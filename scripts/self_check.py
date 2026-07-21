@@ -14,6 +14,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+# Windows 콘솔 기본 코드페이지(cp949)가 한글 출력을 깨뜨리는 것 방지
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 # src 레이아웃 실행 지원
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 

@@ -18,6 +18,9 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.core.timeutil import now_kst  # noqa: E402

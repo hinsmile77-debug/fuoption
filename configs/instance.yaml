@@ -27,4 +27,4 @@ capital:
 
 universe: ["K200_MINI_FUT", "K200_OPT"]   # 미니선물 표준
 model_bundle: "none"                       # live 모드는 지정 필수 (자가 점검)
-redis_url: "redis://localhost:6379/0"
+redis_url: "redis://localhost:6380/0"
