@@ -14,7 +14,11 @@
 
 ## W3~5 (KIS 수집 — 마흐디 이식)
 
-- [ ] 마흐디 broker/ 계층 이식: token_daemon · rest_client · ws_client · order_state_machine
+- [x] 마흐디 broker/ 계층 이식: token_daemon · rest_client · ws_client · order_state_machine
+      (2026-07-21 완료, commit 9cd0f9d) — src/messiah/broker/kis/, 소스는
+      C:\Users\82108\PycharmProjects\options\mahdi\broker\. KISSettings(pydantic-settings) 대신
+      KISCredentials(messiah.core.config.BrokerConfig+resolve_secret)로 설정 소스 교체. 테스트
+      41건 이식. 아직 BrokerAdapter 구현체(KIS용)는 없음 — 별도 착수 필요.
 - [ ] KIS_RAW_FIELD_RANGES.md 이관 + 미니선물/옵션 필드 실측 범위표 작성 (R8 — 5거래일)
 - [ ] docs/capability_matrix.md 작성 시작 — {구현, 실측} × {모의, 실전}
 - [ ] 공유 RateLimiter (모의 1건/초 실측 반영, 적응형 백오프) — R9
