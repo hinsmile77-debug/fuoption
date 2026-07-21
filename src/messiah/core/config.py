@@ -20,6 +20,7 @@ class BrokerConfig(BaseModel):
     account_ref: str = "env:KIS_ACCOUNT"  # 실제 값은 .env에서
     app_key_ref: str = "env:KIS_APP_KEY"
     app_secret_ref: str = "env:KIS_APP_SECRET"
+    account_product_code: str = "01"  # KIS 계좌상품코드(ACNT_PRDT_CD) — 시크릿 아님, 평문 고정값
     is_paper: bool = True
 
 
