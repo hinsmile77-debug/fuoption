@@ -1,0 +1,30 @@
+# MESSIAH 인스턴스 설정 — 멀티 PC 복제 배포 시 PC마다 이 파일 하나만 다르다 (Ver 1.1 §7.2)
+# 시크릿(앱키·계좌번호)은 .env에만 — 이 파일에는 env: 참조만 적는다 (SYSTEM.md §3)
+
+instance_id: "messiah-dev-01"
+mode: dev            # dev | paper | live | replay
+
+broker:              # 주 브로커: KIS (Broker_API_Ranking 확정)
+  name: kis
+  account_ref: "env:KIS_ACCOUNT"
+  app_key_ref: "env:KIS_APP_KEY"
+  app_secret_ref: "env:KIS_APP_SECRET"
+  is_paper: true
+
+secondary_broker:    # 부 브로커: LS — 데이터 교차검증·유사시 대체 (이중화)
+  name: ls
+  account_ref: "env:LS_ACCOUNT"
+  app_key_ref: "env:LS_APP_KEY"
+  app_secret_ref: "env:LS_APP_SECRET"
+  is_paper: true
+
+capital:
+  total: 50000000
+  daily_loss_limit_pct: 2.0      # R2 → Kill Switch
+  margin_cap_pct: 40.0           # Holding Policy §3
+  overnight_margin_cap_pct: 25.0
+  max_overnight_positions: 2
+
+universe: ["K200_MINI_FUT", "K200_OPT"]   # 미니선물 표준
+model_bundle: "none"                       # live 모드는 지정 필수 (자가 점검)
+redis_url: "redis://localhost:6379/0"

@@ -1,0 +1,22 @@
+# secrets — 절대 커밋 금지 (SYSTEM.md §3)
+.env
+*.env
+
+# data / models / logs
+/data/
+logs/
+*.log
+*.parquet
+*.pkl
+*.lgb
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# ide
+.idea/
+.vscode/
