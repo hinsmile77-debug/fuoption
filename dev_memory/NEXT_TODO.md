@@ -79,8 +79,13 @@
       만기(202608)의 실제 상장 행사가 수였음(KOSPI200 옵션이 2.5pt 간격으로 이렇게 넓게 상장돼
       있음 — 버그 아님). option_symbol() 재조회 일치·미상장 행사가 None 확인. 체인에서 뽑은
       종목코드(B01608A46, strike 1112.5)로 get_quote() 실호출 → rt_cd=0, 체결가 101.45 — 내부
-      일관성뿐 아니라 실제 거래 가능한 코드임을 확인. 남은 갭: 위클리 요일 대응(N/O=월,L/M=목)은
-      마흐디의 2026-07-10 단일 실측에 의존 중 — 이번엔 재검증 안 함(capability_matrix.md 참고).
+      일관성뿐 아니라 실제 거래 가능한 코드임을 확인.
+- [x] 위클리 옵션 요일 대응(N/O=월,L/M=목) 재검증 (2026-07-22 완료) — 마흐디는 2026-07-10
+      단일 관측(대시보드 표시명 교차확인)에만 의존했었음. 다른 날짜·다른 방법으로 재확인:
+      symbol_master.nearest_expiry_chain()으로 뽑은 각 series 근월물 실제 종목코드를
+      get_quote()로 조회해 futs_last_tr_date(만기일)를 직접 읽고 Python weekday()로 요일 계산
+      — weekly_mon(N/O) 근월 만기 20260727=월요일, weekly_thu(L/M) 근월 만기 20260723=목요일,
+      둘 다 마흐디 매핑과 일치. symbol_master.py 모듈 docstring·capability_matrix.md 갱신.
 - [x] 공유 RateLimiter — Redis 전역 카운터 기반 (2026-07-22 완료) —
       src/messiah/broker/kis/redis_rate_limiter.py. rest_client._RateLimiter와 같은 계약(wait/
       record_rate_limit_hit/record_success)을 Lua 스크립트 3개로 원자화해 Redis에 백업 — 백오프

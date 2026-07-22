@@ -26,7 +26,9 @@ regular(콜/풋 각 390건, 만기 202608)·weekly_mon(116/116)·weekly_thu(150/
 검증했다. 체인에서 뽑은 종목코드로 KISRestClient.get_quote()를 실호출해 rt_cd=0·실제 체결가까지
 확인 — 내부적으로만 일관된 코드가 아니라 실제 거래 가능한 코드임을 확인했다(docs/
 capability_matrix.md 참고). 위클리 요일 대응(N/O=월요일,L/M=목요일)은 마흐디의 2026-07-10 단일
-실측에 의존 중이며 이번엔 재검증하지 않았다.
+실측(대시보드 표시명 교차확인)에 의존 중이었으나, 2026-07-22 다른 날짜·다른 방법(각 series
+근월물의 실제 get_quote() futs_last_tr_date를 Python weekday()로 계산)으로 재검증 완료 —
+weekly_mon 근월 만기 20260727=월요일, weekly_thu 근월 만기 20260723=목요일, 둘 다 일치.
 """
 
 from __future__ import annotations
