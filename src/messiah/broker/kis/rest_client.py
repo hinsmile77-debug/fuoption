@@ -11,12 +11,29 @@ from __future__ import annotations
 import threading
 import time
 from decimal import Decimal
+from typing import Protocol
 
 import httpx
 
 from messiah.broker.kis import tr_codes
 from messiah.broker.kis.credentials import KISCredentials
-from messiah.broker.kis.token_daemon import TokenDaemon
+
+
+class TokenSource(Protocol):
+    """_headers()가 필요로 하는 최소 계약 — TokenDaemon과 RedisTokenDaemon(redis_token_cache.py)
+    둘 다 이 구조를 만족하므로 KISRestClient는 둘 중 무엇이 주입되는지 신경 쓰지 않는다."""
+
+    def get_token(self) -> str: ...
+
+
+class RateLimiterProtocol(Protocol):
+    """_get()/_post()가 필요로 하는 최소 계약 — _RateLimiter(프로세스 로컬)와
+    RedisRateLimiter(redis_rate_limiter.py, 프로세스 간 공유) 둘 다 만족한다."""
+
+    def wait(self) -> None: ...
+    def record_rate_limit_hit(self) -> None: ...
+    def record_success(self) -> None: ...
+
 
 # 마흐디 2026-07-08 실측: 옵션체인/수급/유동성 폴링 루프 3개가 동시에(asyncio.gather) 60초
 # 주기로 REST를 호출하는데, 각 루프 내부는 순차 호출이라도 서로 다른 asyncio.to_thread 스레드가
@@ -113,14 +130,22 @@ class KISRestClient:
     def __init__(
         self,
         creds: KISCredentials,
-        token_daemon: TokenDaemon,
+        token_daemon: TokenSource,
         client: httpx.Client | None = None,
         min_request_interval: float = DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
+        rate_limiter: RateLimiterProtocol | None = None,
     ) -> None:
+        """
+        입력: token_daemon은 TokenDaemon(프로세스 로컬) 또는 RedisTokenDaemon(redis_token_cache.py,
+             프로세스 간 공유) — get_token() -> str만 만족하면 된다. rate_limiter를 생략하면 기존과
+             동일하게 프로세스 로컬 _RateLimiter를 쓴다 — 여러 프로세스가 계좌 하나의 유량 예산을
+             나눠 쓸 때만 RedisRateLimiter(redis_rate_limiter.py)를 명시적으로 주입한다(NEXT_TODO
+             "RateLimiter 카운터는 프로세스 로컬이 아니라 Redis 전역 카운터 기반").
+        """
         self._creds = creds
         self._token_daemon = token_daemon
         self._client = client or httpx.Client(timeout=10.0)
-        self._rate_limiter = _RateLimiter(min_request_interval)
+        self._rate_limiter = rate_limiter or _RateLimiter(min_request_interval)
 
     @property
     def _domain(self) -> str:

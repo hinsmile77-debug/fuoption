@@ -71,14 +71,27 @@
       종목코드(B01608A46, strike 1112.5)로 get_quote() 실호출 → rt_cd=0, 체결가 101.45 — 내부
       일관성뿐 아니라 실제 거래 가능한 코드임을 확인. 남은 갭: 위클리 요일 대응(N/O=월,L/M=목)은
       마흐디의 2026-07-10 단일 실측에 의존 중 — 이번엔 재검증 안 함(capability_matrix.md 참고).
-- [ ] 공유 RateLimiter (모의 1건/초 실측 반영, 적응형 백오프) — R9
+- [x] 공유 RateLimiter — Redis 전역 카운터 기반 (2026-07-22 완료) —
+      src/messiah/broker/kis/redis_rate_limiter.py. rest_client._RateLimiter와 같은 계약(wait/
+      record_rate_limit_hit/record_success)을 Lua 스크립트 3개로 원자화해 Redis에 백업 — 백오프
+      상수(_BACKOFF_MULTIPLIER 등)는 _RateLimiter 클래스 속성을 직접 재사용해 로컬/Redis 버전이
+      갈라지지 않게 함. KISRestClient(rate_limiter=...)로 주입 가능하게 rest_client.py에
+      RateLimiterProtocol 추가(생략 시 기존과 동일한 로컬 _RateLimiter, 기존 61건 테스트 무변경
+      통과). 테스트 8건을 실제 messiah-redis 컨테이너(redis://localhost:6380/15, 전용 DB)로 실행 —
+      스레드 두 개가 서로 다른 RedisRateLimiter 인스턴스(=프로세스 흉내)로 동시에 wait()해도
+      최소 간격이 지켜짐을 확인, 나머지 백오프/복구 계수는 로컬 버전과 정확히 같은 수치로 통과.
 - [ ] 절대시각 고정 틱 폴링 스케줄러 — R9
-- [ ] **token_daemon을 단일 공유 프로세스로 격리** — Access Token을 Redis에 캐시, 전 프로세스는 캐시만 읽는다.
-      KIS 토큰 재발급이 1분당 1회로 제한되어 있어(2026-07-21 리서치), 프로세스마다 개별 발급 시도 시
-      즉시 리밋에 걸림. "한 계정 다중 봇" 운영의 전제조건.
-- [ ] RateLimiter 카운터는 프로세스 로컬이 아니라 **Redis 전역 카운터** 기반으로 구현 —
-      계좌(앱키) 단위 레이트리밋을 L1/L3/L5 등 여러 프로세스가 나눠 쓰므로 로컬 카운터로는
-      예산 초과를 막을 수 없음 (2026-07-21 등록)
+- [x] token_daemon을 단일 공유 프로세스로 격리 — Redis 캐시 (2026-07-22 완료) —
+      src/messiah/broker/kis/redis_token_cache.py의 RedisTokenDaemon. 캐시 적중 시 즉시 반환,
+      미스면 SET NX 분산락을 잡은 프로세스 하나만 기존 TokenDaemon으로 실제 발급하고 나머지는
+      새로 발급을 시도하지 않고 캐시에 값이 나타날 때까지 폴링(스탬피드 방지). 발급 실패 시
+      finally로 락 해제(다음 시도가 불필요하게 안 막힘). Redis 캐시 TTL은 실제 만료 5분 전으로
+      선제 갱신(TokenDaemon.is_expired()와 동일 여유). TokenDaemon에 current_token 프로퍼티
+      추가(TTL 계산용, 기존 동작 변경 없음). rest_client.py에 TokenSource 프로토콜 추가해
+      KISRestClient가 TokenDaemon/RedisTokenDaemon 어느 쪽이든 받게 함. 테스트 6건을 실제
+      messiah-redis로 실행 — 스레드 두 개(=프로세스 흉내)가 동시에 get_token()해도 실제 KIS
+      발급 호출은 정확히 1회만 일어남을 확인(가짜 발급 지연 0.3초로 경쟁 상황 재현), 발급 실패
+      시 락 해제·폴링 타임아웃도 확인.
 
 ## 등록된 관찰 항목 (분기회의)
 

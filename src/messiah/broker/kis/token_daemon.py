@@ -49,6 +49,12 @@ class TokenDaemon:
             self._token = self._issue_token()
         return self._token.token
 
+    @property
+    def current_token(self) -> AccessToken | None:
+        """마지막으로 발급/캐싱된 토큰(만료 여부 무관) — redis_token_cache.py가 만료 시각을
+        읽어 Redis TTL을 계산하는 데 쓴다. get_token()을 한 번도 안 불렀으면 None."""
+        return self._token
+
     def _issue_token(self) -> AccessToken:
         response = self._client.post(
             f"{self._domain}{tr_codes.PATH_TOKEN}",
