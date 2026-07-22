@@ -35,6 +35,8 @@ TAG_LEVELS: dict[str, int] = {
     "DataFallback": logging.WARNING,  # L18: 폴백은 시끄럽게
     "InsertFailRate": logging.WARNING,  # L16: 삽입 실패율 경보
     "SelfCheckFail": logging.CRITICAL,
+    "SchedulerTickMissed": logging.WARNING,  # L20: 드리프트를 침묵시키지 않음
+    "SchedulerCallbackError": logging.ERROR,  # L22: 콜백 실패가 루프를 안 죽여도 조용히는 안 됨
 }
 
 _logger = logging.getLogger("messiah")
