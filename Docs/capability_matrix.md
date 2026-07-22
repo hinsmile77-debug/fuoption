@@ -26,8 +26,8 @@
 | symbol_master (parse/futures/options/nearest_expiry_chain/option_symbol) | ✅ | ✅ 2026-07-22 (전체) | — | 마흐디에서 이식(pandas→polars, 미니선물 "B" 추가, 선물 월물랭크 필드 수정). futures 경로는 probe_front_month()로(위 행), 옵션 경로(options/nearest_expiry_chain/option_symbol)는 실제 마스터파일로 regular(콜 390·풋 390, 만기 202608)·weekly_mon(116/116)·weekly_thu(150/150) 체인 조회 확인. mini(D/E)는 이 시점 상장 없음(0/0, series 자체는 정상 동작 — 그냥 해당 상품이 없음). option_symbol() 재조회 일치·미상장 행사가 None 확인. 체인에서 뽑은 종목코드(B01608A46, strike 1112.5)로 get_quote() 실호출 → rt_cd=0, 체결가 101.45 확인 — 내부 일관성뿐 아니라 실제 거래 가능한 코드임을 검증 |
 | WS 시세 구독 (ws_client) | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 | WS 주문체결통보 | ✅ | — | — | 포트만 완료, 실측 안 됨 |
-| RedisRateLimiter (공유 유량 예산) | ✅ | ✅ 2026-07-22 | — | 실제 messiah-redis 컨테이너로 테스트 8건 실행. 스레드 두 개=서로 다른 RedisRateLimiter 인스턴스(프로세스 흉내)가 동시에 wait()해도 공유 Redis 키로 최소 간격이 지켜짐 확인. 백오프/복구 계수는 로컬 _RateLimiter와 동일 상수 재사용(수치 완전 일치 확인). 아직 실제 KISRestClient(rate_limiter=RedisRateLimiter(...))로 실주문/시세 조회를 거쳐본 적은 없음(주입 배선만 확인) |
-| RedisTokenDaemon (Access Token 공유 캐시) | ✅ | ✅ 2026-07-22 | — | 실제 messiah-redis로 테스트 6건 실행. 스레드 두 개(프로세스 흉내)가 동시에 get_token() 해도 실제 KIS 발급 호출은 1회만 발생(SET NX 분산락 확인), 캐시 적중 시 KIS 미호출, 발급 실패 시 락 해제·폴백 폴링 타임아웃까지 확인. 실제 KIS 서버로 발급 요청까지 실행한 적은 없음(mock 핸들러로만 검증 — 실제 계정으로는 TokenDaemon 자체가 이미 별도 실측됨) |
+| RedisRateLimiter (공유 유량 예산) | ✅ | ✅ 2026-07-22 | — | 자체 로직은 messiah-redis로 테스트 8건(스레드 동시성 포함) 실행. 이어서 실제 KISRestClient(rate_limiter=RedisRateLimiter(...))로 get_balance() 3연속 호출 → 전부 rt_cd=0, 호출 간격 2.61s·2.75s(최소 1.0s 이상 — 페이싱 위반 없음) 확인 |
+| RedisTokenDaemon (Access Token 공유 캐시) | ✅ | ✅ 2026-07-22 | — | 자체 로직은 messiah-redis로 테스트 6건(mock KIS) 실행. 이어서 진짜 별도 OS 프로세스 두 개(스레드가 아니라 실제 `python ...` 두 번 동시 실행)로 실계좌 토큰 캐시를 재현 — 실제 KIS 발급 호출(`*** 실제 KIS 발급 호출 시작/끝 ***` 로그)은 한쪽 프로세스에서만 한 번 발생(0.09s), 다른 프로세스는 발급을 시도하지 않고 캐시 폴링만으로 동일 토큰을 받음(get_cached 2회 호출) — 지난 세션에 실제로 겪은 "프로세스 두 개→403" 문제가 이 컴포넌트로 해결됨을 실제 KIS 서버로 확인 |
 
 ## 알려진 갭
 
@@ -52,8 +52,7 @@
   주차 라벨)만 확인했고, 마흐디의 2026-07-10 단일 실측(먼슬리 만기 다음날 우연히 두 위클리가
   동시 상장된 시점)에 의존한 요일 매핑 자체를 다시 검증하지는 않았다 — symbol_master.py 모듈
   docstring 참고. 의심되면 get_quote()의 만기일자(futs_last_tr_date)로 요일 재확인할 것.
-- **RedisRateLimiter/RedisTokenDaemon을 KISRestClient 실주문 경로에 실제로 물려본 적 없음**: 두
-  컴포넌트 다 실제 Redis로 자체 로직(원자적 페이싱, 분산락 스탬피드 방지)은 검증했지만, 이걸
-  KISRestClient(token_daemon=RedisTokenDaemon(...), rate_limiter=RedisRateLimiter(...))로 실제
-  KIS 서버에 대고 돌려본 적은 없다 — 실제 다중 프로세스 운영(NEXT_TODO "한 계정 다중 봇") 전에
-  최소 한 번은 실계좌로 통합 실측 필요.
+- ~~RedisRateLimiter/RedisTokenDaemon을 KISRestClient 실주문 경로에 물려본 적 없음~~ — 2026-07-22
+  실측 완료(위 두 행). 다만 아직 시험한 건 진짜 별도 프로세스 2개(토큰)와 단일 프로세스 연속
+  호출(레이트리미터)뿐 — 3개 이상 프로세스가 동시에 붙는 시나리오나 장시간(수 시간) 운영 중
+  Redis 재연결·TTL 만료 경계 상황은 아직 실측 안 됨.
