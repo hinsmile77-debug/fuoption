@@ -4,24 +4,38 @@ REST 클라이언트가 동기(httpx.Client) 기반이라 asyncio.to_thread로 �
 동시에 to_thread로 들어와도 KISRestClient 내부의 공유 _RateLimiter가 직렬화한다(rest_client.py
 설계 그대로 재사용 — 새 락 없음).
 
-"구현됨 ≠ 검증됨" (base.py 원칙, capability_matrix.md 실측 후 사용). 이 어댑터 중 실계좌로 확인된
-경로는 account()/positions()가 감싸는 get_balance() 하나뿐이다(2026-07-21, commit 3c6c9e3) — 단,
-그때 실측한 것은 "호출이 성공한다"까지이고, 여기서 하는 output1/output2 필드 파싱은 공식 문서
-(API ID v1_국내선물-004) Response Example 스키마 그대로이되 실응답으로 재검증되지 않았다.
-submit()/cancel()은 공식 문서(v1_국내선물-001/002) 필드 구성을 따르되 전량 미검증 — 실주문은
-실제 체결을 일으키므로 특히 신중히 실측할 것.
+"구현됨 ≠ 검증됨" (base.py 원칙, docs/capability_matrix.md에 실측 현황 기록). connect/submit/
+cancel/positions/account는 2026-07-22 실계좌(모의투자)로 전체 흐름 실측 완료(빈 계좌 기준 — 실제
+보유 포지션이 있는 상태의 positions() 파싱과 실제 체결 흐름은 아직 미검증). probe_front_month는
+symbol_master 이식(2026-07-22)으로 구현됐으나 이 메서드를 통한 end-to-end 호출로는 아직 실측 안
+됨 — MASTER_FILE_URL 자체는 이 이식 세션 이전(KISBrokerAdapter 실측 세션)에 직접 내려받아 실제
+응답 포맷을 확인했지만, symbol_master.download_master_zip()/probe_front_month() 경로로 실행해본
+적은 없다(단위 테스트는 tmp_path에 쓴 축소판 파일만 사용).
 """
 
 from __future__ import annotations
 
 import asyncio
 from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 
 from messiah.broker.base import BrokerAccount, BrokerAdapter, BrokerPosition, SubmitResult
+from messiah.broker.kis import symbol_master
 from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.rest_client import KISRestClient
 from messiah.broker.kis.token_daemon import TokenDaemon
 from messiah.core.messages import OrderRequest, Side
+
+_UNDERLYING_KOSPI200 = "KOSPI200"
+_DEFAULT_MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
+# probe_front_month()가 받는 product 문자열(configs/instance.yaml universe와 동일 어휘) ->
+# symbol_master 상품종류 코드. 옵션(K200_OPT)은 단일 근월물 "코드" 개념이 없어(행사가마다 다른
+# 종목코드) 여기 포함하지 않는다 — 옵션 종목 조회는 IndexDerivativesMaster.option_symbol()/
+# nearest_expiry_chain()을 별도로 쓴다.
+_PROBE_PRODUCT_TYPES = {
+    "K200_MINI_FUT": symbol_master.PRODUCT_TYPE_MINI_FUTURES,
+    "K200_FUT": symbol_master.PRODUCT_TYPE_FUTURES,
+}
 
 
 class KISBrokerAdapter(BrokerAdapter):
@@ -33,6 +47,8 @@ class KISBrokerAdapter(BrokerAdapter):
         tick_size: Decimal,
         token_daemon: TokenDaemon | None = None,
         rest_client: KISRestClient | None = None,
+        master_cache_dir: Path = _DEFAULT_MASTER_CACHE_DIR,
+        master: symbol_master.IndexDerivativesMaster | None = None,
     ) -> None:
         """
         입력: KIS 인증정보, 종목 1틱의 실제 가격 크기(Decimal — 예: K200 미니선물 0.02).
@@ -40,12 +56,17 @@ class KISBrokerAdapter(BrokerAdapter):
              사이의 유일한 환산 계수다. 상품마다 다르고 이 프로젝트엔 아직 실측 확정된 상품별
              틱 크기 테이블이 없어(NEXT_TODO "KIS_RAW_FIELD_RANGES.md") 하드코딩하지 않고
              호출측이 주입한다(SYSTEM.md R4). token_daemon/rest_client는 KISRestClient와 동일한
-             DI 패턴(테스트에서 MockTransport로 교체) — 생략 시 creds로 직접 구성한다.
+             DI 패턴(테스트에서 MockTransport로 교체) — 생략 시 creds로 직접 구성한다. master는
+             테스트에서 종목코드 마스터파일을 미리 주입해 네트워크 다운로드를 건너뛰기 위한 것 —
+             생략 시 probe_front_month() 최초 호출 때 다운로드한다(모듈 docstring: 하루 1회 호출
+             용도, 이 어댑터는 인스턴스 수명 동안 한 번만 받아 캐싱).
         """
         self._creds = creds
         self._tick_size = tick_size
         self._token_daemon = token_daemon or TokenDaemon(creds)
         self._rest = rest_client or KISRestClient(creds, self._token_daemon)
+        self._master_cache_dir = master_cache_dir
+        self._master = master
         self.connected = False
 
     async def connect(self) -> None:
@@ -140,10 +161,32 @@ class KISBrokerAdapter(BrokerAdapter):
         )
 
     async def probe_front_month(self, product: str) -> str:
-        raise NotImplementedError(
-            "KIS 종목코드 마스터파일 연동 미구현 — 단일 종목 조회(get_quote)뿐이라 근월물 코드를"
-            " 자체 확정할 수단이 없다(tr_codes.py PATH_FUTUREOPTION_QUOTE 주석·NEXT_TODO 참고)."
+        """
+        계산: KIS 종목코드 마스터파일(symbol_master)에서 근월물 단축코드를 확정한다 — base.py
+             계명 9(저장값을 신뢰하지 않고 실측 프로브로 확정)를 마스터파일 재다운로드로 구현.
+             마스터파일은 인스턴스당 최초 1회만 받고 캐싱한다(모듈은 하루 1회 정도만 갱신됨).
+        해석: product는 configs/instance.yaml universe 어휘("K200_MINI_FUT"/"K200_FUT")를
+             그대로 받는다. 옵션(K200_OPT)은 근월물 "코드" 하나로 표현되지 않아(행사가마다 종목
+             코드가 다름) 지원 대상이 아니다 — symbol_master.IndexDerivativesMaster의
+             option_symbol()/nearest_expiry_chain()을 직접 쓸 것.
+        실패 조건: product가 미지원 값이면 ValueError. 마스터파일에 해당 근월물이 없으면
+             LookupError(마스터파일 갱신 지연 등 — 재시도가 아니라 조사 대상).
+        """
+        product_type = _PROBE_PRODUCT_TYPES.get(product)
+        if product_type is None:
+            raise ValueError(
+                f"probe_front_month은 {sorted(_PROBE_PRODUCT_TYPES)}만 지원 — 받은 값: {product!r}"
+            )
+        if self._master is None:
+            self._master = await asyncio.to_thread(
+                symbol_master.load_index_derivatives_master, self._master_cache_dir
+            )
+        code = self._master.front_month_future_code(
+            underlying=_UNDERLYING_KOSPI200, product_type=product_type
         )
+        if code is None:
+            raise LookupError(f"{product} 근월물을 마스터파일에서 찾지 못함")
+        return code
 
     # ------------------------------------------------------------------ 틱 <-> 실가격
     def _ticks_to_price(self, ticks: int) -> Decimal:

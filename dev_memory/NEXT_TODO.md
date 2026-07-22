@@ -47,9 +47,18 @@
       일반화 금지). 남은 갭: 실보유 포지션 상태에서의 positions() 파싱 미검증(이번은 빈 계좌),
       실제 체결→Fill 이벤트 연계 미검증.
 - [ ] KIS_RAW_FIELD_RANGES.md 이관 + 미니선물/옵션 필드 실측 범위표 작성 (R8 — 5거래일)
-- [ ] 마흐디 symbol_master.py를 messiah로 이식 — probe_front_month() 구현에 필요. 이식 시 위에서
-      발견한 미니선물 상품종류 "B"와 선물 행의 월물랭크 필드 위치(index 6, 마흐디가 "ATM구분"으로
-      잘못 이름 붙인 자리) 버그를 함께 고칠 것 (2026-07-22 등록)
+- [x] 마흐디 symbol_master.py를 messiah로 이식 (2026-07-22 완료) —
+      src/messiah/broker/kis/symbol_master.py. pandas 대신 polars 사용(이 프로젝트 의존성과 통일,
+      pandas 신규 추가 안 함). 위에서 발견한 미니선물 상품종류 "B"(PRODUCT_TYPE_MINI_FUTURES로
+      추가)와 선물 행 월물랭크 필드 위치(마흐디가 "ATM구분"이라 이름 붙인 필드가 선물 행에서는
+      실제 월물랭크임 — front_month_future_code()가 이제 이 필드로 명시 정렬, 이전엔 공란 컬럼
+      정렬이라 우연히 파일 순서에 기대고 있었음) 버그 둘 다 반영. KISBrokerAdapter.probe_front_month
+      를 이걸로 구현(product="K200_MINI_FUT"/"K200_FUT" 지원, "K200_OPT"는 단일 코드 개념이 아니라
+      ValueError — 옵션 종목은 IndexDerivativesMaster.option_symbol()/nearest_expiry_chain() 직접
+      사용). 마스터파일은 어댑터 인스턴스당 최초 1회만 받고 캐싱. 테스트 14건 추가(symbol_master
+      11건 — 근월물 정렬 회귀 테스트 포함, adapter probe_front_month 3건 — 전부 로컬 축소판 파일
+      기준, 실제 마스터파일 전체 다운로드나 이 메서드의 end-to-end 실측은 아직 안 함).
+      docs/capability_matrix.md 갱신.
 - [ ] 공유 RateLimiter (모의 1건/초 실측 반영, 적응형 백오프) — R9
 - [ ] 절대시각 고정 틱 폴링 스케줄러 — R9
 - [ ] **token_daemon을 단일 공유 프로세스로 격리** — Access Token을 Redis에 캐시, 전 프로세스는 캐시만 읽는다.

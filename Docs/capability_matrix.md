@@ -22,7 +22,8 @@
 | KISBrokerAdapter.cancel | ✅ | ✅ 2026-07-22 | — | 위 주문 즉시 전량취소 → True, 이후 positions/account 변동 없음 확인(미체결 확정) |
 | KISBrokerAdapter.positions | ✅ | ✅ 2026-07-22 | — | 빈 계좌 기준 확인(0건 반환) — 실제 보유 잔고가 있는 상태에서의 부호/필드 파싱은 아직 실측 안 됨 |
 | KISBrokerAdapter.account | ✅ | ✅ 2026-07-22 | — | cash=50,000,000 (파생상품 계좌 개설 시 기본값과 일치), margin_used/total_equity 필드 존재 확인 |
-| KISBrokerAdapter.probe_front_month | ❌ | — | — | NotImplementedError — 종목코드 마스터파일 미연동 |
+| KISBrokerAdapter.probe_front_month | ✅ | — | — | symbol_master 이식 완료(2026-07-22)로 구현됨. 마스터파일 다운로드 URL은 이전 세션에서 실제 확인했으나, 이 메서드 경로 자체의 end-to-end 실측은 아직 안 함 — 단위 테스트(마스터파일 축소판 주입)만 통과 |
+| symbol_master (parse/futures/options/nearest_expiry_chain/option_symbol) | ✅ | — | — | 2026-07-22 마흐디에서 이식(pandas→polars, 미니선물 "B" 추가, 선물 월물랭크 필드 수정). 테스트 11건은 로컬 축소판 파일 기준 — 실제 마스터파일 전체를 내려받아 옵션 체인 파싱까지 실행한 적은 없음(futures 쪽만 이전 세션에서 실측) |
 | WS 시세 구독 (ws_client) | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 | WS 주문체결통보 | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 

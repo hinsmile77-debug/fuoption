@@ -1,9 +1,12 @@
+import io
 import json
 from decimal import Decimal
 
 import httpx
+import polars as pl
 import pytest
 from messiah.broker.base import SubmitResult
+from messiah.broker.kis import symbol_master
 from messiah.broker.kis.adapter import KISBrokerAdapter
 from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.rest_client import KISRestClient
@@ -24,7 +27,9 @@ def _token_daemon() -> TokenDaemon:
     return TokenDaemon(_creds(), client=httpx.Client(transport=httpx.MockTransport(handler)))
 
 
-def _adapter(handler, tick_size: Decimal = Decimal("0.02")) -> tuple[KISBrokerAdapter, list]:
+def _adapter(
+    handler, tick_size: Decimal = Decimal("0.02"), master=None
+) -> tuple[KISBrokerAdapter, list]:
     captured: list = []
 
     def wrapped(request: httpx.Request) -> httpx.Response:
@@ -39,8 +44,26 @@ def _adapter(handler, tick_size: Decimal = Decimal("0.02")) -> tuple[KISBrokerAd
         client=httpx.Client(transport=httpx.MockTransport(wrapped)),
         min_request_interval=0.0,
     )
-    adapter = KISBrokerAdapter(creds, tick_size, token_daemon=token_daemon, rest_client=rest)
+    adapter = KISBrokerAdapter(
+        creds, tick_size, token_daemon=token_daemon, rest_client=rest, master=master
+    )
     return adapter, captured
+
+
+def _master_with_mini_front_month(symbol: str = "A05608") -> symbol_master.IndexDerivativesMaster:
+    rows = [
+        ["B", symbol, "STD", "미니F 202608", " ", "00000.00", "1", "2001", "KOSPI200"],
+        ["B", "A05609", "STD2", "미니F 202609", " ", "00000.00", "2", "2001", "KOSPI200"],
+    ]
+    content = "\n".join("|".join(row) for row in rows) + "\n"
+    df = pl.read_csv(
+        io.BytesIO(content.encode("utf-8")),
+        separator="|",
+        has_header=False,
+        new_columns=symbol_master._COLUMNS,
+        schema_overrides=dict.fromkeys(symbol_master._COLUMNS, pl.Utf8),
+    )
+    return symbol_master.IndexDerivativesMaster(df)
 
 
 def _order_request(**overrides) -> OrderRequest:
@@ -194,8 +217,27 @@ async def test_account_parses_output2_summary_fields():
     assert account.total_equity == Decimal("90016125000")
 
 
-async def test_probe_front_month_is_not_implemented():
+async def test_probe_front_month_resolves_mini_futures_from_injected_master():
+    master = _master_with_mini_front_month(symbol="A05608")
+    adapter, _ = _adapter(lambda r: httpx.Response(200, json={}), master=master)
+
+    code = await adapter.probe_front_month("K200_MINI_FUT")
+
+    assert code == "A05608"
+
+
+async def test_probe_front_month_caches_master_across_calls():
+    master = _master_with_mini_front_month()
+    adapter, _ = _adapter(lambda r: httpx.Response(200, json={}), master=master)
+
+    await adapter.probe_front_month("K200_MINI_FUT")
+    await adapter.probe_front_month("K200_MINI_FUT")
+
+    assert adapter._master is master  # 재다운로드 없이 그대로 재사용돼야 함
+
+
+async def test_probe_front_month_rejects_unsupported_product():
     adapter, _ = _adapter(lambda r: httpx.Response(200, json={}))
 
-    with pytest.raises(NotImplementedError):
-        await adapter.probe_front_month("K200_MINI_FUT")
+    with pytest.raises(ValueError):
+        await adapter.probe_front_month("K200_OPT")
