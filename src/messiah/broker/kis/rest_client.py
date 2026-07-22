@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from decimal import Decimal
 
 import httpx
 
@@ -295,7 +296,12 @@ class KISRestClient:
         )
 
     def submit_order(
-        self, symbol: str, side: str, qty: int, price: float, order_dvsn_cd: str = "01"
+        self,
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float | Decimal,
+        order_dvsn_cd: str = "01",
     ) -> dict:
         """
         입력: 종목코드(단축상품번호 — 선물 6자리/옵션 9자리, 예: B01603955), BUY/SELL, 수량, 가격,
@@ -318,5 +324,41 @@ class KISRestClient:
                 "ORD_QTY": str(qty),
                 "UNIT_PRICE": str(price),
                 "ORD_DVSN_CD": order_dvsn_cd,
+            },
+        )
+
+    def cancel_order(self, org_order_no: str) -> dict:
+        """
+        선물옵션 정정취소주문(order-rvsecncl) — 전량취소만 지원(정정/부분취소는 미구현).
+
+        입력: 원주문번호(ORGN_ODNO — submit_order 응답의 output.ODNO).
+        계산: RVSE_CNCL_DVSN_CD="02"(취소) 고정, ORD_QTY="0"·RMN_QTY_YN="Y"로 잔량 전부를
+             취소한다(공식 문서 "선물옵션 정정취소주문", API ID v1_국내선물-002: "전량일경우
+             0으로 입력"). UNIT_PRICE·KRX_NMPR_CNDT_CD는 취소 시 "0" 고정(문서: "취소 시에도
+             0 입력"/"취소시 0으로 입력"). ORD_DVSN_CD는 취소 전용 고정값 "01"(문서: "[취소]
+             01 로 입력" — 원주문의 실제 호가유형과 무관하게 이 값을 쓴다).
+        해석: BrokerAdapter.cancel(broker_order_no)이 주문번호 하나만 받는 인터페이스라 원주문의
+             수량/가격/호가유형을 알 수 없다 — 그래서 부분취소가 아니라 전량취소만 지원한다.
+        실패 조건: 4xx/5xx면 httpx.HTTPStatusError 전파. rt_cd != "0"이어도 HTTP 200일 수 있으니
+                  호출측이 response["rt_cd"]를 확인해야 한다. 실계좌 미검증 — capability_matrix.md에
+                  실측 기록 전까지 프로덕션 경로에서 신뢰하지 말 것.
+        """
+        tr_id = tr_codes.TR_ORDER_MODIFY_CANCEL[self._env_key]
+        return self._post(
+            f"{self._domain}{tr_codes.PATH_FUTUREOPTION_ORDER_MODIFY_CANCEL}",
+            headers=self._headers(tr_id),
+            json={
+                "ORD_PRCS_DVSN_CD": "02",
+                "CANO": self._creds.account_no,
+                "ACNT_PRDT_CD": self._creds.account_product_code,
+                "RVSE_CNCL_DVSN_CD": "02",
+                "ORGN_ODNO": org_order_no,
+                "ORD_QTY": "0",
+                "UNIT_PRICE": "0",
+                "NMPR_TYPE_CD": "",
+                "KRX_NMPR_CNDT_CD": "0",
+                "RMN_QTY_YN": "Y",
+                "FUOP_ITEM_DVSN_CD": "",
+                "ORD_DVSN_CD": "01",
             },
         )

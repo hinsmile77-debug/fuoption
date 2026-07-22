@@ -201,6 +201,55 @@ def test_submit_order_includes_required_fields_kis_would_otherwise_reject():
     assert body["ORD_DVSN_CD"] == "01"
 
 
+def test_cancel_order_sends_full_cancel_fields():
+    # 공식 문서(v1_국내선물-002) 규칙: 전량취소는 ORD_QTY=0·RMN_QTY_YN=Y, 취소 시 UNIT_PRICE·
+    # KRX_NMPR_CNDT_CD=0 고정, ORD_DVSN_CD는 취소 전용 고정값 "01".
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"rt_cd": "0"})
+
+    client = KISRestClient(
+        _creds(),
+        _token_daemon(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        min_request_interval=0.0,
+    )
+    result = client.cancel_order(org_order_no="0000007045")
+
+    assert result == {"rt_cd": "0"}
+    body = captured[0]
+    assert body["RVSE_CNCL_DVSN_CD"] == "02"
+    assert body["ORGN_ODNO"] == "0000007045"
+    assert body["ORD_QTY"] == "0"
+    assert body["UNIT_PRICE"] == "0"
+    assert body["RMN_QTY_YN"] == "Y"
+    assert body["ORD_DVSN_CD"] == "01"
+    assert body["ORD_PRCS_DVSN_CD"] == "02"
+    assert body["CANO"] == "12345678"
+
+
+def test_cancel_order_sends_expected_tr_id():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(200, json={"rt_cd": "0"})
+
+    client = KISRestClient(
+        _creds(),
+        _token_daemon(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        min_request_interval=0.0,
+    )
+    client.cancel_order(org_order_no="0000007045")
+
+    assert captured["headers"]["tr_id"] == tr_codes.TR_ORDER_MODIFY_CANCEL["vps"]
+
+
 def test_get_investor_flow_always_uses_real_domain_even_for_mock_account():
     # "모의 TR_ID/Domain: 모의투자 미지원"이지만 계좌 무관 공개 데이터라 실전 도메인 호출이
     # 그대로 성공한다 — 모의(vps) 인증정보로 만든 클라이언트라도 이 호출만은
