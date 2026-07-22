@@ -37,6 +37,7 @@ TAG_LEVELS: dict[str, int] = {
     "SelfCheckFail": logging.CRITICAL,
     "SchedulerTickMissed": logging.WARNING,  # L20: 드리프트를 침묵시키지 않음
     "SchedulerCallbackError": logging.ERROR,  # L22: 콜백 실패가 루프를 안 죽여도 조용히는 안 됨
+    "CollectorProcessingError": logging.ERROR,  # L22: 완성봉 적재/버스 발행 실패 — WS 루프는 계속
 }
 
 _logger = logging.getLogger("messiah")

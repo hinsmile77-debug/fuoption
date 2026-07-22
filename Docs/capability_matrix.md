@@ -29,6 +29,16 @@
 | RedisRateLimiter (공유 유량 예산) | ✅ | ✅ 2026-07-22 | — | 자체 로직은 messiah-redis로 테스트 8건(스레드 동시성 포함) 실행. 이어서 실제 KISRestClient(rate_limiter=RedisRateLimiter(...))로 get_balance() 3연속 호출 → 전부 rt_cd=0, 호출 간격 2.61s·2.75s(최소 1.0s 이상 — 페이싱 위반 없음) 확인 |
 | RedisTokenDaemon (Access Token 공유 캐시) | ✅ | ✅ 2026-07-22 | — | 자체 로직은 messiah-redis로 테스트 6건(mock KIS) 실행. 이어서 진짜 별도 OS 프로세스 두 개(스레드가 아니라 실제 `python ...` 두 번 동시 실행)로 실계좌 토큰 캐시를 재현 — 실제 KIS 발급 호출(`*** 실제 KIS 발급 호출 시작/끝 ***` 로그)은 한쪽 프로세스에서만 한 번 발생(0.09s), 다른 프로세스는 발급을 시도하지 않고 캐시 폴링만으로 동일 토큰을 받음(get_cached 2회 호출) — 지난 세션에 실제로 겪은 "프로세스 두 개→403" 문제가 이 컴포넌트로 해결됨을 실제 KIS 서버로 확인 |
 
+## L1 Data (src/messiah/data/) — Master Plan Ver 2.0 §9 "Collector·Normalizer·Archiver"
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| normalizer.parse_futures_tick | ✅ | — | — | 단위 테스트만(이번 세션 ws_client 실측 때 실제로 캡처한 라이브 H0IFCNT0 프레임을 픽스처로 재사용 — symbol/시각/가격/거래량 필드 인덱스가 실데이터와 맞음을 확인했지만, 함수 자체를 실시간 WS 스트림에 물려 돌려본 적은 없음). count>1(여러 체결이 한 프레임에 묶임) 프레임은 첫 레코드만 파싱(mahdi와 동일 한계, 테스트로 명시) |
+| normalizer.parse_option_tick | ✅ | — | — | 마흐디 인용 필드 인덱스만 반영 — messiah 자체 라이브 옵션 WS 캡처로 재검증된 적 없음(옵션 WS는 아직 구독한 적 없음) |
+| normalizer.MinuteBarAggregator | ✅ | — | — | 단위 테스트만(분 롤오버·품질 플래그·다중 심볼 분리·flush_final) |
+| archiver.ParquetArchiver | ✅ | — | — | 단위 테스트만. **Windows에 tzdata 패키지 필수**(2026-07-22 실측 발견 — polars가 tz-aware datetime을 Parquet 왕복시킬 때 zoneinfo로 "UTC" 존을 찾는데 Windows는 시스템 tzdata가 없어 ZoneInfoNotFoundError; pyproject.toml에 `sys_platform=='win32'` 조건부 의존성으로 추가함) |
+| collector.TickCollector | ✅ | — | — | 단위 테스트만 — FakeConnection(ws_client 테스트와 동일 패턴)으로 실제 네트워크 없이 구독→틱→완성봉→적재/발행 end-to-end 검증. **실제 KIS WS로 이 클래스 자체를 돌려본 적은 없음**(ws_client.py는 별도로 실측했지만 TickCollector가 그 위에 정확히 조립됐는지는 미확인) |
+
 ## 알려진 갭
 
 - **포지션 보유 상태에서의 `positions()` 파싱 미검증**: 이번 실측은 빈 계좌라 `output1`이 빈 배열이었다.
@@ -57,12 +67,23 @@
   실측 완료(위 두 행). 다만 아직 시험한 건 진짜 별도 프로세스 2개(토큰)와 단일 프로세스 연속
   호출(레이트리미터)뿐 — 3개 이상 프로세스가 동시에 붙는 시나리오나 장시간(수 시간) 운영 중
   Redis 재연결·TTL 만료 경계 상황은 아직 실측 안 됨.
-- **WS 실시간 틱 원시 필드 파싱 미구현**: 이번 실측은 "구독→수신→해제"가 연결·프로토콜
-  레벨에서 동작함만 확인했다. 파이프구분 필드(`A05608^152953^-0.54^5^-0.05^1080.30^...`)를
-  실제 의미(체결가·거래량 등)로 파싱하는 Normalizer는 아직 없음 — L1 Collector·Normalizer
-  구축 시 KIS 공식 문서("지수선물 실시간체결가" H0IFCNT0)로 필드 순서를 확정할 것. `iv`/`key`
-  (구독응답에 포함)가 정말 encrypt="Y" TR 전용 복호화 키인지도 추정이지 확인은 안 됨 — 체결통보
-  등 encrypt="Y" TR 실측 시 재확인 필요.
-- **WS 재연결·장시간 연결 유지 미검증**: 이번 실측은 15초 이내 5건만 받고 바로 종료. 장시간
-  연결 유지, PING/PONG 응답, 연결 끊김 후 재연결 로직(ws_client.py 문서에 "재연결은 상위 Data
-  Layer가 담당"이라 명시된 부분 자체)은 아직 아무것도 구현·검증 안 됨.
+- ~~WS 실시간 틱 원시 필드 파싱 미구현~~ — 2026-07-22 완료(위 "L1 Data" 표 참고,
+  normalizer.parse_futures_tick/parse_option_tick). `iv`/`key`(구독응답에 포함)가 정말
+  encrypt="Y" TR 전용 복호화 키인지는 여전히 추정 — 체결통보 등 encrypt="Y" TR 실측 시 확인 필요.
+- **WS 재연결·장시간 연결 유지 미구현**: TickCollector.run_once()는 mahdi의
+  run_observation_loop과 동일하게 "연결 하나가 끊기면 예외를 던지고 끝"이다 — 지수 백오프
+  재연결 래퍼(mahdi run_observation_loop_forever 격)는 의도적으로 이번 스코프에서 뺐다
+  (NEXT_TODO 참고). PING/PONG 응답·장시간 연결 유지도 미검증.
+- **ATM±N 옵션 체인 구독 롤링 미구현**: mahdi의 RollingSubscriptionManager(스팟 추종 옵션 체인
+  WS 구독 롤링)를 이식하지 않음 — TickCollector는 생성 시 주어진 심볼 1개만 구독한다.
+- **REST 폴링 루프(투자자매매동향·옵션체인 그릭스) 미구현**: FixedTickScheduler를 아직 아무
+  실제 폴러에도 물려보지 않음 — 옵션 체인 구독 롤링과 함께 별도 작업으로 남김.
+- **Event Calendar(KRX 휴장일 인식) 미구현**: L1 DATA 다이어그램(Master Plan §9)의 구성요소
+  중 하나지만 Collector/Normalizer/Archiver의 정확성과 독립적인 별개 관심사라 이번엔 다루지
+  않음.
+- **원시 틱 자체는 Parquet에 안 쌓임**: ParquetArchiver는 완성봉(BarClosed)만 적재한다.
+  Digital Twin(W9-11)의 "호가 기반 체결" 재생은 호가(orderbook) WS(H0IFASP0 등, 아직 미검증)가
+  필요해 지금 원시 틱 적재 스키마를 결정하기엔 이르다고 판단해 미룸.
+- **TickCollector를 실제 KIS WS로 end-to-end 돌려본 적 없음**: ws_client.py(저수준 WS 래퍼)는
+  실측했지만, 그 위에 조립한 TickCollector 자체는 FakeConnection 단위 테스트만 거쳤다 —
+  approval_key 발급→구독→실제 틱 수신→완성봉 적재까지 실계좌로 한 번은 확인 필요.

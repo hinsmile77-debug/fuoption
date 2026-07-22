@@ -10,6 +10,11 @@ dependencies = [
     "polars>=1.0",
     "python-dotenv>=1.0",
     "httpx>=0.27",
+    # Windows에는 시스템 tzdata가 없어(Linux/macOS와 달리) polars가 tz-aware datetime 컬럼을
+    # Parquet에서 다시 읽을 때 zoneinfo로 "UTC" 존을 못 찾아 ZoneInfoNotFoundError가 난다
+    # (data/archiver.py 실측, 2026-07-22) — 로컬 datetime 생성 자체(core/timeutil.py)는 고정
+    # offset이라 tzdata가 필요 없지만, polars의 왕복 읽기에는 필요하다.
+    "tzdata>=2026.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
