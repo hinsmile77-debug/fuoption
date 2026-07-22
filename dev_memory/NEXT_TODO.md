@@ -25,8 +25,31 @@
       (MGNA_DVSN·EXCC_STAT_CD·CTX_AREA_FK200/NK200)를 안 보내 KIS가 거부하던 버그 발견·수정(실측
       전에는 아무도 몰랐던 문제 — "구현됨≠검증됨"). KIS_APP_KEY/SECRET/ACCOUNT는 `.env`에 저장(git
       제외 확인됨).
+- [x] KISBrokerAdapter(BrokerAdapter 구현체) 작성 (2026-07-22 완료) —
+      src/messiah/broker/kis/adapter.py. connect/close/submit/cancel/positions/account/
+      probe_front_month 전부 구현. submit()/cancel()/positions()/account()의 필드 구성은
+      마흐디 원본이 아니라 공식 문서(docs/efriend 엑셀, API ID v1_국내선물-001/002/004)를
+      openpyxl로 직접 읽어 파생시킴 — 특히 cancel()은 마흐디에도 없던 신규 구현(rest_client.py에
+      cancel_order() 추가, PATH_FUTUREOPTION_ORDER_MODIFY_CANCEL, 전량취소만 지원). tick_size는
+      상품별 값이 이 프로젝트에 아직 없어 하드코딩하지 않고 생성자 주입으로 미룸. probe_front_month는
+      종목코드 마스터파일 미연동으로 NotImplementedError. 테스트 13건 추가(전부 mock, 실계좌
+      미검증) — submit/cancel/positions/account는 "구현됨≠검증됨" 상태로 capability_matrix.md
+      실측 전 프로덕션 주문 경로 사용 금지.
+- [x] KISBrokerAdapter 실계좌(모의투자) submit→cancel→positions/account 흐름 실측 (2026-07-22
+      완료, docs/capability_matrix.md 신설) — 미니선물 근월물(A05608, F 202608)로 BUY 지정가
+      1000.00(최우선매수호가 1131.04 대비 -131pt, 체결 불가능하게 의도적으로 낮춤) qty=1 제출 →
+      SubmitResult(ok=True, broker_order_no='0000009623') → 즉시 전량취소 → True → 이후
+      positions/account 변동 없음 확인(미체결 확정, 부수효과 없음). 전 과정 버그 없이 1회 성공
+      (get_balance MGNA_DVSN 때와 달리 이번엔 문서 그대로 맞았음). 부산물 발견: 마흐디
+      symbol_master.py가 몰랐던 미니선물 상품종류 코드 "B"(정규선물은 "1")를 KIS 종목코드
+      마스터파일(fo_idx_code_mts.mst) 실측으로 확인 — 상세는 capability_matrix.md "알려진 갭"
+      참고. 틱 크기(tick_size)는 호가 5단계 간격 역산으로 A05608=0.02 확인(다른 상품/행사가에
+      일반화 금지). 남은 갭: 실보유 포지션 상태에서의 positions() 파싱 미검증(이번은 빈 계좌),
+      실제 체결→Fill 이벤트 연계 미검증.
 - [ ] KIS_RAW_FIELD_RANGES.md 이관 + 미니선물/옵션 필드 실측 범위표 작성 (R8 — 5거래일)
-- [ ] docs/capability_matrix.md 작성 시작 — {구현, 실측} × {모의, 실전}
+- [ ] 마흐디 symbol_master.py를 messiah로 이식 — probe_front_month() 구현에 필요. 이식 시 위에서
+      발견한 미니선물 상품종류 "B"와 선물 행의 월물랭크 필드 위치(index 6, 마흐디가 "ATM구분"으로
+      잘못 이름 붙인 자리) 버그를 함께 고칠 것 (2026-07-22 등록)
 - [ ] 공유 RateLimiter (모의 1건/초 실측 반영, 적응형 백오프) — R9
 - [ ] 절대시각 고정 틱 폴링 스케줄러 — R9
 - [ ] **token_daemon을 단일 공유 프로세스로 격리** — Access Token을 Redis에 캐시, 전 프로세스는 캐시만 읽는다.
