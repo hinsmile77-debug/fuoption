@@ -267,10 +267,18 @@ class KISRestClient:
             },
         )
 
-    def get_balance(self) -> dict:
+    def get_balance(self, mgna_dvsn: str = "01", excc_stat_cd: str = "1") -> dict:
         """
+        입력: MGNA_DVSN(증거금 구분: 01=개시/02=유지, 기본 01), EXCC_STAT_CD(정산상태코드:
+             1=정산/2=본정산, 기본 1).
         계산: PATH_FUTUREOPTION_BALANCE GET 호출 (계좌번호는 인증정보에서 사용).
-        실패 조건: 4xx/5xx면 httpx.HTTPStatusError 전파.
+        해석: 2026-07-21 실계좌 실측으로 확인 — 마흐디 원본은 CANO/ACNT_PRDT_CD만 보내 KIS가
+             "ERROR : INPUT_FIELD_NAME MGNA_DVSN"(rt_cd=2)로 거부했다. 공식 문서(API ID
+             v1_국내선물-004, "선물옵션 잔고현황")의 Request Query Parameter 전부가 Required=Y —
+             MGNA_DVSN·EXCC_STAT_CD·CTX_AREA_FK200·CTX_AREA_NK200 누락 시 호출 자체가 실패한다.
+             연속조회(페이지네이션) 미구현이라 FK200/NK200은 항상 최초 조회(공란)로 고정한다.
+        실패 조건: 4xx/5xx면 httpx.HTTPStatusError 전파. rt_cd != "0"이어도 HTTP 200일 수 있으니
+                  호출측이 response["rt_cd"]를 확인해야 한다.
         """
         tr_id = tr_codes.TR_BALANCE_INQUIRY[self._env_key]
         return self._get(
@@ -279,6 +287,10 @@ class KISRestClient:
             params={
                 "CANO": self._creds.account_no,
                 "ACNT_PRDT_CD": self._creds.account_product_code,
+                "MGNA_DVSN": mgna_dvsn,
+                "EXCC_STAT_CD": excc_stat_cd,
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
             },
         )
 

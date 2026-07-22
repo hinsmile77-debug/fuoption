@@ -132,6 +132,29 @@ def test_get_balance_uses_account_settings():
     assert "CANO=12345678" in captured["url"]
 
 
+def test_get_balance_includes_required_fields_kis_would_otherwise_reject():
+    # 2026-07-21 실계좌 실측: MGNA_DVSN 등 누락 시 KIS가 "ERROR : INPUT_FIELD_NAME MGNA_DVSN"
+    # (rt_cd=2)로 거부한다 — 공식 문서 기준 Required=Y 필드 전부를 보내야 한다.
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"output": {}})
+
+    client = KISRestClient(
+        _creds(),
+        _token_daemon(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        min_request_interval=0.0,
+    )
+    client.get_balance()
+
+    assert "MGNA_DVSN=01" in captured["url"]
+    assert "EXCC_STAT_CD=1" in captured["url"]
+    assert "CTX_AREA_FK200=" in captured["url"]
+    assert "CTX_AREA_NK200=" in captured["url"]
+
+
 def test_submit_order_maps_sell_and_buy_direction_codes():
     captured = []
 
