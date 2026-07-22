@@ -6,11 +6,11 @@ REST 클라이언트가 동기(httpx.Client) 기반이라 asyncio.to_thread로 �
 
 "구현됨 ≠ 검증됨" (base.py 원칙, docs/capability_matrix.md에 실측 현황 기록). connect/submit/
 cancel/positions/account는 2026-07-22 실계좌(모의투자)로 전체 흐름 실측 완료(빈 계좌 기준 — 실제
-보유 포지션이 있는 상태의 positions() 파싱과 실제 체결 흐름은 아직 미검증). probe_front_month는
-symbol_master 이식(2026-07-22)으로 구현됐으나 이 메서드를 통한 end-to-end 호출로는 아직 실측 안
-됨 — MASTER_FILE_URL 자체는 이 이식 세션 이전(KISBrokerAdapter 실측 세션)에 직접 내려받아 실제
-응답 포맷을 확인했지만, symbol_master.download_master_zip()/probe_front_month() 경로로 실행해본
-적은 없다(단위 테스트는 tmp_path에 쓴 축소판 파일만 사용).
+보유 포지션이 있는 상태의 positions() 파싱과 실제 체결 흐름은 아직 미검증). probe_front_month도
+2026-07-22 실제 마스터파일 URL로 end-to-end 실측 완료(K200_MINI_FUT→A05608, K200_FUT→A01609,
+캐시 재사용·K200_OPT 거부 전부 확인) — 계좌·토큰과 무관한 정적 파일 다운로드라 모의/실전 구분이
+없다. symbol_master의 옵션 체인 경로(options/nearest_expiry_chain/option_symbol)는 아직 실제
+마스터파일로 실행해본 적 없음(단위 테스트만 통과).
 """
 
 from __future__ import annotations

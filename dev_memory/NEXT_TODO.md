@@ -57,8 +57,13 @@
       ValueError — 옵션 종목은 IndexDerivativesMaster.option_symbol()/nearest_expiry_chain() 직접
       사용). 마스터파일은 어댑터 인스턴스당 최초 1회만 받고 캐싱. 테스트 14건 추가(symbol_master
       11건 — 근월물 정렬 회귀 테스트 포함, adapter probe_front_month 3건 — 전부 로컬 축소판 파일
-      기준, 실제 마스터파일 전체 다운로드나 이 메서드의 end-to-end 실측은 아직 안 함).
-      docs/capability_matrix.md 갱신.
+      기준). docs/capability_matrix.md 갱신.
+- [x] probe_front_month() 실제 마스터파일 URL로 end-to-end 실측 (2026-07-22 완료) —
+      K200_MINI_FUT→A05608, K200_FUT→A01609(둘 다 이전 세션 실측값과 일치), 재호출 시 캐시
+      재사용 확인, K200_OPT/미지원 문자열 ValueError 확인. 버그 없음 — 계좌·토큰 무관(정적 파일
+      다운로드)이라 리스크 없이 실행. 남은 갭: symbol_master의 옵션 체인 경로(options/
+      nearest_expiry_chain/option_symbol)는 아직 로컬 축소판 파일 테스트만 통과, 실제 마스터파일의
+      옵션 행으로는 미실행(capability_matrix.md "알려진 갭" 참고).
 - [ ] 공유 RateLimiter (모의 1건/초 실측 반영, 적응형 백오프) — R9
 - [ ] 절대시각 고정 틱 폴링 스케줄러 — R9
 - [ ] **token_daemon을 단일 공유 프로세스로 격리** — Access Token을 Redis에 캐시, 전 프로세스는 캐시만 읽는다.

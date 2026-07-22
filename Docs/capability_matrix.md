@@ -22,8 +22,8 @@
 | KISBrokerAdapter.cancel | ✅ | ✅ 2026-07-22 | — | 위 주문 즉시 전량취소 → True, 이후 positions/account 변동 없음 확인(미체결 확정) |
 | KISBrokerAdapter.positions | ✅ | ✅ 2026-07-22 | — | 빈 계좌 기준 확인(0건 반환) — 실제 보유 잔고가 있는 상태에서의 부호/필드 파싱은 아직 실측 안 됨 |
 | KISBrokerAdapter.account | ✅ | ✅ 2026-07-22 | — | cash=50,000,000 (파생상품 계좌 개설 시 기본값과 일치), margin_used/total_equity 필드 존재 확인 |
-| KISBrokerAdapter.probe_front_month | ✅ | — | — | symbol_master 이식 완료(2026-07-22)로 구현됨. 마스터파일 다운로드 URL은 이전 세션에서 실제 확인했으나, 이 메서드 경로 자체의 end-to-end 실측은 아직 안 함 — 단위 테스트(마스터파일 축소판 주입)만 통과 |
-| symbol_master (parse/futures/options/nearest_expiry_chain/option_symbol) | ✅ | — | — | 2026-07-22 마흐디에서 이식(pandas→polars, 미니선물 "B" 추가, 선물 월물랭크 필드 수정). 테스트 11건은 로컬 축소판 파일 기준 — 실제 마스터파일 전체를 내려받아 옵션 체인 파싱까지 실행한 적은 없음(futures 쪽만 이전 세션에서 실측) |
+| KISBrokerAdapter.probe_front_month | ✅ | ✅ 2026-07-22 | — | 실제 마스터파일 URL로 end-to-end 실행: K200_MINI_FUT→A05608, K200_FUT→A01609(둘 다 이전 세션 futures() 직접 조회 결과와 일치). 재호출 시 마스터 캐시 재사용 확인. K200_OPT/미지원 문자열은 의도대로 ValueError. 계좌·토큰 무관(정적 파일 다운로드)이라 모의/실전 구분 없음 |
+| symbol_master (parse/futures/options/nearest_expiry_chain/option_symbol) | ✅ | ✅ 2026-07-22 (futures만) | — | 마흐디에서 이식(pandas→polars, 미니선물 "B" 추가, 선물 월물랭크 필드 수정). futures()/front_month_future_code() 경로는 실제 마스터파일로 실측 완료(위 행). options()/nearest_expiry_chain()/option_symbol()은 로컬 축소판 파일 테스트만 통과 — 실제 마스터파일의 옵션 행으로는 아직 실행 안 해봄 |
 | WS 시세 구독 (ws_client) | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 | WS 주문체결통보 | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 
@@ -43,3 +43,8 @@
 - **틱 크기(tick_size) 하드코딩 안 됨**: KISBrokerAdapter 생성자가 `tick_size: Decimal`을 요구한다.
   2026-07-22 실측으로 미니선물(A05608)의 틱 크기가 0.02임을 확인했으나(호가 5단계 간격), 옵션·타
   근월물에도 동일하다고 가정하지 말 것 — 상품·행사가 구간별 실측 필요.
+- **symbol_master 옵션 체인 경로(options/nearest_expiry_chain/option_symbol) 미실측**: futures
+  경로는 probe_front_month()로 실측했지만(위), 옵션 행 파싱은 아직 로컬 축소판 파일 테스트뿐이다.
+  마흐디가 실측한 필드 배치(월물구분코드="2" 고정, ATM구분 대부분 공란)를 그대로 믿고 이식했는데,
+  실제 옵션 필터링/정렬에는 그 두 필드를 쓰지 않아(product_type·strike·한글종목명 정규식만 사용)
+  영향은 없을 것으로 보이나, 실제 마스터파일의 옵션 행으로 한 번은 돌려봐야 확정.
