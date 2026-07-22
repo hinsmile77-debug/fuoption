@@ -117,6 +117,16 @@ class KISWebSocketClient:
     async def listen(self, handler: MessageHandler) -> None:
         """
         수신 루프 — KIS 실시간 데이터는 파이프(|) 구분 텍스트, 구독 응답/PINGPONG은 JSON으로 온다.
+        2026-07-22 실계좌·실제 WS 서버로 확인(H0IFCNT0, 미니선물 A05608) — 구독 직후 첫 메시지는
+        JSON 구독 응답:
+            {"header":{"tr_id":"H0IFCNT0","tr_key":"A05608","encrypt":"N"},
+             "body":{"rt_cd":"0","msg_cd":"OPSP0000","msg1":"SUBSCRIBE SUCCESS",
+                     "output":{"iv":"...","key":"..."}}}
+        이후는 실제 체결 틱, 파이프 구분(암호화여부|TR_ID|데이터건수|필드1^필드2^...):
+            0|H0IFCNT0|001|A05608^152953^-0.54^5^-0.05^1080.30^1131.06^...
+        2번째 캐럿 필드(예: 152953)가 HHMMSS 시각이며 실제 수신 당시 KST 벽시계와 일치했다 —
+        지연 없이 실시간으로 흐르는 것 확인. iv/key는 encrypt="Y"인 다른 TR(체결통보 등)의
+        복호화용으로 보이며 이 TR(encrypt="N")에서는 안 씀.
         실패 조건: 연결이 끊기면 호출측 _conn.recv()가 예외를 던져 루프가 종료된다(재연결은
                   상위 Data Layer가 담당).
         """
