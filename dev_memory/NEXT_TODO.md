@@ -61,9 +61,16 @@
 - [x] probe_front_month() 실제 마스터파일 URL로 end-to-end 실측 (2026-07-22 완료) —
       K200_MINI_FUT→A05608, K200_FUT→A01609(둘 다 이전 세션 실측값과 일치), 재호출 시 캐시
       재사용 확인, K200_OPT/미지원 문자열 ValueError 확인. 버그 없음 — 계좌·토큰 무관(정적 파일
-      다운로드)이라 리스크 없이 실행. 남은 갭: symbol_master의 옵션 체인 경로(options/
-      nearest_expiry_chain/option_symbol)는 아직 로컬 축소판 파일 테스트만 통과, 실제 마스터파일의
-      옵션 행으로는 미실행(capability_matrix.md "알려진 갭" 참고).
+      다운로드)이라 리스크 없이 실행.
+- [x] symbol_master 옵션 체인 경로(options/nearest_expiry_chain/option_symbol) 실측 (2026-07-22
+      완료) — 실제 마스터파일로 regular(콜/풋 각 390건, 만기 202608)·weekly_mon(116/116)·
+      weekly_thu(150/150) 체인 조회, mini(D/E)는 이 시점 상장 없음(정상, series 자체는 동작).
+      처음엔 390건이 여러 만기가 섞인 버그로 의심했으나 group_by로 재확인한 결과 전부 단일
+      만기(202608)의 실제 상장 행사가 수였음(KOSPI200 옵션이 2.5pt 간격으로 이렇게 넓게 상장돼
+      있음 — 버그 아님). option_symbol() 재조회 일치·미상장 행사가 None 확인. 체인에서 뽑은
+      종목코드(B01608A46, strike 1112.5)로 get_quote() 실호출 → rt_cd=0, 체결가 101.45 — 내부
+      일관성뿐 아니라 실제 거래 가능한 코드임을 확인. 남은 갭: 위클리 요일 대응(N/O=월,L/M=목)은
+      마흐디의 2026-07-10 단일 실측에 의존 중 — 이번엔 재검증 안 함(capability_matrix.md 참고).
 - [ ] 공유 RateLimiter (모의 1건/초 실측 반영, 적응형 백오프) — R9
 - [ ] 절대시각 고정 틱 폴링 스케줄러 — R9
 - [ ] **token_daemon을 단일 공유 프로세스로 격리** — Access Token을 Redis에 캐시, 전 프로세스는 캐시만 읽는다.

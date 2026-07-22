@@ -23,7 +23,7 @@
 | KISBrokerAdapter.positions | ✅ | ✅ 2026-07-22 | — | 빈 계좌 기준 확인(0건 반환) — 실제 보유 잔고가 있는 상태에서의 부호/필드 파싱은 아직 실측 안 됨 |
 | KISBrokerAdapter.account | ✅ | ✅ 2026-07-22 | — | cash=50,000,000 (파생상품 계좌 개설 시 기본값과 일치), margin_used/total_equity 필드 존재 확인 |
 | KISBrokerAdapter.probe_front_month | ✅ | ✅ 2026-07-22 | — | 실제 마스터파일 URL로 end-to-end 실행: K200_MINI_FUT→A05608, K200_FUT→A01609(둘 다 이전 세션 futures() 직접 조회 결과와 일치). 재호출 시 마스터 캐시 재사용 확인. K200_OPT/미지원 문자열은 의도대로 ValueError. 계좌·토큰 무관(정적 파일 다운로드)이라 모의/실전 구분 없음 |
-| symbol_master (parse/futures/options/nearest_expiry_chain/option_symbol) | ✅ | ✅ 2026-07-22 (futures만) | — | 마흐디에서 이식(pandas→polars, 미니선물 "B" 추가, 선물 월물랭크 필드 수정). futures()/front_month_future_code() 경로는 실제 마스터파일로 실측 완료(위 행). options()/nearest_expiry_chain()/option_symbol()은 로컬 축소판 파일 테스트만 통과 — 실제 마스터파일의 옵션 행으로는 아직 실행 안 해봄 |
+| symbol_master (parse/futures/options/nearest_expiry_chain/option_symbol) | ✅ | ✅ 2026-07-22 (전체) | — | 마흐디에서 이식(pandas→polars, 미니선물 "B" 추가, 선물 월물랭크 필드 수정). futures 경로는 probe_front_month()로(위 행), 옵션 경로(options/nearest_expiry_chain/option_symbol)는 실제 마스터파일로 regular(콜 390·풋 390, 만기 202608)·weekly_mon(116/116)·weekly_thu(150/150) 체인 조회 확인. mini(D/E)는 이 시점 상장 없음(0/0, series 자체는 정상 동작 — 그냥 해당 상품이 없음). option_symbol() 재조회 일치·미상장 행사가 None 확인. 체인에서 뽑은 종목코드(B01608A46, strike 1112.5)로 get_quote() 실호출 → rt_cd=0, 체결가 101.45 확인 — 내부 일관성뿐 아니라 실제 거래 가능한 코드임을 검증 |
 | WS 시세 구독 (ws_client) | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 | WS 주문체결통보 | ✅ | — | — | 포트만 완료, 실측 안 됨 |
 
@@ -43,8 +43,10 @@
 - **틱 크기(tick_size) 하드코딩 안 됨**: KISBrokerAdapter 생성자가 `tick_size: Decimal`을 요구한다.
   2026-07-22 실측으로 미니선물(A05608)의 틱 크기가 0.02임을 확인했으나(호가 5단계 간격), 옵션·타
   근월물에도 동일하다고 가정하지 말 것 — 상품·행사가 구간별 실측 필요.
-- **symbol_master 옵션 체인 경로(options/nearest_expiry_chain/option_symbol) 미실측**: futures
-  경로는 probe_front_month()로 실측했지만(위), 옵션 행 파싱은 아직 로컬 축소판 파일 테스트뿐이다.
-  마흐디가 실측한 필드 배치(월물구분코드="2" 고정, ATM구분 대부분 공란)를 그대로 믿고 이식했는데,
-  실제 옵션 필터링/정렬에는 그 두 필드를 쓰지 않아(product_type·strike·한글종목명 정규식만 사용)
-  영향은 없을 것으로 보이나, 실제 마스터파일의 옵션 행으로 한 번은 돌려봐야 확정.
+- ~~symbol_master 옵션 체인 경로 미실측~~ — 2026-07-22 실측 완료(위 행). 마흐디가 실측한 필드
+  배치(월물구분코드="2" 고정, ATM구분 대부분 공란)를 그대로 믿고 이식했는데, 실제로도 문제없이
+  동작함을 확인(그 두 필드는 필터링/정렬에 안 쓰여서 원래 예상대로 영향 없었음).
+- **위클리 옵션의 요일 대응(N/O=월요일, L/M=목요일) 재검증 안 됨**: 이번 실측은 2607W4(둘 다 같은
+  주차 라벨)만 확인했고, 마흐디의 2026-07-10 단일 실측(먼슬리 만기 다음날 우연히 두 위클리가
+  동시 상장된 시점)에 의존한 요일 매핑 자체를 다시 검증하지는 않았다 — symbol_master.py 모듈
+  docstring 참고. 의심되면 get_quote()의 만기일자(futs_last_tr_date)로 요일 재확인할 것.

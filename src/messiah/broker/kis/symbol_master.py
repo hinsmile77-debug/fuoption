@@ -19,6 +19,14 @@
    (옵션 행 파싱은 마흐디가 확인한 필드 배치를 그대로 쓴다 — 옵션 필터링/정렬은 상품종류·
    기초자산명·행사가·한글종목명에서 정규식으로 뽑은 만기만 쓰고 5/6번째 필드는 안 쓰이므로
    이번 재해석과 무관하다.)
+
+2026-07-22 실측(같은 날 이어서): futures()/front_month_future_code()는 KISBrokerAdapter.
+probe_front_month() 경유로, options()/nearest_expiry_chain()/option_symbol()은 실제 마스터파일로
+regular(콜/풋 각 390건, 만기 202608)·weekly_mon(116/116)·weekly_thu(150/150) 체인을 직접 조회해
+검증했다. 체인에서 뽑은 종목코드로 KISRestClient.get_quote()를 실호출해 rt_cd=0·실제 체결가까지
+확인 — 내부적으로만 일관된 코드가 아니라 실제 거래 가능한 코드임을 확인했다(docs/
+capability_matrix.md 참고). 위클리 요일 대응(N/O=월요일,L/M=목요일)은 마흐디의 2026-07-10 단일
+실측에 의존 중이며 이번엔 재검증하지 않았다.
 """
 
 from __future__ import annotations
