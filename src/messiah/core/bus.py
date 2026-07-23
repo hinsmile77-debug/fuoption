@@ -22,7 +22,7 @@ from messiah.core.messages import BusMessage
 TOPIC_RAW = "raw"  # raw.{source}
 TOPIC_TICK = "md.tick"  # md.tick.{symbol}
 TOPIC_BAR = "bar"  # bar.{horizon}.{symbol} — 완성봉 확정
-TOPIC_FEAT = "feat"  # feat.{horizon}
+TOPIC_FEAT = "feat"  # feat.{horizon}.{symbol}
 TOPIC_REGIME = "intel.regime"
 TOPIC_FUTURES = "intel.futures"
 TOPIC_OPTIONS = "intel.options"

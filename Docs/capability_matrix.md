@@ -39,6 +39,15 @@
 | archiver.ParquetArchiver | ✅ | ✅ 2026-07-23 | — | 단위 테스트에 이어 실제 완성봉을 실제로 Parquet에 적재·재읽기까지 확인(아래 TickCollector 행). **Windows에 tzdata 패키지 필수**(2026-07-22 실측 발견 — polars가 tz-aware datetime을 Parquet 왕복시킬 때 zoneinfo로 "UTC" 존을 찾는데 Windows는 시스템 tzdata가 없어 ZoneInfoNotFoundError; pyproject.toml에 `sys_platform=='win32'` 조건부 의존성으로 추가함). bar_open_kst는 폴라스 내부 정규화로 파일엔 UTC로 찍히지만(예: KST 14:08 → UTC 05:08) 실제 시점은 정확 — 표시상 혼동 주의 |
 | collector.TickCollector | ✅ | ✅ 2026-07-23 | — | 실제 KIS 서버로 end-to-end 실측: approval_key 발급→WS 연결→미니선물 근월(A05608) 구독→20초간 실틱 64건 수신→Normalizer 파싱→1분봉 2개 완성(quality_ok 둘 다 true, 거래량 73·30건)→Archiver 적재→**Redis 버스(bus.publish)로 실제 발행까지 확인**(별도 실제 구독자가 Tick 메시지 64건을 실시간으로 수신 — bus.py의 실제 Redis 연동이 이번 세션 최초로 실측됨). CollectorProcessingError 로그 0건(적재·발행 전부 성공) |
 | collector.TickCollector.run_forever (WS 재연결) | ✅ | ✅ 2026-07-23 | — | run_once()를 감싸는 지수 백오프 재연결 래퍼 신규 구현(mahdi run_observation_loop_forever와 동일 설계) — 단위 테스트 8건(연결 자체 실패·구독 후 즉시 단절·백오프 배증/리셋 전부 mock으로 커버)에 이어 실제 KIS WS로도 검증: A05608 구독 후 90초 실행 중 t=30s에 실제 연결을 강제 종료(`conn.close()`) → CollectorWSDisconnected 로깅(3초 백오프) → 3초 후 실제 재연결 성공(approval_key 재발급 포함) → CollectorWSReconnected 로깅 → 수신 재개, 전후 합계 257틱, 재연결에 걸친 1분봉도 quality_ok=true로 정상 적재(재연결 시 그 분의 미완성 데이터는 설계대로 폐기 — collector.py docstring 참고). 별도로 60초 연속 무단절 실행도 확인(장시간 연결 유지가 최소 이 구간에서는 문제 없음) |
+| bar_composer.MultiHorizonBarComposer | ✅ | ✅ 2026-07-23 | — | 신규 구현(W6~8) — 1분봉을 구독해 3/5/10/15/30분봉을 합성. 봉 확정은 FixedTickScheduler(이미 검증됨)로 절대시각 경계+500ms 유예 기반(완성봉 규율, Ver 1.2 §2.2). 단위 테스트 12건(OHLCV 합성 정확성·결측 분 시 quality_ok=false·복수 Horizon 독립 누적·적재/발행 실패 격리) 전부 mock. 실측: 오늘 세션에서 실제 KIS WS로 캡처해뒀던 진짜 1분봉 7건(diag_archive~3, 서로 다른 시점이라 갭 있음)을 그대로 흘려 3분봉·5분봉 합성 → OHLCV 정상 합성, 갭 때문에 quality_ok=false로 정확히 표시됨(설계대로) |
+| archiver.ParquetArchiver 경로 버그 수정 | ✅ | ✅ 2026-07-23 | — | 2026-07-23 발견: 경로·dedup 키에 horizon이 없어 서로 다른 Horizon의 봉이 같은 bar_open_kst를 가지면(예: 5m봉과 1m봉이 둘 다 09:30:00 시작) 서로를 지우는 사고가 날 뻔했음(M1만 있을 때는 드러나지 않던 문제) — 경로를 `{symbol}/{horizon}/{date}.parquet`로, dedup 키에 horizon 추가. 회귀 테스트 신규(다른 Horizon 분리 확인) |
+
+## L2 Feature (src/messiah/features/) — Master Plan Ver 2.0 §9 W6~8, Ver 1.4 §2.2
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| px_core — PX(가격·추세·모멘텀) 기저 30개 | ✅ | ✅ 2026-07-23 | — | 신규 구현. **MS(마이크로구조) 30개는 이번 스코프 밖**(아래 "알려진 갭" 참고) — PX만 우선 구현(전부 완성봉 OHLCV만으로 계산 가능). 단위 테스트 53건: 손으로 검산한 값 8개(px_ret/mom/accel/zscore/bb_pos·width/stoch·don_pos/high·low_dist/dd·runup/max_ret), 방향성 검증(RSI 단조추세=0/50/100, ADX 추세>횡보, EMA 교차 부호, MACD 등), 워밍업 부족 시 None 반환 전수 검증. **버그 발견·수정**: px_hurst의 R/S 회귀가 log(size) 실값이 아니라 등간격 인덱스로 회귀해 기울기가 왜곡되던 버그 — 별도 페어 (x,y) 회귀 헬퍼(`_linreg_xy`)로 분리해 수정(수정 전엔 추세 시계열의 Hurst가 평균회귀 시계열보다도 낮게 나왔음, 실측 중 발견) |
+| features.engine.FeatureEngine | ✅ | ✅ 2026-07-23 | — | 신규 구현 — `bar.{h}.{symbol}` 구독→Horizon별 롤링윈도우(deque, maxlen=130)→px_core 30개 계산→FeatureVector 조립·발행(`feat.{h}.{symbol}`). 개별 Feature 계산 실패는 그 값만 None(전체 발행은 안 죽음), nan_ratio>20%면 FeatureNaN(WARNING) 로깅, 발행 실패는 신규 태그 FeaturePublishError(ERROR)로 로깅 후 계속(L22). 세션 상태(당일 시가/고저, px_gap_open 등 4개 상태형)는 M1 봉으로만 갱신. 단위 테스트 11건(FakeBus, 발행 확인·키 개수(~82)·nan_ratio 감소 추이·valid_until 계산·Horizon/심볼 필터링·세션 상태 M1 전용 갱신·개별 계산 실패 격리·발행 실패 로깅). 실측: 오늘 실제 캡처한 진짜 1분봉을 bar_composer가 합성한 실제 3/5분봉과 함께 흘려 실제 FeatureVector 발행 확인 — 데이터가 7건뿐이라 대부분 워밍업 미달(nan_ratio 93~94%)이었지만, 워밍업 조건을 채운 px_ret_5/px_mom_5는 실제 가격 변동과 일치하는 값을 정상 산출(예: -0.0035 근방의 실제 소폭 하락) |
 
 ## 알려진 갭
 
@@ -108,4 +117,23 @@
 - **장시간(수 시간) 운영·거래량 급증(거래대금 상위 구간) 미검증**: 이번 세션 최장 연속
   구간은 180초(정규옵션, 무단절)·90초(선물, 강제 단절 1회 포함)로 확장했으나(기존 20초에서),
   여전히 "장시간"이라 부를 수준은 아니고, 오늘 관측한 거래량도 평상 수준(위클리 만기일
-  제외)이라 실제 급증(장 시작 직후·지수 급변동 등) 구간의 처리량/안정성은 미검증.
+  제외)이라 실제 급증(장 시작 직후·지수 급변동 등) 구간의 처리량/안정성은 미검증. Phase 1
+  파이프라인 완성 후 정기회의로 검증 이관(dev_memory/DECISION_LOG.md 2026-07-23, 기한
+  2026-08-14).
+- **MS(마이크로구조) Feature 30개 미구현**: Ver 1.4 §2.1 목록 대부분(ms_spread·ms_imb_l1/l5/l10·
+  ms_ofi·ms_microprice·ms_queue_imb 등)이 호가창(bid/ask, L1~L10 잔량) 데이터를 필요로 하는데
+  MESSIAH는 아직 호가 WS(H0IFASP0, "지수선물 실시간호가")를 구독하지 않는다. 호가 없이도 계산
+  가능한 절반(ms_vpin·ms_tick_rule·ms_absorb·ms_trade_count 등, mahdi orderflow.py/volume.py에
+  이미 포팅 가능한 형태로 존재 — 2026-07-23 세션에서 확인·판정)도 완성봉 요약(OHLCV)만으로는
+  계산 불가능하고 원시 틱(md.tick)을 봉 경계 사이에 직접 누적해야 해서 FeatureEngine을 틱도
+  구독하도록 확장해야 함 — 호가 WS 작업과 함께 나중에 한번에 처리하기로 함(px_core.py 모듈
+  docstring 참고, 사용자와 스코프 합의).
+- **EV(이벤트·시간) Feature 14개 미구현**: 로드맵 문구가 "MS/PX"만 명시해 이번 스코프 밖으로
+  둠. 계산 자체는 간단(시각/만기 캘린더 기반, 외부 데이터 의존 없음)해 다음 순서로 유력한 후보.
+- **Feature 선정 절차(Ver 1.5 §5, IC 스크리닝·상관 클러스터링·Walk-Forward 생존 검정) 미구현**:
+  Triple Barrier 레이블이 있어야 하는데 Phase 2(W12~13) 산출물이라 아직 없음 — 지금 있는 30개는
+  전부 "후보"(candidate) 상태이며 실전 투입 전 이 절차를 반드시 거쳐야 한다.
+- **px_vwap_dev의 VWAP은 근사치**: 완성봉에 실제 체결가중평균이 없어(BarClosed엔 O/H/L/C/
+  volume만 있음) 전형가(OHLC3) 거래량가중으로 근사. px_macd_h도 고정 12/26/9 대신 window로
+  일반화한 근사(px_core.py 모듈 docstring 참고) — 둘 다 Ver 1.5 §5 IC 스크리닝에서 실제 예측력이
+  없으면 자연 탈락하는 후보이므로 지금은 근사치인 채로 두고 넘어감.

@@ -118,7 +118,7 @@ async def test_run_once_subscribes_and_archives_completed_bar(tmp_path: Path):
     sent = json.loads(conn.sent[0])
     assert sent["body"]["input"] == {"tr_id": tr_codes.WS_TR_FUTURES_CONTRACT, "tr_key": "A05608"}
 
-    df = pl.read_parquet(tmp_path / "A05608" / f"{_TODAY_STR}.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
     assert df.height == 1
     row = df.row(0, named=True)
     assert row["o_ticks"] == 54015  # 1080.30 / 0.02
@@ -148,7 +148,7 @@ async def test_run_once_works_without_bus(tmp_path: Path):
     with pytest.raises(ConnectionError):
         await collector.run_once()  # bus=None이어도 예외 없이 archiver까지는 정상 동작해야 함
 
-    assert (tmp_path / "A05608" / f"{_TODAY_STR}.parquet").exists()
+    assert (tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet").exists()
 
 
 async def test_handle_message_ignores_json_control_messages(tmp_path: Path):
@@ -157,7 +157,7 @@ async def test_handle_message_ignores_json_control_messages(tmp_path: Path):
     with pytest.raises(ConnectionError):
         await collector.run_once()
 
-    assert not (tmp_path / "A05608" / f"{_TODAY_STR}.parquet").exists()  # 완성봉 없음(정상)
+    assert not (tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet").exists()  # 완성봉 없음(정상)
 
 
 async def test_archiver_failure_is_logged_and_does_not_crash_loop(tmp_path: Path, monkeypatch):
@@ -269,7 +269,7 @@ async def test_run_forever_reconnects_with_backoff_and_resumes_archiving(
     # 재연결: 시도3(시도1~2의 단절에서 복구), 시도4(시도3 이후 단절에서 복구) 각각 1회 = 2건
     assert len(reconnect_logs) == 2
 
-    df = pl.read_parquet(tmp_path / "A05608" / f"{_TODAY_STR}.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
     assert df.height == 1  # 시도3에서 완성된 1분봉이 정상 적재됨
 
 
@@ -300,10 +300,11 @@ async def test_flush_final_bar_archives_remaining_partial_bar(tmp_path: Path):
 
     with pytest.raises(ConnectionError):
         await collector.run_once()
-    assert not (tmp_path / "A05608" / f"{_TODAY_STR}.parquet").exists()  # 아직 봉 미완성(1틱뿐)
+    partial_path = tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet"
+    assert not partial_path.exists()  # 아직 봉 미완성(1틱뿐)
 
     await collector.flush_final_bar()
 
-    df = pl.read_parquet(tmp_path / "A05608" / f"{_TODAY_STR}.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
     assert df.height == 1
     assert df.row(0, named=True)["quality_ok"] is False  # 1틱 < MIN_TICKS_FOR_QUALITY_OK(3)

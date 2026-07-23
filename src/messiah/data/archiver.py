@@ -1,8 +1,15 @@
 """완성봉(BarClosed) Parquet 적재 — Master Plan Ver 2.0 §9 "L1 DATA: Archiver(Parquet)".
 
-Digital Twin(W9~11)이 날짜·심볼 단위로 바로 읽을 수 있게 {base_dir}/{symbol}/{date}.parquet로
-파티셔닝한다. 1분봉은 심볼당 하루 최대 수백 행이라(정규장 405분) append마다 파일 전체를
-읽어-합쳐-다시 쓰는 것으로 충분하다(배치 flush 최적화는 실제 처리량을 실측한 뒤 필요해지면 추가).
+Digital Twin(W9~11)이 날짜·심볼·Horizon 단위로 바로 읽을 수 있게
+{base_dir}/{symbol}/{horizon}/{date}.parquet로 파티셔닝한다. 1분봉은 심볼당 하루 최대 수백
+행이라(정규장 405분) append마다 파일 전체를 읽어-합쳐-다시 쓰는 것으로 충분하다(배치 flush
+최적화는 실제 처리량을 실측한 뒤 필요해지면 추가).
+
+2026-07-23 발견: 경로·중복제거 키에 horizon이 없었다(symbol/date만) — M1만 있을 때는 문제가
+없었지만, W6~8에서 3/5/10/15/30m 합성봉을 같은 심볼·같은 날짜에 적재하기 시작하면 서로 다른
+Horizon의 봉이 같은 bar_open_kst를 가질 수 있어(예: 5m봉과 1m봉이 둘 다 09:30:00에 시작)
+unique()가 이걸 중복으로 오인해 조용히 하나를 지우는 사고가 날 뻔했다 — 실제로 여러 Horizon을
+적재해보기 전에는 아무도 몰랐던 문제. 경로와 dedup 키 둘 다에 horizon을 추가해 원천 차단.
 
 주의(2026-07-22 실측): polars는 tz-aware datetime 컬럼을 Parquet에 쓸 때 내부적으로 UTC로
 정규화하고, 다시 읽을 때 zoneinfo로 "UTC" 존을 조회한다 — Windows에는 시스템 tzdata가 없어
@@ -40,12 +47,14 @@ class ParquetArchiver:
         else:
             combined = new_row
 
-        combined = combined.unique(subset=["bar_open_kst"], keep="last").sort("bar_open_kst")
+        combined = combined.unique(subset=["bar_open_kst", "horizon"], keep="last").sort(
+            "bar_open_kst"
+        )
         combined.write_parquet(path)
 
     def _path_for(self, bar: BarClosed) -> Path:
         date_str = bar.bar_open_kst.strftime("%Y-%m-%d")
-        return self._base_dir / bar.symbol / f"{date_str}.parquet"
+        return self._base_dir / bar.symbol / bar.horizon.value / f"{date_str}.parquet"
 
     @staticmethod
     def _bar_to_frame(bar: BarClosed) -> pl.DataFrame:

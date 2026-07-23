@@ -10,6 +10,7 @@ from messiah.data.archiver import ParquetArchiver
 def _bar(
     minute: int,
     symbol: str = "A05608",
+    horizon: Horizon = Horizon.M1,
     o_ticks=100,
     h_ticks=105,
     l_ticks=95,
@@ -19,7 +20,7 @@ def _bar(
 ):
     return BarClosed(
         symbol=symbol,
-        horizon=Horizon.M1,
+        horizon=horizon,
         bar_open_kst=datetime(2026, 7, 22, 15, minute, tzinfo=KST),
         o_ticks=o_ticks,
         h_ticks=h_ticks,
@@ -30,13 +31,13 @@ def _bar(
     )
 
 
-def test_append_bar_creates_file_at_symbol_date_path(tmp_path: Path):
+def test_append_bar_creates_file_at_symbol_horizon_date_path(tmp_path: Path):
     archiver = ParquetArchiver(tmp_path)
     bar = _bar(minute=29)
 
     archiver.append_bar(bar)
 
-    expected_path = tmp_path / "A05608" / "2026-07-22.parquet"
+    expected_path = tmp_path / "A05608" / "1m" / "2026-07-22.parquet"
     assert expected_path.exists()
 
 
@@ -48,7 +49,7 @@ def test_append_bar_round_trips_values(tmp_path: Path):
 
     archiver.append_bar(bar)
 
-    df = pl.read_parquet(tmp_path / "A05608" / "2026-07-22.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / "1m" / "2026-07-22.parquet")
     row = df.row(0, named=True)
     assert row["symbol"] == "A05608"
     assert row["horizon"] == "1m"
@@ -66,7 +67,7 @@ def test_append_bar_accumulates_multiple_minutes(tmp_path: Path):
     archiver.append_bar(_bar(minute=30))
     archiver.append_bar(_bar(minute=31))
 
-    df = pl.read_parquet(tmp_path / "A05608" / "2026-07-22.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / "1m" / "2026-07-22.parquet")
     assert df.height == 3
     assert df["bar_open_kst"].to_list() == sorted(df["bar_open_kst"].to_list())  # 정렬됨
 
@@ -76,7 +77,7 @@ def test_append_bar_same_minute_overwrites_not_duplicates(tmp_path: Path):
     archiver.append_bar(_bar(minute=29, quality_ok=False))
     archiver.append_bar(_bar(minute=29, quality_ok=True))  # 같은 분 재처리(재시작 등)
 
-    df = pl.read_parquet(tmp_path / "A05608" / "2026-07-22.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / "1m" / "2026-07-22.parquet")
     assert df.height == 1
     assert df.row(0, named=True)["quality_ok"] is True  # 나중 값으로 갱신됨
 
@@ -86,10 +87,10 @@ def test_append_bar_separates_different_symbols(tmp_path: Path):
     archiver.append_bar(_bar(minute=29, symbol="A05608"))
     archiver.append_bar(_bar(minute=29, symbol="OTHER"))
 
-    assert (tmp_path / "A05608" / "2026-07-22.parquet").exists()
-    assert (tmp_path / "OTHER" / "2026-07-22.parquet").exists()
-    a = pl.read_parquet(tmp_path / "A05608" / "2026-07-22.parquet")
-    other = pl.read_parquet(tmp_path / "OTHER" / "2026-07-22.parquet")
+    assert (tmp_path / "A05608" / "1m" / "2026-07-22.parquet").exists()
+    assert (tmp_path / "OTHER" / "1m" / "2026-07-22.parquet").exists()
+    a = pl.read_parquet(tmp_path / "A05608" / "1m" / "2026-07-22.parquet")
+    other = pl.read_parquet(tmp_path / "OTHER" / "1m" / "2026-07-22.parquet")
     assert a.height == 1
     assert other.height == 1
 
@@ -110,5 +111,20 @@ def test_append_bar_separates_different_dates(tmp_path: Path):
     )
     archiver.append_bar(next_day_bar)
 
-    assert (tmp_path / "A05608" / "2026-07-22.parquet").exists()
-    assert (tmp_path / "A05608" / "2026-07-23.parquet").exists()
+    assert (tmp_path / "A05608" / "1m" / "2026-07-22.parquet").exists()
+    assert (tmp_path / "A05608" / "1m" / "2026-07-23.parquet").exists()
+
+
+def test_append_bar_separates_different_horizons(tmp_path: Path):
+    """2026-07-23 발견: 서로 다른 Horizon의 봉이 같은 bar_open_kst를 가질 수 있어(예: 5m봉과
+    1m봉이 둘 다 09:30:00에 시작) horizon을 경로·dedup 키에 안 넣으면 서로를 지워버린다."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(minute=29, horizon=Horizon.M1, c_ticks=101))
+    archiver.append_bar(_bar(minute=29, horizon=Horizon.M5, c_ticks=205))
+
+    m1_path = tmp_path / "A05608" / "1m" / "2026-07-22.parquet"
+    m5_path = tmp_path / "A05608" / "5m" / "2026-07-22.parquet"
+    assert m1_path.exists()
+    assert m5_path.exists()
+    assert pl.read_parquet(m1_path).row(0, named=True)["c_ticks"] == 101
+    assert pl.read_parquet(m5_path).row(0, named=True)["c_ticks"] == 205

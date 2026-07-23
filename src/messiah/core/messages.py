@@ -42,6 +42,16 @@ class Horizon(str, Enum):
     M30 = "30m"
 
 
+HORIZON_SECONDS: dict[Horizon, int] = {
+    Horizon.M1: 60,
+    Horizon.M3: 3 * 60,
+    Horizon.M5: 5 * 60,
+    Horizon.M10: 10 * 60,
+    Horizon.M15: 15 * 60,
+    Horizon.M30: 30 * 60,
+}
+
+
 class Regime(str, Enum):
     TREND_UP = "TREND_UP"
     TREND_DOWN = "TREND_DOWN"

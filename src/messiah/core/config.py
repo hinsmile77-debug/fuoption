@@ -46,6 +46,7 @@ class InstanceConfig(BaseModel):
     universe: list[str] = Field(default_factory=lambda: ["K200_MINI_FUT", "K200_OPT"])
     model_bundle: str = "none"  # 릴리스 번들 ID (예: messiah-2026.08)
     redis_url: str = "redis://localhost:6379/0"
+    feature_set: str = "v2026.07"  # FeatureVector.feature_set 기본값 (Ver 1.4 §5.2, W6~8)
 
 
 def resolve_secret(ref: str) -> str:
