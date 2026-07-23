@@ -8,11 +8,16 @@ import pytest
 from messiah.broker.kis import tr_codes
 from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.ws_client import ApprovalKeyIssuer
+from messiah.core.timeutil import now_kst
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.collector import TickCollector
 from messiah.data.normalizer import parse_futures_tick
 
-# 2026-07-22 ws_client.py 실측 세션에서 실제로 캡처한 라이브 WS 프레임(미니선물 A05608).
+# 2026-07-22 ws_client.py 실측 세션에서 실제로 캡처한 라이브 WS 프레임(미니선물 A05608). 시각
+# 필드(HHMMSS)만 실측값이고 날짜는 parse_futures_tick이 today 생략 시 오늘 KST 날짜를 쓰므로,
+# 아카이브 파일 경로도 하드코딩하지 않고 실행 시점의 오늘 날짜로 계산한다(그래야 세션이 자정을
+# 넘겨도 테스트가 안 깨짐).
+_TODAY_STR = now_kst().date().isoformat()
 _SUBSCRIBE_ACK = json.dumps(
     {
         "header": {"tr_id": "H0IFCNT0", "tr_key": "A05608", "encrypt": "N"},
@@ -113,7 +118,7 @@ async def test_run_once_subscribes_and_archives_completed_bar(tmp_path: Path):
     sent = json.loads(conn.sent[0])
     assert sent["body"]["input"] == {"tr_id": tr_codes.WS_TR_FUTURES_CONTRACT, "tr_key": "A05608"}
 
-    df = pl.read_parquet(tmp_path / "A05608" / "2026-07-22.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / f"{_TODAY_STR}.parquet")
     assert df.height == 1
     row = df.row(0, named=True)
     assert row["o_ticks"] == 54015  # 1080.30 / 0.02
@@ -143,7 +148,7 @@ async def test_run_once_works_without_bus(tmp_path: Path):
     with pytest.raises(ConnectionError):
         await collector.run_once()  # bus=None이어도 예외 없이 archiver까지는 정상 동작해야 함
 
-    assert (tmp_path / "A05608" / "2026-07-22.parquet").exists()
+    assert (tmp_path / "A05608" / f"{_TODAY_STR}.parquet").exists()
 
 
 async def test_handle_message_ignores_json_control_messages(tmp_path: Path):
@@ -152,7 +157,7 @@ async def test_handle_message_ignores_json_control_messages(tmp_path: Path):
     with pytest.raises(ConnectionError):
         await collector.run_once()
 
-    assert not (tmp_path / "A05608" / "2026-07-22.parquet").exists()  # 완성봉 없음(정상)
+    assert not (tmp_path / "A05608" / f"{_TODAY_STR}.parquet").exists()  # 완성봉 없음(정상)
 
 
 async def test_archiver_failure_is_logged_and_does_not_crash_loop(tmp_path: Path, monkeypatch):
@@ -181,10 +186,10 @@ async def test_flush_final_bar_archives_remaining_partial_bar(tmp_path: Path):
 
     with pytest.raises(ConnectionError):
         await collector.run_once()
-    assert not (tmp_path / "A05608" / "2026-07-22.parquet").exists()  # 아직 봉 미완성(1틱뿐)
+    assert not (tmp_path / "A05608" / f"{_TODAY_STR}.parquet").exists()  # 아직 봉 미완성(1틱뿐)
 
     await collector.flush_final_bar()
 
-    df = pl.read_parquet(tmp_path / "A05608" / "2026-07-22.parquet")
+    df = pl.read_parquet(tmp_path / "A05608" / f"{_TODAY_STR}.parquet")
     assert df.height == 1
     assert df.row(0, named=True)["quality_ok"] is False  # 1틱 < MIN_TICKS_FOR_QUALITY_OK(3)

@@ -33,11 +33,11 @@
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
 |---|---|---|---|---|
-| normalizer.parse_futures_tick | ✅ | — | — | 단위 테스트만(이번 세션 ws_client 실측 때 실제로 캡처한 라이브 H0IFCNT0 프레임을 픽스처로 재사용 — symbol/시각/가격/거래량 필드 인덱스가 실데이터와 맞음을 확인했지만, 함수 자체를 실시간 WS 스트림에 물려 돌려본 적은 없음). count>1(여러 체결이 한 프레임에 묶임) 프레임은 첫 레코드만 파싱(mahdi와 동일 한계, 테스트로 명시) |
+| normalizer.parse_futures_tick | ✅ | ✅ 2026-07-23 | — | 단위 테스트(실캡처 프레임 픽스처)에 이어 TickCollector 경유로 실제 WS 스트림 20초 구독 → 실틱 64건 정상 파싱·집계 확인(아래 TickCollector 행) |
 | normalizer.parse_option_tick | ✅ | — | — | 마흐디 인용 필드 인덱스만 반영 — messiah 자체 라이브 옵션 WS 캡처로 재검증된 적 없음(옵션 WS는 아직 구독한 적 없음) |
-| normalizer.MinuteBarAggregator | ✅ | — | — | 단위 테스트만(분 롤오버·품질 플래그·다중 심볼 분리·flush_final) |
-| archiver.ParquetArchiver | ✅ | — | — | 단위 테스트만. **Windows에 tzdata 패키지 필수**(2026-07-22 실측 발견 — polars가 tz-aware datetime을 Parquet 왕복시킬 때 zoneinfo로 "UTC" 존을 찾는데 Windows는 시스템 tzdata가 없어 ZoneInfoNotFoundError; pyproject.toml에 `sys_platform=='win32'` 조건부 의존성으로 추가함) |
-| collector.TickCollector | ✅ | — | — | 단위 테스트만 — FakeConnection(ws_client 테스트와 동일 패턴)으로 실제 네트워크 없이 구독→틱→완성봉→적재/발행 end-to-end 검증. **실제 KIS WS로 이 클래스 자체를 돌려본 적은 없음**(ws_client.py는 별도로 실측했지만 TickCollector가 그 위에 정확히 조립됐는지는 미확인) |
+| normalizer.MinuteBarAggregator | ✅ | ✅ 2026-07-23 | — | 단위 테스트에 이어 실제 틱 스트림으로 1분봉 2개 완성 확인(아래 TickCollector 행) |
+| archiver.ParquetArchiver | ✅ | ✅ 2026-07-23 | — | 단위 테스트에 이어 실제 완성봉을 실제로 Parquet에 적재·재읽기까지 확인(아래 TickCollector 행). **Windows에 tzdata 패키지 필수**(2026-07-22 실측 발견 — polars가 tz-aware datetime을 Parquet 왕복시킬 때 zoneinfo로 "UTC" 존을 찾는데 Windows는 시스템 tzdata가 없어 ZoneInfoNotFoundError; pyproject.toml에 `sys_platform=='win32'` 조건부 의존성으로 추가함). bar_open_kst는 폴라스 내부 정규화로 파일엔 UTC로 찍히지만(예: KST 14:08 → UTC 05:08) 실제 시점은 정확 — 표시상 혼동 주의 |
+| collector.TickCollector | ✅ | ✅ 2026-07-23 | — | 실제 KIS 서버로 end-to-end 실측: approval_key 발급→WS 연결→미니선물 근월(A05608) 구독→20초간 실틱 64건 수신→Normalizer 파싱→1분봉 2개 완성(quality_ok 둘 다 true, 거래량 73·30건)→Archiver 적재→**Redis 버스(bus.publish)로 실제 발행까지 확인**(별도 실제 구독자가 Tick 메시지 64건을 실시간으로 수신 — bus.py의 실제 Redis 연동이 이번 세션 최초로 실측됨). CollectorProcessingError 로그 0건(적재·발행 전부 성공) |
 
 ## 알려진 갭
 
@@ -84,6 +84,7 @@
 - **원시 틱 자체는 Parquet에 안 쌓임**: ParquetArchiver는 완성봉(BarClosed)만 적재한다.
   Digital Twin(W9-11)의 "호가 기반 체결" 재생은 호가(orderbook) WS(H0IFASP0 등, 아직 미검증)가
   필요해 지금 원시 틱 적재 스키마를 결정하기엔 이르다고 판단해 미룸.
-- **TickCollector를 실제 KIS WS로 end-to-end 돌려본 적 없음**: ws_client.py(저수준 WS 래퍼)는
-  실측했지만, 그 위에 조립한 TickCollector 자체는 FakeConnection 단위 테스트만 거쳤다 —
-  approval_key 발급→구독→실제 틱 수신→완성봉 적재까지 실계좌로 한 번은 확인 필요.
+- ~~TickCollector를 실제 KIS WS로 end-to-end 돌려본 적 없음~~ — 2026-07-23 완료(위 "L1 Data"
+  표 참고) — approval_key 발급→WS 연결→실틱 64건 수신→1분봉 2개 완성→Archiver 적재→Redis 버스
+  발행까지 전부 실측, 버그 없음. 20초·틱 데이터만 본 것이라 장시간 운영·거래량 급증 구간·
+  옵션 WS는 여전히 미검증.
