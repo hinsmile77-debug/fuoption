@@ -2,10 +2,10 @@
 (Master Plan Ver 2.0 §9 "L1 DATA: Collector").
 
 단일 연결·단일 심볼용 골격이다. 마흐디 mahdi/main.py가 run_observation_loop(단일 연결, 끊기면
-예외 전파)과 run_observation_loop_forever(재연결 래퍼)를 분리한 것과 같은 설계로, 이 클래스는
-전자에 해당한다 — WS 재연결·지수 백오프는 이 클래스의 책임이 아니고 별도 후속 작업이다
-(NEXT_TODO 참고). ATM±N 옵션 체인 구독 롤링(RollingSubscriptionManager 이식)도 마찬가지로
-범위 밖 — 이 클래스는 생성 시 주어진 심볼 1개만 구독한다.
+예외 전파)과 run_observation_loop_forever(재연결 래퍼)를 분리한 것과 같은 설계로, run_once()가
+전자에 해당하고 run_forever()가 후자에 해당한다(2026-07-23 추가 — 그 전까지는 run_once만
+있었다, NEXT_TODO 참고). ATM±N 옵션 체인 구독 롤링(RollingSubscriptionManager 이식)은
+여전히 범위 밖 — 이 클래스는 생성 시 주어진 심볼 1개만 구독한다.
 """
 
 from __future__ import annotations
@@ -25,6 +25,14 @@ from messiah.core.messages import BarClosed, Horizon, Tick
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.normalizer import MinuteBarAggregator
 
+# websockets 라이브러리 자체 예외(ConnectionClosed 등)는 WebSocketException 계열, 소켓 단의
+# 실패(연결 거부 등)는 OSError(ConnectionError는 그 서브클래스) 계열이다 — mahdi
+# _WS_DISCONNECT_ERRORS와 동일 판단: 재연결 대상은 이 둘뿐이고, ValueError(구독 슬롯 한도 등)
+# 같은 코드/설정 문제는 재시도로 해결되지 않으니 여기서 안 잡고 그대로 전파한다.
+_WS_DISCONNECT_ERRORS = (OSError, websockets.WebSocketException)
+_WS_RECONNECT_INITIAL_BACKOFF_SECONDS = 5.0
+_WS_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
+
 
 class TickCollector:
     def __init__(
@@ -39,6 +47,8 @@ class TickCollector:
         horizon: Horizon = Horizon.M1,
         approval_issuer: ApprovalKeyIssuer | None = None,
         ws_connect: Callable[[str], Any] = websockets.connect,
+        reconnect_initial_backoff_seconds: float = _WS_RECONNECT_INITIAL_BACKOFF_SECONDS,
+        reconnect_max_backoff_seconds: float = _WS_RECONNECT_MAX_BACKOFF_SECONDS,
     ) -> None:
         """
         입력: tr_id/parse_tick은 짝을 맞춰 넘긴다 — 선물은
@@ -46,7 +56,8 @@ class TickCollector:
              (tr_codes.WS_TR_OPTION_CONTRACT, normalizer.parse_option_tick). bus를 생략하면
              Redis 발행 없이 Parquet 적재만 한다(테스트·오프라인 실행에 유용). ws_connect는
              테스트에서 실제 네트워크 없이 가짜 연결을 주입하기 위한 것(기본값
-             websockets.connect).
+             websockets.connect). reconnect_*_backoff_seconds는 run_forever() 전용 — 테스트가
+             실제로 몇 초씩 기다리지 않도록 주입 가능하게 노출(기본값은 mahdi와 동일한 5~60초).
         """
         self._creds = creds
         self._symbol = symbol
@@ -55,22 +66,72 @@ class TickCollector:
         self._tick_size = tick_size
         self._archiver = archiver
         self._bus = bus
+        self._horizon = horizon
         self._approval_issuer = approval_issuer or ApprovalKeyIssuer(creds)
         self._ws_connect = ws_connect
+        self._reconnect_initial_backoff_seconds = reconnect_initial_backoff_seconds
+        self._reconnect_max_backoff_seconds = reconnect_max_backoff_seconds
         self._aggregator = MinuteBarAggregator(symbol, horizon)
 
-    async def run_once(self) -> None:
+    async def run_once(self, on_connected: Callable[[], None] | None = None) -> None:
         """
+        입력: on_connected는 구독까지 성공한 직후 호출되는 선택적 훅(run_forever()가 재연결
+             성공을 감지해 백오프를 리셋하는 용도 — 일반 호출에서는 생략).
         계산: approval_key 발급(동기 httpx 호출이라 asyncio.to_thread로 감쌈) → WS 연결 →
              구독 → listen()의 무한 수신 루프.
-        실패 조건: 연결이 끊기면(또는 다른 예외) 그대로 전파된다 — 재연결은 이 클래스의
-                  책임이 아니다(모듈 docstring 참고).
+        실패 조건: 연결이 끊기면(또는 다른 예외) 그대로 전파된다 — 이 메서드 자체는 재연결하지
+                  않는다(run_forever()가 감싸서 처리, 모듈 docstring 참고).
         """
         approval_key = await asyncio.to_thread(self._approval_issuer.issue)
         async with self._ws_connect(tr_codes.MARKET_DATA_WS_DOMAIN) as ws:
             client = KISWebSocketClient(approval_key, ws)
             await client.subscribe(Subscription(self._tr_id, self._symbol))
+            if on_connected is not None:
+                on_connected()
             await client.listen(self._handle_message)
+
+    async def run_forever(self) -> None:
+        """
+        계산: run_once()를 감싸 WS 단절(_WS_DISCONNECT_ERRORS)마다 프로세스를 죽이는 대신
+             지수 백오프(기본 5초→최대 60초) 후 재연결한다 — mahdi run_observation_loop_forever와
+             동일 설계. approval_key도 재연결마다 새로 발급한다(run_once()를 통째로 재호출하므로
+             — 장시간 연결 유지 중 만료됐을 가능성을 배제). 재연결(구독까지 성공)마다
+             on_connected 훅으로 백오프를 초기값으로 리셋하고, 끊긴 상태에서 다시 이어졌을
+             때만(연속 재시도 중 매번이 아니라) CollectorWSReconnected를 1회 로깅한다.
+             재연결 시 이전 연결에서 누적 중이던 미완성 분봉은 버린다(aggregator 재생성) —
+             그 분은 이미 관측 공백이 낀 구간이라 새 연결의 첫 틱과 섞이면 안 되고, 부분
+             데이터로 quality_ok=True인 봉을 만드는 것도 부정확하다.
+        실패 조건: OSError/websockets.WebSocketException 이외의 예외(ValueError 등 코드/설정
+                  문제)는 재시도 없이 그대로 전파된다 — 재시도로 해결되지 않는 문제라 사람이
+                  봐야 한다.
+        """
+        backoff = self._reconnect_initial_backoff_seconds
+        was_disconnected = False
+
+        def _on_connected() -> None:
+            nonlocal backoff, was_disconnected
+            if was_disconnected:
+                mlog.log(
+                    "CollectorWSReconnected", "WS 재연결 성공 — 수신 재개", symbol=self._symbol
+                )
+                was_disconnected = False
+            backoff = self._reconnect_initial_backoff_seconds
+
+        while True:
+            try:
+                await self.run_once(on_connected=_on_connected)
+                return  # listen()은 정상 반환하지 않지만 방어적으로 그대로 종료
+            except _WS_DISCONNECT_ERRORS as exc:
+                if not was_disconnected:
+                    mlog.log(
+                        "CollectorWSDisconnected",
+                        f"WS 연결 끊김 — {backoff:.0f}초 후 재연결 시도: {exc}",
+                        symbol=self._symbol,
+                    )
+                    was_disconnected = True
+                self._aggregator = MinuteBarAggregator(self._symbol, self._horizon)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self._reconnect_max_backoff_seconds)
 
     async def flush_final_bar(self) -> None:
         """graceful shutdown 시 마지막 미완성 분봉을 강제 flush — 호출측(재연결 래퍼 등)이

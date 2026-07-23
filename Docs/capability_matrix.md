@@ -34,10 +34,11 @@
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
 |---|---|---|---|---|
 | normalizer.parse_futures_tick | ✅ | ✅ 2026-07-23 | — | 단위 테스트(실캡처 프레임 픽스처)에 이어 TickCollector 경유로 실제 WS 스트림 20초 구독 → 실틱 64건 정상 파싱·집계 확인(아래 TickCollector 행) |
-| normalizer.parse_option_tick | ✅ | — | — | 마흐디 인용 필드 인덱스만 반영 — messiah 자체 라이브 옵션 WS 캡처로 재검증된 적 없음(옵션 WS는 아직 구독한 적 없음) |
+| normalizer.parse_option_tick | ✅ | ✅ 2026-07-23 | — | 위클리 목요일물(만기 당일) 근월 풋 C09F7WA45 구독 → 실틱 70건 이상 확보, symbol/시각/가격/거래량 전부 원시 프레임과 파싱 결과를 직접 대조해 확인(정규월물은 이 세션 거래량이 너무 얇아 시도했으나 틱을 못 잡음 — normalizer.py 모듈 docstring 참고) |
 | normalizer.MinuteBarAggregator | ✅ | ✅ 2026-07-23 | — | 단위 테스트에 이어 실제 틱 스트림으로 1분봉 2개 완성 확인(아래 TickCollector 행) |
 | archiver.ParquetArchiver | ✅ | ✅ 2026-07-23 | — | 단위 테스트에 이어 실제 완성봉을 실제로 Parquet에 적재·재읽기까지 확인(아래 TickCollector 행). **Windows에 tzdata 패키지 필수**(2026-07-22 실측 발견 — polars가 tz-aware datetime을 Parquet 왕복시킬 때 zoneinfo로 "UTC" 존을 찾는데 Windows는 시스템 tzdata가 없어 ZoneInfoNotFoundError; pyproject.toml에 `sys_platform=='win32'` 조건부 의존성으로 추가함). bar_open_kst는 폴라스 내부 정규화로 파일엔 UTC로 찍히지만(예: KST 14:08 → UTC 05:08) 실제 시점은 정확 — 표시상 혼동 주의 |
 | collector.TickCollector | ✅ | ✅ 2026-07-23 | — | 실제 KIS 서버로 end-to-end 실측: approval_key 발급→WS 연결→미니선물 근월(A05608) 구독→20초간 실틱 64건 수신→Normalizer 파싱→1분봉 2개 완성(quality_ok 둘 다 true, 거래량 73·30건)→Archiver 적재→**Redis 버스(bus.publish)로 실제 발행까지 확인**(별도 실제 구독자가 Tick 메시지 64건을 실시간으로 수신 — bus.py의 실제 Redis 연동이 이번 세션 최초로 실측됨). CollectorProcessingError 로그 0건(적재·발행 전부 성공) |
+| collector.TickCollector.run_forever (WS 재연결) | ✅ | ✅ 2026-07-23 | — | run_once()를 감싸는 지수 백오프 재연결 래퍼 신규 구현(mahdi run_observation_loop_forever와 동일 설계) — 단위 테스트 8건(연결 자체 실패·구독 후 즉시 단절·백오프 배증/리셋 전부 mock으로 커버)에 이어 실제 KIS WS로도 검증: A05608 구독 후 90초 실행 중 t=30s에 실제 연결을 강제 종료(`conn.close()`) → CollectorWSDisconnected 로깅(3초 백오프) → 3초 후 실제 재연결 성공(approval_key 재발급 포함) → CollectorWSReconnected 로깅 → 수신 재개, 전후 합계 257틱, 재연결에 걸친 1분봉도 quality_ok=true로 정상 적재(재연결 시 그 분의 미완성 데이터는 설계대로 폐기 — collector.py docstring 참고). 별도로 60초 연속 무단절 실행도 확인(장시간 연결 유지가 최소 이 구간에서는 문제 없음) |
 
 ## 알려진 갭
 
@@ -70,10 +71,23 @@
 - ~~WS 실시간 틱 원시 필드 파싱 미구현~~ — 2026-07-22 완료(위 "L1 Data" 표 참고,
   normalizer.parse_futures_tick/parse_option_tick). `iv`/`key`(구독응답에 포함)가 정말
   encrypt="Y" TR 전용 복호화 키인지는 여전히 추정 — 체결통보 등 encrypt="Y" TR 실측 시 확인 필요.
-- **WS 재연결·장시간 연결 유지 미구현**: TickCollector.run_once()는 mahdi의
-  run_observation_loop과 동일하게 "연결 하나가 끊기면 예외를 던지고 끝"이다 — 지수 백오프
-  재연결 래퍼(mahdi run_observation_loop_forever 격)는 의도적으로 이번 스코프에서 뺐다
-  (NEXT_TODO 참고). PING/PONG 응답·장시간 연결 유지도 미검증.
+- ~~WS 재연결 미구현~~ — 2026-07-23 완료. TickCollector.run_forever() 신규 구현(위 "L1 Data" 표
+  참고) — run_once()는 여전히 "연결 하나가 끊기면 예외를 던지고 끝"이지만, run_forever()가
+  이를 감싸 지수 백오프(5→60초, mahdi run_observation_loop_forever와 동일 설계)로 재연결한다.
+  실제 KIS 서버로 강제 단절→재연결 성공까지 실측 완료. 남은 갭: PING/PONG 명시적 응답 로직은
+  여전히 없음(연결이 살아있는 한 KIS 서버가 자체적으로 관리하는 것으로 보이나 별도 확인 안 됨),
+  수 시간 단위 초장기 연결 유지·다회 반복 재연결(3회 이상 연속)은 미검증(이번엔 최대 1회
+  강제 단절만 실측).
+- **동시에 여러 WS 연결을 열면 서로 반복적으로 끊김 (2026-07-23 신규 발견)**: 같은 계좌/
+  앱키로 TickCollector 두 개(선물 1개 + 옵션 1개)를 동시에 각자의 WS 연결로 실행했더니 양쪽
+  다 "no close frame received or sent"로 몇 초 간격으로 반복 단절됨(run_forever()가 계속
+  재연결을 시도하며 루프). 같은 두 심볼을 각각 **단독으로** 연결했을 때는(순차 실행) 60~180초
+  동안 단 한 번도 끊기지 않아 원인이 동시 연결 자체에 있음을 확인 — 정확한 서버 측 메커니즘은
+  미확인(approval_key 재발급이 같은 계좌의 다른 세션을 무효화하는 것으로 추정)이지만, 결론은
+  명확함: **여러 종목을 동시에 실시간 구독하려면 TickCollector(연결)를 여러 개 띄우지 말고,
+  연결 하나(KISWebSocketClient 하나)에서 subscribe()를 여러 번 호출**해야 한다 — 이는
+  ws_client.py가 애초에 "세션당 구독 슬롯 최대 41건"으로 설계된 이유와도 일치한다. ATM±N
+  옵션 체인 구독 롤링(아래 항목)을 구현할 때 이 제약을 그대로 따라야 함.
 - **ATM±N 옵션 체인 구독 롤링 미구현**: mahdi의 RollingSubscriptionManager(스팟 추종 옵션 체인
   WS 구독 롤링)를 이식하지 않음 — TickCollector는 생성 시 주어진 심볼 1개만 구독한다.
 - **REST 폴링 루프(투자자매매동향·옵션체인 그릭스) 미구현**: FixedTickScheduler를 아직 아무
@@ -86,5 +100,12 @@
   필요해 지금 원시 틱 적재 스키마를 결정하기엔 이르다고 판단해 미룸.
 - ~~TickCollector를 실제 KIS WS로 end-to-end 돌려본 적 없음~~ — 2026-07-23 완료(위 "L1 Data"
   표 참고) — approval_key 발급→WS 연결→실틱 64건 수신→1분봉 2개 완성→Archiver 적재→Redis 버스
-  발행까지 전부 실측, 버그 없음. 20초·틱 데이터만 본 것이라 장시간 운영·거래량 급증 구간·
-  옵션 WS는 여전히 미검증.
+  발행까지 전부 실측, 버그 없음.
+- ~~옵션 WS 경로(H0IOCNT0) 미검증~~ — 2026-07-23 완료(위 "L1 Data" 표 참고). 정규월물은 이
+  세션 시점 거래량이 너무 얇아(당일 누적 0~23건, 여러 종목·최대 3분 구독 시도) 틱을 못 잡음
+  — 위클리 목요일물(만기 당일이라 거래량 폭증, 당일 누적 최대 12,464건)로 전환해 45초 만에
+  실틱 70건 이상 확보, 필드 인덱스 검증 완료.
+- **장시간(수 시간) 운영·거래량 급증(거래대금 상위 구간) 미검증**: 이번 세션 최장 연속
+  구간은 180초(정규옵션, 무단절)·90초(선물, 강제 단절 1회 포함)로 확장했으나(기존 20초에서),
+  여전히 "장시간"이라 부를 수준은 아니고, 오늘 관측한 거래량도 평상 수준(위클리 만기일
+  제외)이라 실제 급증(장 시작 직후·지수 급변동 등) 구간의 처리량/안정성은 미검증.

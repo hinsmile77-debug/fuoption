@@ -9,6 +9,7 @@ logs/
 *.parquet
 *.pkl
 *.lgb
+/.cache/
 
 # python
 __pycache__/

@@ -181,6 +181,120 @@ async def test_archiver_failure_is_logged_and_does_not_crash_loop(tmp_path: Path
     assert any(tag == "CollectorProcessingError" for tag, _ in logged)
 
 
+class _FailingConnectCM:
+    """__aenter__ 시점(연결 자체)에 실패 — 서버 거부 등 accept 이전 단계의 단절을 흉내낸다."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aenter__(self):
+        raise self._exc
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _RotatingConnect:
+    """호출마다 미리 준비된 커넥션/실패를 순서대로 돌려준다 — run_forever()의 재연결마다
+    다른 시나리오(연결 자체 실패·구독 후 즉시 단절·정상 수신)를 검증하기 위함."""
+
+    def __init__(self, cms: list) -> None:
+        self._cms = cms
+        self.calls = 0
+
+    def __call__(self, uri: str):
+        cm = self._cms[self.calls]
+        self.calls += 1
+        return cm
+
+
+async def test_run_forever_reconnects_with_backoff_and_resumes_archiving(
+    tmp_path: Path, monkeypatch
+):
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "messiah.data.collector.mlog.log", lambda tag, msg, **f: logged.append((tag, msg))
+    )
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("messiah.data.collector.asyncio.sleep", fake_sleep)
+
+    conn_final_stop = FakeConnection([_SUBSCRIBE_ACK])
+
+    async def _raise_value_error() -> str:
+        raise ValueError("코드 문제 — 재시도 대상 아님")
+
+    conn_final_stop.recv = _raise_value_error  # type: ignore[method-assign]
+
+    conn_success_then_disconnect = FakeConnection(
+        [_SUBSCRIBE_ACK, _REAL_TICK_1, _REAL_TICK_2, _TICK_NEXT_MINUTE]
+    )
+    connect = _RotatingConnect(
+        [
+            _FailingConnectCM(OSError("connection refused")),  # 시도 1: 연결 자체 실패
+            _FailingConnectCM(OSError("connection refused")),  # 시도 2: 다시 실패(백오프 배증)
+            _FakeConnectCM(conn_success_then_disconnect),  # 시도 3: 정상 수신, 1분봉 완성 후 단절
+            _FakeConnectCM(conn_final_stop),  # 시도 4: ValueError로 루프 종료(재시도 대상 아님)
+        ]
+    )
+
+    collector = TickCollector(
+        creds=_creds(),
+        symbol="A05608",
+        tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
+        parse_tick=parse_futures_tick,
+        tick_size=_TICK_SIZE,
+        archiver=ParquetArchiver(tmp_path),
+        approval_issuer=_approval_issuer(),
+        ws_connect=connect,
+        reconnect_initial_backoff_seconds=5.0,
+        reconnect_max_backoff_seconds=60.0,
+    )
+
+    with pytest.raises(ValueError):
+        await collector.run_forever()
+
+    assert connect.calls == 4
+    # 시도1 실패(백오프 5초 대기) → 시도2도 실패(백오프 10초로 배증) → 시도3 연결 성공(백오프
+    # 리셋) 후 단절(다시 5초 대기) → 시도4는 ValueError라 재시도 없음.
+    assert slept == [5.0, 10.0, 5.0]
+
+    disconnect_logs = [msg for tag, msg in logged if tag == "CollectorWSDisconnected"]
+    reconnect_logs = [msg for tag, msg in logged if tag == "CollectorWSReconnected"]
+    # 단절: 시도1 실패 시 1회(시도2는 연속 실패라 중복 안 함), 시도3 성공 후 다시 끊길 때 1회 = 2건
+    assert len(disconnect_logs) == 2
+    # 재연결: 시도3(시도1~2의 단절에서 복구), 시도4(시도3 이후 단절에서 복구) 각각 1회 = 2건
+    assert len(reconnect_logs) == 2
+
+    df = pl.read_parquet(tmp_path / "A05608" / f"{_TODAY_STR}.parquet")
+    assert df.height == 1  # 시도3에서 완성된 1분봉이 정상 적재됨
+
+
+async def test_run_forever_propagates_non_disconnect_errors_immediately(
+    tmp_path: Path, monkeypatch
+):
+    async def fake_sleep(seconds: float) -> None:
+        raise AssertionError("재시도 대상이 아닌 예외인데 sleep이 호출됨")
+
+    monkeypatch.setattr("messiah.data.collector.asyncio.sleep", fake_sleep)
+
+    conn = FakeConnection([_SUBSCRIBE_ACK])
+
+    async def _raise_value_error() -> str:
+        raise ValueError("설정 문제")
+
+    conn.recv = _raise_value_error  # type: ignore[method-assign]
+
+    collector, _ = _collector(tmp_path, [])
+    collector._ws_connect = lambda uri: _FakeConnectCM(conn)
+
+    with pytest.raises(ValueError):
+        await collector.run_forever()
+
+
 async def test_flush_final_bar_archives_remaining_partial_bar(tmp_path: Path):
     collector, _ = _collector(tmp_path, [_SUBSCRIBE_ACK, _REAL_TICK_1])
 

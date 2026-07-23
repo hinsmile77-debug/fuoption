@@ -38,6 +38,8 @@ TAG_LEVELS: dict[str, int] = {
     "SchedulerTickMissed": logging.WARNING,  # L20: 드리프트를 침묵시키지 않음
     "SchedulerCallbackError": logging.ERROR,  # L22: 콜백 실패가 루프를 안 죽여도 조용히는 안 됨
     "CollectorProcessingError": logging.ERROR,  # L22: 완성봉 적재/버스 발행 실패 — WS 루프는 계속
+    "CollectorWSDisconnected": logging.WARNING,  # WS 단절 — run_forever()가 백오프 후 재연결 시도
+    "CollectorWSReconnected": logging.INFO,  # 끊긴 뒤 재연결 성공(수신 재개)
 }
 
 _logger = logging.getLogger("messiah")
