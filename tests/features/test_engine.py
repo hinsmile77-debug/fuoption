@@ -165,7 +165,9 @@ async def test_publish_failure_is_logged_and_does_not_raise(monkeypatch):
     assert any(tag == "FeaturePublishError" for tag, _ in logged)
 
 
-async def test_high_nan_ratio_logs_feature_nan_warning(monkeypatch):
+async def test_high_nan_ratio_during_warmup_does_not_log_feature_nan(monkeypatch):
+    """워밍업 중(히스토리가 아직 _MAX_HISTORY 미만)엔 nan_ratio가 높은 게 정상이라 매 봉마다
+    경고하면 안 된다 — 2026-07-24 실제 운영 로그 리뷰 중 발견한 잡음 문제의 회귀 테스트."""
     logged: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "messiah.features.engine.mlog.log", lambda tag, msg, **f: logged.append((tag, msg))
@@ -173,6 +175,32 @@ async def test_high_nan_ratio_logs_feature_nan_warning(monkeypatch):
     bus = FakeBus()
     engine = FeatureEngine("A05608", bus, feature_set="v-test", horizons=[Horizon.M5])
 
-    await engine.handle_bar(_bar(0))  # 첫 봉 — nan_ratio=1.0 > 20%
+    await engine.handle_bar(_bar(0))  # 첫 봉 — nan_ratio=1.0 > 20%이지만 워밍업 중
 
+    assert not any(tag == "FeatureNaN" for tag, _ in logged)
+
+
+async def test_high_nan_ratio_after_warmup_logs_feature_nan_warning(monkeypatch):
+    """워밍업이 끝났어야 할 시점(_MAX_HISTORY개 봉 이상)에도 nan_ratio가 여전히 높으면(=
+    계산이 계속 실패 중) 그때는 진짜 문제이므로 경고해야 한다."""
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "messiah.features.engine.mlog.log", lambda tag, msg, **f: logged.append((tag, msg))
+    )
+    monkeypatch.setattr("messiah.features.engine._MAX_HISTORY", 3)  # 테스트를 짧게
+
+    def _boom(*args):
+        raise RuntimeError("계산 실패")
+
+    monkeypatch.setattr("messiah.features.px_core.WINDOWED_FEATURES", [("px_ret", _boom, (5,))])
+    monkeypatch.setattr("messiah.features.px_core.STATEFUL_FEATURES", [])
+
+    bus = FakeBus()
+    engine = FeatureEngine("A05608", bus, feature_set="v-test", horizons=[Horizon.M5])
+
+    for i in range(2):  # _MAX_HISTORY(3) 미만 — 아직 경고 안 함
+        await engine.handle_bar(_bar(i))
+    assert not any(tag == "FeatureNaN" for tag, _ in logged)
+
+    await engine.handle_bar(_bar(2))  # 3번째 봉 — 워밍업 완료 시점, 여전히 100% None이라 경고
     assert any(tag == "FeatureNaN" for tag, _ in logged)

@@ -17,7 +17,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from messiah.core.timeutil import now_utc
+from messiah.core.timeutil import now_kst
 
 # 태그 등록부: 태그 = 심각도 1개 고정 (신규 태그는 여기 등록 후 사용)
 TAG_LEVELS: dict[str, int] = {
@@ -59,7 +59,12 @@ def _git_sha() -> str:
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": now_utc().isoformat(),
+            # 사람이 읽는 로그라 표시는 KST(+09:00, 거래소 시각)로 — 내부 데이터(BusMessage.
+            # ts_utc 등)는 여전히 UTC가 표준(SYSTEM.md R3, core/timeutil.py)이며 이건 로그
+            # 표시 전용 변경이다. ISO8601 오프셋이 그대로 찍히므로 값 자체로 시간대가
+            # 명확해 혼동 소지 없음(2026-07-24, 사용자 요청 — 실제 운영 로그 리뷰 중 UTC라
+            # 장 시각과 안 맞아 읽기 불편하다는 피드백).
+            "ts": now_kst().isoformat(),
             "level": record.levelname,
             "tag": getattr(record, "tag", "-"),
             "msg": record.getMessage(),

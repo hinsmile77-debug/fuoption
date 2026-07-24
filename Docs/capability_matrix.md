@@ -47,7 +47,7 @@
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
 |---|---|---|---|---|
 | px_core — PX(가격·추세·모멘텀) 기저 30개 | ✅ | ✅ 2026-07-23 | — | 신규 구현. **MS(마이크로구조) 30개는 이번 스코프 밖**(아래 "알려진 갭" 참고) — PX만 우선 구현(전부 완성봉 OHLCV만으로 계산 가능). 단위 테스트 53건: 손으로 검산한 값 8개(px_ret/mom/accel/zscore/bb_pos·width/stoch·don_pos/high·low_dist/dd·runup/max_ret), 방향성 검증(RSI 단조추세=0/50/100, ADX 추세>횡보, EMA 교차 부호, MACD 등), 워밍업 부족 시 None 반환 전수 검증. **버그 발견·수정**: px_hurst의 R/S 회귀가 log(size) 실값이 아니라 등간격 인덱스로 회귀해 기울기가 왜곡되던 버그 — 별도 페어 (x,y) 회귀 헬퍼(`_linreg_xy`)로 분리해 수정(수정 전엔 추세 시계열의 Hurst가 평균회귀 시계열보다도 낮게 나왔음, 실측 중 발견) |
-| features.engine.FeatureEngine | ✅ | ✅ 2026-07-23 | — | 신규 구현 — `bar.{h}.{symbol}` 구독→Horizon별 롤링윈도우(deque, maxlen=130)→px_core 30개 계산→FeatureVector 조립·발행(`feat.{h}.{symbol}`). 개별 Feature 계산 실패는 그 값만 None(전체 발행은 안 죽음), nan_ratio>20%면 FeatureNaN(WARNING) 로깅, 발행 실패는 신규 태그 FeaturePublishError(ERROR)로 로깅 후 계속(L22). 세션 상태(당일 시가/고저, px_gap_open 등 4개 상태형)는 M1 봉으로만 갱신. 단위 테스트 11건(FakeBus, 발행 확인·키 개수(~82)·nan_ratio 감소 추이·valid_until 계산·Horizon/심볼 필터링·세션 상태 M1 전용 갱신·개별 계산 실패 격리·발행 실패 로깅). 실측: 오늘 실제 캡처한 진짜 1분봉을 bar_composer가 합성한 실제 3/5분봉과 함께 흘려 실제 FeatureVector 발행 확인 — 데이터가 7건뿐이라 대부분 워밍업 미달(nan_ratio 93~94%)이었지만, 워밍업 조건을 채운 px_ret_5/px_mom_5는 실제 가격 변동과 일치하는 값을 정상 산출(예: -0.0035 근방의 실제 소폭 하락) |
+| features.engine.FeatureEngine | ✅ | ✅ 2026-07-24 | — | 신규 구현 — `bar.{h}.{symbol}` 구독→Horizon별 롤링윈도우(deque, maxlen=130)→px_core 30개 계산→FeatureVector 조립·발행(`feat.{h}.{symbol}`). 개별 Feature 계산 실패는 그 값만 None(전체 발행은 안 죽음), 발행 실패는 FeaturePublishError(ERROR)로 로깅 후 계속(L22). 세션 상태(당일 시가/고저, px_gap_open 등 4개 상태형)는 M1 봉으로만 갱신. 단위 테스트 13건. 실측: 오늘 실제 캡처한 진짜 1분봉을 bar_composer가 합성한 실제 3/5분봉과 함께 흘려 실제 FeatureVector 발행 확인 — 데이터가 7건뿐이라 대부분 워밍업 미달(nan_ratio 93~94%)이었지만, 워밍업 조건을 채운 px_ret_5/px_mom_5는 실제 가격 변동과 일치하는 값을 정상 산출(예: -0.0035 근방의 실제 소폭 하락). **개선(2026-07-24, 실제 운영 로그 리뷰 중 발견)**: FeatureNaN(WARNING) 로깅이 워밍업 중(예: 30m은 최대 윈도우를 채우는 데만 30시간)에도 매 봉마다 찍혀 agenda.py의 주간 경보 집계가 잡음에 파묻힐 뻔함 — `len(history) >= _MAX_HISTORY`("워밍업이 끝났어야 할 시점")를 넘긴 뒤에도 nan_ratio가 여전히 높을 때만 경고하도록 수정, 회귀 테스트 추가 |
 
 ## 운영 스크립트 (scripts/)
 
@@ -153,3 +153,15 @@
 - **run_l1_daily.py는 선물(K200_MINI_FUT) 1개만 수집**: `universe`에는 K200_OPT도 있지만,
   같은 계좌로 WS 연결을 2개 열면 서로 끊기는 문제가 이미 실측으로 확인됨(위 "L1 Data" 갭
   참고) — 옵션까지 같이 수집하려면 연결 하나에 다중 subscribe()로 묶는 재설계가 먼저 필요.
+- **WS 재연결이 짧은 시간 안에 반복되는 패턴 재관측(2026-07-24, 원인 미확정)**: 2026-07-23
+  세션에선 "동시 WS 연결 2개"가 반복 단절의 원인으로 추정됐는데(위 갭 항목), 2026-07-24
+  run_l1_daily.py 실측 중에는 **연결이 딱 1개뿐**인데도 20초 사이에 5회 연속 단절(전부
+  "no close frame received or sent")이 재현됨 — 지난번 가설(동시 연결 충돌)만으로는 전부
+  설명이 안 됨. 유력한 새 가설: approval_key 재발급도 OAuth 토큰처럼 계정당 재발급 빈도
+  제한이 있고, 이 세션에서 짧은 시간 안에 배치파일·검증 스크립트를 여러 번 반복 실행하며
+  approval_key를 자주 재발급받은 게 트리거였을 가능성(재연결마다 approval_key를 새로
+  발급받는 설계라 — collector.py run_forever() 참고). run_forever() 자체의 재연결 로직은
+  설계대로 정확히 동작함(단절 감지→백오프→재시도→CollectorWSReconnected) — 코드 결함이
+  아니라 서버측/유량제한 추정. 확실히 밝히려면 approval_key 재발급 간격을 충분히 띄운
+  상태에서 재검증 필요(이번 세션엔 실측을 더 반복하지 않고 보류 — API를 더 두들기지
+  않기 위함).

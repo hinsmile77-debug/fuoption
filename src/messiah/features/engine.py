@@ -23,6 +23,8 @@ from messiah.features import px_core
 
 # px_hurst(W_SLOW_HURST 최대 120) · px_accel(W_STD 최대 60이면 2*60+1=121 필요)를 전부
 # 커버하는 넉넉한 여유(130개 완성봉, 1분봉 기준 하루 정규장 405분 내에서도 충분히 작음).
+# 이 값은 두 가지로 쓰인다: ① 롤링 히스토리 보관 개수(deque maxlen) ② 아래 FeatureNaN 경고의
+# "워밍업 완료" 판정 기준(len(history)가 maxlen에 도달했다는 건 최소 이만큼의 봉을 봤다는 뜻).
 _MAX_HISTORY = 130
 
 _NAN_RATIO_HALT_THRESHOLD = 0.20  # Ver 1.1 §2-2: 20% 초과 시 해당 Horizon 신호 정지
@@ -73,7 +75,12 @@ class FeatureEngine:
             values[name] = self._safe_call(stateful_fn, history, self._session)
 
         nan_ratio = sum(1 for v in values.values() if v is None) / len(values)
-        if nan_ratio > _NAN_RATIO_HALT_THRESHOLD:
+        # 워밍업 중(예: 30m은 최대 윈도우 60개를 채우는 데만 30시간 = 며칠이 걸림)엔 nan_ratio가
+        # 높은 게 정상이라 매 봉마다 WARNING을 찍으면 agenda.py의 주간 경보 집계가 이 잡음에
+        # 파묻힌다(2026-07-24, 실제 운영 로그 리뷰 중 발견) — len(history)가 _MAX_HISTORY에
+        # 도달해 "워밍업이 끝났어야 할 시점"이 된 뒤에도 nan_ratio가 여전히 높을 때만 경고한다.
+        warmed_up = len(history) >= _MAX_HISTORY
+        if warmed_up and nan_ratio > _NAN_RATIO_HALT_THRESHOLD:
             mlog.log(
                 "FeatureNaN",
                 f"NaN 비율 {nan_ratio:.0%} — {bar.horizon.value} 신호 정지 권고",
