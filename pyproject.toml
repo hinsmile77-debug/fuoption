@@ -10,6 +10,11 @@ dependencies = [
     "polars>=1.0",
     "python-dotenv>=1.0",
     "httpx>=0.27",
+    # ws_client.py/collector.py/bar_composer.py가 직접 import — L1 데이터 수집(UI 아님)의
+    # 핵심 의존성인데 "ui" extras에 잘못 분류돼 있었다. 지금 이 세션의 .venv는 우연히 이미
+    # ui extras까지 설치된 상태라 안 드러났지만, run_l1_daily.py를 위한 무인 운영용 venv를
+    # base 의존성만으로 새로 만들면 ImportError로 즉시 죽었을 것 — 2026-07-24 발견, 여기로 옮김.
+    "websockets>=12.0",
     # Windows에는 시스템 tzdata가 없어(Linux/macOS와 달리) polars가 tz-aware datetime 컬럼을
     # Parquet에서 다시 읽을 때 zoneinfo로 "UTC" 존을 못 찾아 ZoneInfoNotFoundError가 난다
     # (data/archiver.py 실측, 2026-07-22) — 로컬 datetime 생성 자체(core/timeutil.py)는 고정
@@ -19,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ml = ["lightgbm>=4.3", "scikit-learn>=1.4", "numpy>=1.26"]
-ui = ["fastapi>=0.111", "uvicorn>=0.30", "websockets>=12.0"]
+ui = ["fastapi>=0.111", "uvicorn>=0.30"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4", "pyright>=1.1"]
 
 [build-system]

@@ -47,6 +47,9 @@ class InstanceConfig(BaseModel):
     model_bundle: str = "none"  # 릴리스 번들 ID (예: messiah-2026.08)
     redis_url: str = "redis://localhost:6379/0"
     feature_set: str = "v2026.07"  # FeatureVector.feature_set 기본값 (Ver 1.4 §5.2, W6~8)
+    # 미니선물(A05608) 2026-07-22 실측값(호가 5단계 간격 역산) — 다른 상품/근월물에 그대로
+    # 일반화하지 말 것(capability_matrix.md "알려진 갭" 참고, 상품별 실측 전까지는 이 값만 사용).
+    futures_tick_size: str = "0.02"
 
 
 def resolve_secret(ref: str) -> str:

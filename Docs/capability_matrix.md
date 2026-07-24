@@ -49,6 +49,12 @@
 | px_core — PX(가격·추세·모멘텀) 기저 30개 | ✅ | ✅ 2026-07-23 | — | 신규 구현. **MS(마이크로구조) 30개는 이번 스코프 밖**(아래 "알려진 갭" 참고) — PX만 우선 구현(전부 완성봉 OHLCV만으로 계산 가능). 단위 테스트 53건: 손으로 검산한 값 8개(px_ret/mom/accel/zscore/bb_pos·width/stoch·don_pos/high·low_dist/dd·runup/max_ret), 방향성 검증(RSI 단조추세=0/50/100, ADX 추세>횡보, EMA 교차 부호, MACD 등), 워밍업 부족 시 None 반환 전수 검증. **버그 발견·수정**: px_hurst의 R/S 회귀가 log(size) 실값이 아니라 등간격 인덱스로 회귀해 기울기가 왜곡되던 버그 — 별도 페어 (x,y) 회귀 헬퍼(`_linreg_xy`)로 분리해 수정(수정 전엔 추세 시계열의 Hurst가 평균회귀 시계열보다도 낮게 나왔음, 실측 중 발견) |
 | features.engine.FeatureEngine | ✅ | ✅ 2026-07-23 | — | 신규 구현 — `bar.{h}.{symbol}` 구독→Horizon별 롤링윈도우(deque, maxlen=130)→px_core 30개 계산→FeatureVector 조립·발행(`feat.{h}.{symbol}`). 개별 Feature 계산 실패는 그 값만 None(전체 발행은 안 죽음), nan_ratio>20%면 FeatureNaN(WARNING) 로깅, 발행 실패는 신규 태그 FeaturePublishError(ERROR)로 로깅 후 계속(L22). 세션 상태(당일 시가/고저, px_gap_open 등 4개 상태형)는 M1 봉으로만 갱신. 단위 테스트 11건(FakeBus, 발행 확인·키 개수(~82)·nan_ratio 감소 추이·valid_until 계산·Horizon/심볼 필터링·세션 상태 M1 전용 갱신·개별 계산 실패 격리·발행 실패 로깅). 실측: 오늘 실제 캡처한 진짜 1분봉을 bar_composer가 합성한 실제 3/5분봉과 함께 흘려 실제 FeatureVector 발행 확인 — 데이터가 7건뿐이라 대부분 워밍업 미달(nan_ratio 93~94%)이었지만, 워밍업 조건을 채운 px_ret_5/px_mom_5는 실제 가격 변동과 일치하는 값을 정상 산출(예: -0.0035 근방의 실제 소폭 하락) |
 
+## 운영 스크립트 (scripts/)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| run_l1_daily.py — L1 파이프라인 일일 진입점 | ✅ | ✅ 2026-07-24 | — | 신규 구현 — 웜업(self_check→근월물 심볼 확인→Redis 연결→Collector/Composer/Engine 구성·WS 연결까지 미리 끝냄)→정규장 수집(09:00~15:35 KST, TickCollector+MultiHorizonBarComposer+FeatureEngine을 asyncio.gather로 동시 구동)→daily_close(미완성 봉 flush·버스 종료, 15:40 KST 안전판 데드라인) 흐름. `scripts/run_l1_daily.bat`(Windows 배치 래퍼)도 함께 준비 — **작업 스케줄러(schtasks) 등록은 아직 안 함**(매일 무인으로 실제 KIS API를 호출하는 상시 자동화라 사용자 확인 후 별도 진행하기로 함). 실측: 세션-스톱 시각을 20초 뒤로 패치해 전체 생애주기(웜업→실제 WS 연결→실틱 수신→1분봉 완성→3/5/10/15/30분봉 합성→FeatureVector 발행→daily_close→정상 종료 exit 0)를 실제 KIS 서버로 확인, `data/bars/A05608/{1m,3m,5m,10m,15m,30m}/2026-07-24.parquet` 전부 정상 생성. **버그 5건 발견·수정**: (1) `websockets` 패키지가 core 런타임 의존성인데 `ui` extras로 잘못 분류돼 있어 base 의존성만 설치한 무인 운영용 venv에서 ImportError로 죽었을 것(pyproject.toml에서 이동), (2) `.bat` 파일에 한글 주석을 UTF-8로 저장하면 cmd.exe가 시스템 로캘(cp949)로 잘못 해석해 배치 자체가 실행 안 됨(전부 영문 주석으로 재작성), (3) self_check.py를 서브프로세스로 부를 때 `subprocess.run(text=True)`가 인코딩을 명시 안 해 self_check의 UTF-8 출력을 cp949로 디코딩하려다 UnicodeDecodeError(encoding="utf-8" 명시로 수정), (4) 최초 버전이 `>> 로그파일 2>&1`로 전부 파일에만 리다이렉트해 cmd 창에 아무 것도 안 보임(사용자 실사용 중 발견) — PowerShell 경유로 콘솔에도 동시에 뿌리도록 수정, `chcp 65001`로 콘솔 코드페이지도 UTF-8로 전환, (5) 그 수정에 처음 쓴 `Tee-Object -Encoding utf8`이 Windows PowerShell 5.1엔 `-Encoding` 파라미터 자체가 없어 즉시 실패, 파라미터 없이 쓰면 `-FilePath` 출력이 기본 UTF-16LE로 저장됨(둘 다 실측으로 확인) — `Out-File -Encoding utf8`로 줄 단위 수동 tee로 교체해 최종 해결 |
+
 ## 알려진 갭
 
 - **포지션 보유 상태에서의 `positions()` 파싱 미검증**: 이번 실측은 빈 계좌라 `output1`이 빈 배열이었다.
@@ -137,3 +143,13 @@
   volume만 있음) 전형가(OHLC3) 거래량가중으로 근사. px_macd_h도 고정 12/26/9 대신 window로
   일반화한 근사(px_core.py 모듈 docstring 참고) — 둘 다 Ver 1.5 §5 IC 스크리닝에서 실제 예측력이
   없으면 자연 탈락하는 후보이므로 지금은 근사치인 채로 두고 넘어감.
+- **run_l1_daily.py가 작업 스케줄러(schtasks)에 등록 안 됨**: 스크립트·배치파일은 실측
+  완료했지만, 매일 무인으로 실제 KIS API를 호출하는 상시 자동화는 사용자 확인 후 별도
+  진행하기로 함(2026-07-24) — 지금은 수동 실행만 가능.
+- **run_l1_daily.py는 KRX 휴장일을 모른다**: Event Calendar Service 미구현(기존에 알려진 갭)이
+  그대로 이 스크립트에도 적용됨 — 휴장일에 실행하면 self_check는 통과하고 WS 연결도 되지만
+  하루 종일 틱이 안 옴(에러는 안 나지만 빈 수집). 작업 스케줄러 등록 시 최소 주중(월~금)
+  트리거로는 걸러야 하고, 완전한 휴장일 인식은 Event Calendar 구현 이후.
+- **run_l1_daily.py는 선물(K200_MINI_FUT) 1개만 수집**: `universe`에는 K200_OPT도 있지만,
+  같은 계좌로 WS 연결을 2개 열면 서로 끊기는 문제가 이미 실측으로 확인됨(위 "L1 Data" 갭
+  참고) — 옵션까지 같이 수집하려면 연결 하나에 다중 subscribe()로 묶는 재설계가 먼저 필요.

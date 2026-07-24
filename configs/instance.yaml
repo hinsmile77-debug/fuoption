@@ -29,3 +29,4 @@ universe: ["K200_MINI_FUT", "K200_OPT"]   # 미니선물 표준
 model_bundle: "none"                       # live 모드는 지정 필수 (자가 점검)
 redis_url: "redis://localhost:6380/0"
 feature_set: "v2026.07"                    # FeatureVector.feature_set (Ver 1.4 §5.2, W6~8 PX 핵심 30개)
+futures_tick_size: "0.02"                  # 미니선물(A05608) 실측값 — 다른 상품엔 그대로 쓰지 말 것
