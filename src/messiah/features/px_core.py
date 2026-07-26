@@ -59,7 +59,7 @@ def _lows(bars: Bars) -> list[float]:
     return [float(b.l_ticks) for b in bars]
 
 
-def _true_ranges(bars: Bars) -> list[float]:
+def true_ranges(bars: Bars) -> list[float]:
     """bars[i]의 TR은 bars[i-1].close가 필요 — 반환 길이는 len(bars)-1."""
     out: list[float] = []
     for prev, cur in zip(bars, bars[1:]):
@@ -68,10 +68,12 @@ def _true_ranges(bars: Bars) -> list[float]:
     return out
 
 
-def _atr(bars: Bars, window: int) -> float | None:
+def atr(bars: Bars, window: int) -> float | None:
+    """모듈 내부 px_* 계산기 전용이 아니라 의도적으로 공개 — models/labeling.py의 Triple
+    Barrier 폭 계산(Ver 1.2 §3.2)이 그대로 재사용한다(ATR 로직 중복 방지, 2026-07-26)."""
     if len(bars) < window + 1:
         return None
-    trs = _true_ranges(bars[-(window + 1) :])
+    trs = true_ranges(bars[-(window + 1) :])
     if not trs:
         return None
     atr = statistics.fmean(trs)
@@ -209,20 +211,20 @@ def px_vwap_dev(bars: Bars, window: int) -> float | None:
     vwap = sum(((b.h_ticks + b.l_ticks + b.c_ticks) / 3) * b.volume for b in window_bars) / (
         total_vol
     )
-    atr = _atr(bars, window)
-    if not atr:
+    atr_val = atr(bars, window)
+    if not atr_val:
         return None
-    return (bars[-1].c_ticks - vwap) / atr
+    return (bars[-1].c_ticks - vwap) / atr_val
 
 
 def px_ema_dev(bars: Bars, window: int) -> float | None:
     """EMA 괴리 — (close-EMA_W)/ATR."""
     closes = _closes(bars)
     ema = _ema_series(closes, window)
-    atr = _atr(bars, window)
-    if not ema or not atr:
+    atr_val = atr(bars, window)
+    if not ema or not atr_val:
         return None
-    return (bars[-1].c_ticks - ema[-1]) / atr
+    return (bars[-1].c_ticks - ema[-1]) / atr_val
 
 
 def px_ema_cross(bars: Bars, window: int) -> float | None:
@@ -243,11 +245,11 @@ def px_trend_slope(bars: Bars, window: int) -> float | None:
         return None
     closes = _closes(bars[-window:])
     result = _linreg_slope_r2(closes)
-    atr = _atr(bars, window)
-    if result is None or not atr:
+    atr_val = atr(bars, window)
+    if result is None or not atr_val:
         return None
     slope, _ = result
-    return slope / atr
+    return slope / atr_val
 
 
 def px_trend_r2(bars: Bars, window: int) -> float | None:
@@ -400,10 +402,10 @@ def px_macd_h(bars: Bars, window: int) -> float | None:
     signal = _ema_series(macd_series, signal_period)
     if not signal:
         return None
-    atr = _atr(bars, window)
-    if not atr:
+    atr_val = atr(bars, window)
+    if not atr_val:
         return None
-    return (macd_series[-1] - signal[-1]) / atr
+    return (macd_series[-1] - signal[-1]) / atr_val
 
 
 # ---------------------------------------------------------------- 4. 레인지·극값
@@ -413,20 +415,20 @@ def px_high_dist(bars: Bars, window: int) -> float | None:
     """고점 거리 — (maxW-close)/ATR."""
     if len(bars) < window:
         return None
-    atr = _atr(bars, window)
-    if not atr:
+    atr_val = atr(bars, window)
+    if not atr_val:
         return None
-    return (max(_highs(bars[-window:])) - bars[-1].c_ticks) / atr
+    return (max(_highs(bars[-window:])) - bars[-1].c_ticks) / atr_val
 
 
 def px_low_dist(bars: Bars, window: int) -> float | None:
     """저점 거리 — (close-minW)/ATR."""
     if len(bars) < window:
         return None
-    atr = _atr(bars, window)
-    if not atr:
+    atr_val = atr(bars, window)
+    if not atr_val:
         return None
-    return (bars[-1].c_ticks - min(_lows(bars[-window:]))) / atr
+    return (bars[-1].c_ticks - min(_lows(bars[-window:]))) / atr_val
 
 
 def px_dd(bars: Bars, window: int) -> float | None:
@@ -455,15 +457,15 @@ def px_breakout(bars: Bars, window: int) -> float | None:
     if len(bars) < window + 1:
         return None
     prior = bars[-1 - window : -1]
-    atr = _atr(bars, window)
-    if not atr:
+    atr_val = atr(bars, window)
+    if not atr_val:
         return None
     close = bars[-1].c_ticks
     prior_high, prior_low = max(_highs(prior)), min(_lows(prior))
     if close > prior_high:
-        return (close - prior_high) / atr
+        return (close - prior_high) / atr_val
     if close < prior_low:
-        return (close - prior_low) / atr
+        return (close - prior_low) / atr_val
     return 0.0
 
 
@@ -579,12 +581,12 @@ def px_range_pos_d(bars: Bars, session: SessionState) -> float | None:
 def px_round_dist(bars: Bars, session: SessionState) -> float | None:
     """라운드넘버 거리 — 가까운 라운드 레벨까지 ATR 거리(session은 시그니처 통일용, 미사용).
     라운드 간격은 _DEFAULT_ROUND_TICKS로 고정된 근사치(상품별 실제 값과 다를 수 있음)."""
-    atr = _atr(bars, _DEFAULT_ROUND_ATR_WINDOW)
-    if not bars or not atr:
+    atr_val = atr(bars, _DEFAULT_ROUND_ATR_WINDOW)
+    if not bars or not atr_val:
         return None
     close = bars[-1].c_ticks
     nearest_round = round(close / _DEFAULT_ROUND_TICKS) * _DEFAULT_ROUND_TICKS
-    return abs(close - nearest_round) / atr
+    return abs(close - nearest_round) / atr_val
 
 
 # ---------------------------------------------------------------- 레지스트리

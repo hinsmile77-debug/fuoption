@@ -50,3 +50,6 @@ select = ["E", "F", "I", "DTZ"]
 [tool.pyright]
 include = ["src"]
 typeCheckingMode = "standard"
+pythonVersion = "3.11"  # requires-python과 동일 — 미지정 시 pyright가 더 낮은 버전을 가정해
+# `tuple[...]`/`dict[...]` 같은 PEP 585 builtin 제네릭 구독을 오탐 오류로 표시함(2026-07-27
+# models/cv.py 작업 중 발견 — 실제로는 3.9+에서 안전, .venv도 3.12).

@@ -17,7 +17,7 @@ from typing import Sequence
 
 import polars as pl
 
-from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon
+from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon, bar_confirm_time
 
 
 class ParquetBarReplaySource:
@@ -54,7 +54,7 @@ class ParquetBarReplaySource:
                     continue
                 bars.extend(self._read_file(path, horizon))
 
-        bars.sort(key=lambda b: (_confirm_time(b), HORIZON_SECONDS[b.horizon]))
+        bars.sort(key=lambda b: (bar_confirm_time(b), HORIZON_SECONDS[b.horizon]))
         return bars
 
     def _read_file(self, path: Path, horizon: Horizon) -> list[BarClosed]:
@@ -73,10 +73,6 @@ class ParquetBarReplaySource:
             )
             for row in df.iter_rows(named=True)
         ]
-
-
-def _confirm_time(bar: BarClosed):
-    return bar.bar_open_kst + timedelta(seconds=HORIZON_SECONDS[bar.horizon])
 
 
 def _date_range(start: date, end: date):

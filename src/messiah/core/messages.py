@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 
@@ -128,6 +128,13 @@ class BarClosed(BusMessage):
     @classmethod
     def _aware(cls, v: datetime) -> datetime:
         return ensure_aware(v)
+
+
+def bar_confirm_time(bar: BarClosed) -> datetime:
+    """봉이 실제로 확정(발행 가능)되는 시각 — bar_open_kst + Horizon 길이. 완성봉 규율
+    (Ver 1.2 §2.2)의 기준점이라 여러 모듈이 공유한다: simulator/replay.py(재생 순서 정렬),
+    models/labeling.py(Triple Barrier 진입·판정 시점 정렬)."""
+    return bar.bar_open_kst + timedelta(seconds=HORIZON_SECONDS[bar.horizon])
 
 
 # ---------------------------------------------------------------- L2 Feature

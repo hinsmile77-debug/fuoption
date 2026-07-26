@@ -59,6 +59,16 @@
 | simulator.engine.DigitalTwinEngine | ✅ | ✅ 2026-07-26 | — | 재생봉 → InProcessBus 발행 → SimBroker.on_bar() 체결 판정 → OrderGateway.on_fill() 순으로 묶는 오케스트레이터. 단위 테스트 4건(버스 발행·심볼 필터링·지정가 체결이 실제 포지션까지 반영·게이트웨이 우회 주문의 미매칭 체결이 실제로 CRITICAL 정지시킴 — L1 안전장치가 재생 경로에서도 살아있음을 확인) |
 | scripts/run_replay.py — 수동 스모크 진입점 | ✅ | ✅ 2026-07-26 | — | 실제 아카이브(A05608, 2026-07-24, 60행)로 전체 배선 end-to-end 실행: 재생 → FeatureEngine이 Horizon별 FeatureVector 발행(1m 33건·3m 11건·5m 7건·10m 5건·15m 3건·30m 1건 — 실제 아카이브 행 수와 일치) → 데모 시장가 주문 1건 제출·체결 → 최종 포지션(qty=1)·계좌·게이트웨이 정지 여부 출력까지 버그 없이 1회 성공 |
 
+## 레이블링·CV (src/messiah/models/) — Master Plan Ver 1.2 §3·§8.2, Ver 2.0 §9 W12~13
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| models.labeling.triple_barrier_labels | ✅ | ✅ 2026-07-27 | — | Ver 1.2 §3.2 Horizon별 표(시간배리어·ATR 폭 배수)를 그대로 인코딩. ATR은 `features.px_core.atr`(이번에 공개 전환)을 재사용 — 중복 구현 없음. 동일 봉에서 상/하단 동시 터치 시 상단 우선(결정론적 타이브레이크, 모듈 docstring 근거 기록), 비용반영 강등(`cost_ticks`, Cost Model v1 나오기 전 호출자 전달 임시값), 워밍업·꼬리 트림. 단위 테스트 9건(상단/하단 터치·시간배리어·동시터치 타이브레이크·비용강등·워밍업부족·꼬리부족·심볼혼입 거부 — 전부 손으로 계산한 ATR/배리어 값 기준 known-value). 실측: 실제 2026-07-24 아카이브(A05608, 1m, 33행)로 `scripts/run_labeling_smoke.py` 실행 — 레이블 16건 생성(−1: 6·+1: 10), 버그 없음 |
+| models.labeling.compute_uniqueness | ✅ | ✅ 2026-07-27 | — | Lopez de Prado(2018) 평균 고유도. 격자점은 전체 레이블의 t_start∪t_end(동시성이 바뀔 수 있는 지점은 구간 경계뿐이므로 정확한 격자 — t_start만 쓰면 시계열 꼬리에서 과소평가되는 버그를 known-value 테스트 작성 중 직접 발견·수정). 단위 테스트 3건(손으로 계산한 3이벤트 겹침 사례 A=0.75/B=0.75/C=1.0·안 겹치는 경우 전부 1.0·빈 입력) + 실제 생성 레이블 통합 테스트(가중치 (0,1] 범위·겹침으로 인한 감쇠 확인) |
+| models.cv.PurgedKFold | ✅ | ✅ 2026-07-27 | — | de Prado(2018) Ch.7 표준 알고리즘(순수 Python, numpy 의존성 없음 — Optuna 탐색용 "Purged 5-Fold", Ver 1.6 §2.2). 폴드는 시간순 연속 구간, 겹치는 학습 샘플 제거(purge) + 경계 인접 샘플 추가 제외(embargo, 인덱스 단위). 단위 테스트 7건(균등분할 아닐 때 폴드 크기·전 인덱스가 정확히 한 번씩 test로 나뉘는지·purge가 구간 겹침 학습샘플을 실제로 제거하는지·embargo가 겹침 없어도 경계 인접분을 제거하는지·잘못된 n_splits/embargo 거부) |
+| models.cv.WalkForwardSplitter | ✅ | ✅ 2026-07-27 | — | Ver 1.2 §8.2 "학습 6개월/검증 1개월, 1개월씩 전진" 스킴을 달력일 파라미터(train_days/test_days/embargo_days/step_days)로 일반화. Purge(배리어가 검증 구간을 침범하는 학습 샘플 제거) + Embargo(검증 직전 N일 추가 제외) 둘 다 구현. 단위 테스트 8건(빈 입력·롤링 창 개수·첫 창의 train/test 정확한 소속(embargo 반영)·검증 구간을 침범하는 장기 배리어 purge·기본 step=test_days·커스텀 step_days·잘못된 창 크기 거부) — 전부 30~60일 합성 데이터 기준(실제 아카이브가 하루치뿐이라 달력 롤링을 의미 있게 재현할 데이터가 없음, 아래 "알려진 갭" 참고) |
+| scripts/run_labeling_smoke.py | ✅ | ✅ 2026-07-27 | — | 실제 2026-07-24 아카이브로 레이블링+고유도+PurgedKFold 전체 배선 end-to-end 실행 확인(위 행들 참고) |
+
 ## 운영 스크립트 (scripts/)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
@@ -178,6 +188,21 @@
   자동으로 주문을 내는 로직이 없음 — `scripts/run_replay.py`의 데모 주문은 배선 검증용 1건뿐이고,
   실제 Walk-Forward 백테스트(Ver 1.0.1 §8.2)에 쓰려면 Triple Barrier·CV 프레임(W12~13)과 최소
   1개 Expert(W14~16 이후)가 먼저 있어야 한다.
+- **WalkForwardSplitter는 실제 다개월 아카이브로 실측한 적 없다 (2026-07-27)**: 정확성은
+  합성(30~60일) 데이터 기준 known-value 테스트가 담당한다 — 실제 KRX 데이터가 여러 달 쌓이면
+  (G1 백테스트 준비 단계, W17~ 이후) 진짜 롤링 창 여러 개가 나오는지 재검증 필요.
+- **models/cv.py는 KRX 휴장일을 모른다**: WalkForwardSplitter는 달력일(calendar day) 기준
+  창 경계를 계산한다 — Event Calendar 미구현(기존 갭)과 동일한 한계. 휴장일이 창 안에 껴도
+  그날은 이벤트 자체가 없을 뿐 경계 계산 자체는 안전하지만, "학습 180일"이 실제 거래일
+  기준으로는 그보다 적은 표본을 의미한다는 점은 Trainer 설계 시 감안 필요.
+- **Triple Barrier의 비용반영 강등(cost_ticks)은 Cost Model v1이 아니라 호출자가 직접
+  주는 임시값이다**: Cost Model v1(W14~16)이 나오면 `triple_barrier_labels(cost_ticks=...)`
+  호출부(향후 Trainer)를 실제 추정 비용으로 교체할 자리로 남겨둠 — 지금은 기본값 0(강등
+  없음)이라 호출자가 명시하지 않으면 비용을 전혀 반영하지 않는다.
+- **Triple Barrier ATR 윈도우(14)는 명시된 근거 없이 선택한 기본값**: Ver 1.2 §3.2 표는
+  배리어 폭이 "×ATR(주기)"라고만 하고 ATR 계산 윈도우 크기는 명시하지 않는다 — Wilder
+  관례값 14를 기본으로 뒀으나(`atr_window` 파라미터로 언제든 override 가능), 실제 실효값은
+  Ver 1.5 §5 Feature 선정 절차와 함께 재검토 대상.
 - **run_l1_daily.py는 선물(K200_MINI_FUT) 1개만 수집**: `universe`에는 K200_OPT도 있지만,
   같은 계좌로 WS 연결을 2개 열면 서로 끊기는 문제가 이미 실측으로 확인됨(위 "L1 Data" 갭
   참고) — 옵션까지 같이 수집하려면 연결 하나에 다중 subscribe()로 묶는 재설계가 먼저 필요.
