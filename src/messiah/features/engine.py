@@ -17,7 +17,7 @@ from datetime import timedelta
 from typing import Sequence
 
 from messiah.core import logging as mlog
-from messiah.core.bus import TOPIC_BAR, TOPIC_FEAT, MessageBus
+from messiah.core.bus import TOPIC_BAR, TOPIC_FEAT, BusLike
 from messiah.core.messages import HORIZON_SECONDS, BarClosed, FeatureVector, Horizon
 from messiah.features import px_core
 
@@ -36,7 +36,7 @@ class FeatureEngine:
     def __init__(
         self,
         symbol: str,
-        bus: MessageBus,
+        bus: BusLike,
         feature_set: str,
         horizons: Sequence[Horizon] | None = None,
     ) -> None:

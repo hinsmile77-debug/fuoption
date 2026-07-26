@@ -23,7 +23,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ml = ["lightgbm>=4.3", "scikit-learn>=1.4", "numpy>=1.26"]
+# lightgbm==4.3.0 (범위가 아니라 정확히 이 버전): 4.7.0의 Windows 휠(numpy 2.5.1 +
+# Python 3.12 조합, 2026-07-27 실측)이 lgb.Dataset.construct()의 set_label 단계에서
+# 확정적으로 OSError(access violation)를 일으킴 — Dataset 생성 자체가 안 됨(데이터
+# 크기·내용과 무관, 15행/500행 전부 재현). 처음엔 `>=4.3,<4.7`로 상한만 뒀었는데
+# `uv lock`이 그 범위의 최신인 4.6.0을 골라버려(4.3.0만 실측했지 4.4~4.6은 검증한 적
+# 없음) 실측 안 한 버전이 조용히 깔릴 뻔했다 — 정확히 실측한 버전으로 못박음. 4.3.0은
+# weight·feature_name·저장/재로드·feature_importance까지 전부 정상 동작 확인함. 버전을
+# 올리려면(4.4~4.6 어딘가에서 고쳐졌을 수도 있음, 개별 확인 안 함) 반드시
+# tests/strategy/futures/test_expert.py(학습→예측→저장→재로드 전체 경로)로 먼저 검증할 것.
+ml = ["lightgbm==4.3.0", "scikit-learn>=1.4", "numpy>=1.26"]
 ui = ["fastapi>=0.111", "uvicorn>=0.30"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4", "pyright>=1.1"]
 

@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Awaitable, Callable, Type
+from typing import Any, Awaitable, Callable, Protocol, Type
 
 from messiah.core import messages as m
 from messiah.core.messages import BusMessage
@@ -70,6 +70,17 @@ def registered_types() -> frozenset[str]:
 # ---------------------------------------------------------------- Redis 버스
 
 Handler = Callable[[BusMessage], Awaitable[None]]
+
+
+class BusLike(Protocol):
+    """`publish`/`subscribe`만 있으면 되는 최소 계약 — Ver 1.0.1 §2.1 "동일 인터페이스"를
+    타입 수준에서도 명시한다. `MessageBus`(Redis)·`simulator.InProcessBus`(재생)·테스트용
+    FakeBus가 전부 이 구조를 구조적으로 만족한다. `connect`/`close`/`read_stream` 등
+    `MessageBus`의 나머지 메서드는 `bus.*`만 쓰는 소비자(FeatureEngine 등)에겐 불필요해
+    포함하지 않는다 — 그 메서드가 필요한 소비자(collector 등)는 여전히 구체 클래스를 받는다."""
+
+    async def publish(self, topic: str, msg: BusMessage) -> None: ...
+    async def subscribe(self, patterns: list[str], handler: Handler) -> None: ...
 
 
 class MessageBus:

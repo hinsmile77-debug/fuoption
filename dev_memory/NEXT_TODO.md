@@ -347,6 +347,59 @@
       KRX 휴장일 미인식(달력일 기준), cost_ticks는 Cost Model v1 나오기 전 임시 호출값,
       ATR 윈도우(14) 근거 미확정(Ver 1.5 §5 Feature 선정과 함께 재검토 대상).
 
+## W14~16 (Cost Model v1 + Validator 골격 + 5m Expert 프로토타입 1호)
+
+- [x] risk/cost_model.py + strategy/futures/expert.py + models/{trainer,metrics,validator}.py
+      신규 (2026-07-27 완료) —
+      **ml extras(lightgbm/scikit-learn/numpy) 최초 설치** — 여태 선언만 돼 있었고
+      실제 설치된 적 없었음. 설치 직후 `lgb.Dataset` 생성이 항상 access violation으로
+      죽는 심각한 버그 발견: lightgbm 4.7.0 + numpy 2.5.1 + Python 3.12(이 프로젝트
+      .venv) 조합의 Windows 휠 문제로 판명(데이터 크기·내용 무관, 재현율 100%). numpy를
+      1.26으로 내리면 이번엔 scipy가 깨지는 별개 사고 발생 — lightgbm을 4.3.0으로
+      내려서(numpy는 2.5.1 유지) 해결, `pyproject.toml` ml extras를 `lightgbm>=4.3,<4.7`로
+      상한 고정(capability_matrix.md에 재현 시나리오 상세 기록 — 향후 버전 올릴 때 반드시
+      `tests/strategy/futures/test_expert.py`로 먼저 검증할 것).
+      **src/messiah/risk/cost_model.py 신규**: CostModel — Ver 1.1 §4-1 4요소(수수료+세금+
+      슬리피지+시장충격) 구현. 시장충격은 완성봉의 실제 volume으로 계산(구조적으로 정확),
+      슬리피지는 호가 WS 미구독으로 설정값 근사(알려진 갭, 기존 MS Feature 갭과 동일 원인).
+      **models/labeling.py 소폭 확장**: `cost_ticks: int`(W12~13 임시값)을 `float`로 넓혀
+      CostModel의 소수점 틱 출력을 그대로 받게 함 — 결선은 trainer.py가 실제로 함.
+      **src/messiah/strategy/futures/expert.py 신규**: HorizonExpert — Ver 1.2 §9 스켈레톤의
+      5m 프로토타입 1호(단일 LightGBM 3-class, 미니 앙상블·Meta-Labeler·Isotonic 교정·
+      Optuna 탐색은 전부 W17~19 정식 스코프로 명시적으로 미룸). `core/logging.py`에 W1부터
+      등록만 되고 한 번도 안 쓰인 `FeatureSetMismatch` 태그를 `predict()`에서 처음 실사용.
+      **src/messiah/models/trainer.py 신규**: Ver 1.6 §7.1 파이프라인 1~3단계(데이터준비·
+      레이블생성·학습)만 구현 — 봉을 실제 운영과 동일한 FeatureEngine(지난주 만든
+      simulator.InProcessBus 재사용)에 직접 흘려 FeatureVector를 얻고, CostModel→
+      label_and_weight로 레이블을 만들어 bar_confirm_time으로 정렬 매칭, 클래스불균형
+      (inverse-frequency)×고유도 가중치를 조립해 HorizonExpert.train() 호출까지.
+      **src/messiah/models/metrics.py 신규**: sharpe_ratio·max_drawdown·
+      negative_window_ratio·multiclass_brier_score — 전부 순수 함수, labeling.py에
+      의존 안 하는 cv.py와 같은 설계 원칙.
+      **src/messiah/models/validator.py 신규**: Validator — Ver 1.2 §8.3 성과 관문 3종
+      (Deflated Sharpe 제외 — 시행횟수 보정할 Optuna 탐색 기반 정식 Trainer가 없어서,
+      W17~19 이후) + Ver 1.6 §8 추가검사 4종(교정 Brier·Feature 의존도·추론지연·직렬화
+      왕복) 전부 구현.
+      **부수 발견**: `models/trainer.py`가 `FeatureEngine`에 `InProcessBus`를 넘기자
+      pyright가 처음으로 "MessageBus 구체클래스와 불일치" 오류를 냄(런타임은 이미 W9~11
+      `scripts/run_replay.py`부터 같은 패턴을 썼지만 scripts/는 pyright 검사 대상 밖이라
+      안 드러났었음) — `core/bus.py`에 `BusLike` Protocol(publish/subscribe만 요구)을
+      신설해 `FeatureEngine.__init__`의 타입힌트를 이걸로 교체, 런타임 변화 없이 타입
+      수준에서도 "동일 인터페이스"(Ver 1.0.1 §2.1) 원칙을 명시.
+      **scripts/run_expert_training_smoke.py 신규**: 실제 2026-07-24 아카이브(A05608, 5m,
+      7행)로 Trainer→HorizonExpert→Validator(모델 검사 3개 관문 — Feature 의존도·추론지연·
+      직렬화) end-to-end 실행 확인, 버그 없이 1회 성공. 성과 관문·교정 관문은 의도적으로
+      생략(백테스트 인프라·홀드아웃 데이터 부재, 스크립트 docstring에 명시). 데이터가
+      7행뿐이라 Feature 의존도가 전부 0(트리가 유의미하게 못 갈라짐)이었던 것도 예상된
+      결과 — 목적은 배관 검증이었고 달성함.
+      테스트 58건 신규(cost_model 10·expert 7·metrics 15·validator 14·trainer 12), 전체
+      319건 통과. ruff 클린, pyright는 models/risk/strategy 패키지 기준 클린(engine.py/
+      trainer.py의 Handler 분산성 경고는 W9~11부터 있던 기존 패턴 — 신규 아님).
+      남은 갭(capability_matrix.md 기록): Cost Model 수치 전부 미실측, 5m Expert 예측력
+      없음(의도됨, 데이터 부족), 미니 앙상블·Meta-Labeler·교정·Optuna 미구현(W17~19),
+      Deflated Sharpe 미구현, Validator 성과 관문 실제 백테스트 미실행(백테스트 하니스
+      자체가 아직 없음), top_features는 전역 근사(로컬 XAI는 W24~26 재검토).
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)

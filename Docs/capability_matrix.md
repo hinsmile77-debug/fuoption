@@ -69,6 +69,62 @@
 | models.cv.WalkForwardSplitter | ✅ | ✅ 2026-07-27 | — | Ver 1.2 §8.2 "학습 6개월/검증 1개월, 1개월씩 전진" 스킴을 달력일 파라미터(train_days/test_days/embargo_days/step_days)로 일반화. Purge(배리어가 검증 구간을 침범하는 학습 샘플 제거) + Embargo(검증 직전 N일 추가 제외) 둘 다 구현. 단위 테스트 8건(빈 입력·롤링 창 개수·첫 창의 train/test 정확한 소속(embargo 반영)·검증 구간을 침범하는 장기 배리어 purge·기본 step=test_days·커스텀 step_days·잘못된 창 크기 거부) — 전부 30~60일 합성 데이터 기준(실제 아카이브가 하루치뿐이라 달력 롤링을 의미 있게 재현할 데이터가 없음, 아래 "알려진 갭" 참고) |
 | scripts/run_labeling_smoke.py | ✅ | ✅ 2026-07-27 | — | 실제 2026-07-24 아카이브로 레이블링+고유도+PurgedKFold 전체 배선 end-to-end 실행 확인(위 행들 참고) |
 
+## Cost Model·5m Expert 프로토타입·Trainer·Validator (Ver 2.0 §9 W14~16)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| risk.cost_model.CostModel | ✅ | ✅ 2026-07-27 | — | Ver 1.1 §4-1 4요소(수수료+세금+슬리피지+시장충격) 구조 구현. 시장충격은 완성봉의 실제 volume 필드로 계산(구조적으로 정확), 슬리피지는 호가 WS 미구독으로 `expected_spread_ticks` 설정값 근사(알려진 갭). 단위 테스트 10건(편도/왕복 계산·시장충격 비례성·유동성 없을 때 폴백·qty 검증·봉 이력 평균거래량 근사·커스텀 설정·CostEstimate 덧셈, 전부 손으로 계산한 값 기준) |
+| models.labeling.triple_barrier_labels/label_and_weight cost_ticks 결선 | ✅ | ✅ 2026-07-27 | — | `cost_ticks: int`(W12~13 임시값)를 `float`로 확장해 `CostModel.estimate_round_trip_from_bars(...).total_ticks`를 그대로 받을 수 있게 함(`models/trainer.py`가 실제 연결부). 기존 12개 테스트 회귀 없음 |
+| strategy.futures.expert.HorizonExpert | ✅ | ✅ 2026-07-27 | — | Ver 1.2 §9 스켈레톤의 5m 프로토타입 1호 — 단일 LightGBM 3-class 분류기(미니 앙상블·Meta-Labeler·Isotonic 교정·Optuna 탐색은 전부 W17~19 "정식" 스코프, 모듈 docstring에 명기). `core/logging.py`에 W1부터 등록만 되고 미사용이던 `FeatureSetMismatch` 태그를 `predict()`에서 처음 실사용(추론 시점 feature_set 불일치 시 ERROR 로그+예외). 단위 테스트 7건(학습·예측 확률분포 검증·플레이스홀더 필드 확인·feature_set 불일치 예외·feature_row NaN 매핑·top_features 정렬·저장/재로드 왕복 동일 예측·커스텀 파라미터) |
+| models.trainer.build_feature_vectors/build_training_data/train_prototype_expert | ✅ | ✅ 2026-07-27 | — | Ver 1.6 §7.1 파이프라인 1~3단계(데이터준비·레이블생성·학습)만 구현([4]교정 [5]번들패키징 [6]Validator제출 자동화는 W17~19). 봉을 실제 운영과 동일한 FeatureEngine(simulator.InProcessBus 재사용)에 직접 흘려 FeatureVector를 얻어 재현성 보장. CostModel→label_and_weight 실제 결선, 클래스불균형(inverse-frequency)×고유도 가중치 조립. 단위 테스트 12건 |
+| models.validator.Validator | ✅ | ✅ 2026-07-27 | — | Ver 1.2 §8.3 성과 관문 3종(Deflated Sharpe 제외 — 알려진 갭) + Ver 1.6 §8 추가검사 4종(교정 Brier·Feature 의존도·추론지연·직렬화 왕복) 전부 구현. 성과 관문은 이미 계산된 시계열을 입력받는 순수 오케스트레이션(실제 walk-forward 백테스트 루프는 W17~19 이후, 알려진 갭). 모델 자체 검사 4종은 이번 주 프로토타입으로 바로 실행 가능함을 확인. 단위 테스트 14건(GateResult/ValidationReport 집계·성과 관문 3종 pass/fail 경계·교정 pass/fail·Feature 의존도 pass/fail(경계 비교 로직)·지연 pass/fail·직렬화·validate_all 7관문 조립) |
+| models.metrics (sharpe_ratio/max_drawdown/negative_window_ratio/multiclass_brier_score) | ✅ | ✅ 2026-07-27 | — | 전부 순수 함수, Validator·향후 Self Evaluation(Phase 5) 재사용 가능하게 labeling.py에 의존하지 않음. 단위 테스트 15건 전부 손으로 계산한 known-value 기준(R16) |
+| core.bus.BusLike (Protocol) | ✅ | ✅ 2026-07-27 | — | `models/trainer.py`가 `FeatureEngine`에 `simulator.InProcessBus`를 넘기면서 pyright가 처음으로 "MessageBus 구체클래스와 불일치" 오류를 냄(런타임은 이미 정상 동작 중이었음 — W9~11부터 `scripts/run_replay.py`가 같은 패턴을 썼지만 scripts/는 pyright 검사 대상 밖이라 안 드러났었음). `publish`/`subscribe`만 요구하는 Protocol을 신설해 `FeatureEngine.__init__`의 `bus` 타입힌트를 이걸로 교체 — 런타임 동작 변화 없이 타입 수준에서도 "동일 인터페이스"(Ver 1.0.1 §2.1) 원칙을 명시 |
+| scripts/run_expert_training_smoke.py | ✅ | ✅ 2026-07-27 | — | 실제 2026-07-24 아카이브(A05608, 5m, 7행)로 Trainer→HorizonExpert→Validator(모델 검사 3개 관문) end-to-end 실행 확인. 성과 관문·교정 관문은 의도적으로 생략(스크립트 docstring — 백테스트 인프라 부재·홀드아웃 데이터 없음) |
+
+## lightgbm 4.7.0 Windows 휠 크래시 (2026-07-27, `ml` extras 상한 고정으로 해결)
+
+`lightgbm==4.7.0` + `numpy==2.5.1` + Python 3.12(이 프로젝트 .venv) 조합에서 `lgb.Dataset`
+생성이 **항상** `OSError: exception: access violation reading 0x0000000000000000`로 죽음 —
+`lgb.Dataset(x, label=y).construct()`만으로도 재현(데이터 크기·내용 무관, 15행·500행 전부
+동일 실패). `set_label` 단계에서 네이티브 DLL 호출이 널 포인터를 역참조하는 것으로 보이며,
+numpy를 1.26으로 내리면 이번엔 이미 설치된 scipy(numpy 2.0+ 요구)가 깨져 별개
+`AttributeError: module 'numpy' has no attribute 'long'`가 남 — 두 패키지가 서로 다른
+numpy 메이저 버전을 요구하는 상태였음. `lightgbm==4.3.0`으로 내리자 동일 환경(numpy
+2.5.1 유지)에서 학습·weight·feature_name·저장/재로드·feature_importance까지 전부 정상
+동작 확인 — `pyproject.toml`의 `ml` extras를 `lightgbm>=4.3,<4.7`로 상한 고정, 이유와
+재현 시나리오를 주석으로 남김. **다음 lightgbm 버전을 올리려는 사람은 반드시
+`tests/strategy/futures/test_expert.py`(학습→예측→저장→재로드 전체 경로) 통과를 먼저
+확인할 것** — 이 버그는 수치 결과가 아니라 프로세스 크래시라 테스트가 없으면 그냥
+빌드/CI가 죽는다.
+
+## 알려진 갭 (Cost Model·Expert·Validator, 2026-07-27)
+
+- **Cost Model의 슬리피지·수수료·세금은 전부 미실측 placeholder**: `CostModelConfig`
+  기본값(commission=0.3틱, tax=0.0, spread=1.0틱, impact_coefficient=2.0)은 실제 KIS
+  수수료 체계·호가 스프레드를 측정한 값이 아니다(호가 WS 미구독 — 기존 갭과 동일 원인).
+  Ver 2.0 §6 "체결 품질 기록 → Cost Model이 매주 자기 보정" 루프가 실제 체결 데이터로
+  교정할 자리로 남겨둠.
+- **5m Expert 프로토타입 1호는 예측력이 없다(의도된 스코프)**: 실측 아카이브가 하루치(7~33
+  행)뿐이라 Ver 1.2 §8.1 "최소 확보 목표: 틱/호가 2년치"에 한참 못 미침 — 스모크 실행 결과
+  Feature 의존도가 전부 0(트리가 유의미하게 못 갈라짐)이었던 것도 이 때문. 목적은 배관
+  검증(Feature→Label→Train→Predict→Save/Load→Validate)이었고 그 목적은 달성했다.
+- **미니 앙상블·Meta-Labeler·Isotonic 교정·Optuna 탐색 전부 미구현**: Ver 1.2 §4.2·Ver 1.6
+  §2.2~2.3·§6이 명시한 "정식" 5m Expert 구성요소 — W17~19 스코프로 명시적으로 미룸
+  (strategy/futures/expert.py 모듈 docstring).
+- **Deflated Sharpe(시행 횟수 보정) 미구현**: Ver 1.2 §8.3 관문 중 유일하게 빠진 항목 —
+  시행 횟수를 세는 Optuna 탐색 기반 정식 Trainer가 있어야 의미가 있다(W17~19 이후,
+  models/metrics.py 모듈 docstring).
+- **Validator의 성과 관문(Sharpe·MDD·창별 일관성)은 실제 walk-forward 백테스트로 실행된
+  적 없다**: Digital Twin(W9~11)·Expert(W14~16)·Cost Model(W14~16)이 전부 갖춰졌지만
+  이들을 엮어 실제 성과 시계열을 뽑는 백테스트 하니스 자체가 아직 없다 — 합성 데이터
+  기준 known-value 테스트로 관문 계산 로직의 정확성만 증명해 뒀다(models/validator.py
+  모듈 docstring).
+- **HorizonExpert의 top_features/XAI는 전역 중요도(gain) 근사다**: 개별 예측별 로컬 기여도
+  (SHAP 등)는 스코프 밖(strategy/futures/expert.py 모듈 docstring) — `decision.intent`의
+  "근거 top5"(Ver 1.1 §3-4)가 실제로 필요해지는 Meta Decision Engine 구현 시점(W24~26)에
+  재검토 대상.
+
 ## 운영 스크립트 (scripts/)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
