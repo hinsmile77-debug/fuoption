@@ -30,6 +30,7 @@ TAG_LEVELS: dict[str, int] = {
     "OrderPendingSet": logging.INFO,
     "FillMatched": logging.INFO,
     "FillUnmatched": logging.CRITICAL,  # L1: 미매칭 체결 = CRITICAL 정지
+    "OrderExpired": logging.INFO,  # SimBroker: TTL 경과 미체결 자동 취소 — 정상 동작
     "RiskReject": logging.INFO,  # 거부는 정상 동작 — 예외 밀도에 안 섞이게 INFO
     "KillSwitch": logging.CRITICAL,
     "DataFallback": logging.WARNING,  # L18: 폴백은 시끄럽게

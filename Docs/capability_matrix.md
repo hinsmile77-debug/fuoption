@@ -49,6 +49,16 @@
 | px_core — PX(가격·추세·모멘텀) 기저 30개 | ✅ | ✅ 2026-07-23 | — | 신규 구현. **MS(마이크로구조) 30개는 이번 스코프 밖**(아래 "알려진 갭" 참고) — PX만 우선 구현(전부 완성봉 OHLCV만으로 계산 가능). 단위 테스트 53건: 손으로 검산한 값 8개(px_ret/mom/accel/zscore/bb_pos·width/stoch·don_pos/high·low_dist/dd·runup/max_ret), 방향성 검증(RSI 단조추세=0/50/100, ADX 추세>횡보, EMA 교차 부호, MACD 등), 워밍업 부족 시 None 반환 전수 검증. **버그 발견·수정**: px_hurst의 R/S 회귀가 log(size) 실값이 아니라 등간격 인덱스로 회귀해 기울기가 왜곡되던 버그 — 별도 페어 (x,y) 회귀 헬퍼(`_linreg_xy`)로 분리해 수정(수정 전엔 추세 시계열의 Hurst가 평균회귀 시계열보다도 낮게 나왔음, 실측 중 발견) |
 | features.engine.FeatureEngine | ✅ | ✅ 2026-07-24 | — | 신규 구현 — `bar.{h}.{symbol}` 구독→Horizon별 롤링윈도우(deque, maxlen=130)→px_core 30개 계산→FeatureVector 조립·발행(`feat.{h}.{symbol}`). 개별 Feature 계산 실패는 그 값만 None(전체 발행은 안 죽음), 발행 실패는 FeaturePublishError(ERROR)로 로깅 후 계속(L22). 세션 상태(당일 시가/고저, px_gap_open 등 4개 상태형)는 M1 봉으로만 갱신. 단위 테스트 13건. 실측: 오늘 실제 캡처한 진짜 1분봉을 bar_composer가 합성한 실제 3/5분봉과 함께 흘려 실제 FeatureVector 발행 확인 — 데이터가 7건뿐이라 대부분 워밍업 미달(nan_ratio 93~94%)이었지만, 워밍업 조건을 채운 px_ret_5/px_mom_5는 실제 가격 변동과 일치하는 값을 정상 산출(예: -0.0035 근방의 실제 소폭 하락). **개선(2026-07-24, 실제 운영 로그 리뷰 중 발견)**: FeatureNaN(WARNING) 로깅이 워밍업 중(예: 30m은 최대 윈도우를 채우는 데만 30시간)에도 매 봉마다 찍혀 agenda.py의 주간 경보 집계가 잡음에 파묻힐 뻔함 — `len(history) >= _MAX_HISTORY`("워밍업이 끝났어야 할 시점")를 넘긴 뒤에도 nan_ratio가 여전히 높을 때만 경고하도록 수정, 회귀 테스트 추가 |
 
+## Digital Twin (src/messiah/simulator/, src/messiah/broker/simulator/) — Master Plan Ver 2.0 §9 W9~11
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| simulator.replay.ParquetBarReplaySource | ✅ | ✅ 2026-07-26 | — | 아카이브된 전 Horizon 완성봉을 확정시각(bar_open+horizon초, 동률 시 짧은 Horizon 우선) 순으로 정렬해 재생 시퀀스로 반환. 단위 테스트 5건(정렬·날짜 공백 스킵·심볼 없음·복수일 연속·Horizon 필터). 실측: 실제 2026-07-24 아카이브(`data/bars/A05608/*/2026-07-24.parquet`, 6개 Horizon 총 60행)로 `scripts/run_replay.py` 실행 — 로드·정렬 정상 |
+| simulator.inprocess_bus.InProcessBus | ✅ | ✅ 2026-07-26 | — | `core.bus.MessageBus`와 같은 `publish/subscribe` 시그니처의 인메모리 버스(Redis 불필요) — Ver 1.0.1 §2.1 "동일 인터페이스" 원칙 실현. FeatureEngine을 코드 변경 없이 그대로 재사용해 검증(아래 DigitalTwinEngine 실측에 포함). 단위 테스트 4건 |
+| broker.simulator.adapter.SimBroker (재작성) | ✅ | ✅ 2026-07-26 | — | 기존 "즉시체결" 골격을 pending 지정가·TTL·1분봉 터치 체결·시장가 슬리피지 모델로 재작성(모듈 docstring에 근거 상세 기록). **체결 판정은 1분봉으로만** 한다(호가 WS 미구독 — 알려진 갭 참고). 단위 테스트 10건(제출 전 거부·시장가 슬리피지·지정가 터치 체결 매수/매도·TTL 만료·취소·굵은 Horizon 무시·EXIT_FULL·qty 검증). 계약 변경으로 기존 `tests/test_core_w1.py` OrderGateway 테스트 2건이 "봉 1개로 시계 프라이밍" 필요하게 바뀜(반영 완료, 회귀 없음) |
+| simulator.engine.DigitalTwinEngine | ✅ | ✅ 2026-07-26 | — | 재생봉 → InProcessBus 발행 → SimBroker.on_bar() 체결 판정 → OrderGateway.on_fill() 순으로 묶는 오케스트레이터. 단위 테스트 4건(버스 발행·심볼 필터링·지정가 체결이 실제 포지션까지 반영·게이트웨이 우회 주문의 미매칭 체결이 실제로 CRITICAL 정지시킴 — L1 안전장치가 재생 경로에서도 살아있음을 확인) |
+| scripts/run_replay.py — 수동 스모크 진입점 | ✅ | ✅ 2026-07-26 | — | 실제 아카이브(A05608, 2026-07-24, 60행)로 전체 배선 end-to-end 실행: 재생 → FeatureEngine이 Horizon별 FeatureVector 발행(1m 33건·3m 11건·5m 7건·10m 5건·15m 3건·30m 1건 — 실제 아카이브 행 수와 일치) → 데모 시장가 주문 1건 제출·체결 → 최종 포지션(qty=1)·계좌·게이트웨이 정지 여부 출력까지 버그 없이 1회 성공 |
+
 ## 운영 스크립트 (scripts/)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
@@ -151,6 +161,23 @@
   그대로 이 스크립트에도 적용됨 — 휴장일에 실행하면 self_check는 통과하고 WS 연결도 되지만
   하루 종일 틱이 안 옴(에러는 안 나지만 빈 수집). 작업 스케줄러 등록 시 최소 주중(월~금)
   트리거로는 걸러야 하고, 완전한 휴장일 인식은 Event Calendar 구현 이후.
+- **Digital Twin은 호가창 수준 재생이 아니라 1분봉 기반 체결 모사다 (2026-07-26, 설계상 의도된 스코프 축소)**:
+  Ver 1.0.1 §2.1 원안("호가창 수준 재생 + 자기 주문의 시장충격 모사")은 MESSIAH가 아직 호가
+  (orderbook) WS를 구독하지 않아(위 "원시 틱 자체는 Parquet에 안 쌓임" 갭과 동일 원인) 이번
+  스코프에서 불가능했다 — 대신 이미 아카이브된 완성봉(1분봉)의 고가/저가 터치로 지정가 체결을
+  판정하는 근사로 W9~11을 완료했다(simulator/adapter.py 모듈 docstring 참고). 호가 WS가
+  나중에 구현되면 더 정밀한 체결 모사로 교체할 자리로 남겨둠 — 지금은 "터치하면 지정가 그대로
+  체결"(더 유리한 체결 가능성 무시, 보수적)이라는 단순 가정이다.
+- **SimBroker의 TTL은 1분봉 단위로만 판정된다**: 실제 ttl_ms(기본 30초)가 1분봉 간격(60초)보다
+  짧아도 체결 판정이 TTL 만료 판정보다 항상 우선이라(같은 봉에서 동시 발생 시) 실질적으로는
+  "다음 1분봉에서 터치하면 체결, 아니면 그 시점 TTL을 넘겼는지 확인" 수준의 정밀도다 — 진짜
+  틱 단위 TTL 정밀도가 필요해지면(Cost Model v1, W14~16) 재검토 대상.
+- **SimBroker는 부분체결을 모델링하지 않는다**: 터치하면 항상 전량 체결, 아니면 미체결 — 실제
+  체결 품질 대사가 쌓이면(Cost Model v1) 확장할 자리로 남겨둠.
+- **DigitalTwinEngine에는 아직 전략(Expert) 레이어가 없다**: Phase 3(W17~) 이전이라 재생 중
+  자동으로 주문을 내는 로직이 없음 — `scripts/run_replay.py`의 데모 주문은 배선 검증용 1건뿐이고,
+  실제 Walk-Forward 백테스트(Ver 1.0.1 §8.2)에 쓰려면 Triple Barrier·CV 프레임(W12~13)과 최소
+  1개 Expert(W14~16 이후)가 먼저 있어야 한다.
 - **run_l1_daily.py는 선물(K200_MINI_FUT) 1개만 수집**: `universe`에는 K200_OPT도 있지만,
   같은 계좌로 WS 연결을 2개 열면 서로 끊기는 문제가 이미 실측으로 확인됨(위 "L1 Data" 갭
   참고) — 옵션까지 같이 수집하려면 연결 하나에 다중 subscribe()로 묶는 재설계가 먼저 필요.

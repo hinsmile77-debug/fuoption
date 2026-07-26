@@ -10,13 +10,15 @@ from messiah.broker.simulator.adapter import SimBroker
 from messiah.core import logging as mlog
 from messiah.core.config import InstanceConfig
 from messiah.core.messages import (
+    BarClosed,
     DecisionIntent,
     Fill,
+    Horizon,
     OrderKind,
     OrderRequest,
     Side,
 )
-from messiah.core.timeutil import ensure_aware, now_kst, now_utc
+from messiah.core.timeutil import KST, ensure_aware, now_kst, now_utc
 from messiah.execution.order_gateway import OrderGateway
 
 mlog.setup("test-instance")
@@ -81,9 +83,29 @@ def _req(qty: int = 3) -> OrderRequest:
     )
 
 
+def _primed_broker() -> SimBroker:
+    """SimBroker는 W9~11부터 재생봉으로 시계·기준가를 받기 전엔 주문을 거부한다
+    (simulator/adapter.py) — 이 파일의 나머지 테스트는 SimBroker 자체가 아니라
+    OrderGateway 로직 검증이 목적이라 봉 1개로 시계만 진행시켜 둔다."""
+    broker = SimBroker()
+    broker.on_bar(
+        BarClosed(
+            symbol="K200_MINI_FUT",
+            horizon=Horizon.M1,
+            bar_open_kst=datetime(2026, 7, 21, 9, 0, tzinfo=KST),
+            o_ticks=41500,
+            h_ticks=41500,
+            l_ticks=41500,
+            c_ticks=41500,
+            volume=1,
+        )
+    )
+    return broker
+
+
 def test_pending_registered_before_send_and_matched_fill() -> None:
     async def run() -> None:
-        gw = OrderGateway(SimBroker())
+        gw = OrderGateway(_primed_broker())
         ack = await gw.submit(_req())
         assert ack is not None and ack.broker_order_no.startswith("SIM")
 
@@ -128,7 +150,7 @@ def test_unmatched_fill_halts_gateway_not_ghost_position() -> None:
 
 def test_failed_submit_rolls_back_pending() -> None:
     async def run() -> None:
-        gw = OrderGateway(SimBroker())
+        gw = OrderGateway(_primed_broker())
         assert await gw.submit(_req(qty=0)) is None  # 브로커 거부
         # pending이 롤백되어 다음 정상 주문에 지장 없음
         assert (await gw.submit(_req())) is not None
