@@ -492,6 +492,53 @@
       규칙층 사실상 1개 규칙뿐, RegimeState는 어떤 운영 루프에도 아직 발행 안 됨(상시
       구동 배선은 W24~26 스코프), n_states 후보 범위 민감도 미검증, 온라인/점증 갱신 없음.
 
+## W22~23 (15m·30m Expert — VL 확장 + FeatureEngine 버그 수정)
+
+- [x] features/vl_core.py 확장(1→14) + FeatureEngine 결선 + deque 버그 수정 + M15/M30 검증
+      (2026-07-29 완료) —
+      **버그 발견·수정(이번 세션의 가장 큰 산출물)**: `features/engine.py`가 롤링 히스토리를
+      `collections.deque`로 보관하는데 `px_core`/`vl_core` 계산기 다수가 `bars[-window:]`
+      슬라이스를 쓴다 — `deque`는 슬라이스를 지원하지 않아(정수 인덱싱만 가능, 파이썬 표준
+      동작) 슬라이스 쓰는 계산기는 전부 `TypeError`를 던졌고 `_safe_call`의 광범위
+      `except Exception`이 조용히 None으로 삼켜 왔다. 실측으로 확인: 80봉 완전 워밍업
+      후에도 82개 키 중 72개가 None — PX 30개 중 정수 인덱싱만 쓰는 소수(px_ret/px_mom/
+      px_accel 등)를 제외한 대다수가 워밍업과 무관하게 항상 NaN이었다. W6~8 원 실측
+      노트가 정확히 그 소수 사례만 확인해서 그동안 발견 안 됨. `handle_bar()`가 계산
+      직전 `list(history)`로 변환해 해결(계산기 쪽은 원래도 `Sequence[BarClosed]` 계약대로
+      짠 것이라 수정 불필요). 회귀 테스트 신규(`test_slice_based_calculators_produce_real_values_once_warmed`).
+      **src/messiah/features/vl_core.py**: Ver 1.4 §2.3 VL 16개 중 OHLCV만으로 계산
+      가능한 13개 신규(`vl_rv`·`vl_park`·`vl_gk`·`vl_yz`·`vl_atr`·`vl_atr_rel`·
+      `vl_semi_dn`·`vl_semi_up`·`vl_semi_ratio`·`vl_jump`·`vl_range_exp`·`vl_vov`·
+      `vl_squeeze`) — Ver 1.5 §3.5/3.6(15m/30m Expert의 VL 15% 배정) 대응.
+      `WINDOWED_FEATURES`/`STATEFUL_FEATURES` 레지스트리를 px_core.py와 동일 형태로
+      노출해 이번에 VL이 처음으로 실제 `FeatureVector`에 실린다(전엔 Regime AI 전용
+      직접호출 경로뿐이었음). `vl_vov`/`vl_squeeze`는 이중 윈도우 구조라 하위윈도우를
+      5로 낮춰(`_INNER_SUBWINDOW`) `engine._MAX_HISTORY`(130) 예산 안에 맞춤(표준 20을
+      썼으면 W_SLOW 최댓값 120 기준 140>130으로 영원히 워밍업 안 끝나는 죽은 칸이 됐을
+      것). `vl_har_pred`/`vl_intraday_shape`(다개월 시간대별 통계 필요)는 Event Calendar
+      미구현과 같은 이유로 스코프 밖 유지.
+      **src/messiah/features/engine.py**: vl_core 레지스트리 결선(카테고리별 루프 2줄
+      추가, 본체 로직 변경 없음).
+      **M15/M30 Expert 파이프라인 검증**: `HorizonExpert`/`Trainer`/`MetaLabeler`/
+      `labeling.BARRIER_PARAMS`는 W14~19부터 이미 Horizon을 데이터로만 받는 설계였다 —
+      이번 주는 그 일반성이 M15/M30에서도 실제로 성립함을 처음 못 박았다(Ver 1.2 §4.2
+      구현 순서 "5m → 15m → 30m …" 대응). `tests/models/test_trainer.py`의 `_bars()`
+      헬퍼가 M5가 아니면 무조건 1분 간격으로 봉을 만들던 버그도 발견·수정
+      (`HORIZON_SECONDS[horizon]//60`으로 실제 Horizon 길이 반영 — 안 고쳤으면 M15/M30의
+      시간배리어가 봉 간격보다 훨씬 길어 PurgedKFold가 사실상 전부 purge했을 것).
+      `scripts/run_formal_expert_training_smoke.py --horizon 15m`/`--horizon 30m`으로
+      실제 실행 확인 — 실제 아카이브(15m 3건/30m 1건)는 예상대로 데이터 부족 실패(정직
+      보고), 합성 200봉으로는 5m과 동일하게 탐색→out-of-fold→앙상블+교정기→Meta-Labeler
+      까지 end-to-end 성공.
+      테스트 40건 신규(vl_core 36·engine 회귀 1·trainer M15/M30 파라미터화 4)+기존 수정
+      3건(test_engine.py 모노키패치 2건에 vl_core 격리 추가, _EXPECTED_KEY_COUNT 재계산),
+      전체 439건 통과. ruff 클린.
+      남은 갭(capability_matrix.md 기록): 15m Expert는 여전히 Ver 1.5 배정(FL 30%·OP 10%·
+      RG 10%)의 절반도 못 받음(FL/OP/RG 전부 미구현 — 투자자매매동향 폴링·옵션체인
+      수집기·매크로 데이터 소스 전부 별도 착수 필요), 30m도 동일 이유로 배정
+      (FL 20%·OP 20%·RG 20%) 미달, vl_har_pred/vl_intraday_shape 보류, Aggregator/Meta
+      Decision과의 결선 여전히 없음(W24~26 스코프).
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)

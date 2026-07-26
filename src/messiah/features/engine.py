@@ -1,13 +1,22 @@
-"""Realtime Feature Engine 골격 — Master Plan Ver 2.0 §9 W6~8 (Ver 1.1 §2-2).
+"""Realtime Feature Engine 골격 — Master Plan Ver 2.0 §9 W6~8 (Ver 1.1 §2-2), VL 결선 W22~23.
 
-`bar.{horizon}.{symbol}`을 구독해 Horizon별 롤링 윈도우를 갱신하고, `px_core`의 PX 30개
-계산기를 전부 돌려 `FeatureVector`를 조립·발행한다(`feat.{horizon}.{symbol}`). MS는 이번
-스코프에 없음(px_core.py 모듈 docstring·capability_matrix.md 참고) — 계산기 레지스트리에
-추가하기만 하면 이 엔진이 자동으로 같이 계산·발행하도록 설계했다(신규 계산기 추가 시 엔진
-코드 변경 불필요).
+`bar.{horizon}.{symbol}`을 구독해 Horizon별 롤링 윈도우를 갱신하고, `px_core`(PX 30개) +
+`vl_core`(VL, W22~23 확장분) 계산기를 전부 돌려 `FeatureVector`를 조립·발행한다
+(`feat.{horizon}.{symbol}`). MS/FL/OP/RG는 이번 스코프에 없음(각 모듈 docstring·
+capability_matrix.md 참고) — 계산기 레지스트리(`WINDOWED_FEATURES`/`STATEFUL_FEATURES`)에
+추가하기만 하면 이 엔진이 자동으로 같이 계산·발행하도록 설계했다(신규 카테고리 추가 시
+`_build_feature_vector`에 루프 두 줄만 늘어남, 그 외 엔진 코드 변경 불필요).
 
 완성봉 규율(Ver 1.2 §2.2): 발행은 `handle_bar()`가 완성봉을 받은 시점에만 한다 — 이 엔진
 자체는 미완성 봉을 절대 보지 않는다(L1이 완성된 봉만 발행하므로).
+
+**버그 발견·수정(2026-07-29)**: 롤링 히스토리를 `collections.deque`로 보관하는데 계산기
+다수가 `bars[-window:]` 슬라이스를 쓴다 — `deque`는 슬라이스를 지원하지 않아(정수 인덱싱만
+가능, 파이썬 표준 동작) 슬라이스를 쓰는 계산기는 전부 `TypeError`를 던지고 `_safe_call`이
+조용히 None으로 삼켜 왔다. PX 30개 중 정수 인덱싱만 쓰는 소수(px_ret/px_mom/px_accel 등)를
+제외한 대다수가 워밍업 완료 여부와 무관하게 **항상 NaN이었다**(80봉 워밍업 후 실측: 82개 중
+72개 None). `handle_bar()`가 계산 직전 `list(history)`로 변환해 해결 — 계산기 쪽은 원래도
+`Sequence[BarClosed]` 계약대로 짠 것이라 수정 불필요.
 """
 
 from __future__ import annotations
@@ -19,7 +28,7 @@ from typing import Sequence
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, TOPIC_FEAT, BusLike
 from messiah.core.messages import HORIZON_SECONDS, BarClosed, FeatureVector, Horizon
-from messiah.features import px_core
+from messiah.features import px_core, vl_core
 
 # px_hurst(W_SLOW_HURST 최대 120) · px_accel(W_STD 최대 60이면 2*60+1=121 필요)를 전부
 # 커버하는 넉넉한 여유(130개 완성봉, 1분봉 기준 하루 정규장 405분 내에서도 충분히 작음).
@@ -31,7 +40,7 @@ _NAN_RATIO_HALT_THRESHOLD = 0.20  # Ver 1.1 §2-2: 20% 초과 시 해당 Horizon
 
 
 class FeatureEngine:
-    """단일 심볼용 — 전 Horizon의 완성봉을 구독해 PX Feature를 계산·발행한다."""
+    """단일 심볼용 — 전 Horizon의 완성봉을 구독해 PX+VL Feature를 계산·발행한다."""
 
     def __init__(
         self,
@@ -63,15 +72,27 @@ class FeatureEngine:
 
         history = self._history[bar.horizon]
         history.append(bar)
-        vector = self._build_feature_vector(bar, history)
+        # 계산기(px_core/vl_core)는 `bars[-window:]` 같은 슬라이스를 그대로 쓰는데
+        # `collections.deque`는 슬라이스를 지원하지 않는다(정수 인덱싱만 가능— 파이썬 표준
+        # 동작, 버그 아니라 deque의 알려진 제약). `history`를 deque 그대로 넘기면 슬라이스를
+        # 쓰는 계산기가 전부 TypeError → `_safe_call`이 조용히 None으로 삼켜, PX 30개 중
+        # 정수 인덱싱만 쓰는 소수(px_ret/px_mom/px_accel 등)를 제외한 대다수가 워밍업과
+        # 무관하게 항상 NaN이었다(2026-07-29 발견 — 리스트로 바꾸자 실제 값 산출 확인).
+        bars = list(history)
+        vector = self._build_feature_vector(bar, bars)
         await self._publish(vector)
 
-    def _build_feature_vector(self, bar: BarClosed, history: deque[BarClosed]) -> FeatureVector:
+    def _build_feature_vector(self, bar: BarClosed, history: list[BarClosed]) -> FeatureVector:
         values: dict[str, float | None] = {}
         for name, fn, windows in px_core.WINDOWED_FEATURES:
             for window in windows:
                 values[f"{name}_{window}"] = self._safe_call(fn, history, window)
         for name, stateful_fn in px_core.STATEFUL_FEATURES:
+            values[name] = self._safe_call(stateful_fn, history, self._session)
+        for name, fn, windows in vl_core.WINDOWED_FEATURES:
+            for window in windows:
+                values[f"{name}_{window}"] = self._safe_call(fn, history, window)
+        for name, stateful_fn in vl_core.STATEFUL_FEATURES:
             values[name] = self._safe_call(stateful_fn, history, self._session)
 
         nan_ratio = sum(1 for v in values.values() if v is None) / len(values)

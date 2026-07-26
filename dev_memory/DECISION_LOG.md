@@ -362,3 +362,86 @@ confidence=1.0 고정, 오버라이드 없을 때 통계층 결과 그대로 통
 **검증**: 위 두 테스트 통과, 전체 406건 통과.
 
 ---
+
+## 2026-07-29 (8차 — VL 확장 + FeatureEngine deque 버그 수정 + 15m·30m Expert 검증, Ver 2.0 §9 W22~23)
+
+### [버그] FeatureEngine이 계산 직전 history(deque)를 list로 안 바꿔 슬라이스 기반 계산기 다수가 항상 None
+
+**증상**: 15m/30m Expert 작업을 시작하며 "PX+VL 후보군이 실제로 얼마나 되는가"를 확인하려고
+FeatureEngine에 합성 봉 80개를 흘려 실제 값을 찍어봤다 — 82개 Feature 키 중 72개가 여전히
+None이었다(워밍업은 충분히 끝난 시점인데도).
+**원인**: `FeatureEngine._history`는 `collections.deque(maxlen=130)`로 보관되는데,
+`px_core`/`vl_core`의 계산기 다수(`atr`/`true_ranges`·`px_vwap_dev`·`px_trend_slope`·
+`px_hurst`·`px_rsi`·`px_bb_pos/width`·`px_adx` 등, PX 30개 중 대다수)가 내부에서
+`bars[-(window+1):]` 같은 슬라이스를 쓴다. Python `collections.deque`는 정수 인덱싱
+(`d[-1]`)은 지원하지만 슬라이스(`d[-3:]`)는 지원하지 않는다(`TypeError: sequence index
+must be integer, not 'slice'`) — 표준 라이브러리의 알려진 제약이지 이 프로젝트의 버그가
+아니다. `FeatureEngine._safe_call()`은 "개별 Feature 계산 실패는 그 값만 None으로
+마킹"(Ver 1.1 §2-2)이라는 의도된 설계로 넓은 `except Exception`을 쓰는데, 이 관용구가
+의도치 않게 슬라이스 계산기의 TypeError까지 조용히 삼켜버렸다. 정수 인덱싱만 쓰는 소수
+(px_ret/px_mom/px_accel 등)만 매번 정상 작동해 왔다.
+**결정**: `handle_bar()`가 `history.append(bar)` 직후, 계산기를 부르기 전에
+`bars = list(history)`로 한 번 변환해 이후 전 계산기(px_core+vl_core)에 리스트를 넘긴다.
+계산기 쪽 계약(`Bars = Sequence[BarClosed]`)은 원래도 슬라이스 가능한 시퀀스를 가정하고
+바르게 짜여 있었으므로 계산기 코드는 손대지 않았다.
+**Why**: `Sequence` 타입힌트는 슬라이스 지원을 문법적으로 강제하지 않는다 — `deque`는
+`Sequence`의 여러 연산(길이·정수 인덱싱·반복)은 만족하지만 슬라이스는 만족하지 않는
+"불완전한 Sequence"였다. 타입 체커(pyright)도 이 구멍을 잡지 못했다(런타임 예외만
+발생). 이런 종류의 "일부만 계약을 만족하는 자료구조"는 정적 타입만으로는 못 잡고,
+실제로 파이프라인을 끝까지 흘려보고 값을 찍어봐야 드러난다 — 이번에도 발견 경로는
+단위 테스트가 아니라 "80봉을 흘려 실제 값을 눈으로 확인"이었다(W6~8 원 실측 노트가
+`px_ret_5`/`px_mom_5` 두 개만 확인하고 넘어간 것과 대비).
+**How to apply**: 향후 `FeatureEngine`에 새 계산기 카테고리(MS/FL/OP/RG)를 추가할 때도
+`handle_bar()`가 이미 리스트로 변환한 `history`를 계산기에 넘기므로 별도 조치 불필요 —
+단, 계산기 category 모듈 자체를 테스트할 때 리스트가 아니라 deque를 직접 넣어보는 테스트를
+최소 1건은 추가해 이런 종류의 회귀를 예방할 것(`test_slice_based_calculators_produce_real_values_once_warmed`가 그 역할).
+**검증**: 신규 회귀 테스트 통과(40봉 워밍업 후 `px_vwap_dev_5`/`vl_atr_5` 등 슬라이스
+기반 키가 None이 아님 확인), 전체 439건 통과.
+
+### [설계결정] VL 하위윈도우(`vl_vov`/`vl_squeeze`)를 표준 20 대신 5로 고정
+
+**근거**: `vl_vov`(변동성의 변동성)와 `vl_squeeze`(BB폭 백분위)는 이중 윈도우 구조 —
+외부 윈도우(W_SLOW={20,60,120}) 안에서 하위 지표를 여러 시점에 굴려 그 분포를 본다.
+표준 관례(BB(20))를 하위윈도우로 쓰면 외부 윈도우가 120일 때 필요 봉수가 120+20=140으로,
+`features/engine.py`의 `_MAX_HISTORY`(130, px_hurst/px_accel 요구치 기준으로 이미 고정된
+예산)를 넘는다.
+**결정**: 하위윈도우를 5로 고정(`_INNER_SUBWINDOW`) — 120+5=125<130으로 기존 예산 안에
+맞춘다.
+**Why**: `_MAX_HISTORY`를 올리는 대신 하위윈도우를 낮추는 쪽을 택했다 — Ver 1.4가 VL의
+하위윈도우 값을 못박지 않아 어차피 판단이 필요했고, `_MAX_HISTORY`를 건드리면 기존
+px_hurst 등 이미 검증된 Feature들의 워밍업 판정 기준(`warmed_up = len(history) >=
+_MAX_HISTORY`)까지 흔들어 회귀 위험이 커진다. 메모리 비용은 130이든 140이든 무시할
+수준이라 이 트레이드오프의 실익은 "기존 예산을 안 건드림"에 있다.
+**How to apply**: Ver 1.5 §5 선정 절차(IC 스크리닝 등)로 이 두 Feature가 실제 유용하다고
+확인되면, 그때 하위윈도우를 표준값으로 늘리는 대신 `_MAX_HISTORY` 자체를 올리는 재검토를
+할 것(당장은 배관 검증 우선).
+**검증**: `test_vl_squeeze_low_percentile_when_compressing_after_expansion` 작성 중
+처음 window=20으로 설계했다가 실패(0.85 vs 기대 <0.5) — 원인은 하위윈도우 자체가 아니라
+테스트의 창 구성(quiet 구간이 창의 85%를 차지해 비교 기준이 무의미해짐)이었고, 창에
+확장(wild) 구간이 다수·압축(quiet) 구간이 소수로 섞이도록 재설계(window=30)해 해결.
+
+### [설계결정] 15m/30m Expert는 이번 주 PX+VL만 받는다 — FL/OP/RG는 명시적 갭으로 남김
+
+**근거**: Ver 1.2 §4.2·Ver 1.5 §3.5~3.6은 15m Expert에 FL(수급) 30%, 30m Expert에
+RG(국면)+OP(옵션) 각 20%를 배정한다 — 둘 다 카테고리 배정의 절반 이상이다. 그런데 FL은
+투자자매매동향 REST 폴링 루프, OP는 옵션체인 그릭스 수집기, RG는 현물지수·매크로
+데이터 소스가 각각 필요한데 셋 다 이 프로젝트에 전혀 연동돼 있지 않다(W3~8부터 이어진
+기존 갭).
+**결정**: 이번 W22~23 스코프를 "M15/M30에서도 Expert 학습 파이프라인이 실제로 동작하는가"
++ "PX+VL 후보군을 최대한 채운다(VL 1→14)"로 한정하고, FL/OP/RG 카테고리는 구현하지
+않은 채 capability_matrix.md에 사유와 함께 명시적으로 기록했다.
+**Why**: FL/OP/RG를 만들려면 각각 새 Collector/Normalizer/Archiver급 데이터 파이프라인이
+필요하다 — 이미 알려진 갭(REST 폴링 루프, 옵션체인 수집기)을 "15m Expert 작업"이라는
+명목으로 급하게 얼기설기 만들면, Regime AI의 규칙층이 겪을 뻔한 것과 같은 문제(미구현
+입력에 임시값을 넣어 "있는 것처럼 보이지만 실제로는 의미 없는" 조용한 가짜 구현)가 될
+위험이 크다. 데이터가 없으면 없다고 정직하게 기록하고, 있는 걸로 파이프라인의 정확성을
+검증하는 편이 낫다.
+**How to apply**: FL/OP/RG는 각각 독립된 착수 대상(다음 분기회의 안건 후보)으로
+NEXT_TODO.md·capability_matrix.md에 남겨둔다 — "15m Expert 완료"라고 말할 수 있는 시점은
+이 셋이 채워진 뒤다.
+**검증**: `scripts/run_formal_expert_training_smoke.py --horizon 15m`/`--horizon 30m`
+실제 실행 — 두 경우 다 실제 아카이브는 데이터 부족으로 정직하게 실패, 합성 데이터로는
+탐색→out-of-fold→앙상블+교정기→Meta-Labeler까지 5m과 동일하게 성공. 단위 테스트
+(M15/M30 파라미터화 4건) 통과, 전체 439건 통과.
+
+---

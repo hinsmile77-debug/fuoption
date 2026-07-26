@@ -2,7 +2,7 @@ import math
 from datetime import datetime, timedelta
 
 import pytest
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon
 from messiah.core.timeutil import KST
 from messiah.models.labeling import label_and_weight
 from messiah.models.trainer import (
@@ -24,8 +24,12 @@ _START = datetime(2026, 7, 27, 9, 0, tzinfo=KST)
 
 
 def _bars(n: int, horizon: Horizon = Horizon.M5) -> list[BarClosed]:
-    """가격이 오르내리며 ATR>0을 보장하는 합성 5분봉 시퀀스(사인파 + 정수 반올림)."""
-    minutes = 5 if horizon == Horizon.M5 else 1
+    """가격이 오르내리며 ATR>0을 보장하는 합성 봉 시퀀스(사인파 + 정수 반올림) — 봉 간격은
+    `horizon`의 실제 길이를 그대로 씀(예전엔 M5가 아니면 무조건 1분 간격으로 고정돼 있었는데,
+    그러면 M15/M30의 시간배리어(각 3봉=45분/90분)가 봉 간격(1분)보다 훨씬 길어져 거의 모든
+    레이블 구간이 서로 겹쳐버려 PurgedKFold가 실질적으로 전부 purge하는 왜곡이 생김 — W22~23
+    15m/30m Expert 테스트 추가하며 발견·수정)."""
+    minutes = HORIZON_SECONDS[horizon] // 60
     out = []
     for i in range(n):
         close = round(100 + 10 * math.sin(i / 3))
@@ -269,3 +273,54 @@ async def test_train_formal_expert_raises_when_data_too_short_for_any_label():
     bars = _bars(5)
     with pytest.raises(ValueError, match="레이블"):
         await train_formal_expert(bars, feature_set=_FEATURE_SET, model_version="formal-v1")
+
+
+# ---------------------------------------------------------------- 15m·30m Expert (W22~23)
+#
+# HorizonExpert/Trainer/MetaLabeler/labeling.BARRIER_PARAMS는 처음부터 Horizon을 데이터로만
+# 받아왔다(하드코딩된 "5m" 분기 없음) — 이 절은 그 일반성이 실제로 M15/M30에서도 성립하는지
+# 못 박아 두는 회귀 테스트다(구현 순서 Ver 1.2 §4.2 "5m → 15m → 30m …"). 합성 데이터 기준
+# — 실제 아카이브는 하루치뿐이라 여전히 데이터 부족(기존 5m 갭과 동일 이유,
+# capability_matrix.md).
+
+
+@pytest.mark.parametrize("horizon", [Horizon.M15, Horizon.M30])
+async def test_train_formal_expert_is_horizon_generic(horizon):
+    bars = _bars(80, horizon=horizon)
+
+    result = await train_formal_expert(
+        bars,
+        feature_set=_FEATURE_SET,
+        model_version=f"{horizon.value}-formal-v1",
+        atr_window=3,
+        n_splits=3,
+        n_search_trials=2,
+        search_space=_SMALL_SEARCH_SPACE,
+        search_num_boost_round=10,
+        final_num_boost_round=10,
+        n_members=2,
+        meta_num_boost_round=10,
+    )
+
+    assert result.expert.horizon == horizon
+    assert result.n_oof_records > 0
+    assert result.n_meta_signals > 0
+
+    vectors = await build_feature_vectors(bars, feature_set=_FEATURE_SET)
+    view = result.expert.predict(vectors[-1])
+    assert view.horizon == horizon
+    assert view.p_up + view.p_flat + view.p_down == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("horizon", [Horizon.M15, Horizon.M30])
+async def test_train_prototype_expert_is_horizon_generic(horizon):
+    bars = _bars(30, horizon=horizon)
+
+    expert = await train_prototype_expert(
+        bars, feature_set=_FEATURE_SET, model_version=f"{horizon.value}-prototype-v1"
+    )
+
+    assert expert.horizon == horizon
+    vectors = await build_feature_vectors(bars, feature_set=_FEATURE_SET)
+    view = expert.predict(vectors[-1])
+    assert view.horizon == horizon

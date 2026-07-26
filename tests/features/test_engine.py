@@ -3,10 +3,16 @@ from datetime import datetime, timedelta
 from messiah.core.messages import BarClosed, FeatureVector, Horizon
 from messiah.core.timeutil import KST
 from messiah.features.engine import FeatureEngine
-from messiah.features.px_core import STATEFUL_FEATURES, WINDOWED_FEATURES
+from messiah.features.px_core import STATEFUL_FEATURES as PX_STATEFUL_FEATURES
+from messiah.features.px_core import WINDOWED_FEATURES as PX_WINDOWED_FEATURES
+from messiah.features.vl_core import STATEFUL_FEATURES as VL_STATEFUL_FEATURES
+from messiah.features.vl_core import WINDOWED_FEATURES as VL_WINDOWED_FEATURES
 
-_EXPECTED_KEY_COUNT = sum(len(windows) for _, _, windows in WINDOWED_FEATURES) + len(
-    STATEFUL_FEATURES
+_EXPECTED_KEY_COUNT = (
+    sum(len(windows) for _, _, windows in PX_WINDOWED_FEATURES)
+    + len(PX_STATEFUL_FEATURES)
+    + sum(len(windows) for _, _, windows in VL_WINDOWED_FEATURES)
+    + len(VL_STATEFUL_FEATURES)
 )
 
 
@@ -71,6 +77,26 @@ async def test_nan_ratio_is_one_on_first_bar_and_decreases_with_more_history():
         await engine.handle_bar(_bar(i, c=100 + i))
     later_nan_ratio = bus.published[-1][1].nan_ratio
     assert later_nan_ratio < first_nan_ratio  # 히스토리가 쌓일수록 워밍업된 Feature가 늘어남
+
+
+async def test_slice_based_calculators_produce_real_values_once_warmed(monkeypatch):
+    """회귀 테스트(2026-07-29 버그) — `history`는 `collections.deque`인데 `px_vwap_dev`/
+    `vl_atr` 등 다수의 계산기가 `bars[-window:]` 슬라이스를 쓴다. deque는 슬라이스를
+    지원하지 않아(정수 인덱싱만 가능) `handle_bar()`가 deque를 그대로 넘기면 이 계산기들은
+    워밍업 완료 여부와 무관하게 항상 TypeError→None이었다. `list(history)`로 변환한 뒤에는
+    실제 값이 나와야 한다 — 변동하는 종가로 40봉을 흘려 슬라이스 기반 계산기 다수가 더 이상
+    None이 아님을 확인(정수 인덱싱만 쓰는 px_ret 등과 달리, 이 계산기들은 리스트 변환 전엔
+    이 테스트가 실패했다)."""
+    bus = FakeBus()
+    engine = FeatureEngine("A05608", bus, feature_set="v-test", horizons=[Horizon.M5])
+
+    for i in range(40):
+        await engine.handle_bar(_bar(i, c=100 + (i % 7)))
+
+    vector = bus.published[-1][1]
+    slice_based_keys = ["px_vwap_dev_5", "px_ema_dev_5", "px_high_dist_5", "vl_atr_5", "vl_rv_5"]
+    for key in slice_based_keys:
+        assert vector.values[key] is not None, f"{key}가 None — deque 슬라이스 버그 재발 의심"
 
 
 async def test_valid_until_is_bar_open_plus_horizon_length():
@@ -139,6 +165,8 @@ async def test_individual_feature_failure_does_not_crash_publish(monkeypatch):
         [("px_ret", _boom, (5,))],
     )
     monkeypatch.setattr("messiah.features.px_core.STATEFUL_FEATURES", [])
+    monkeypatch.setattr("messiah.features.vl_core.WINDOWED_FEATURES", [])
+    monkeypatch.setattr("messiah.features.vl_core.STATEFUL_FEATURES", [])
 
     await engine.handle_bar(_bar(0))
 
@@ -194,6 +222,8 @@ async def test_high_nan_ratio_after_warmup_logs_feature_nan_warning(monkeypatch)
 
     monkeypatch.setattr("messiah.features.px_core.WINDOWED_FEATURES", [("px_ret", _boom, (5,))])
     monkeypatch.setattr("messiah.features.px_core.STATEFUL_FEATURES", [])
+    monkeypatch.setattr("messiah.features.vl_core.WINDOWED_FEATURES", [])
+    monkeypatch.setattr("messiah.features.vl_core.STATEFUL_FEATURES", [])
 
     bus = FakeBus()
     engine = FeatureEngine("A05608", bus, feature_set="v-test", horizons=[Horizon.M5])

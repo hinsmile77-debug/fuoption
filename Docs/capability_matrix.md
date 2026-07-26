@@ -203,6 +203,41 @@ numpy 메이저 버전을 요구하는 상태였음. `lightgbm==4.3.0`으로 내
   다시 학습해야 하는지, 아니면 일정 주기로만 재학습할지(레짐 시프트 대응과 안정성의
   트레이드오프)는 아직 정책이 없다.
 
+## VL 확장 + FeatureEngine deque 버그 수정 + 15m·30m Expert 검증 (Ver 2.0 §9 W22~23)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| features.engine.FeatureEngine — deque 슬라이스 버그 수정 | ✅ | ✅ 2026-07-29 | — | **버그 발견·수정(회귀 영향 큼)**: 롤링 히스토리를 `collections.deque`로 보관하는데 `px_core`/`vl_core` 계산기 다수가 `bars[-window:]` 슬라이스를 쓴다 — Python `deque`는 슬라이스를 지원하지 않아(정수 인덱싱만 가능) 슬라이스 쓰는 계산기는 전부 `TypeError`를 던졌고 `_safe_call`의 광범위 `except Exception`이 조용히 None으로 삼켜 왔다. **실측으로 확인**: 80봉 완전 워밍업 후에도 82개 키 중 72개가 None(정수 인덱싱만 쓰는 px_ret/px_mom/px_accel 등 소수만 정상). W6~8 원 실측 노트("px_ret_5/px_mom_5는 실제 값 산출 확인")가 정확히 그 소수 사례만 확인한 것이었어서 그동안 발견되지 못했다 — W14~19의 5m Expert 프로토타입·정식 학습도 전부 이 축소된 유효 Feature 집합으로 진행된 셈(실측 데이터가 원래도 극소량이라 학습 자체의 배관 검증 목적은 훼손 안 됐지만, 실제 신호 폭은 예상보다 좁았음). 수정: `handle_bar()`가 계산 직전 `list(history)`로 변환 — 계산기 쪽 계약(`Sequence[BarClosed]`)은 원래도 맞게 짜여 있어 수정 불필요. 회귀 테스트 신규 1건(`test_slice_based_calculators_produce_real_values_once_warmed` — 40봉 워밍업 후 `px_vwap_dev_5`/`vl_atr_5` 등 슬라이스 기반 계산기가 실제로 None이 아님을 확인) |
+| features.vl_core — VL(변동성) 1개 → 14개 확장 + FeatureEngine 결선 | ✅ | ✅ 2026-07-29 | — | Ver 1.4 §2.3 VL 16개 중 OHLCV만으로 계산 가능한 13개 신규(`vl_rv`·`vl_park`·`vl_gk`·`vl_yz`·`vl_atr`·`vl_atr_rel`·`vl_semi_dn`·`vl_semi_up`·`vl_semi_ratio`·`vl_jump`·`vl_range_exp`·`vl_vov`·`vl_squeeze`) + 기존 `vl_vol_ratio`(W20~21, Regime AI 전용 직접호출 경로였음). Ver 1.5 §3.5(15m Expert, VL 15%)·§3.6(30m Expert, VL 15%) 배정 대응. `WINDOWED_FEATURES`/`STATEFUL_FEATURES` 레지스트리를 px_core.py와 동일 형태로 노출해 `features/engine.py`가 자동으로 계산·발행(엔진 코드는 카테고리별 루프 2줄만 추가, `_build_feature_vector` 본체 변경 없음) — **이번에 VL이 처음으로 `FeatureVector`에 실제로 실린다**(전엔 Regime AI가 `build_observations()`로 별도 직접호출만 했음). `vl_vov`/`vl_squeeze`는 이중 윈도우 구조(하위윈도우로 지표를 여러 시점에 굴려 그 분포를 봄)라 하위윈도우를 표준 20 대신 5로 낮춰(`_INNER_SUBWINDOW`) `engine._MAX_HISTORY`(130) 예산 안에 맞춤(W_SLOW 최댓값 120 기준 120+5=125<130, 20이면 140>130으로 영원히 워밍업 안 끝나는 죽은 칸이 됐을 것). 분산 성분은 전부 모집단 분산(프로젝트 기존 관례), `vl_rv`는 연율화 미적용(Horizon마다 하루 봉 수가 달라 통일 상수가 없고 트리 모델엔 실익 없음). 단위 테스트 36건 신규(각 함수 known-value/cross-check + 워밍업 부족 None + 주요 경계 케이스, `vl_jump`의 0-클립·`vl_squeeze`의 창 구성 실패로 인한 재설계 1건 포함) |
+| **여전히 스코프 밖**: `vl_har_pred`·`vl_intraday_shape` | ❌ | — | — | 둘 다 "상태형"으로 여러 거래일에 걸친 시간대별 통계(일/주/월 RV, 시간대별 평균 RV)가 필요한데 이 프로젝트엔 그 통계를 쌓는 인프라(세션별 시계열 저장소)가 없다 — Event Calendar 미구현으로 Regime AI 이벤트 근접 규칙을 미룬 것과 같은 이유(vl_core.py 모듈 docstring). |
+| models.trainer.train_formal_expert / train_prototype_expert — M15/M30 검증 | ✅ | ✅ 2026-07-29 (합성 데이터) | — | `HorizonExpert`/`Trainer`/`MetaLabeler`/`labeling.BARRIER_PARAMS`는 W14~19부터 이미 Horizon을 데이터로만 받는 설계(하드코딩된 "5m" 분기 없음)였다 — 이번 주는 그 일반성이 M15/M30에서도 실제로 성립함을 처음 못 박았다(Ver 1.2 §4.2 구현 순서 "5m → 15m → 30m …" 대응). `tests/models/test_trainer.py`의 `_bars()` 헬퍼가 M5가 아니면 무조건 1분 간격으로 봉을 만들던 버그를 발견·수정(`HORIZON_SECONDS[horizon]//60`으로 실제 Horizon 길이를 반영) — 고치기 전엔 M15/M30의 시간배리어(3봉=45분/90분)가 봉 간격(1분)보다 훨씬 길어 거의 모든 레이블 구간이 서로 겹쳐 PurgedKFold가 사실상 전부 purge하는 왜곡이 있었을 것. `scripts/run_formal_expert_training_smoke.py --horizon 15m`/`--horizon 30m`으로 실제 실행 확인: 두 경우 다 실제 아카이브(15m 3건/30m 1건)는 예상대로 데이터 부족 실패(정직 보고), 합성 200봉으로는 탐색→out-of-fold 192건→앙상블+교정기→Meta-Labeler 학습·임계값 선택까지 5m과 동일하게 end-to-end 성공. 단위 테스트 4건 신규(M15/M30 × formal/prototype 파라미터화) |
+
+## 알려진 갭 (VL·15m·30m Expert, 2026-07-29)
+
+- **15m/30m Expert는 여전히 Ver 1.5 §3.5~3.6이 배정한 후보 구성의 절반 이하만 받는다**:
+  15m은 FL(수급) 30%·OP 10%·RG 10%(합 50%), 30m은 FL 20%·OP 20%·RG 20%(합 60%)가
+  배정돼 있는데, 셋 다 아직 데이터 자체가 없다 — FL(외국인/기관 순매수 누적)은 KIS
+  투자자매매동향 REST 폴링 루프가 여전히 미구현(W3~5/W6~8부터 이어진 기존 갭), OP(옵션
+  체인 그릭스·IV)는 옵션 체인 수집기 자체가 없음(K200_OPT WS 동시구독 문제와 별개로 REST
+  폴링도 미구현), RG(베이시스·시장폭·VIX·USDKRW 등)는 현물지수·매크로 데이터 소스 자체가
+  연동돼 있지 않다. 지금 15m/30m Expert가 실제로 쓸 수 있는 건 PX+VL(두 Horizon 모두
+  Ver 1.5 배정 20%+15%=35%에 해당하는 카테고리)뿐 — Ver 1.5 §5 선정 절차(IC 스크리닝→
+  상관 클러스터링→안정성 선택)도 이 축소된 후보군에서만 의미가 있다. FL/OP/RG는 각각
+  전용 Collector/Normalizer/Archiver급 작업이 필요해 이번 2주 스코프에 넣지 않았다 —
+  별도 착수 필요(다음 분기회의 안건 후보).
+- **deque 슬라이스 버그가 W14~19에 학습된 모델에도 영향을 줬을 가능성**: 그 시점 5m
+  Expert 학습은 전부 극소량 실측 데이터(7~33행) 또는 합성 데이터였고 목적 자체가 "배관
+  검증"이었다고 명시돼 있었지만, 실제로 사용 가능했던 Feature 폭이 기록된 것(82개 중 대부분)
+  보다 훨씬 좁았다는 뜻 — 다만 저장된 모델 자산이 없어(Registry 부재, 매번 스모크에서
+  즉석 학습) 재학습이 필요한 대상은 없음, 향후 실제 학습부터는 이번 수정이 반영된 상태.
+- **vl_vov/vl_squeeze의 하위윈도우(5)는 표준 관례(20)보다 작다**: `engine._MAX_HISTORY`
+  예산(130) 안에 맞추기 위한 판단(vl_core.py 모듈 docstring) — Ver 1.5 §5 선정 절차에서
+  이 두 Feature가 실제로 쓸모 있다고 나오면, 하위윈도우를 표준값으로 늘리는 대신
+  `_MAX_HISTORY` 자체를 올리는 재검토가 필요할 수 있다(메모리 비용은 여전히 작음).
+- **Aggregator/Meta Decision Engine과의 결선은 여전히 없다**(기존 갭 유지, W24~26 스코프):
+  이번 주는 Expert 학습 파이프라인이 M15/M30에서도 성립함을 확인했을 뿐, Regime 가중치
+  매트릭스(Ver 1.2 §7.1)를 적용한 다중 Horizon 통합점수 S 계산은 아직 어디에도 없다.
+
 ## 운영 스크립트 (scripts/)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
