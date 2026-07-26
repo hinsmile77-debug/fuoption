@@ -32,7 +32,7 @@ dependencies = [
 # weight·feature_name·저장/재로드·feature_importance까지 전부 정상 동작 확인함. 버전을
 # 올리려면(4.4~4.6 어딘가에서 고쳐졌을 수도 있음, 개별 확인 안 함) 반드시
 # tests/strategy/futures/test_expert.py(학습→예측→저장→재로드 전체 경로)로 먼저 검증할 것.
-ml = ["lightgbm==4.3.0", "scikit-learn>=1.4", "numpy>=1.26", "optuna>=3.6"]
+ml = ["lightgbm==4.3.0", "scikit-learn>=1.4", "numpy>=1.26", "optuna>=3.6", "hmmlearn>=0.3"]
 ui = ["fastapi>=0.111", "uvicorn>=0.30"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4", "pyright>=1.1"]
 

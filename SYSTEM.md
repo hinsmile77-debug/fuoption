@@ -10,8 +10,9 @@
 
 - **코드네임**: MESSIAH (메시아) — 자율형 파생상품 AI (KOSPI200 미니선물 + 옵션)
 - **선행 프로젝트**: 미륵이(선물, Kiwoom/Cybos) · 마흐디(옵션, KIS) — 레슨런 L1~L28, 금지 15계명 적용
-- **현 단계**: Phase 3 (Ver 2.0 §9 로드맵 W17~19 완료) — 5m Expert 정식(탐색·앙상블·교정)
-  + Meta-Labeler → Regime AI(HMM+규칙, W20~21) → 15m·30m Expert(W22~23) 순
+- **현 단계**: Phase 3 (Ver 2.0 §9 로드맵 W20~21 완료) — Regime AI(HMM+규칙) →
+  15m·30m Expert(W22~23) → Aggregator·Meta Decision·Risk Engine·Sizer·Kill
+  Switch(W24~26, 전 경로 관통) 순
 
 ## 2. 브로커 전략 (확정)
 

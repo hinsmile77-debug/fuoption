@@ -154,6 +154,21 @@ class FeatureVector(BusMessage):
 # ---------------------------------------------------------------- L3 Intelligence
 
 
+class RegimeState(BusMessage):
+    """국면 판정 결과 (intel.regime) — Ver 1.1 §3-1, Ver 1.6 §3.1.
+
+    통계층(HMM)이 낸 상태를 명명층이 Regime으로 매핑한 뒤, 규칙층이 필요시 덮어쓴다
+    (Ver 1.6 §3.1 하이브리드 구조 — strategy/regime/service.py 참고)."""
+
+    symbol: str
+    regime: Regime
+    confidence: float  # 상태 확률(HMM posterior 최댓값) — 규칙 오버라이드 시 1.0
+    state_duration_bars: int  # 현재 국면이 몇 봉째 지속 중인지(구동 Horizon 기준)
+    transition_prob: dict[str, float] = Field(default_factory=dict)  # 국면명 -> 다음 전이확률
+    rule_override: str | None = None  # 규칙층이 강제한 사유(없으면 통계층 그대로)
+    valid_until: datetime | None = None
+
+
 class ExpertView(BusMessage):
     """Horizon Expert 1개의 의견 (intel.futures 구성요소)."""
 

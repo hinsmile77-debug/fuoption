@@ -318,3 +318,47 @@ booster 리스트를 trainer.py가 몰라도 되게 캡슐화가 유지된다(�
 착수, 문제 재발 없음.
 
 ---
+
+## 2026-07-29 (7차 — Regime AI: HMM + 규칙, Ver 2.0 §9 W20~21)
+
+### [설계결정] 통계층(HMM)과 규칙층을 분리하고 규칙층은 지금 1개 규칙만 둠
+
+**근거**: Ver 1.6 §3.1이 명시한 하이브리드 구조 — 통계적으로 상태를 분리하는 HMM과,
+사람이 정의한 예외(이벤트 근접, 세션 시가/종가 등)를 강제하는 규칙층을 별도 계층으로
+둔다. 규칙층이 필요로 하는 입력(이벤트 근접도) 중 상당수가 Event Calendar 미구현이라
+아직 계산 불가능하다.
+**결정**: `strategy/regime/rules.py`는 지금 변동성 극단(vol_ratio 임계 초과 시 HIGH_VOL
+강제, confidence=1.0) 1개 규칙만 구현하고, 나머지는 `RuleContext`에 필드를 미리
+마련해두되(추후 채울 자리) 실제로 평가하지 않는다.
+**Why**: 통계층이 못 잡는 걸 규칙층이 억지로 채우려고 미구현 입력에 임시값(0 고정 등)을
+넣으면 "규칙이 있는 것처럼 보이지만 실제로는 아무 조건도 아닌" 조용한 가짜 구현이
+된다 — R10(폴백·합성 데이터는 배지·경보 동반, 조용한 폴백 금지)과 같은 원칙. 차라리
+지금 계산 가능한 규칙만 정직하게 구현하고 나머지는 갭으로 명시하는 편이 낫다.
+**How to apply**: Event Calendar가 구현되면 이벤트 근접 규칙을, 호가 WS가 구현되면
+스프레드 기반 규칙을 각각 추가할 자리로 `rules.py`를 남겨둔다 — 그 전까지 새 규칙을
+추가할 땐 반드시 그 규칙이 실제로 평가 가능한 입력을 갖고 있는지부터 확인할 것.
+**검증**: tests/strategy/regime/test_rules.py — 임계 이하/초과 경계값, 오버라이드 시
+confidence=1.0 고정, 오버라이드 없을 때 통계층 결과 그대로 통과 확인.
+
+### [버그] classify()가 px_autocorr에 필요한 최소 봉수를 과소 계산해 항상 UNKNOWN 반환
+
+**증상**: `test_rule_override_forces_confidence_one_and_reason`,
+`test_state_duration_increments_on_same_regime_and_resets_on_change` 두 테스트가
+계속 실패 — `classify()`가 매번 `Regime.UNKNOWN`을 반환.
+**원인**: `classify()`는 성능을 위해 꼬리에서 `window + 1`봉만 잘라 `build_observations()`
+에 넘기는 최적화를 해뒀는데, 관측 Feature 3개(px_trend_r2·vl_vol_ratio·px_autocorr) 중
+`px_autocorr`만 `window + 2`봉이 필요하다(다른 둘보다 엄격한 요구사항) — 그래서 자른
+구간이 항상 1봉 부족해 `build_observations()`가 빈 결과를 반환하고, 관측치가 없으니
+`classify()`가 안전하게 UNKNOWN으로 떨어졌다.
+**결정**: `classify()`의 `min_length`를 `self._window + 2`로 수정 — 3개 Feature 중
+가장 엄격한 요구사항 기준으로 통일.
+**Why**: 여러 Feature를 조합해 관측 벡터를 만들 때 "각 Feature가 필요로 하는 최소
+길이"를 개별적으로 확인하지 않고 대표 하나(가장 단순한 Feature)의 요구사항만 보고
+최적화하면 이런 종류의 조용한 실패가 생긴다 — Feature 조합 지점에서는 항상 구성
+요소 전체의 최댓값을 취해야 한다.
+**How to apply**: 향후 관측 벡터에 Feature를 추가/교체할 때는 각 Feature의 최소 요구
+길이를 다시 확인하고 `min_length` 계산도 함께 갱신할 것 — `build_observations()`
+모듈 docstring에 각 Feature의 최소 길이 요구사항을 명시해 둠.
+**검증**: 위 두 테스트 통과, 전체 406건 통과.
+
+---

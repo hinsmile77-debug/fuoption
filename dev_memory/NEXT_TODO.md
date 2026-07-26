@@ -452,6 +452,46 @@
       관문 미실행(기존 갭 유지), 5m Expert 예측력 검증 불가(데이터 부족, 기존 갭 유지),
       정식 번들 포맷(manifest.yaml) 여전히 미구현(Registry 없음).
 
+## W20~21 (Regime AI — HMM + 규칙)
+
+- [x] features/vl_core.py + strategy/regime/{hmm_model,naming,rules,service}.py 신규
+      (2026-07-29 완료) —
+      **src/messiah/features/vl_core.py 신규**: `vl_vol_ratio` — W_STD 앞 두 값(5, 20)
+      윈도우 표준편차의 비율. 세 번째 값(60)은 30시간 웜업 비용이 커 제외. 모듈 docstring이
+      처음엔 "W_STD의 최솟값/최댓값"이라고 잘못 써놨었는데(W_STD=(5,20,60)에서 20은
+      중앙값이지 최댓값이 아님) 테스트가 `min(W_STD), max(W_STD)`로 60-윈도우를 요구해
+      데이터 부족으로 실패 — docstring·테스트 둘 다 W_STD[0]/W_STD[1] 기준으로 수정.
+      **src/messiah/strategy/regime/hmm_model.py 신규**: `RegimeHMM`(hmmlearn
+      GaussianHMM 래퍼, BIC 최솟값으로 상태수 자동 선택) + `build_observations()`
+      (px_trend_r2·vl_vol_ratio·px_autocorr 3개 Feature 조합, 신규 계산 없이 기존 Feature
+      재사용).
+      **src/messiah/strategy/regime/naming.py 신규**: `label_states()`(HMM 상태 index →
+      Regime enum 통계적 매핑) + `describe_labels()`(사람 검수용 상태별 사후 통계 요약).
+      **src/messiah/strategy/regime/rules.py 신규**: `RuleContext` + 규칙층 — 지금 살아있는
+      규칙은 변동성 극단(vol_ratio 임계 초과 시 HIGH_VOL 강제, confidence=1.0) 1개뿐.
+      이벤트 근접·세션 시가/종가 규칙은 Event Calendar 미구현이라 제외.
+      **src/messiah/strategy/regime/service.py 신규**: `RegimeAI` — `fit()`(HMM 학습→명명)
+      →`classify()`(윈도우 판정→규칙 오버라이드) 오케스트레이션, `RegimeState` 메시지 조립.
+      `n_states`/`labels`/`hmm_model` 공개 프로퍼티(private 속성 직접 접근 방지 — 스모크
+      스크립트에서 `regime_ai._model` 등으로 접근하던 걸 프로퍼티로 정리).
+      **버그 발견·수정**: `classify()`가 꼬리에서 `window+1`봉만 잘라 썼는데 3개 관측
+      Feature 중 `px_autocorr`만 `window+2`봉이 필요해(다른 둘보다 엄격) `build_observations()`
+      가 항상 빈 결과를 반환 → `classify()`가 항상 UNKNOWN — 테스트로 발견,
+      `min_length = window + 2`로 수정.
+      **core/messages.py**: `RegimeState`(symbol/regime/confidence/state_duration_bars/
+      transition_prob/rule_override/valid_until) 신규 — L3 Intelligence 섹션,
+      `ExpertView` 앞.
+      **pyproject.toml**: `ml` extras에 `hmmlearn>=0.3` 추가.
+      **scripts/run_regime_ai_smoke.py 신규**: 실제 아카이브(A05608, 30분봉 1건)로 먼저
+      시도 → 예상대로 "관측치 부족" 실패(정직하게 보고) → 추세상승/횡보/고변동성 3구간
+      반복 합성 30분봉으로 전체 파이프라인(HMM 학습→BIC 상태수 선정→국면 판정→규칙
+      오버라이드 시연→사람 검수용 요약) end-to-end 1회 성공.
+      테스트 신규 다수(vl_core 4·hmm_model 8·naming 6·rules 5·service 9), 전체 406건
+      통과. ruff 클린.
+      남은 갭(capability_matrix.md 기록): HMM 실제 다개월 아카이브 미검증(합성 데이터만),
+      규칙층 사실상 1개 규칙뿐, RegimeState는 어떤 운영 루프에도 아직 발행 안 됨(상시
+      구동 배선은 W24~26 스코프), n_states 후보 범위 민감도 미검증, 온라인/점증 갱신 없음.
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)

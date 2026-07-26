@@ -171,6 +171,38 @@ numpy 메이저 버전을 요구하는 상태였음. `lightgbm==4.3.0`으로 내
   앙상블 멀티파일+JSON+선택적 pickle로 확장됐지만 Registry가 없어 정식 패키징은 그대로
   미룸(W17~19 이후 재검토, expert.py 모듈 docstring).
 
+## Regime AI — HMM + 규칙 (Ver 2.0 §9 W20~21)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| features.vl_core.vl_vol_ratio | ✅ | ✅ 2026-07-29 | — | W_STD의 앞 두 값(5, 20) 윈도우 표준편차의 비율 — 짧은 창이 긴 창보다 훨씬 크면(고변동성 국면) 1보다 크게 나온다. W_STD 세 번째 값(60)은 30시간 웜업 비용이 커 이번 스코프에서 제외(모듈 docstring). 단위 테스트 4건(known-value·등락 없는 구간은 비율 1 근처·NaN 웜업 구간 처리·창 크기 override) |
+| strategy.regime.hmm_model.RegimeHMM / build_observations | ✅ | ✅ 2026-07-29 (합성 데이터) | — | hmmlearn GaussianHMM 래퍼. 관측 벡터는 px_trend_r2·vl_vol_ratio·px_autocorr 3개 Feature 조합(px_core/vl_core 재사용, 신규 계산 없음). `n_states_candidates`로 후보 상태 수를 주면 BIC 최솟값으로 자동 선택(Ver 1.6 §3.1). 단위 테스트 8건(BIC 선정 known-value·상태수 1개 고정 경로·관측치 부족 시 ValueError·predict_states 길이 일치) |
+| strategy.regime.naming.label_states / describe_labels | ✅ | ✅ 2026-07-29 (합성 데이터) | — | 통계층(HMM 상태 index)을 Regime enum으로 매핑하는 명명층 — 상태별 관측 특성(추세 강도·변동성 비율 평균)을 기준으로 TREND_UP/TREND_DOWN/RANGE/HIGH_VOL에 통계적으로 배정, 애매하면 UNKNOWN. describe_labels()는 사람 검수용 상태별 사후 통계 요약 문자열을 만든다. 단위 테스트 6건(각 국면 유형 known-value 배정·동률 처리·요약 문자열 필드 포함 여부) |
+| strategy.regime.rules.RuleContext / rules | ✅ | ✅ 2026-07-29 | — | 규칙층(하이브리드 구조 2단) — 통계층 판정을 필요시 덮어쓴다. 지금 살아있는 규칙은 변동성 극단(vol_ratio가 임계값 초과 시 무조건 HIGH_VOL, confidence=1.0) 1개뿐 — 이벤트 근접·세션 시가/종가 특수구간 등 Ver 1.6 §3.1이 언급한 나머지 규칙은 Event Calendar 미구현(기존 갭)이라 제외(모듈 docstring). 단위 테스트 5건(임계 이하/초과 경계값·오버라이드 시 confidence=1.0 고정·오버라이드 없을 때 통계층 결과 그대로 통과) |
+| strategy.regime.service.RegimeAI | ✅ | ✅ 2026-07-29 (합성 데이터) | — | `fit()`(HMM 학습→명명)→`classify()`(최신 봉 윈도우로 통계층 판정→규칙층 오버라이드) 오케스트레이션. `RegimeState`(core/messages.py 신규 — symbol/regime/confidence/state_duration_bars/transition_prob/rule_override/valid_until) 메시지 조립까지 담당. `n_states`/`labels`/`hmm_model` 공개 프로퍼티로 내부 모델 상태를 노출(스모크 스크립트·사람 검수용, private 속성 직접 접근 방지). 단위 테스트 9건(classify 국면 판정 known-value·상태 지속 봉수 증가/리셋·규칙 오버라이드가 confidence=1.0 강제·전이확률 합=1·최소 관측치 부족 시 UNKNOWN) — 최소 관측 길이가 `window+2`(px_autocorr가 다른 두 Feature보다 1봉 더 필요)임을 놓쳐 classify()가 항상 UNKNOWN을 반환하던 버그를 테스트로 발견·수정 |
+| scripts/run_regime_ai_smoke.py | ✅ | ✅ 2026-07-29 | — | 실제 아카이브(A05608, 30분봉 1건)로 먼저 시도 → 예상대로 "관측치 부족" ValueError로 실패(정직하게 보고) → 추세상승/횡보/고변동성 3구간 반복 합성 30분봉으로 전체 파이프라인(HMM 학습→BIC 상태수 선정→국면 판정→규칙 오버라이드 시연→사람 검수용 요약) end-to-end 1회 성공. 합성 데이터는 "실제 시장 데이터 아님" 명시 |
+
+## 알려진 갭 (Regime AI, 2026-07-29)
+
+- **HMM은 여전히 실제 다개월 아카이브로 학습·검증된 적이 없다**: 실측 아카이브가 30분봉
+  기준 1건뿐이라(`RegimeAI.fit()`이 요구하는 최소 관측치에 크게 못 미침) 이번 주 산출물은
+  전부 합성(추세상승/횡보/고변동성 3구간 반복) 데이터로 배관만 검증했다 — 실제 상태 분리가
+  의미 있게 되는지는 G1 백테스트 준비 단계(W17~ 이후, 다개월 아카이브 확보 시) 재검증 필요.
+- **규칙층이 사실상 1개 규칙(변동성 극단)뿐이다**: Ver 1.6 §3.1 원안이 언급한 이벤트 근접·
+  세션 시가/종가 특수구간 규칙은 Event Calendar 미구현(기존 갭)이라 전부 제외했다 — 지금은
+  통계층(HMM) 의존도가 원안보다 훨씬 높은 상태.
+- **RegimeState는 아직 어떤 운영 루프에도 발행되지 않는다**: `core/messages.py`에 스키마만
+  추가됐고 `intel.regime` 토픽으로 실제로 publish하는 상시 구동 서비스는 없음(스모크
+  스크립트가 직접 `classify()`를 호출해 확인할 뿐) — Aggregator·Meta Decision Engine이
+  이 메시지를 소비하려면 그 전에 상시 구동 배선이 먼저 필요(W24~26, 전 경로 관통 스코프).
+- **HMM 상태 수(n_states)는 후보 목록 중 BIC 최솟값을 고르는 방식이라, 후보 목록 자체를
+  잘못 좁히면(예: 실제로 5개 국면인데 후보를 2~3개로만 줌) 과소적합을 못 알아챈다**: 지금
+  스모크 스크립트는 4~6 범위로 고정 — 실제 시장 데이터로 재학습할 때 더 넓은 후보 범위로
+  민감도 분석이 필요하다.
+- **온라인/점증 갱신 없음**: `fit()`은 전체 배치 학습만 지원 — 매일 새 데이터로 HMM을
+  다시 학습해야 하는지, 아니면 일정 주기로만 재학습할지(레짐 시프트 대응과 안정성의
+  트레이드오프)는 아직 정책이 없다.
+
 ## 운영 스크립트 (scripts/)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
