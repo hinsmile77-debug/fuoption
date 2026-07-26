@@ -400,6 +400,58 @@
       Deflated Sharpe 미구현, Validator 성과 관문 실제 백테스트 미실행(백테스트 하니스
       자체가 아직 없음), top_features는 전역 근사(로컬 XAI는 W24~26 재검토).
 
+## W17~19 (5m Expert 정식 — 탐색·앙상블·교정 + Meta-Labeler)
+
+- [x] models/{search,calibration}.py + strategy/futures/{expert 재설계,meta_labeler}.py +
+      models/trainer.py 확장 (2026-07-28 완료) —
+      **optuna 신규 설치·확인**: 지난주 lightgbm 4.7.0 크래시 사고 이후 습관대로 최소
+      스모크(`create_study().optimize()`) 먼저 실행해 확인 — 문제 없음, `ml` extras에
+      `optuna>=3.6` 추가.
+      **src/messiah/models/search.py 신규**: `search_hyperparameters()` — Ver 1.6 §2.2
+      탐색공간(num_leaves/max_depth/min_data_in_leaf/learning_rate/feature_fraction/
+      bagging_fraction/lambda_l1/l2) 원문 그대로, Optuna(TPE) + W12~13에 만든
+      `PurgedKFold`로 "창 내부 CV로만 탐색" 실제 구현. early_stopping은 폴드 내부
+      홀드아웃 추가 분리의 복잡도 대비 실익이 작아 스코프 제외(갭으로 기록).
+      **src/messiah/models/calibration.py 신규**: `ProbabilityCalibrator`(클래스별
+      Isotonic + 재정규화, Ver 1.6 §6.1) + `ConformalCalibrator`(비적합도 분위수 메커니즘,
+      Ver 1.6 §6.2 — 실제 운영 이력이 없어 메커니즘만 구현, G2부터 실사용).
+      **src/messiah/strategy/futures/expert.py 재설계**: 단일 LightGBM → Ver 1.6 §2.3
+      미니 앙상블(×5, seed만 다름). `predict()`가 확률 평균 + **P(+1) 표준편차**(Ver 1.2
+      §6 원문 그대로, 다른 클래스 아님)를 `ens_std`로. `ProbabilityCalibrator` 선택적
+      부착(`set_calibrator()`). 저장/로드를 앙상블 멀티파일(`{stem}_e{i}.lgb`)+메타데이터
+      (`.json`)+교정기(`.pkl`)로 확장 — 기존 저장 포맷 하위호환 없음(W14~16 프로토타입은
+      저장된 모델 자산이 없어 마이그레이션 불필요 확인 후 진행).
+      **src/messiah/strategy/futures/meta_labeler.py 신규**: `MetaLabeler`(Horizon별 얕은
+      LightGBM 이진분류, depth≤4·leaves≤15, Ver 1.2 §5.2) + `select_threshold()`(Ver 1.6
+      §5.2 "비용차감 후 기대수익 최대화" 그리드서치, 정확도 최대화 아님) + 메타 Feature
+      5개(1차확률·마진·앙상블분산·실현변동성 근사·시간대) — Regime·스프레드·이벤트근접도는
+      각각 W20~21·호가WS·Event Calendar 미구현이라 제외(명시적 갭).
+      **src/messiah/models/trainer.py 확장**: `generate_out_of_fold_predictions()` —
+      Ver 1.6 §5.1 "1차 모델을 Walk-Forward로 가상 운용 → out-of-fold 신호만 수집"을
+      `PurgedKFold`로 실제 구현(**W12~13에 만든 CV 인프라의 첫 실사용처** — 지난주까지는
+      합성 테스트 데이터로만 검증됐었음). `train_formal_expert()` — 탐색→out-of-fold→
+      최종 앙상블 전체데이터 재학습→교정 부착→Meta-Labeler 학습+임계값선택 전체
+      오케스트레이션, `ExpertTrainingResult` 반환. out-of-fold 신호 0건이면 조용히 빈
+      Meta-Labeler를 만드는 대신 ValueError(정식 경로는 칸닝 방지가 실제로 작동했다는
+      보장이 핵심). `train_prototype_expert()`(W14~16)는 그대로 유지 — 빠른 배관 확인용.
+      **scripts/run_formal_expert_training_smoke.py 신규**: 실제 아카이브(A05608, 5m,
+      7건)로 먼저 시도 → 예상대로 "데이터 부족" 실패(정직하게 보고) → 200건 합성(사인파+
+      지터) 데이터로 전체 파이프라인 실행 확인(탐색→out-of-fold 192건→Meta-Labeler
+      학습·임계값 0.9→앙상블+교정기→예측→Meta-Labeler 통과판정까지). 순수 사인파(지터
+      없음)는 여러 지표의 롤링 표준편차가 0이 되는 퇴화 케이스가 잦아 FeatureNaN 경고가
+      대량 발생 — 작은 난수 지터 추가로 완화(완전히 없애진 못함, 잔여 경고는 정직한 신호로
+      남겨둠).
+      테스트 41건 신규(search 5·calibration 9·expert 15(전면 재작성)·meta_labeler 14·
+      trainer 7 추가), 전체 362건 통과. ruff 클린, pyright는 models/strategy 패키지
+      기준 클린(lightgbm/optuna 미해석은 기존 polars/redis 패턴과 동일한 pyright venv
+      미탐지 이슈 — 신규 아님, trainer.py의 Handler 분산성 경고도 W9~11부터 있던 기존
+      패턴).
+      남은 갭(capability_matrix.md 기록): Meta-Labeler Regime/스프레드/이벤트근접도
+      미구현, 실현변동성은 ATR 대신 px_bb_width_20 근사, early_stopping 미구현,
+      ConformalCalibrator 실사용 이력 없음(G2부터), Deflated Sharpe·실제 백테스트 성과
+      관문 미실행(기존 갭 유지), 5m Expert 예측력 검증 불가(데이터 부족, 기존 갭 유지),
+      정식 번들 포맷(manifest.yaml) 여전히 미구현(Registry 없음).
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)

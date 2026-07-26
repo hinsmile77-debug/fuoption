@@ -258,3 +258,63 @@ handler가 특정 BusMessage 서브클래스로 좁게 타입돼 있어 발생, 
 이번 수정 대상에서 제외 — 실행 동작에는 영향 없음(319건 전체 회귀 통과로 확인).
 
 ---
+
+## 2026-07-28 (6차 — 5m Expert 정식(탐색·앙상블·교정) + Meta-Labeler, Ver 2.0 §9 W17~19)
+
+### [설계결정] out-of-fold 생성 로직을 HorizonExpert 내부가 아니라 trainer.py에 둠
+
+**근거**: Ver 1.6 §5.1 "1차 모델을 Walk-Forward로 가상 운용"과 §6.1 "검증 폴드에서
+Isotonic 교정기 학습"은 사실상 같은 메커니즘(폴드별 재학습 + out-of-fold 예측 수집)을
+요구한다 — 교정기 학습용과 Meta-Labeler 학습용 데이터를 각각 따로 만들면 같은 계산을
+두 번 하게 된다.
+**결정**: `models/trainer.py`의 `generate_out_of_fold_predictions()`가 `PurgedKFold`로
+폴드를 나누고 폴드마다 `HorizonExpert.train()`(그 폴드에서 제외된 데이터만)을 호출해
+`HorizonExpert.predict()`(공개 API)로 예측을 얻는 단일 경로를 만들고, 그 산출물
+(`OutOfFoldRecord` 목록)을 `ProbabilityCalibrator.fit()`과
+`build_meta_training_data()` 양쪽에 그대로 재사용한다.
+**Why**: HorizonExpert 자신이 "내가 저 데이터로 학습됐는지"를 추적하게 만들면(Ver 1.2
+§1 "전문가는 서로를 모른다"는 원칙과도 어긋나고) 클래스가 무거워진다 — 폴드 분할·재학습·
+수집이라는 오케스트레이션은 Trainer(L6)의 책임이고, Expert(L3)는 학습된 상태로 예측만
+하면 된다는 역할 분리를 그대로 지켰다. 부수적으로 `HorizonExpert.predict()`의 내부
+booster 리스트를 trainer.py가 몰라도 되게 캡슐화가 유지된다(직접 booster를 순회하며
+확률을 뽑는 대신 공개 predict() 결과의 p_up/p_flat/p_down/ens_std만 읽음).
+**How to apply**: 향후 다른 Horizon Expert나 다른 1차 모델(예: Options AI 매트릭스)도
+같은 "가상 운용" 데이터가 필요해지면 `generate_out_of_fold_predictions()`와 같은 패턴
+(PurgedKFold + 공개 predict() 재사용)을 그대로 따를 것 — 모델 클래스 내부를 열어보지
+않는다.
+**검증**: tests/models/test_trainer.py — out-of-fold 레코드 확률 합=1·ens_std≥0 확인,
+`train_formal_expert()` end-to-end 테스트(합성 데이터)로 전체 경로 통과 확인 + 실제
+스모크 스크립트로 합성 200봉 기준 192건 out-of-fold 산출 확인.
+
+### [설계결정] Meta-Labeler 임계값은 정확도가 아니라 비용차감 기대수익 최대화로 선택
+
+**근거**: Ver 1.6 §5.2 원문 "Meta 통과 임계 τ는 검증 구간에서 비용 차감 후 기대수익
+최대화로 선정(정확도 최대화가 아니다)".
+**결정**: `select_threshold()`가 후보 임계값 그리드(기본 0.0~1.0, 0.05 간격)마다
+"그 임계값 이상만 통과했을 때 남는 신호들의 평균 net_return"을 계산해 최댓값을 내는
+임계값을 고른다. 동률이면 더 보수적인(높은) 임계값을 남긴다.
+**Why**: 정확도(예측 성공률)를 최대화하는 임계값은 신호 수를 과도하게 줄여 "맞춘 것만
+남기고 기회 자체를 버리는" 방향으로 갈 수 있다 — 실제 목적(수익)과 대리 지표(정확도)가
+어긋나는 전형적인 사례라 원문이 명시적으로 경고한 것으로 이해했다.
+**Why(동률 처리)**: 여러 임계값이 같은 평균 수익을 낸다면, 신호 수가 더 적더라도(더
+엄격하더라도) 안정성 측면에서 보수적인 쪽이 낫다고 판단 — 이건 원문에 명시되지 않은
+설계 판단이라 별도로 기록해 둔다(재검토 대상이면 여기를 먼저 볼 것).
+**검증**: tests/strategy/futures/test_meta_labeler.py — 손으로 계산한 5-포인트 그리드
+사례(최댓값이 중간 임계값에서 나오는 케이스)와 동률 케이스 둘 다 통과.
+
+### [설계결정] lightgbm 이후 신규 ML 의존성(optuna)은 설치 직후 최소 스모크부터
+
+**근거**: 지난주(W14~16) lightgbm 4.7.0이 Dataset 생성 단계에서 100% 크래시하는 사고를
+겪었다 — "설치됨≠동작함"이 실제로 일어날 수 있다는 걸 학습.
+**결정**: optuna를 pyproject.toml에 추가하기 전에 먼저 `uv pip install`로 설치해
+`create_study().optimize()` 최소 예제부터 돌려 확인한 뒤에야 본 구현에 반영했다.
+**Why**: 본 구현(하이퍼파라미터 탐색 전체)을 다 짜고 나서 실행 단계에서 크래시를
+만나면 원인 추적 범위가 훨씬 넓어진다 — 의존성 자체의 건전성을 먼저 분리해 확인하는
+게 싸다.
+**How to apply**: 이후 신규 ML/데이터 계열 의존성을 추가할 때(scikit-learn 이미
+있었으니 생략했었지만, 새로운 라이브러리라면) 같은 순서(설치→최소 스모크→본 구현)를
+기본값으로 삼을 것.
+**검증**: optuna 최소 스모크 통과(비선형 목적함수 20 trial 최적화 확인) 후 본 구현
+착수, 문제 재발 없음.
+
+---

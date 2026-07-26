@@ -125,6 +125,52 @@ numpy 메이저 버전을 요구하는 상태였음. `lightgbm==4.3.0`으로 내
   "근거 top5"(Ver 1.1 §3-4)가 실제로 필요해지는 Meta Decision Engine 구현 시점(W24~26)에
   재검토 대상.
 
+## 5m Expert 정식(탐색·앙상블·교정) + Meta-Labeler (Ver 2.0 §9 W17~19)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| models.search.search_hyperparameters | ✅ | ✅ 2026-07-28 | — | Ver 1.6 §2.2 탐색 공간(num_leaves/max_depth/min_data_in_leaf/learning_rate/feature_fraction/bagging_fraction/lambda_l1/l2) 원문 그대로 인코딩. Optuna(TPE) + `PurgedKFold`(W12~13 재사용)로 "창 내부 CV로만 탐색" 실제 구현 — objective=폴드 평균 multi_logloss. early_stopping은 이번 스코프 제외(알려진 갭). 단위 테스트 5건(커스텀 탐색공간 키/범위 검증·시드 고정 시 결정론성·퇴화 폴드(train/test 어느 한쪽 빔) 안전 처리·기본 탐색공간이 프로덕션 공간과 일치) |
+| models.calibration.ProbabilityCalibrator | ✅ | ✅ 2026-07-28 | — | Ver 1.6 §6.1 — 클래스별 Isotonic Regression(one-vs-rest) + 재정규화. out-of-fold 데이터로 학습해야 한다는 제약을 모듈 docstring에 명기. 단위 테스트 3건(재정규화 합=1 확인·1차원 입력 처리·과신 보정 손계산 known-value — 동일 입력 x=0.9 반복 시 PAVA가 pooled 평균으로 수렴하는 성질 이용) |
+| models.calibration.ConformalCalibrator | ✅ | ✅ 2026-07-28 (메커니즘만) | — | Ver 1.2 §6 / Ver 1.6 §6.2 — 비적합도 분위수 계산 메커니즘 구현·합성 데이터로 정확성 검증(known-value 6건: 비적합도 계산·분위수 산출·이력 없을 때 최대보수값·구간 클리핑·잘못된 alpha 거부). **실제 운영 이력 없음** — 매일 갱신되는 라이브/페이퍼 예측 로그가 전제인데 그 이력이 아직 없다(G2 페이퍼트레이딩 W39~40부터, 알려진 갭). 어떤 운영 루프에도 아직 안 붙어 있음 |
+| strategy.futures.expert.HorizonExpert (앙상블+교정 재설계) | ✅ | ✅ 2026-07-28 | — | W14~16 단일모델 프로토타입을 Ver 1.6 §2.3 미니 앙상블(×5, seed만 다름)로 확장 + `ProbabilityCalibrator` 선택적 부착. `ens_std`는 Ver 1.2 §6 원문 그대로 "P(+1) 표준편차"로 계산(다른 클래스 아님). 저장/로드가 앙상블 멤버 다중 파일(`{stem}_e{i}.lgb`) + 메타데이터(`.json`) + 교정기(`.pkl`, sklearn 객체라 pickle — Ver 1.6 §9.1 번들 포맷과 동일 확장자)로 확장. 단위 테스트 15건(기본 앙상블 크기 5·커스텀 멤버수/시드·단일멤버 ens_std=0 확인·플레이스홀더 필드(meta_passed 항상 True 등)·빈 부스터 거부·feature_set 불일치·feature_row NaN 매핑·top_features 정렬·저장/로드 왕복(교정기 유무 양쪽)·교정기 부착 시 확률 실제로 바뀌는지·교정기 제거) |
+| strategy.futures.meta_labeler.MetaLabeler | ✅ | ✅ 2026-07-28 | — | Ver 1.2 §5 / Ver 1.6 §5 — Horizon별 얕은 LightGBM(depth≤4, leaves≤15) 이진 분류기. 메타 Feature 5개(1차확률·마진·앙상블분산·실현변동성 근사·시간대)만 지금 계산 가능 — Regime·스프레드·이벤트근접도는 각각 W20~21·호가WS·Event Calendar 미구현이라 제외(모듈 docstring에 명기). `select_threshold()`가 Ver 1.6 §5.2 "비용차감 후 기대수익 최대화"를 그리드서치로 실제 구현(정확도 최대화 아님). 단위 테스트 14건(메타Feature 조립 known-value·순net_return 부호 검증(up/down/flat 신호)·학습데이터 조립이 flat신호 제외+y라벨 정확히 산출하는지·임계값선택 known-value(그리드 평균 손계산)+동률 시 보수적 선택·MetaLabeler 학습/예측/임계값 교체(재학습 없음)/저장로드 왕복) |
+| models.trainer.generate_out_of_fold_predictions | ✅ | ✅ 2026-07-28 | — | Ver 1.6 §5.1 "1차 모델을 Walk-Forward로 가상 운용 → out-of-fold 신호만 수집"을 `PurgedKFold`로 실제 구현(칸닝 방지 — W12~13에 만든 CV 인프라의 첫 실사용처). 폴드마다 그 폴드에서 제외된 데이터로 학습한 앙상블의 `HorizonExpert.predict()`를 그대로 호출해 예측을 얻는다(booster 내부에 안 손대고 공개 API만 재사용). 단위 테스트 3건(정상 산출 시 확률 합=1·ens_std≥0·길이불일치 거부·레이블 없을 때 빈 결과) |
+| models.trainer.train_formal_expert | ✅ | ✅ 2026-07-28 | — | Ver 1.6 §7.1 [3]~[4]단계 전체 오케스트레이션(탐색→out-of-fold→최종 앙상블 전체데이터 재학습→교정 부착→Meta-Labeler 학습+임계값선택) — `ExpertTrainingResult`(expert, meta_labeler, best_params, n_oof_records, n_meta_signals) 반환. out-of-fold 신호가 0건이면(데이터 부족) 조용히 빈 Meta-Labeler를 만드는 대신 ValueError로 실패(정식 경로는 칸닝 방지 메커니즘이 실제로 작동했다는 보장이 핵심이라는 판단). `train_prototype_expert()`(W14~16)는 그대로 유지 — 빠른 배관 확인용 경로로 남김. 단위 테스트 4건(전체 결과 필드 검증·교정기 부착 확인·빈 bars 거부·데이터 부족 거부) + `scripts/run_formal_expert_training_smoke.py` 실제 실행 확인 |
+| scripts/run_formal_expert_training_smoke.py | ✅ | ✅ 2026-07-28 | — | 실제 아카이브(A05608, 5m, 7건)로 먼저 시도 → 예상대로 "데이터 부족" ValueError로 실패(정직하게 보고) → 200건 합성(사인파+지터) 데이터로 전체 파이프라인 실행: 탐색 완료(8개 하이퍼파라미터 산출) → out-of-fold 192건 → Meta-Labeler 192개 신호로 학습·임계값 0.9 선택 → 5-멤버 앙상블+교정기 부착 → 마지막 봉 예측→Meta-Labeler 통과판정까지 end-to-end 1회 성공. 합성 데이터는 스크립트 출력에 "실제 시장 데이터 아님" 명시 |
+
+## optuna 설치·동작 확인 (2026-07-28)
+
+지난주 lightgbm 4.7.0 Windows 휠 크래시 사고 이후 신규 ML 의존성은 설치 직후 최소 스모크
+테스트를 거치는 습관을 들임 — optuna 4.9.0은 기본 `create_study().optimize()` 호출로 별
+문제 없이 동작 확인(sqlalchemy/alembic 등 부수 의존성이 딸려오지만 기본 `InMemoryStorage`
+사용 시 문제 없음). `pyproject.toml` ml extras에 `optuna>=3.6` 추가.
+
+## 알려진 갭 (5m Expert 정식·Meta-Labeler, 2026-07-28)
+
+- **Meta-Labeler의 Regime·스프레드·이벤트근접도 입력 미구현**: Ver 1.2 §5.2 원문이 요구하는
+  입력 중 Regime(HMM, W20~21)·스프레드(호가 WS 미구독)·이벤트 근접도(Event Calendar
+  미구현)는 아직 못 낸다 — 지금은 1차확률·마진·앙상블분산·실현변동성 근사·시간대 5개만
+  사용(strategy/futures/meta_labeler.py 모듈 docstring).
+- **실현변동성은 ATR이 아니라 px_bb_width_20 재사용**: 별도 ATR 재계산 대신 FeatureVector가
+  이미 갖고 있는 변동성 계열 Feature를 근사치로 재사용 — Ver 1.5 §5 Feature 선정 절차가
+  아직 없어(기존 갭) "가장 적합한" 변동성 지표를 고른 게 아니라 편의상 하나를 고정 선택.
+- **early_stopping 미구현**: Ver 1.6 §2.2가 명시한 항목이나, 폴드 내부에 학습/조기종료용
+  홀드아웃을 추가로 쪼개는 복잡도 대비 지금 데이터 규모에서 실익이 작다고 판단해 생략 —
+  `num_boost_round` 고정값 사용(models/search.py 모듈 docstring).
+- **ConformalCalibrator는 메커니즘만 있고 실사용 이력이 없다**: 매일 갱신되는 라이브/
+  페이퍼 예측 로그가 전제인데(Ver 1.6 §6.2) 그 운영 루프 자체가 없다(G2 페이퍼트레이딩,
+  W39~40부터). 지금은 어떤 곳에도 안 붙어 있고 합성 데이터로 계산 정확성만 검증됨.
+- **Deflated Sharpe·실제 walk-forward 백테스트 성과 관문은 여전히 미실행**(W14~16
+  기존 갭 유지): Cost Model·Expert·Validator·Meta-Labeler가 전부 갖춰졌지만 이들을 엮어
+  실제 성과 시계열을 뽑는 백테스트 하니스 자체가 아직 없다.
+- **5m Expert의 예측력은 여전히 검증 불가**(W14~16 기존 갭과 동일 이유): 실측 아카이브가
+  하루치뿐이라 탐색·out-of-fold·Meta-Labeler 전 구간이 실제 시장 데이터로는 못 돌아간다
+  (실측: 7건으로 시도 → 예상대로 실패). 이번 주 산출물은 배관 검증(합성 데이터로 전체
+  경로가 실제로 도는지)이지 예측력 검증이 아니다.
+- **HorizonExpert 저장 포맷은 여전히 Ver 1.6 §9.1 정식 번들(manifest.yaml 등)이 아니다**:
+  앙상블 멀티파일+JSON+선택적 pickle로 확장됐지만 Registry가 없어 정식 패키징은 그대로
+  미룸(W17~19 이후 재검토, expert.py 모듈 docstring).
+
 ## 운영 스크립트 (scripts/)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
