@@ -184,6 +184,26 @@ class ExpertView(BusMessage):
     valid_until: datetime | None = None
 
 
+class FuturesView(BusMessage):
+    """Futures AI 통합 출력 (intel.futures) — Aggregator 산출물, Ver 1.2 §7.2, Ver 2.0 §9 W24~26.
+
+    개별 `ExpertView`는 "intel.futures 구성요소"(ExpertView 자체 docstring)이고, 이 메시지가
+    Regime 가중치·Meta-Labeler 통과여부·불확실성·신선도를 반영해 실제로 합성한 최종 출력이다
+    (`strategy/futures/aggregator.py`)."""
+
+    symbol: str
+    score: float  # S = Σ_h w(regime,h)×(P_h(+1)−P_h(−1))×meta_h×(1−u_h)×f_h (Ver 1.2 §7.2)
+    agg_p_up: float  # 가중평균 P(+1) — score와 동일 가중치로 정규화(Σ가중치=1 기준)
+    agg_p_down: float  # 가중평균 P(−1)
+    uncertainty: float  # 가중평균 정규화 불확실성 [0,1] — 기여 Horizon이 없으면 1.0(최대 보수)
+    dispersion: float  # Horizon 간 방향 의견 분산(Ver 2.0 §3.1 ③ NO TRADE 판정 입력)
+    regime: Regime
+    n_experts: int  # 이번 집계에 실제로 기여한(meta 통과 + 신선) Horizon 수
+    model_versions: list[str] = Field(default_factory=list)  # 기여 Expert들의 번들 ID(중복 제거)
+    top_features: list[tuple[str, float]] = Field(default_factory=list)  # XAI 근거 top5
+    valid_until: datetime | None = None  # 기여 Horizon 중 가장 이른 다음 갱신 시각
+
+
 class DecisionIntent(BusMessage):
     """Meta Decision Engine의 최종 의도 (decision.intent) — Ver 1.1 §4.3."""
 

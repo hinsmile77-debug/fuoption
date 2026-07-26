@@ -33,14 +33,14 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import lightgbm as lgb
 import numpy as np
 
-from messiah.core.messages import BarClosed, FeatureVector, Horizon
+from messiah.core.messages import HORIZON_SECONDS, BarClosed, FeatureVector, Horizon
 from messiah.models.labeling import TripleBarrierLabel
 
 # Ver 1.2 §5.2 "모델: 얕은 LightGBM (깊이 3~4)" / Ver 1.6 §5.1 "max_depth 3~4, num_leaves
@@ -93,6 +93,31 @@ def build_meta_features(
         "meta_ens_std": float(ens_std),
         "meta_realized_vol": float(realized_vol) if realized_vol is not None else 0.0,
         "meta_minutes_since_open": _minutes_since_session_open(bar.bar_open_kst),
+    }
+
+
+def build_meta_features_from_feature_vector(
+    probs: np.ndarray, ens_std: float, feature_vector: FeatureVector
+) -> dict[str, float]:
+    """`build_meta_features()`의 실시간 추론 경로 전용 버전(Ver 2.0 §9 W24~26, `strategy/
+    futures/service.py`가 호출) — Trainer 경로는 실제 `BarClosed`를 갖고 있지만(look-ahead
+    없는 학습 파이프라인), 실시간 추론 경로는 `FeatureVector`만 받는다. `bar.bar_open_kst`는
+    `FeatureVector.valid_until − Horizon 길이`로 정확히 역산 가능하다(`valid_until`이
+    `core/messages.py`의 `bar_confirm_time()`과 동일한 공식으로 채워지기 때문, `features/
+    engine.py` 참고) — 별도 `BarClosed` 구독 없이 이 함수 하나로 시간대 Feature까지 낸다."""
+    if feature_vector.valid_until is None:
+        raise ValueError("valid_until 없는 FeatureVector로는 시간대 Feature를 계산할 수 없음")
+    bar_open_kst = feature_vector.valid_until - timedelta(
+        seconds=HORIZON_SECONDS[feature_vector.horizon]
+    )
+    sorted_probs = sorted(probs, reverse=True)
+    realized_vol = feature_vector.values.get(_REALIZED_VOL_FEATURE_KEY)
+    return {
+        "meta_p_primary": float(sorted_probs[0]),
+        "meta_margin": float(sorted_probs[0] - sorted_probs[1]),
+        "meta_ens_std": float(ens_std),
+        "meta_realized_vol": float(realized_vol) if realized_vol is not None else 0.0,
+        "meta_minutes_since_open": _minutes_since_session_open(bar_open_kst),
     }
 
 

@@ -148,6 +148,29 @@ def test_unmatched_fill_halts_gateway_not_ghost_position() -> None:
     asyncio.run(run())
 
 
+def test_halt_blocks_new_entries_but_not_emergency_liquidation() -> None:
+    """Kill Switch가 halt() 후에도 자기 청산 주문(EMERGENCY)은 낼 수 있어야 한다 —
+    halted가 EMERGENCY까지 막으면 청산 자체가 불가능해지는 모순 (Ver 2.0 §9 W24~26 실측 발견)."""
+
+    async def run() -> None:
+        gw = OrderGateway(_primed_broker())
+        await gw.halt("test")
+        assert gw.halted
+        assert await gw.submit(_req()) is None  # 일반 진입은 여전히 거부
+
+        emergency = OrderRequest(
+            intent_id="kill-switch",
+            symbol="K200_MINI_FUT",
+            kind=OrderKind.EMERGENCY,
+            side=Side.SHORT,
+            qty=3,
+        )
+        ack = await gw.submit(emergency)
+        assert ack is not None  # 청산은 통과
+
+    asyncio.run(run())
+
+
 def test_failed_submit_rolls_back_pending() -> None:
     async def run() -> None:
         gw = OrderGateway(_primed_broker())

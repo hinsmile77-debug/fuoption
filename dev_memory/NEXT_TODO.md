@@ -539,6 +539,89 @@
       (FL 20%·OP 20%·RG 20%) 미달, vl_har_pred/vl_intraday_shape 보류, Aggregator/Meta
       Decision과의 결선 여전히 없음(W24~26 스코프).
 
+## W24~26 (Aggregator·Meta Decision·Risk Engine·Sizer·Kill Switch — 전 경로 관통)
+
+- [x] strategy/{futures/aggregator,futures/service,decision/meta_decision,pipeline}.py +
+      strategy/regime/runtime.py + risk/{risk_engine,sizer,kill_switch}.py 신규 +
+      execution/order_gateway.py 확장 (2026-07-30 완료) —
+      **src/messiah/core/messages.py**: `FuturesView` 신규(Aggregator 산출물, `intel.futures`)
+      — score/agg_p_up/agg_p_down/uncertainty/dispersion/regime/n_experts/model_versions/
+      top_features/valid_until.
+      **src/messiah/strategy/futures/aggregator.py 신규**: `Aggregator` — Ver 1.2 §7.1
+      가중치 매트릭스(6 Regime×6 Horizon, 원문 표 그대로 상수화) + §7.2 통합점수 공식
+      (S=Σw×방향×meta×(1−u)×신선도). dispersion(Ver 2.0 §3.1 ③ 입력)은 원문에 계산식이
+      없어 "집계 기여 Horizon들의 방향점수 표준편차"로 직접 정의(모듈 docstring에 근거 명기).
+      XAI top5는 전문가×Feature 기여도를 가중치로 스케일해 합산.
+      **src/messiah/strategy/futures/service.py 신규**: `FuturesAIService` — Ver 1.2 §9가
+      명시한 `service.py`("feat.* 구독 → Expert → MetaLabeler → Aggregator → intel.futures
+      발행, 프로세스 진입점")의 최초 구현. W14~19에 이미 만들어진 `HorizonExpert`/
+      `MetaLabeler`가 이번 주 처음으로 실시간 루프에 연결됨. `BarClosed` 재구독 없이
+      `meta_labeler.build_meta_features_from_feature_vector()`(신규 헬퍼, `valid_until`로
+      봉 시가 역산)만으로 시간대 메타 Feature까지 계산 — `FeatureEngine`과 같은 `bar.*`를
+      중복 구독해 핸들러 등록 순서에 의존하게 되는 취약점을 피함.
+      **src/messiah/strategy/regime/runtime.py 신규**: `RegimeRuntime` — 이미 학습된
+      `RegimeAI` 인스턴스를 `bar.30m.{symbol}`에 배선해 `intel.regime` 상시 발행(W20~21
+      "어떤 운영 루프에도 아직 발행 안 됨" 상태를 해소).
+      **src/messiah/strategy/decision/meta_decision.py 신규**: `MetaDecisionEngine` —
+      Ver 2.0 §3.1 규칙 ①~⑤(kill 활성/이벤트·UNKNOWN 국면/의견분산>0.25/|S|<0.20/방향 결정)
+      우선순위 그대로. ⑥⑦(Options AI 비교·상관노출 합산)은 Options AI 자체가 없어(Phase 4)
+      코드 경로가 아예 없음. NO TRADE도 근거와 함께 항상 발행(Ver 2.0 §3.2). `horizon` 필드는
+      의도적으로 항상 None(S가 이미 전 Horizon 통합값이라 특정 Horizon을 지목할 수 없음).
+      **src/messiah/risk/risk_engine.py 신규**: `RiskEngine` — Ver 2.0 §5 한도표 중 R2(일일
+      손실)·R3(증거금)·R5(포지션수)·R10(연속손실)·R11(데이터단절)·R12(주문오류율) + Net
+      ER>0 게이트. **R1(단일포지션 최대손실 2%)은 이 클래스가 아니라 Sizer의 사이징 상한으로
+      구조적으로 강제**(순서상 Risk Engine 통과 시점엔 아직 사이징 전이라 검사할 수량 자체가
+      없음 — 모듈 docstring에 설계 근거 상세 기록). R3·R5는 "예상 증거금/포지션수"가 아니라
+      "현재 상태" 기준 게이트로 구현해 사이징 전 순환 의존을 피함. R4·R6·R7·R8·R9는 세션
+      인식·옵션 Greeks 전제라 미구현(명시적 갭).
+      **src/messiah/risk/sizer.py 신규**: `PositionSizer` — Ver 1.1 §4-3 "Vol Targeting ×
+      Fractional Kelly × 불확실성 페널티"를 Ver 2.0 §2 워크스루 예시("Vol Target × 1/4
+      Kelly × (1−0.11) → 미니 3계약") 그대로 세 항의 곱으로 구현. Kelly 엣지는 실현
+      트랙레코드가 없어 대칭 페이오프(b=1) 가정 근사(`edge=2p−1`)로 단순화(명시적 갭).
+      **src/messiah/risk/kill_switch.py 신규**: `KillSwitch` — Ver 1.1 §4-4/Ver 2.0 §5
+      트리거(R2+R11(지속)+수동+모델이상) 구현. 발동 시 `sys.kill` 발행 + 청산 주문 목록
+      생성(`liquidate()`, 제출은 호출자가 OrderGateway로 — 계명 1 유지).
+      **src/messiah/execution/order_gateway.py**: `halt()` 신규 공개 메서드(`resume()`과
+      대칭) + `submit()`이 `kind=EMERGENCY`는 halted 상태에서도 통과시키도록 수정.
+      **src/messiah/strategy/pipeline.py 신규**: `TradingPipeline` — L3(FuturesView)→
+      L4(Cost→Risk→Sizer)→L5(OrderGateway) 전 경로 관통 오케스트레이터("전 경로 관통"의
+      실체). Net Expected Return은 크기 예측 모델이 없어 `edge×ATR(M1,14봉)−왕복비용`으로
+      근사(명시적 갭, 모듈 docstring에 근거 기록).
+      **버그 2건 발견·수정(둘 다 `scripts/run_full_path_smoke.py` 최초 실행 중 실측으로
+      발견, 실제 실행 없이는 안 드러났을 종류)**:
+      (1) `FuturesView.ts_utc`가 Aggregator의 `as_of`(봉 도메인 시각)와 무관하게 `BusMessage`
+      기본값(wall clock)으로 채워지고 있어, 재생/스모크처럼 과거·합성 시각을 빠르게 재생하면
+      `TradingPipeline`의 R11 판정이 "wall clock now" vs "봉 도메인 시각"을 비교해 수억 초
+      단위 가짜 데이터단절을 일으킴(최초 스모크 실행 로그: "R11 데이터단절 15172559s 지속")
+      — `Aggregator.compute()`가 `ts_utc=as_of`로 명시 오버라이드, `FuturesAIService`가
+      `trigger.valid_until`(봉 도메인)을 `as_of`로 사용하도록 수정.
+      (2) 신선도(f_h) 공식이 처음부터 방향이 반대였음 — `valid_until`은 스키마 주석("다음
+      완성봉 시각")과 달리 실제로는 "그 봉 자신의 확정 시각"(`features/engine.py`가 그렇게
+      채움, `RegimeState`/`ExpertView` 등 다른 발행자도 전부 동일 — 이번에 처음 확인된
+      pre-existing 관례)인데, 최초 구현은 이를 미래 만료 시점으로 오독해 발행 즉시 신선도가
+      0이 되는 반대 결과를 냈음 — `(as_of−valid_until)/Horizon` 경과 기준으로 공식 반전.
+      (3) 위 두 버그를 고치는 과정에서 세 번째(설계상) 문제도 발견: `OrderGateway.halt()`가
+      `kind=EMERGENCY`까지 차단해 Kill Switch 자신의 청산 주문이 거부되는 모순이 있었음
+      (청산 로그가 매 Horizon 갱신마다 반복 발행되는 것으로 발견) — `submit()`이 EMERGENCY는
+      halted여도 통과시키도록 수정, 회귀 테스트 추가.
+      **scripts/run_full_path_smoke.py 신규**: 실제 아카이브 시도(예상대로 실패) → 합성
+      데이터로 Expert 2개(5m·30m)+Meta-Labeler 학습 + RegimeAI 학습 → 전체 실시간 배선
+      구동(FeatureEngine·FuturesAIService·RegimeRuntime·SimBroker·TradingPipeline) → 직접
+      주입한 강한 LONG 신호로 Sizer→RiskEngine→OrderGateway→SimBroker 전 경로 주문 체결
+      확인(포지션 16계약 개설) → 계좌 손실 조작으로 Kill Switch(R2) 실제 발동·청산·Gateway
+      정지까지 end-to-end 1회 성공.
+      테스트 71건 신규(aggregator 10·futures_service 6·regime_runtime 4·meta_decision 11·
+      risk_engine 13·sizer 10·kill_switch 10·pipeline 6·order_gateway EMERGENCY 우회 1),
+      전체 510건 통과. ruff 클린(신규 파일 기준 — 리포 전체 I001 경고는 기존부터 있던 별개
+      항목, W22~23부터 반복 확인된 사항). pyright는 신규 파일 기준 클린(`strategy/regime/
+      runtime.py`의 `Handler`/`BarClosed` 분산성 경고 1건은 `features/engine.py`가 W6~8부터
+      갖고 있던 동일 패턴 — 신규 아님, 일관성 확인 차 대조까지 완료).
+      남은 갭(capability_matrix.md 기록): Regime 가중치 매트릭스 Walk-Forward 재추정 없음,
+      Conformal 불확실성 미사용(기존 갭), Options AI 부재로 ⑥⑦·R7~R9 코드 경로 자체 없음,
+      R4·R6(세션 인식 없음), Kelly 엣지 대칭 페이오프 근사, `point_value_krw` 미실측, Net ER
+      계산식 명시적 근사, R10 결선 없음(포지션 추적기 부재), R12 심볼별 미분리, Kill Switch
+      실제 KIS 계좌 청산 미실측.
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)

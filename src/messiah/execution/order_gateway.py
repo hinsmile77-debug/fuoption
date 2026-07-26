@@ -23,7 +23,7 @@ import asyncio
 
 from messiah.broker.base import BrokerAdapter, SubmitResult
 from messiah.core.logging import log
-from messiah.core.messages import Fill, OrderAck, OrderRequest
+from messiah.core.messages import Fill, OrderAck, OrderKind, OrderRequest
 from messiah.core.timeutil import now_utc
 
 
@@ -78,8 +78,13 @@ class OrderGateway:
         return self._halted
 
     async def submit(self, req: OrderRequest) -> OrderAck | None:
-        """pending 선등록 → 전송 → 실패 시 롤백. (L1 패턴의 유일한 구현처)"""
-        if self._halted:
+        """pending 선등록 → 전송 → 실패 시 롤백. (L1 패턴의 유일한 구현처)
+
+        `halted` 상태에서도 `kind=EMERGENCY`는 통과시킨다 — Ver 2.0 §5 "Kill Switch 트리거 시:
+        신규 차단 → 전 포지션 청산 절차"(원문)는 청산 자체를 차단 대상으로 두지 않는다.
+        `halted`가 EMERGENCY까지 막으면 Kill Switch가 스스로 청산을 못 하는 모순이 생긴다
+        (Ver 2.0 §9 W24~26, `risk/kill_switch.py` 도입 중 실측으로 발견)."""
+        if self._halted and req.kind != OrderKind.EMERGENCY:
             log("OrderSubmit", "rejected: gateway halted", request_id=req.msg_id)
             return None
 
@@ -133,3 +138,11 @@ class OrderGateway:
         """사람 확인 후에만 재개 (Kill Switch와 동일 철학)."""
         log("OrderSubmit", "gateway resumed by operator", operator=operator)
         self._halted = False
+
+    async def halt(self, reason: str) -> None:
+        """긴급 정지 공개 진입점 — `resume()`과 대칭(Ver 2.0 §9 W24~26, `risk/kill_switch.py`
+        전용). 기존엔 `on_fill()`의 미매칭 체결 CRITICAL 경로에서만 내부적으로 halted=True로
+        전환됐음 — Kill Switch처럼 체결과 무관한 사유(일일손실 한도 등)로도 정지시켜야 하는
+        상위 감시자를 위해 명시적 진입점을 신설했다."""
+        self._halted = True
+        log("OrderSubmit", f"gateway halted: {reason}", reason=reason)

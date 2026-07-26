@@ -387,3 +387,77 @@ numpy 메이저 버전을 요구하는 상태였음. `lightgbm==4.3.0`으로 내
   아니라 서버측/유량제한 추정. 확실히 밝히려면 approval_key 재발급 간격을 충분히 띄운
   상태에서 재검증 필요(이번 세션엔 실측을 더 반복하지 않고 보류 — API를 더 두들기지
   않기 위함).
+
+## Aggregator·Meta Decision·Risk Engine·Sizer·Kill Switch (Ver 2.0 §9 W24~26, 전 경로 관통)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| strategy.futures.aggregator.Aggregator | ✅ | ✅ 2026-07-30 | — | Ver 1.2 §7.1 가중치 매트릭스(6 Regime×6 Horizon)·§7.2 통합점수 공식 그대로 구현. 신선도(f_h) 구현 중 실제 버그 발견·수정(아래 "알려진 갭·버그" 참고). 단위 테스트 10건 |
+| strategy.futures.service.FuturesAIService | ✅ | ✅ 2026-07-30 | — | Ver 1.2 §9 모듈 구조의 `service.py`(HorizonExpert→MetaLabeler→Aggregator→intel.futures) 최초 배선 — W14~19에 구현만 되고 실시간 루프에 안 붙어 있던 HorizonExpert/MetaLabeler를 실제로 연결. 단위 테스트 6건 |
+| strategy.regime.runtime.RegimeRuntime | ✅ | ✅ 2026-07-30 | — | RegimeAI(W20~21, "어떤 운영 루프에도 아직 발행 안 됨"이던 상태)를 `bar.30m.{symbol}`에 배선해 `intel.regime` 상시 발행. 단위 테스트 4건 |
+| strategy.decision.meta_decision.MetaDecisionEngine | ✅ | ✅ 2026-07-30 | — | Ver 2.0 §3.1 규칙 ①~⑤ 우선순위 그대로 구현. ⑥⑦(Options AI 비교)은 Options AI 자체가 없어(Phase 4) 코드 경로 자체가 없음(선택이 아니라 부재). NO TRADE도 근거와 함께 항상 발행(Ver 2.0 §3.2). 단위 테스트 11건 |
+| risk.risk_engine.RiskEngine | ✅ | ✅ 2026-07-30 | — | Ver 2.0 §5 한도표 중 R2(일일손실)·R3(증거금)·R5(포지션수)·R10(연속손실)·R11(데이터단절)·R12(주문오류율) + Net ER>0 게이트 구현. R1은 게이트가 아니라 Sizer의 사이징 상한으로 구조적으로 강제(모듈 docstring 근거). R4·R6·R7·R8·R9는 세션 인식·옵션 Greeks 전제라 미구현(아래 "알려진 갭"). 단위 테스트 13건 |
+| risk.sizer.PositionSizer | ✅ | ✅ 2026-07-30 | — | Ver 1.1 §4-3 "Vol Targeting × Fractional Kelly × 불확실성 페널티"를 Ver 2.0 §2 워크스루 예시 그대로 구현. Kelly 엣지는 대칭 페이오프(b=1) 가정 근사(실현 트랙레코드 없음, 알려진 갭). `point_value_krw`(50,000원/pt)는 공개적으로 알려진 값이나 KIS API 실측(계약승수 필드) 전 placeholder. 단위 테스트 10건 |
+| risk.kill_switch.KillSwitch | ✅ | ✅ 2026-07-30 | — | Ver 1.1 §4-4·Ver 2.0 §5 트리거(R2+R11(지속)+수동+모델이상) 구현. 발동 시 `sys.kill` 발행 + `OrderGateway.halt()` + `liquidate()`(반대매매 시장가 EMERGENCY 주문 목록, 제출은 호출자가 OrderGateway로). **실제 버그 발견·수정**: 최초 구현은 `OrderGateway.halt()`가 EMERGENCY 주문까지 차단해 Kill Switch 자신의 청산 주문이 거부되는 모순이 있었음 — `scripts/run_full_path_smoke.py` 실행 중 청산 로그가 반복 발행되는 것으로 발견, `OrderGateway.submit()`이 `kind=EMERGENCY`는 halted 상태에서도 통과시키도록 수정(회귀 테스트 `tests/test_core_w1.py::test_halt_blocks_new_entries_but_not_emergency_liquidation` 추가). 단위 테스트 10건 |
+| execution.order_gateway.OrderGateway.halt() | ✅ | ✅ 2026-07-30 | — | `resume()`과 대칭되는 신규 공개 진입점. 기존 61건 회귀 없음 + 신규 EMERGENCY 우회 테스트 1건 |
+| strategy.pipeline.TradingPipeline | ✅ | ✅ 2026-07-30 | — | L3(FuturesView)→L4(Cost→Risk→Sizer)→L5(OrderGateway) 전 경로 관통 오케스트레이터. Net Expected Return은 크기 예측 모델이 없어 `edge×ATR(M1,14봉) − 왕복비용`으로 근사(명시적 근사, 알려진 갭). 단위 테스트 6건 |
+| scripts/run_full_path_smoke.py | ✅ | ✅ 2026-07-30 | — | 실제 아카이브 시도(예상대로 데이터 부족 실패) → 합성 데이터로 Expert 2개(5m·30m)+Meta-Labeler 학습 → RegimeAI 학습 → 전체 실시간 배선(FeatureEngine·FuturesAIService·RegimeRuntime·SimBroker·TradingPipeline) 구동 → 직접 주입한 강한 LONG 신호로 Sizer→RiskEngine→OrderGateway→SimBroker 전 경로 주문 체결(포지션 16계약 개설) 확인 → 계좌 손실 조작으로 Kill Switch(R2) 실제 발동·청산·Gateway 정지까지 end-to-end 1회 성공. **이 스크립트 실행 중 위 KillSwitch/OrderGateway 버그와 아래 시각 도메인 버그를 실제로 발견** |
+
+### 실측 중 발견·수정한 버그 2건 (2026-07-30)
+
+1. **`FuturesView.ts_utc`/Aggregator 신선도 계산의 시각 도메인 불일치**: `Aggregator.compute()`가
+   신선도(f_h) 계산에 쓰는 `as_of`와 무관하게 `FuturesView`의 `ts_utc`는 `BusMessage` 기본값
+   (wall clock, `now_utc()`)으로 채워지고 있었다 — 실거래에선 wall clock≈봉 시각이라 안
+   드러나지만, 재생/스모크처럼 과거·합성 시각을 빠르게 재생하면 `TradingPipeline`의
+   R11(데이터단절) 판정이 "wall clock 기준 now" vs "봉 도메인 last_bar_confirm_at"을 비교해
+   수억 초 단위 가짜 단절을 일으켰다(스모크 스크립트 첫 실행에서 실측 발견, 로그
+   "R11 데이터단절 15172559s 지속"). `Aggregator.compute()`가 `FuturesView(ts_utc=as_of, ...)`로
+   명시 오버라이드하도록 수정 + `FuturesAIService._publish()`가 `trigger.ts_utc` 대신
+   `trigger.valid_until`(봉 도메인 시각)을 `as_of`로 넘기도록 수정(`strategy/futures/
+   aggregator.py`·`service.py` 모듈 docstring에 상세 근거 기록).
+2. **신선도(f_h) 공식 자체가 처음부터 거꾸로였음**: `valid_until` 필드는 스키마 주석("다음
+   완성봉 시각")과 달리 `features/engine.py`가 실제로 "그 봉 자신의 확정 시각"(= `bar_open_kst
+   + Horizon길이` = `bar_confirm_time`)으로 채운다 — 최초 구현은 이를 "미래 만료 시점"으로
+   오독해 `(valid_until − as_of)/Horizon`으로 감쇠시켰는데, 실제 채움값 기준으로는 발행
+   즉시 신선도가 0이 되는 반대 결과가 났다(위 1번 버그를 고치는 과정에서 단위 테스트로
+   재현·발견). `(as_of − valid_until)`(경과 시간) 기준으로 공식을 반전해 수정 —
+   `RegimeState.valid_until`·`ExpertView.valid_until` 등 이 필드를 채우는 다른 모든 발행자가
+   전부 "확정 시각" semantics를 따른다는 것도 이번에 함께 확인(pre-existing, 이번 주 버그
+   아님 — Aggregator만 잘못 해석하고 있었음).
+
+## 알려진 갭 (Aggregator·Meta Decision·Risk Engine·Sizer·Kill Switch, 2026-07-30)
+
+- **Regime 가중치 매트릭스(Ver 1.2 §7.1)는 Walk-Forward 재추정 없이 원문 초기값 고정**:
+  "이 표 자체가 학습 대상"(원문)이지만 재추정 파이프라인은 스코프 밖 — 분기회의 안건 후보.
+- **불확실성 정규화가 앙상블 분산(ens_std)뿐**: Ver 1.2 §6의 두 번째 겹(Conformal Prediction)은
+  여전히 실사용 이력 없음(G2부터, 기존 갭 유지) — Aggregator의 u_h는 그 전까지 근사치.
+- **Meta Decision Engine의 ⑥⑦(Options AI 비교·상관노출 합산)은 코드 경로 자체가 없음**:
+  Options AI(Ver 1.3)가 Phase 4(W27~31)까지 존재하지 않아 방향 의도만 낸다.
+- **Risk Engine의 R4(오버나이트 증거금)·R6(오버나이트 자격)·R7(순델타)·R8(순베가)·
+  R9(매도옵션 손실) 미구현**: R4·R6은 세션(장중/오버나이트) 구분을 아는 컴포넌트가 없어서
+  (Event Calendar 미구현, 기존 갭), R7·R8·R9는 옵션 포지션·Greeks 자체가 없어서(Options AI
+  부재)다.
+- **Sizer의 Kelly 엣지는 대칭 페이오프(b=1) 가정 근사**: `edge=2p−1`은 정식 Kelly
+  `(p·b−q)/b`의 단순화 — 실현 트랙레코드(Self Evaluation, Phase 5)가 쌓이면 실제 페이오프
+  비율로 교체할 자리.
+- **`point_value_krw`(50,000원/pt) 미실측**: 공개적으로 알려진 수치(정규선물의 1/5)이나
+  KIS API로 직접 확인(계약승수 필드)한 적은 없음 — `futures_tick_size`와 동일한 성격의 갭.
+- **TradingPipeline의 Net Expected Return은 명시적 근사**: 방향 확률만 내는 Expert 구조상
+  크기(magnitude) 예측이 없어 `edge×ATR(M1,14봉)`으로 기대이동폭을 대신한다 — 원문이 정한
+  공식이 아니라 이 구현의 선택(모듈 docstring에 근거 기록), 크기 예측 Expert나 실측
+  캘리브레이션이 생기면 교체 대상.
+- **R10(연속손실) 결선 없음**: `RiskEngine.record_trade_result()`를 실제로 호출하는 포지션
+  추적기(Ver 1.1 §5-3 Position Reconciler)가 아직 없다 — `record_order_error()`(R12)만
+  `gateway.submit()` 실패로 결선됨.
+- **R12 주문오류율은 심볼 구분 없이 전역 집계**: 현재 단일 심볼(A05608) 운용이라 문제되지
+  않으나, 멀티 심볼 확장 시(Ver 1.1 §7 복제 배포와 별개로 한 인스턴스가 여러 심볼을 다루게
+  되면) 심볼별 분리가 필요.
+- **Kill Switch의 청산은 시뮬레이션 브로커 기준으로만 검증됨**: 실제 KIS 계좌로 EMERGENCY
+  시장가 청산 주문을 낸 적은 없다(capability_matrix.md "KIS" 섹션의 기존 실측 범위 밖).
+- **Meta Decision Engine의 `latency_trace`는 재생/스모크에서 무의미할 수 있음**: `ts_utc`가
+  봉 도메인 시각일 때 `now_utc()`와의 차가 실제 지연이 아니게 된다 — 순수 정보성 필드라
+  게이팅에는 영향 없음(모듈 docstring에 명기).
+- **run_full_path_smoke.py의 RegimeRuntime 워밍업은 학습 데이터 꼬리를 재사용한 인위적
+  사전 채움**: 실제 운영은 기동 후 실제로 22개 30분봉(window+2)이 쌓일 때까지 자연스럽게
+  UNKNOWN 구간을 거친다 — 스모크는 그 대기를 건너뛰기 위한 장치일 뿐 실제 기동 절차가
+  아님(스크립트 docstring에 명기).
