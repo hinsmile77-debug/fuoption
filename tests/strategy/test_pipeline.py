@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from messiah.broker.simulator.adapter import SimBroker
+from messiah.core.event_calendar import EventCalendar
 from messiah.core.messages import BarClosed, FuturesView, Horizon, Regime, Side
 from messiah.core.timeutil import KST
 from messiah.execution.order_gateway import OrderGateway
@@ -13,9 +14,10 @@ from messiah.strategy.pipeline import TradingPipeline
 
 _SYMBOL = "TEST"
 _START = datetime(2026, 7, 30, 9, 0, tzinfo=KST)
+_NEAR_CLOSE_START = datetime(2026, 7, 30, 15, 10, tzinfo=KST)  # 15:35 마감 25분 전부터 워밍업
 
 
-def _m1_bars(n: int) -> list[BarClosed]:
+def _m1_bars(n: int, start: datetime = _START) -> list[BarClosed]:
     out = []
     price = 100.0
     for i in range(n):
@@ -25,7 +27,7 @@ def _m1_bars(n: int) -> list[BarClosed]:
             BarClosed(
                 symbol=_SYMBOL,
                 horizon=Horizon.M1,
-                bar_open_kst=_START + timedelta(minutes=i),
+                bar_open_kst=start + timedelta(minutes=i),
                 o_ticks=round(price),
                 h_ticks=round(price) + 2,
                 l_ticks=round(price) - 2,
@@ -62,8 +64,8 @@ async def _make_pipeline(**overrides):
     return bus, broker, gateway, pipeline
 
 
-async def _warm_up(pipeline, broker, n=20):
-    bars = _m1_bars(n)
+async def _warm_up(pipeline, broker, n=20, start: datetime = _START):
+    bars = _m1_bars(n, start)
     for bar in bars:
         broker.on_bar(bar)
         await pipeline.handle_bar(bar)
@@ -150,3 +152,29 @@ async def test_stale_futures_view_rejected_by_risk_engine():
     await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=stale_ts))
     positions = await broker.positions()
     assert positions == []
+
+
+@pytest.mark.asyncio
+async def test_event_calendar_blocks_new_entry_near_session_close_r6():
+    calendar = EventCalendar.from_file()  # 실제 configs/krx_holidays.yaml — 2026-07-30은 평일
+    bus, broker, gateway, pipeline = await _make_pipeline(event_calendar=calendar)
+    bars = await _warm_up(pipeline, broker, start=_NEAR_CLOSE_START)  # 마지막 봉 ~15:30 확정
+    fresh_ts = bars[-1].bar_open_kst + timedelta(seconds=60)  # 15:35 마감 5분 전, R11엔 안 걸림
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=fresh_ts))
+
+    positions = await broker.positions()
+    assert positions == []  # R6가 신규 진입을 거부 — Holding Policy §2.2 Type A 무포 오버나이트
+
+
+@pytest.mark.asyncio
+async def test_no_event_calendar_injected_allows_entry_near_close():
+    # event_calendar 미주입(기존 동작) — 같은 마감 임박 시각이어도 R6가 아예 평가되지 않는다.
+    bus, broker, gateway, pipeline = await _make_pipeline()
+    bars = await _warm_up(pipeline, broker, start=_NEAR_CLOSE_START)
+    fresh_ts = bars[-1].bar_open_kst + timedelta(seconds=60)
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=fresh_ts))
+
+    positions = await broker.positions()
+    assert len(positions) == 1

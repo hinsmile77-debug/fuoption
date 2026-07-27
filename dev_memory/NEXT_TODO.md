@@ -622,6 +622,32 @@
       계산식 명시적 근사, R10 결선 없음(포지션 추적기 부재), R12 심볼별 미분리, Kill Switch
       실제 KIS 계좌 청산 미실측.
 
+## W27 (Phase 4 착수 전 선행 인프라 갭 3건 — Event Calendar·백테스트 하니스·Options AI 인프라)
+
+- [x] core/event_calendar.py + configs/krx_holidays.yaml 신규, RiskEngine R4/R6·
+      TradingPipeline·run_l1_daily.py 결선 (2026-07-27 완료) — KRX 휴장일 인식 + 세션
+      판정. RiskEngine R4(오버나이트 증거금 25%, 30분 창)·R6(오버나이트 자격, 10분 창)
+      최초 구현(Holding Policy §2.2 Type A "무포 오버나이트" 반영). run_l1_daily.py는
+      휴장일이면 self_check조차 안 하고 즉시 종료. `rule_economic_event`(경제지표
+      캘린더)는 별개 외부 데이터 소스가 필요해 이번에도 미발동 — 의도적 스코프 제외
+      (dev_memory/DECISION_LOG.md 13차, capability_matrix.md 참고). 테스트 33건 신규.
+- [x] backtest/harness.py 신규 — Walk-Forward 백테스트 하니스 (2026-07-27 완료) —
+      WalkForwardSplitter+train_formal_expert+FeatureEngine/FuturesAIService/
+      TradingPipeline/SimBroker를 엮어 Validator.validate_performance()가 처음으로
+      실제 walk-forward 산출물을 입력받아 계산되게 함(W14~26 내내 남아있던 공통 갭
+      해소). Regime AI 미포함·일별 granularity 없음·Deflated Sharpe 미제출은 명시적
+      스코프 제외. scripts/run_backtest_harness.py로 실제 실행 확인(합성 데이터,
+      창 2개, 무거래로 수익률 0% — 성능 주장 아니라 배관 검증). 테스트 9건 신규.
+- [x] data/collector.py MultiSymbolTickCollector + data/investor_flow_poller.py 신규
+      (2026-07-27 완료, 실계좌 미검증) — 단일 WS 연결 다중 구독(2026-07-23 "연결 2개
+      → 반복 단절" 문제의 구조적 해법)과 FixedTickScheduler 첫 실사용(REST 폴링).
+      MultiSymbolTickCollector 실계좌 검증은 오늘 라이브 세션과의 리소스 경합을 피해
+      의도적으로 보류(다음 비거래시간 또는 [[l1_gap_deferral_to_weekly_review]] 같은
+      이관). InvestorFlowSnapshot은 필드 매핑 없이 raw dict만 보존(FL Feature 파싱은
+      실측 캡처 확보 후 별도 착수). 테스트 21건 신규(collector 16·poller 5).
+      남은 갭: OP(옵션체인 그릭스)·RG(매크로/현물지수) 폴러 미착수, ATM±N 구독 롤링
+      미구현 — capability_matrix.md "옵션/수급 데이터 인프라 착수" 섹션 참고.
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)
@@ -631,3 +657,13 @@
       제거하면 RegimeAI/RegimeRuntime이 깨짐. numpy를 올릴 계기가 생기면(다른 사유로든)
       tests/strategy/regime/ 전체 통과 확인 + hmmlearn 신규 릴리스 여부 확인
       (dev_memory/DECISION_LOG.md 12차, Docs/capability_matrix.md 참고)
+- [ ] MultiSymbolTickCollector 실계좌 검증 (2026-07-27 등록) — futures+option 동시 구독으로
+      2026-07-23 관측된 반복 단절이 실제로 해소됐는지 확인. 오늘 라이브 세션과의 리소스
+      경합을 피해 의도적으로 보류함 — 다음 비거래시간 또는 주간회의에서 일정 재확인
+      (dev_memory/DECISION_LOG.md 13차 참고)
+- [ ] FL Feature 필드 매핑 실측 (2026-07-27 등록) — get_investor_flow() 원시 응답 캡처로
+      외국인/기관/개인 순매수 필드 위치 확정 필요(docs/efriend 엑셀 또는 실계좌 캡처).
+      확정되면 normalizer.py에 parse_investor_flow() 유형 함수 추가
+- [ ] OP(옵션체인 그릭스)·RG(매크로/현물지수) REST 폴러 착수 (2026-07-27 등록) —
+      InvestorFlowPoller와 동일 패턴(FixedTickScheduler+REST+raw 발행)으로 확장 가능.
+      15m/30m Expert가 Ver 1.5 배정의 절반 이하만 받는 문제 해소의 남은 절반

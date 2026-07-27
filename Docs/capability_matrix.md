@@ -460,10 +460,10 @@ runtime) 전체 통과를 먼저 확인하도록 명시했다. hmmlearn 쪽 릴�
   여전히 실사용 이력 없음(G2부터, 기존 갭 유지) — Aggregator의 u_h는 그 전까지 근사치.
 - **Meta Decision Engine의 ⑥⑦(Options AI 비교·상관노출 합산)은 코드 경로 자체가 없음**:
   Options AI(Ver 1.3)가 Phase 4(W27~31)까지 존재하지 않아 방향 의도만 낸다.
-- **Risk Engine의 R4(오버나이트 증거금)·R6(오버나이트 자격)·R7(순델타)·R8(순베가)·
-  R9(매도옵션 손실) 미구현**: R4·R6은 세션(장중/오버나이트) 구분을 아는 컴포넌트가 없어서
-  (Event Calendar 미구현, 기존 갭), R7·R8·R9는 옵션 포지션·Greeks 자체가 없어서(Options AI
-  부재)다.
+- ~~Risk Engine의 R4(오버나이트 증거금)·R6(오버나이트 자격) 미구현~~ — **2026-07-27
+  Event Calendar 도입으로 구현 완료**(아래 "Event Calendar" 섹션 참고).
+- **Risk Engine의 R7(순델타)·R8(순베가)·R9(매도옵션 손실) 미구현**: 전부 옵션 포지션·
+  Greeks 자체가 없어서(Options AI 부재, Phase 4까지 계속 남는 갭).
 - **Sizer의 Kelly 엣지는 대칭 페이오프(b=1) 가정 근사**: `edge=2p−1`은 정식 Kelly
   `(p·b−q)/b`의 단순화 — 실현 트랙레코드(Self Evaluation, Phase 5)가 쌓이면 실제 페이오프
   비율로 교체할 자리.
@@ -488,3 +488,92 @@ runtime) 전체 통과를 먼저 확인하도록 명시했다. hmmlearn 쪽 릴�
   사전 채움**: 실제 운영은 기동 후 실제로 22개 30분봉(window+2)이 쌓일 때까지 자연스럽게
   UNKNOWN 구간을 거친다 — 스모크는 그 대기를 건너뛰기 위한 장치일 뿐 실제 기동 절차가
   아님(스크립트 docstring에 명기).
+
+## Event Calendar — KRX 휴장일·세션 인식 (2026-07-27 신설)
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| core.event_calendar.EventCalendar | ✅ | ✅ 2026-07-27 | — | `is_trading_day`·`next_trading_day`·`previous_trading_day`·`is_regular_session`·`minutes_to_close`·`is_expiry_day`(요일 규칙 근사). 휴장일 데이터는 `configs/krx_holidays.yaml`(공개 집계 사이트 2곳 교차대조 — **KRX 공식 확인 아님**, 파일 헤더에 출처 한계 명기). 단위 테스트 25건(경계값·naive datetime 거부·연도 데이터 없음 시 예외·0-휴장일 연도 구분 등). |
+| scripts/run_l1_daily.py — 휴장일 스킵 | ✅ | — | — | `main()` 시작 직후(self_check 이전) `is_trading_day()` 확인, 휴장일이면 KIS API 호출 없이 즉시 종료. 실측 미실행(다음 실제 휴장일까지 대기해야 자연 검증 가능 — capability_matrix "알려진 갭" 참고). `REGULAR_SESSION_STOP`을 `EventCalendar.DEFAULT_SESSION`에서 파생하도록 리팩터(단일 소스). |
+| risk.risk_engine.RiskEngine — R4·R6 | ✅ | ✅ 2026-07-27 | — | R6(오버나이트 자격, 기본 10분): 장마감 임박 시 신규 진입 전면 거부(Holding Policy §2.2 Type A "무포 오버나이트"). R4(오버나이트 증거금, 기본 30분): R3 한도(40%)보다 이른 구간부터 `overnight_margin_cap_pct`(25%)로 강화. `minutes_to_close=None`(미지정)이면 둘 다 조용히 비활성 — 회귀 없음. 단위 테스트 6건 신규. |
+| strategy.pipeline.TradingPipeline — event_calendar 주입 | ✅ | ✅ 2026-07-27 | — | 생성자에 `EventCalendar` 선택적 주입 — 주입 시 매 `handle_futures_view()`가 `minutes_to_close`를 계산해 RiskEngine에 전달. 단위 테스트 2건(주입 시 R6 발동·미주입 시 기존 동작 유지). |
+
+### 알려진 갭 (Event Calendar, 2026-07-27)
+
+- **`configs/krx_holidays.yaml`는 KRX 공식 공지가 아니라 공개 집계 사이트 교차대조 결과다**:
+  official kind.krx.co.kr 접속이 막혀(403/JS 렌더링) 직접 확인 못함 — schtasks 자동화
+  전에는 반드시 공식 공지로 재검증할 것(파일 헤더에 상세 기록).
+- **수능일(11/19) 지연개장·연말 마지막 거래일(12/31) 조기폐장을 이진(거래일/휴장일)
+  모델로 표현 못함**: 둘 다 "휴장"이 아니라 "다른 시간에 개장"이라 의도적으로 휴장일
+  목록에서 제외 — `is_trading_day()`는 두 날 다 True를 반환하지만 실제 세션 시간은
+  다르다(미모델링, 파일 헤더에 명기).
+- **`is_expiry_day()`는 symbol_master 실측이 아니라 요일 규칙(매주 월/목 + 매월 2번째
+  목요일) 근사**: 그 요일이 마침 KRX 휴장일과 겹칠 때 실제 만기가 어떻게 재조정되는지는
+  다루지 않는다(event_calendar.py 모듈 docstring).
+- **`rule_economic_event`(Regime 규칙층)는 여전히 미발동**: Event Calendar가 다루는 건
+  "KRX가 문을 여는가"뿐 — `ev_econ_prox`/`ev_econ_grade`(FOMC·CPI 등 경제지표 캘린더)는
+  완전히 별개의 외부 데이터 소스가 필요해 이번 스코프 밖(event_calendar.py 모듈 docstring
+  "스코프 경계").
+- **run_l1_daily.py의 휴장일 스킵 경로는 라이브 미검증**: 다음 실제 KRX 휴장일에 이
+  스크립트가 실행돼야 자연 검증 가능 — 인위적으로 날짜를 조작해 검증하는 건 시스템
+  시계 신뢰도를 흔드는 방식이라 보류.
+
+## Walk-Forward 백테스트 하니스 (2026-07-27 신설)
+
+W14~16부터 W24~26까지 남아있던 공통 갭("Digital Twin·Expert·Cost Model·Validator가 전부
+갖춰졌지만 이들을 엮어 실제 성과 시계열을 뽑는 백테스트 하니스가 없다")을 처음 메웠다.
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| backtest.harness.run_walk_forward_backtest | ✅ | ✅ 2026-07-27 (합성 데이터) | — | `WalkForwardSplitter`(W12~13)로 창을 굴리며 매 창 `train_formal_expert()`(W17~19)로 재학습 → 검증구간을 `MultiHorizonBarComposer`+`FeatureEngine`+`FuturesAIService`+`TradingPipeline`+`SimBroker`(전부 `InProcessBus`)로 실시간 재생 → 창별 자산 변화를 기록. 단위 테스트 9건(순수 헬퍼 7·통합 2). `scripts/run_backtest_harness.py`로 실제 실행 확인: 실제 아카이브 시도(예상대로 데이터 부족 실패) → 17일치 합성 데이터로 창 2개 완료 → `Validator.validate_performance()`가 처음으로 실제 walk-forward 산출물을 입력받아 3개 관문(Sharpe·MDD·창별 일관성) 전부 계산(둘 다 무거래로 수익률 0%, FAIL/PASS 혼재 — 성능 주장 아님, "관문이 실행된다"만 확인). |
+| data.bar_composer.MultiHorizonBarComposer — BusLike 타입힌트 | ✅ | ✅ 2026-07-27 | — | `bus: MessageBus`(구체클래스) → `bus: BusLike`(Protocol)로 교체 — `backtest/harness.py`가 `InProcessBus`를 넘기며 pyright가 "MessageBus 불일치" 오류를 냄(`features/engine.py`가 W14~16에 같은 이유로 겪은 것과 동일 사례). `publish`/`subscribe`만 써서 안전 확인 후 교체, 회귀 없음. |
+
+### 알려진 갭 (백테스트 하니스, 2026-07-27)
+
+- **일별(daily) granularity 없음**: 창 하나 = 기간 하나로 근사(`test_days`를 좁히면 세분화
+  가능하나 그만큼 창마다 재학습 비용이 커짐) — `harness.py` 모듈 docstring에 근거 기록.
+- **Regime AI 미포함**: `RegimeRuntime`을 배선하지 않아 `FuturesAIService`가 항상
+  `Regime.UNKNOWN`으로 집계 — Regime까지 엮은 백테스트는 향후 확장 대상.
+- **Deflated Sharpe 여전히 미제출**: `models/metrics.py`의 기존 갭 그대로, 이 하니스도
+  3종(Sharpe·MDD·창별 일관성)까지만 `Validator`에 넘긴다.
+- **실제 시장 데이터로 실행된 적 없음**: 실제 아카이브가 하루치뿐이라(기존 갭) 다개월
+  walk-forward를 의미 있게 재현할 데이터가 없다 — 합성 데이터로 "루프가 실제로 도는가"만
+  확인했다(성과 주장 아님).
+- **`aggregate_to_horizon()`은 학습용 오프라인 지름길**: 검증구간 재생(`MultiHorizonBarComposer`
+  실사용)과 다른 별도 구현이라, 이론상 두 로직이 서로 다른 버그를 가질 여지가 있다(둘 다
+  표준 OHLCV 롤업이라 실무 영향은 작을 것으로 판단, 재검토 대상).
+
+## 옵션/수급 데이터 인프라 착수 (Ver 1.3 Options AI 선행 갭, 2026-07-27 신설)
+
+Phase 4(Options AI) 착수 전 필요한 인프라 갭 2건 중 착수 가능한 부분만 이번 스코프에서
+처리했다 — "동일 계좌 WS 연결 2개 → 반복 단절" 구조적 해법(WS 재설계)과 REST 폴링
+인프라(FixedTickScheduler 첫 실사용)이다. **옵션체인 그릭스(OP) 수집기·매크로/현물지수
+(RG) 데이터 소스는 이번에도 착수하지 않음**(아래 "알려진 갭" 참고, 여전히 열린 항목).
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| data.collector.MultiSymbolTickCollector | ✅ | — | — | 단일 WS 연결에 여러 (심볼,TR) 조합을 동시 구독(`KISWebSocketClient.subscribe()`가 처음부터 지원하던 방식을 처음 실사용) — 2026-07-23 실측으로 확인된 "동일 계좌 WS 연결 2개(선물+옵션) → 양쪽 다 반복 단절" 문제의 구조적 해법. 원시 메시지의 TR_ID로 파서를 고르고, 파싱된 심볼로 올바른 tick_size 재확인 후 심볼별 aggregator로 라우팅. 단위 테스트 16건(연결 하나에 subscribe 2회 확인·TR별 라우팅·심볼별 tick_size 정확성·모르는 TR/심볼 무시·빈 feeds/슬롯초과 거부·다중 flush) — 전부 mock `WSConnection`. **라이브 미검증(검증 기한: 2026-08-14, [[l1_gap_deferral_to_weekly_review]]와 동일 이관 — 오늘 이 계좌로 `run_l1_daily.py`가 실제 라이브 수집 중이라 이 클래스의 실계좌 검증을 지금 하면 그 세션과 리소스를 다툰다)**. |
+| data.investor_flow_poller.InvestorFlowPoller | ✅ | ✅ 2026-07-27 (구조만, mock REST) | — | `FixedTickScheduler`(W3~5, "아직 실제 폴러에 안 물려봄") 첫 실사용처 — 이미 실측된 `get_investor_flow()`를 감싸 주기적으로 호출·`raw.investor_flow.{market}`로 발행. **필드는 파싱하지 않는다**(아래 "알려진 갭" 참고) — `raw` dict 그대로 `InvestorFlowSnapshot`에 담아 보존. 단위 테스트 5건(sector_code별 순차 조회·부분 실패 시 계속 진행·발행 실패 로깅·빈 sector_codes 거부·FixedTickScheduler와 실제 연동). |
+| core.messages.InvestorFlowSnapshot | ✅ | — | — | `market_code`/`sector_code`/`raw: dict[str, object]` — 필드 매핑 없는 원시 passthrough 스키마(신규). |
+
+### 알려진 갭 (옵션/수급 데이터 인프라, 2026-07-27)
+
+- **MultiSymbolTickCollector 실계좌 미검증**: 위 표 참고 — 오늘 라이브 세션과의 리소스
+  경합을 피하려 의도적으로 보류. 다음 검증 기회에 futures(A05608)+option(임의 위클리
+  종목) 동시 구독으로 실제 단절 재발 여부까지 확인할 것.
+- **FL Feature(`fl_frgn_cum`/`fl_frgn_streak` 등, Ver 1.5 §3.5) 파싱 미구현**: KIS
+  `get_investor_flow()` 응답의 구체 필드 의미(외국인/기관/개인 순매수 수량·거래대금이
+  몇 번째 필드인지)를 확정할 근거(docs/efriend 엑셀 또는 실계좌 실측 캡처)가 이 세션엔
+  없었다 — `InvestorFlowSnapshot.raw`에 원시 dict만 보존. 실측 캡처가 생기면
+  `normalizer.py`에 `parse_investor_flow()` 유형 함수를 추가해 정규화할 것.
+- **OP(옵션체인 그릭스) REST 폴링 수집기 미착수**: `get_quote()`(옵션)가 이미 실측
+  완료돼 있지만(capability_matrix.md "KIS" 섹션), 이를 주기적으로 폴링해 그릭스·IV를
+  쌓는 수집기 자체는 아직 없다 — `InvestorFlowPoller`와 같은 패턴(FixedTickScheduler+
+  REST+발행)으로 별도 착수 가능, 이번엔 스코프에 안 넣음.
+- **RG(현물지수·매크로: VIX·USDKRW 등) 데이터 소스 미착수**: `get_overseas_future_price()`가
+  이미 있지만(rest_client.py) 이를 물린 폴러가 없다 — OP와 마찬가지로 별도 착수 대상.
+  RG/OP 둘 다 완성되기 전까지는 15m/30m Expert가 Ver 1.5 배정의 절반 이하만 받는다는
+  기존 갭이 그대로 남는다.
+- **ATM±N 옵션 체인 구독 롤링(RollingSubscriptionManager 이식) 미구현**: `MultiSymbolTickCollector`는
+  생성 시 고정된 심볼 목록만 구독 — 시세에 따라 체인을 동적으로 갈아끼우는 롤링은
+  별도 과제(collector.py 모듈 docstring에 명기).

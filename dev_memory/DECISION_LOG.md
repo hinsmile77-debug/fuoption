@@ -598,3 +598,95 @@ capability_matrix.md에 근거를 남기고, NEXT_TODO.md "등록된 관찰 항�
 regime/`(hmm_model·naming·rules·service·runtime) 전체 통과를 먼저 확인할 것. hmmlearn
 쪽에 이 경고를 없앤 새 릴리스가 나왔는지도 그때 함께 확인.
 **검증**: 해당 없음(코드 변경 없는 관찰 기록) — 문서화만으로 이 절의 목적 달성.
+
+---
+
+## 2026-07-27 (13차 — Phase 4 착수 전 선행 인프라 갭 3건: Event Calendar·백테스트 하니스·Options AI 인프라)
+
+사용자가 이전 일일점검에서 제시한 "고도화 제안 3종"(Phase 4 선행 갭·Event Calendar·백테스트
+하니스)을 우선순위 그대로가 아니라 안전·의존성 순서로 재배열해 진행했다 — Event Calendar
+(외부 의존 없음, 가장 안전) → 백테스트 하니스(오프라인, 합성 데이터로 완결 가능) →
+Options AI 인프라(실계좌 WS/REST 개입 필요, 오늘 라이브 파이프라인이 도는 중이라 가장
+조심스러움) 순.
+
+### [설계결정] Event Calendar는 "KRX 개장일" 좁은 스코프만 — 경제지표 캘린더는 별개
+
+**근거**: Ver 1.4 §2.7 EV Feature 14개 중 `ev_econ_prox`/`ev_econ_grade`(FOMC·CPI 캘린더)까지
+"Event Calendar"라는 이름 하나에 넣으면 스코프가 무한정 커진다 — 전자는 정적 공휴일
+테이블(연 1회 갱신)로 끝나지만 후자는 매일 갱신되는 경제지표 발표 일정 피드가 필요한
+완전히 다른 종류의 외부 의존이다.
+**결정**: `core/event_calendar.py`는 "KRX가 문을 여는가"·"지금이 장중인가"만 다룬다.
+`strategy/regime/rules.py`의 `rule_economic_event`는 이번에도 미발동 상태로 남긴다.
+**Why**: 좁은 스코프가 실제로 완결 가능했다 — 정적 공휴일 테이블 + 요일 기반 세션 판정은
+외부 API 호출 없이 순수 계산으로 끝나, 이번 세션 안에 "구현·테스트·실사용처 연결"까지
+전부 마칠 수 있었다. 경제지표 캘린더까지 넣었다면 데이터 소스 확보 단계에서 막혀 아무
+것도 완결 못 했을 것이다.
+**How to apply**: `ev_econ_*` 규칙을 살리려면 별도 프로젝트(경제지표 캘린더 피드 연동)로
+착수할 것 — `RuleContext.econ_grade`/`econ_prox_days` 필드는 이미 준비돼 있다(rules.py).
+**검증**: `tests/test_event_calendar.py` 25건, `tests/risk/test_risk_engine.py` R4/R6 6건,
+`tests/strategy/test_pipeline.py` 2건 — 전체 570건 회귀 없음.
+
+### [설계결정] R4/R6은 서로 다른 폭의 창(30분/10분)으로 분리 — 겹치되 독립적인 이중 방어
+
+**근거**: Holding Policy Ver 1.0 §2.2 Type A는 "장 마감 전 강제 청산(예: 마감 10분 전)"
+하나만 예시로 든다 — R4(오버나이트 증거금 25%)와 R6(오버나이트 자격)를 같은 창으로
+겹치면 R6가 먼저 걸려 R4가 사실상 죽은 코드가 된다.
+**결정**: R6은 10분(기본), R4는 그보다 넓은 30분(기본)로 분리 — 10~30분 구간에서는
+증거금 한도만 강화되고, 10분 이내부터 신규 진입 자체가 전면 거부된다.
+**Why**: 두 게이트가 각자 독립적으로 검증 가능해야 "R4가 실제로 동작한다"는 걸 테스트로
+증명할 수 있다 — 겹치는 창이었다면 R4 전용 테스트를 짜는 것 자체가 불가능했을 것이다.
+**How to apply**: 두 상수(`overnight_flatten_lead_minutes`·`overnight_margin_window_minutes`)를
+바꿀 때는 항상 전자 < 후자를 유지할 것(역전되면 R6가 R4보다 늦게 걸려 설계 의도가 깨짐).
+**검증**: `test_rejects_overnight_margin_window_r4_at_stricter_cap`·
+`test_same_margin_usage_passes_outside_overnight_window` — 같은 증거금 사용률(30%)이
+창 안/밖에서 다르게 판정됨을 직접 확인.
+
+### [버그] `MultiHorizonBarComposer`가 `MessageBus` 구체클래스를 요구해 `InProcessBus` 주입 시 pyright 오류
+
+**증상**: `backtest/harness.py`가 검증구간 재생에 `InProcessBus`를 넘기자 pyright가
+"MessageBus와 불일치" 오류.
+**원인**: `features/engine.py`가 W14~16에 똑같은 이유로 `BusLike` Protocol로 바뀐 적이
+있는데, `bar_composer.py`는 그때 안 바뀌었다 — `scripts/run_full_path_smoke.py`가 이미
+같은 패턴(InProcessBus를 MultiHorizonBarComposer에 주입)을 썼지만 `scripts/`는 pyright
+검사 대상 밖(`[tool.pyright] include = ["src"]`)이라 안 드러났었다.
+**결정**: `bus: MessageBus` → `bus: BusLike`로 교체. `publish`/`subscribe`만 쓰고 `connect`/
+`close` 등 나머지 `MessageBus` 메서드는 안 쓴다는 걸 확인 후 적용.
+**Why**: `src/` 안에서 InProcessBus를 쓰는 두 번째 소비자(harness.py)가 생기고 나서야
+이 타입 불일치가 실제로 드러났다 — `scripts/`에 갇혀 있던 잠재 버그가 `src/`로 재사용
+범위가 넓어지면서 표면화된 전형적인 사례.
+**검증**: `tests/backtest/test_harness.py` 통합 테스트 2건이 실제로 `MultiHorizonBarComposer`
++`InProcessBus` 조합을 실행해 통과, pyright 재실행으로 오류 소멸 확인.
+
+### [설계결정] `MultiSymbolTickCollector`는 만들되, 실계좌 검증은 오늘 세션 종료 후로 미룬다
+
+**근거**: 2026-07-23 실측으로 "동일 계좌 WS 연결 2개 → 반복 단절"이 이미 확인돼 있는데,
+바로 오늘(2026-07-27) `run_l1_daily.py`가 이 계좌로 실제 라이브 수집 중이다. 지금
+`MultiSymbolTickCollector`를 실계좌로 검증하려면 정확히 그 "연결 2개" 조건을 의도적으로
+재현해야 하는데, 그러면 오늘 라이브 세션의 안정성을 해칠 실질적 위험이 있다.
+**결정**: 클래스 자체(단일 연결에 여러 `subscribe()`)는 지금 구현·mock 테스트까지 완료.
+실계좌 검증은 [[l1_gap_deferral_to_weekly_review]]와 같은 이관 논리로 다음 기회(비거래일·
+비거래시간 또는 오늘 세션 종료 후)로 명시적으로 미룬다.
+**Why**: "구현됨≠검증됨" 원칙은 검증을 生略해도 된다는 뜻이 아니라, 검증되지 않은 채로
+있다는 사실을 숨기지 않는다는 뜻이다 — 여기서는 오히려 "지금 검증하면 위험하다"는
+사실 자체가 기록할 가치가 있는 판단이었다.
+**How to apply**: 다음 검증 시점엔 futures(A05608)+option(임의 위클리 종목) 동시 구독으로
+2026-07-23에 관측된 반복 단절이 실제로 해소됐는지까지 확인할 것.
+**검증**: mock `WSConnection` 기반 단위 테스트 16건(연결 하나에 subscribe 2회·TR별 라우팅·
+심볼별 tick_size 정확성 등) — 실계좌 검증은 없음(의도적 보류, 위 참고).
+
+### [설계결정] `InvestorFlowSnapshot`은 필드를 파싱하지 않고 raw dict를 그대로 보존한다
+
+**근거**: KIS `get_investor_flow()` 응답의 구체 필드(외국인/기관/개인 순매수 수량이 몇
+번째 필드인지)를 확정할 근거(docs/efriend 엑셀 또는 실계좌 실측 캡처)가 이 세션엔 없다.
+**결정**: 필드 인덱스를 추측해서 하드코딩하지 않는다 — `TOPIC_RAW`(W1부터 있었지만 아무도
+안 쓴 토픽)로 raw dict를 그대로 발행하는 폴링 인프라만 이번 스코프로 좁혔다.
+**Why**: symbol_master의 미니선물 상품종류 "B" 사례(2026-07-22)에서 이미 "추측 대신 실측"
+원칙이 실제로 버그를 막아준 전례가 있다 — 필드 순서를 잘못 추측해 하드코딩했다가 나중에
+실측으로 뒤집히면, 그 사이에 이미 그 필드로 학습된 Feature/모델이 조용히 오염된다.
+**How to apply**: FL Feature(`fl_frgn_cum` 등)가 실제로 필요해지면, 먼저 실계좌로
+`get_investor_flow()` 원시 응답을 캡처해 필드 의미를 확정한 뒤(docs/KIS_RAW_FIELD_RANGES.md
+같은 문서에 기록) `normalizer.py`에 파서를 추가할 것 — 이 순서를 바꾸지 말 것.
+**검증**: `tests/data/test_investor_flow_poller.py` 5건(부분 실패 시 계속 진행·발행 실패
+로깅·`FixedTickScheduler` 실제 연동 등). 전체 570건 통과, ruff 클린, pyright는 신규 파일
+기준 클린(사전 확인된 기존 오탐 2건 — `sys.stdout.reconfigure()`·`Handler`/`BarClosed`
+분산성 — 과 무관함을 개별 대조로 확인).

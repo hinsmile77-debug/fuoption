@@ -10,8 +10,8 @@ from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.ws_client import ApprovalKeyIssuer
 from messiah.core.timeutil import now_kst
 from messiah.data.archiver import ParquetArchiver
-from messiah.data.collector import TickCollector
-from messiah.data.normalizer import parse_futures_tick
+from messiah.data.collector import MultiSymbolTickCollector, SymbolFeed, TickCollector
+from messiah.data.normalizer import parse_futures_tick, parse_option_tick
 
 # 2026-07-22 ws_client.py 실측 세션에서 실제로 캡처한 라이브 WS 프레임(미니선물 A05608). 시각
 # 필드(HHMMSS)만 실측값이고 날짜는 parse_futures_tick이 today 생략 시 오늘 KST 날짜를 쓰므로,
@@ -308,3 +308,154 @@ async def test_flush_final_bar_archives_remaining_partial_bar(tmp_path: Path):
     df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
     assert df.height == 1
     assert df.row(0, named=True)["quality_ok"] is False  # 1틱 < MIN_TICKS_FOR_QUALITY_OK(3)
+
+
+# =============================================================== MultiSymbolTickCollector
+
+_OPT_SYMBOL = "B01608A46"
+_OPT_TICK_SIZE = Decimal("0.01")
+_OPT_SUBSCRIBE_ACK = json.dumps(
+    {
+        "header": {"tr_id": "H0IOCNT0", "tr_key": _OPT_SYMBOL, "encrypt": "N"},
+        "body": {"rt_cd": "0", "msg_cd": "OPSP0000", "msg1": "SUBSCRIBE SUCCESS"},
+    }
+)
+
+
+def _opt_tick(hhmmss: str, price: str, qty: str) -> str:
+    fields = [_OPT_SYMBOL, hhmmss, price, "0", "0", "0", "0", "0", "0", qty]
+    return "0|H0IOCNT0|001|" + "^".join(fields)
+
+
+def _multi_collector(
+    tmp_path: Path, incoming: list[str], feeds: list[SymbolFeed] | None = None, bus=None
+) -> tuple[MultiSymbolTickCollector, FakeConnection]:
+    conn = FakeConnection(incoming)
+    default_feeds = feeds or [
+        SymbolFeed("A05608", tr_codes.WS_TR_FUTURES_CONTRACT, parse_futures_tick, _TICK_SIZE),
+        SymbolFeed(_OPT_SYMBOL, "H0IOCNT0", parse_option_tick, _OPT_TICK_SIZE),
+    ]
+    collector = MultiSymbolTickCollector(
+        creds=_creds(),
+        feeds=default_feeds,
+        archiver=ParquetArchiver(tmp_path),
+        bus=bus,
+        approval_issuer=_approval_issuer(),
+        ws_connect=lambda uri: _FakeConnectCM(conn),
+    )
+    return collector, conn
+
+
+async def test_multi_symbol_subscribes_all_feeds_on_one_connection(tmp_path: Path):
+    collector, conn = _multi_collector(tmp_path, [_SUBSCRIBE_ACK, _OPT_SUBSCRIBE_ACK])
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    assert len(conn.sent) == 2  # 연결 하나에 subscribe() 두 번 — 구조적 핵심 주장
+    sent_keys = [json.loads(m)["body"]["input"]["tr_key"] for m in conn.sent]
+    assert sent_keys == ["A05608", _OPT_SYMBOL]
+
+
+async def test_multi_symbol_routes_ticks_to_correct_symbol_by_tr_id(tmp_path: Path):
+    incoming = [
+        _SUBSCRIBE_ACK,
+        _OPT_SUBSCRIBE_ACK,
+        _REAL_TICK_1,
+        _REAL_TICK_2,
+        _opt_tick("153000", "5.25", "2"),
+        _opt_tick("153001", "5.30", "1"),
+        _TICK_NEXT_MINUTE,
+        _opt_tick("153100", "5.35", "1"),  # 다음 분(15:31) — 옵션 1분봉 flush 유발
+    ]
+    bus = FakeBus()
+    collector, _ = _multi_collector(tmp_path, incoming, bus=bus)
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    fut_df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
+    assert fut_df.height == 1
+    assert fut_df.row(0, named=True)["volume"] == 2
+
+    opt_df = pl.read_parquet(tmp_path / _OPT_SYMBOL / "1m" / f"{_TODAY_STR}.parquet")
+    assert opt_df.height == 1
+    assert opt_df.row(0, named=True)["volume"] == 3  # 2+1
+
+    tick_topics = [t for t, _ in bus.published if t.startswith("md.tick.")]
+    assert tick_topics.count("md.tick.A05608") == 3
+    assert tick_topics.count(f"md.tick.{_OPT_SYMBOL}") == 3
+
+
+async def test_multi_symbol_uses_correct_tick_size_per_symbol(tmp_path: Path):
+    # 선물(tick_size=0.02)·옵션(tick_size=0.01)이 같은 원시가격이어도 다른 price_ticks가
+    # 나와야 한다 — feeds[0](선물) tick_size로 잘못 파싱된 채 넘어가지 않는지 확인.
+    collector, _ = _multi_collector(
+        tmp_path, [_SUBSCRIBE_ACK, _OPT_SUBSCRIBE_ACK, _opt_tick("153000", "5.25", "1")]
+    )
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+    await collector.flush_final_bar()  # 미완성 1틱짜리 봉을 강제 flush(가격 변환만 확인 목적)
+
+    opt_df = pl.read_parquet(tmp_path / _OPT_SYMBOL / "1m" / f"{_TODAY_STR}.parquet")
+    assert opt_df.row(0, named=True)["o_ticks"] == 525  # 5.25 / 0.01, 0.02였다면 262(반올림) 나옴
+
+
+async def test_multi_symbol_ignores_unknown_tr_id(tmp_path: Path):
+    unknown_tr_tick = "0|H0UNKNOWN0|001|" + "^".join(["X", "153000"] + ["0"] * 8)
+    collector, _ = _multi_collector(tmp_path, [_SUBSCRIBE_ACK, _OPT_SUBSCRIBE_ACK, unknown_tr_tick])
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()  # 예외 없이 조용히 무시(다음 메시지에서 단절)
+
+
+async def test_multi_symbol_ignores_unknown_symbol_under_known_tr(tmp_path: Path):
+    other_symbol_tick = "0|H0IOCNT0|001|" + "^".join(
+        ["NOT_REGISTERED", "153000", "5.00"] + ["0"] * 6 + ["1"]
+    )
+    collector, _ = _multi_collector(
+        tmp_path, [_SUBSCRIBE_ACK, _OPT_SUBSCRIBE_ACK, other_symbol_tick]
+    )
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+    assert not (tmp_path / "NOT_REGISTERED").exists()
+
+
+def test_multi_symbol_rejects_empty_feeds(tmp_path: Path):
+    with pytest.raises(ValueError, match="feeds"):
+        MultiSymbolTickCollector(
+            creds=_creds(),
+            feeds=[],
+            archiver=ParquetArchiver(tmp_path),
+            approval_issuer=_approval_issuer(),
+        )
+
+
+def test_multi_symbol_rejects_more_feeds_than_subscription_limit(tmp_path: Path):
+    from messiah.broker.kis.ws_client import KISWebSocketClient
+
+    too_many = [
+        SymbolFeed(f"SYM{i}", tr_codes.WS_TR_FUTURES_CONTRACT, parse_futures_tick, _TICK_SIZE)
+        for i in range(KISWebSocketClient.MAX_SUBSCRIPTIONS + 1)
+    ]
+    with pytest.raises(ValueError, match="구독 슬롯 한도"):
+        MultiSymbolTickCollector(
+            creds=_creds(),
+            feeds=too_many,
+            archiver=ParquetArchiver(tmp_path),
+            approval_issuer=_approval_issuer(),
+        )
+
+
+async def test_multi_symbol_flush_final_bar_flushes_all_symbols(tmp_path: Path):
+    incoming = [_SUBSCRIBE_ACK, _OPT_SUBSCRIBE_ACK, _REAL_TICK_1, _opt_tick("153000", "5.25", "1")]
+    collector, _ = _multi_collector(tmp_path, incoming)
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    await collector.flush_final_bar()
+
+    fut_df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
+    opt_df = pl.read_parquet(tmp_path / _OPT_SYMBOL / "1m" / f"{_TODAY_STR}.parquet")
+    assert fut_df.height == 1
+    assert opt_df.height == 1

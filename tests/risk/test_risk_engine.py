@@ -143,3 +143,68 @@ def test_reset_daily_clears_streak_and_errors():
     engine.reset_daily()
     decision = engine.evaluate(**_default_kwargs())
     assert decision.approved is True
+
+
+def test_minutes_to_close_none_skips_overnight_gates_r4_r6():
+    # 호출자가 세션 정보를 안 넘기면(기존 동작) R4/R6 둘 다 조용히 건너뛴다 — 회귀 없음.
+    engine = RiskEngine(RiskEngineConfig(overnight_flatten_lead_minutes=60.0))
+    decision = engine.evaluate(**_default_kwargs(minutes_to_close=None))
+    assert decision.approved is True
+
+
+def test_rejects_new_entry_near_close_r6():
+    engine = RiskEngine(RiskEngineConfig(overnight_flatten_lead_minutes=10.0))
+    decision = engine.evaluate(**_default_kwargs(minutes_to_close=5.0))
+    assert decision.approved is False
+    assert "R6" in decision.reason
+
+
+def test_r6_boundary_is_inclusive():
+    engine = RiskEngine(RiskEngineConfig(overnight_flatten_lead_minutes=10.0))
+    decision = engine.evaluate(**_default_kwargs(minutes_to_close=10.0))
+    assert decision.approved is False
+    assert "R6" in decision.reason
+
+
+def test_approves_new_entry_well_before_close():
+    engine = RiskEngine(RiskEngineConfig(overnight_flatten_lead_minutes=10.0))
+    decision = engine.evaluate(**_default_kwargs(minutes_to_close=120.0))
+    assert decision.approved is True
+
+
+def test_rejects_overnight_margin_window_r4_at_stricter_cap():
+    # 40%(R3 평시 한도)는 통과하지만 25%(R4 오버나이트 한도)는 초과하는 증거금 사용률 —
+    # margin_used=15,000,000/50,000,000=30% (>25%, <40%).
+    engine = RiskEngine(
+        RiskEngineConfig(
+            overnight_flatten_lead_minutes=10.0,
+            overnight_margin_window_minutes=30.0,
+            capital=CapitalConfig(margin_cap_pct=40.0, overnight_margin_cap_pct=25.0),
+        )
+    )
+    decision = engine.evaluate(
+        **_default_kwargs(
+            account=_account(margin_used=Decimal("15000000")),
+            minutes_to_close=20.0,  # R6(10분) 밖, R4(30분) 안
+        )
+    )
+    assert decision.approved is False
+    assert "R4" in decision.reason
+
+
+def test_same_margin_usage_passes_outside_overnight_window():
+    # 위와 같은 30% 증거금 사용률이지만 마감까지 여유가 있으면(R4 구간 밖) 평시 40%
+    # 한도만 적용돼 통과한다.
+    engine = RiskEngine(
+        RiskEngineConfig(
+            overnight_margin_window_minutes=30.0,
+            capital=CapitalConfig(margin_cap_pct=40.0, overnight_margin_cap_pct=25.0),
+        )
+    )
+    decision = engine.evaluate(
+        **_default_kwargs(
+            account=_account(margin_used=Decimal("15000000")),
+            minutes_to_close=120.0,
+        )
+    )
+    assert decision.approved is True

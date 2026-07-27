@@ -24,7 +24,7 @@ import asyncio
 from datetime import datetime
 
 from messiah.core import logging as mlog
-from messiah.core.bus import TOPIC_BAR, MessageBus
+from messiah.core.bus import TOPIC_BAR, BusLike
 from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon
 from messiah.core.scheduler import FixedTickScheduler
 from messiah.core.timeutil import KST, UTC, ensure_aware
@@ -52,13 +52,19 @@ def floor_to_horizon(dt: datetime, horizon_seconds: int) -> datetime:
 
 
 class MultiHorizonBarComposer:
-    """단일 심볼용 — 1분봉을 구독해 3/5/10/15/30분봉을 합성·적재·발행한다."""
+    """단일 심볼용 — 1분봉을 구독해 3/5/10/15/30분봉을 합성·적재·발행한다.
+
+    `bus` 타입힌트는 `MessageBus`(Redis) 구체클래스가 아니라 `BusLike` Protocol이다
+    (2026-07-27, `backtest/harness.py`가 `simulator.InProcessBus`를 넘기면서 pyright가
+    "MessageBus와 불일치" 오류를 처음 냄 — `features/engine.py`가 W14~16에 같은 이유로
+    `BusLike`로 바뀐 것과 동일 사례, 이 클래스는 `publish`/`subscribe`만 쓰고 `connect`/
+    `close` 등 나머지 `MessageBus` 메서드는 안 써서 좁혀도 안전함을 확인 후 교체)."""
 
     def __init__(
         self,
         symbol: str,
         archiver: ParquetArchiver,
-        bus: MessageBus,
+        bus: BusLike,
         target_horizons: dict[Horizon, int] | None = None,
     ) -> None:
         """

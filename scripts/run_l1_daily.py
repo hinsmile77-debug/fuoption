@@ -15,11 +15,15 @@ FeatureEngine)을 실제 매매일 하루 동안 무인으로 돌리기 위한 �
   HARD_SHUTDOWN_DEADLINE까지 끝내지 못하면 강제 종료(운영 사고 시 무한정 떠 있는 프로세스
   방지 — 안전판).
 
+**KRX 휴장일 인식 (2026-07-27 추가)**: `main()` 시작 직후 `EventCalendar.is_trading_day()`로
+오늘이 거래일인지부터 확인한다 — 휴장일이면 self_check조차 실행하지 않고(불필요한 KIS API
+호출 회피) 즉시 종료한다. 휴장일 목록은 `configs/krx_holidays.yaml`(출처 한계는 그 파일
+헤더 참고 — 공식 KRX 확인 아님).
+
 **아직 없는 것**: 스캘러/모델 로딩(_load_warmup_artifacts, Phase 3 이후 실제 모델이 생기면
-채울 자리만 미리 파둠), KRX 휴장일 인식(Event Calendar 미구현 — 휴장일에 실행하면 self_check는
-통과하지만 WS 구독 후 하루 종일 틱이 안 옴, capability_matrix.md 참고), 옵션(K200_OPT) 동시
-수집(오늘 세션 실측으로 같은 계좌 WS 연결을 2개 열면 서로 끊기는 문제 확인됨 — 별도 연결이
-아니라 단일 연결·다중 subscribe()로 풀어야 하는 별도 작업, 이 스크립트는 선물 1개만).
+채울 자리만 미리 파둠), 옵션(K200_OPT) 동시 수집(오늘 세션 실측으로 같은 계좌 WS 연결을
+2개 열면 서로 끊기는 문제 확인됨 — 별도 연결이 아니라 단일 연결·다중 subscribe()로 풀어야
+하는 별도 작업, 이 스크립트는 선물 1개만).
 
 사용: python scripts/run_l1_daily.py [--configs configs]
 Windows 작업 스케줄러 등록은 아직 안 함 — scripts/run_l1_daily.bat만 준비, 실제 매일 무인
@@ -46,6 +50,7 @@ from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
+from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
@@ -53,7 +58,9 @@ from messiah.data.collector import TickCollector  # noqa: E402
 from messiah.data.normalizer import parse_futures_tick  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 
-REGULAR_SESSION_STOP = (15, 35)  # 이 시각 도달 시 수집 중단(정상 종료 신호)
+# 정규장 마감(연속거래 종료) 시각 — event_calendar.DEFAULT_SESSION과 같은 값을 직접
+# 참조해 단일 소스를 유지한다(두 곳이 따로 하드코딩돼 있다가 어긋나는 사고 방지).
+REGULAR_SESSION_STOP = (DEFAULT_SESSION.close_time.hour, DEFAULT_SESSION.close_time.minute)
 HARD_SHUTDOWN_DEADLINE = (15, 40)  # daily_close()가 이 시각까지 못 끝내면 강제 종료(안전판)
 
 _MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
@@ -117,6 +124,14 @@ async def _daily_close(
 
 async def main(cfg: InstanceConfig) -> None:
     mlog.setup(cfg.instance_id)
+
+    today = now_kst().date()
+    if not EventCalendar.from_file().is_trading_day(today):
+        print(
+            f"{today.isoformat()}은 KRX 휴장일(Event Calendar) — 수집 생략, 즉시 종료",
+            flush=True,
+        )
+        return
 
     creds = KISCredentials.from_broker_config(cfg.broker)
     symbol = await asyncio.to_thread(_resolve_front_month_symbol)

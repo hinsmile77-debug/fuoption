@@ -20,12 +20,29 @@ R3(증거금 40%)·R5(오버나이트 포지션 2개)는 "이 주문을 추가�
 전 수량으로 "예상 증거금"을 계산하려 하면 Sizer가 아직 안 정한 수량을 미리 가정해야 하는
 순환 의존이 생긴다 — 이 분리로 피한다.
 
+## R4(오버나이트 증거금)·R6(오버나이트 자격) — Event Calendar 도입(2026-07-27)으로 구현
+
+`core/event_calendar.py`(EventCalendar)가 생기면서 "지금이 장마감 임박인가"를 처음으로
+판단할 수 있게 됐다. Holding Policy Ver 1.0 §2.2 "A. 선물 데이트레이딩"(이 프로젝트의
+현재 유일한 포지션 유형 — Options AI는 Phase 4까지 없다)은 **오버나이트 금지가 기본값**
+("장 마감 전 강제 청산, 예: 마감 10분 전")이라고 명시한다. 이를 반영해 두 단계로 나눴다:
+
+- **R6(오버나이트 자격, `overnight_flatten_lead_minutes`=10분 기본)**: 장마감이 이 시간
+  이내로 남으면 신규 진입 자체를 거부한다 — Type A는 "최대손실이 정의된 구조"(Ver 1.0 §1.2
+  "오버나이트 자격 원칙")가 아니라 자격이 아예 없어서다.
+- **R4(오버나이트 증거금, `overnight_margin_window_minutes`=30분 기본)**: R6보다 넓은
+  구간에서 R3의 증거금 한도(`margin_cap_pct`=40%) 대신 더 보수적인
+  `overnight_margin_cap_pct`(25%)를 적용한다 — R6가 어떤 이유로든 못 걸러도(예: 두 상수를
+  다르게 튜닝하는 향후 변경) 이중 방어가 되도록 R6보다 먼저(더 이른 시각부터) 발동하는
+  별개 구간으로 설계했다.
+
+`minutes_to_close`가 `None`(호출자가 세션 정보를 안 넘김 — 예: 재생/스모크처럼 실제
+KRX 세션 개념이 무의미한 경로)이면 두 게이트 모두 조용히 건너뛴다(기존 동작 그대로,
+회귀 없음) — "모른다"를 "오버나이트 아님"으로 낙관 해석하지 않고 그냥 검사 자체를
+생략한다(Regime rules.py의 `RuleContext` None 처리와 같은 철학).
+
 ## 구현하지 않은 항목 (알려진 갭)
 
-- **R4(오버나이트 증거금 25%)·R6(오버나이트 자격)**: 세션(장중/오버나이트) 구분을 아는
-  컴포넌트가 없다(Event Calendar 미구현, 기존 갭) — "지금이 장마감 임박인가"를 판단할 수
-  없어 R4/R6 게이트를 걸 수 없다. Holding Policy §2 A유형(미니선물)은 "당일 무포 원칙"이라
-  실제 운영에서 오버나이트 자체가 드물지만, 판단 로직 자체는 없다.
 - **R7(순델타)·R8(순베가)·R9(매도옵션 손실)**: 전부 옵션 포지션·Greeks 전제 — Options AI
   (Ver 1.3)가 Phase 4까지 없어 포트폴리오에 옵션 자체가 없다(부재이지 미달이 아님).
 """
@@ -52,11 +69,14 @@ class RiskDecision:
 
 @dataclass(frozen=True)
 class RiskEngineConfig:
-    capital: CapitalConfig = field(default_factory=CapitalConfig)  # R2·R3·R5 한도 재사용
+    capital: CapitalConfig = field(default_factory=CapitalConfig)  # R2·R3·R4·R5 한도 재사용
     consecutive_loss_limit: int = 3  # R10
     data_staleness_limit_seconds: float = 30.0  # R11
     order_error_limit: int = 3  # R12
     order_error_window_seconds: float = 300.0  # R12 "5분 내 3회"
+    # Holding Policy Ver 1.0 §2.2 "A. 선물 데이트레이딩" 예시("마감 10분 전") 그대로.
+    overnight_flatten_lead_minutes: float = 10.0  # R6 — 이 안쪽이면 신규 진입 전면 거부
+    overnight_margin_window_minutes: float = 30.0  # R4 — 이 안쪽이면 증거금 한도가 25%로 강화
 
 
 class RiskEngine:
@@ -100,6 +120,7 @@ class RiskEngine:
         daily_start_equity: Decimal,
         data_age_seconds: float,
         as_of: datetime,
+        minutes_to_close: float | None = None,
     ) -> RiskDecision:
         cfg = self._config
 
@@ -135,11 +156,25 @@ class RiskEngine:
                 "Kill Switch 영역(별도 감시자가 청산 판단)"
             )
 
-        margin_pct = _margin_pct(account)
-        if margin_pct > cfg.capital.margin_cap_pct:
+        if minutes_to_close is not None and minutes_to_close <= cfg.overnight_flatten_lead_minutes:
             return self._reject(
-                f"R3 증거금사용률 {margin_pct:.1f}% > {cfg.capital.margin_cap_pct}% — 진입 거부"
+                f"R6 오버나이트 자격 없음(Type A) — 장마감 {minutes_to_close:.1f}분 전 "
+                f"(≤{cfg.overnight_flatten_lead_minutes:.0f}분) 신규 진입 거부, Holding "
+                "Policy §2.2 A"
             )
+
+        overnight_margin_window = (
+            minutes_to_close is not None and minutes_to_close <= cfg.overnight_margin_window_minutes
+        )
+        margin_cap = (
+            cfg.capital.overnight_margin_cap_pct
+            if overnight_margin_window
+            else cfg.capital.margin_cap_pct
+        )
+        margin_pct = _margin_pct(account)
+        if margin_pct > margin_cap:
+            gate = "R4 오버나이트증거금" if overnight_margin_window else "R3 증거금사용률"
+            return self._reject(f"{gate} {margin_pct:.1f}% > {margin_cap}% — 진입 거부")
 
         held_symbols = {p.symbol for p in positions if p.qty != 0}
         projected_count = len(held_symbols | {intent.symbol})

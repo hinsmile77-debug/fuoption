@@ -28,6 +28,14 @@ Aggregator의 S는 이미 여러 Horizon을 통합한 값이라 "어느 Horizon 
 잴 것인가"에 정답이 없다(`strategy/decision/meta_decision.py`가 `horizon=None`을 항상 내는
 것과 같은 이유) — 가장 촘촘하고 항상 최신인 M1을 공통 재료로 택했다.
 
+## R4·R6(오버나이트) 결선 — Event Calendar 도입(2026-07-27)
+
+`event_calendar`를 생성자에 주입하면 `handle_futures_view()`가 매 호출마다
+`EventCalendar.minutes_to_close(view.ts_utc)`를 계산해 `RiskEngine.evaluate()`에 넘긴다
+— 정규장 중이 아니면(또는 미주입 시) `None`이라 R4/R6 게이트는 조용히 비활성 상태로
+남는다(risk_engine.py 모듈 docstring 참고). 재생/스모크(`run_full_path_smoke.py` 등)처럼
+KRX 세션 개념이 무의미한 경로는 지금까지처럼 `event_calendar`를 안 넘기면 된다.
+
 ## R10(연속손실) 결선은 이번 스코프 밖
 
 `RiskEngine.record_trade_result()`는 진입가·청산가를 매칭해 실현손익을 계산하는 포지션
@@ -45,6 +53,7 @@ from decimal import Decimal
 
 from messiah.broker.base import BrokerAdapter
 from messiah.core.bus import TOPIC_BAR, TOPIC_FUTURES, TOPIC_INTENT, BusLike
+from messiah.core.event_calendar import EventCalendar
 from messiah.core.messages import (
     BarClosed,
     BusMessage,
@@ -80,6 +89,7 @@ class TradingPipeline:
         kill_switch: KillSwitch | None = None,
         tick_size: Decimal = Decimal("0.02"),
         atr_window: int = DEFAULT_ATR_WINDOW,
+        event_calendar: EventCalendar | None = None,
     ) -> None:
         self._symbol = symbol
         self._broker = broker
@@ -92,6 +102,10 @@ class TradingPipeline:
         self._kill_switch = kill_switch or KillSwitch(bus)
         self._tick_size = tick_size
         self._atr_window = atr_window
+        # 미지정(None)이면 R4/R6는 RiskEngine.evaluate()가 그냥 건너뛴다(기존 동작, 회귀
+        # 없음) — 재생/스모크처럼 실제 KRX 세션 개념이 없는 경로를 위한 기본값(모듈
+        # docstring에 근거 없음 — risk_engine.py 쪽 docstring 참고).
+        self._event_calendar = event_calendar
         self._bars: deque[BarClosed] = deque(maxlen=_BAR_HISTORY_LIMIT)
         self._last_bar_confirm_at: datetime | None = None
         self._daily_start_equity: Decimal | None = None
@@ -143,6 +157,9 @@ class TradingPipeline:
         edge = max(0.0, min(1.0, 2.0 * intent.confidence - 1.0))
         net_expected_return_ticks = edge * atr_ticks - cost.total_ticks
 
+        minutes_to_close = (
+            self._event_calendar.minutes_to_close(view.ts_utc) if self._event_calendar else None
+        )
         risk_decision = self._risk_engine.evaluate(
             intent=intent,
             net_expected_return_ticks=net_expected_return_ticks,
@@ -151,6 +168,7 @@ class TradingPipeline:
             daily_start_equity=self._daily_start_equity or account.total_equity,
             data_age_seconds=data_age_seconds,
             as_of=view.ts_utc,
+            minutes_to_close=minutes_to_close,
         )
         if not risk_decision.approved:
             return

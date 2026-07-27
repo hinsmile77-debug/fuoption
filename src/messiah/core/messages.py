@@ -137,6 +137,23 @@ def bar_confirm_time(bar: BarClosed) -> datetime:
     return bar.bar_open_kst + timedelta(seconds=HORIZON_SECONDS[bar.horizon])
 
 
+class InvestorFlowSnapshot(BusMessage):
+    """투자자매매동향(get_investor_flow) REST 폴링 원시 응답 스냅샷 (raw.investor_flow.*,
+    2026-07-27 신설, `data/investor_flow_poller.py`).
+
+    **필드 미해석 — 의도적**: Ver 1.5 §3.5가 15m Expert에 배정한 FL(수급) Feature
+    (`fl_frgn_cum`/`fl_frgn_streak` 등, 외국인/기관 순매수 누적)를 만들려면 KIS 응답의
+    구체 필드(외국인/기관/개인 순매수 수량·거래대금이 각각 몇 번째 필드인지)를 알아야
+    하는데, 이 세션엔 그걸 확정할 근거(docs/efriend 엑셀 또는 실계좌 실측 캡처)가 없다 —
+    "구현됨≠검증됨" 원칙 그대로, 이 메시지는 필드 매핑 없이 `raw` 그대로 보존한다. 폴링
+    루프(스케줄러·유량제한·발행) 자체가 이번 스코프고, `fl_*` Feature 파싱은 실측 캡처가
+    생기면 별도로 채울 자리(known gap, capability_matrix.md 참고)."""
+
+    market_code: str  # FID_INPUT_ISCD(예: tr_codes.FID_MRKT_DIV_DERIVATIVES="K2I")
+    sector_code: str  # FID_INPUT_ISCD_2(예: tr_codes.FID_INVESTOR_FLOW_FUTURES="F001")
+    raw: dict[str, object]
+
+
 # ---------------------------------------------------------------- L2 Feature
 
 

@@ -1,18 +1,26 @@
 """L1 Collector — KIS WS 실시간체결가 구독 → 정규화 → 완성봉 적재/발행 오케스트레이션
 (Master Plan Ver 2.0 §9 "L1 DATA: Collector").
 
-단일 연결·단일 심볼용 골격이다. 마흐디 mahdi/main.py가 run_observation_loop(단일 연결, 끊기면
-예외 전파)과 run_observation_loop_forever(재연결 래퍼)를 분리한 것과 같은 설계로, run_once()가
-전자에 해당하고 run_forever()가 후자에 해당한다(2026-07-23 추가 — 그 전까지는 run_once만
-있었다, NEXT_TODO 참고). ATM±N 옵션 체인 구독 롤링(RollingSubscriptionManager 이식)은
-여전히 범위 밖 — 이 클래스는 생성 시 주어진 심볼 1개만 구독한다.
+`TickCollector`는 단일 연결·단일 심볼용 골격이다. 마흐디 mahdi/main.py가
+run_observation_loop(단일 연결, 끊기면 예외 전파)과 run_observation_loop_forever(재연결
+래퍼)를 분리한 것과 같은 설계로, run_once()가 전자에 해당하고 run_forever()가 후자에
+해당한다(2026-07-23 추가 — 그 전까지는 run_once만 있었다, NEXT_TODO 참고).
+
+`MultiSymbolTickCollector`(2026-07-27 신설)는 여러 심볼/TR을 **연결 하나**로 동시 수집한다
+— 2026-07-23 실측으로 확인된 "같은 계좌로 WS 연결을 2개(선물+옵션) 열면 양쪽 다 몇 초
+간격으로 반복 단절된다"는 문제(`ws_client.py`의 `KISWebSocketClient.subscribe()`가 처음부터
+호출을 여러 번 지원하도록 설계돼 있었음에도, `TickCollector`가 인스턴스당 심볼 1개로 고정돼
+있어 이 설계를 못 썼다)의 구조적 해법이다. ATM±N 옵션 체인 구독 롤링
+(RollingSubscriptionManager 이식) 자체는 여전히 범위 밖 — 이 클래스는 생성 시 주어진
+고정 심볼 목록만 구독한다(체인을 시세에 따라 동적으로 갈아끼우는 롤링은 별도 과제).
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import websockets
 
@@ -162,6 +170,184 @@ class TickCollector:
     async def _archive_and_publish_bar(self, bar: BarClosed) -> None:
         """완성봉 적재/발행은 파싱과 달리 인프라 실패라 침묵하면 안 됨(L22) — 잡아서 로깅하고
         계속한다. 적재 실패와 발행 실패는 서로 독립(하나가 실패해도 다른 하나는 시도)."""
+        try:
+            self._archiver.append_bar(bar)
+        except Exception as exc:  # noqa: BLE001
+            mlog.log("CollectorProcessingError", f"완성봉 적재 실패: {exc}", symbol=bar.symbol)
+
+        if self._bus is not None:
+            try:
+                await self._bus.publish(f"{TOPIC_BAR}.{bar.horizon.value}.{bar.symbol}", bar)
+            except Exception as exc:  # noqa: BLE001
+                mlog.log("CollectorProcessingError", f"완성봉 발행 실패: {exc}", symbol=bar.symbol)
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolFeed:
+    """`MultiSymbolTickCollector`에 등록할 심볼 1개 — TR·파서·틱 크기가 상품군마다
+    다르므로(선물 vs 옵션) 심볼별로 함께 묶어 넘긴다."""
+
+    symbol: str
+    tr_id: str
+    parse_tick: Callable[..., Tick | None]
+    tick_size: Decimal
+
+
+def _extract_tr_id(raw: str) -> str | None:
+    """ "암호화유무|TR_ID|데이터건수|실제데이터" 헤더에서 TR_ID(2번째 필드)만 뽑는다 —
+    `normalizer._strip_ws_envelope`와 같은 구분자 규약이지만 헤더 자체가 목적이라 별도
+    구현(정규화 모듈에 파싱 대상 외 책임을 얹지 않는다)."""
+    parts = raw.split("|", 3)
+    return parts[1] if len(parts) >= 2 else None
+
+
+class MultiSymbolTickCollector:
+    """단일 WS 연결에 여러 (심볼, TR) 조합을 동시 구독 — 모듈 docstring 참고.
+
+    **라이브 미검증 (검증 기한: 2026-08-14, Phase 1 파이프라인 완성 후 첫 금요일
+    주간회의 — [[l1_gap_deferral_to_weekly_review]]와 동일 이관 사유)**: `run_l1_daily.py`가
+    바로 이 계좌로 매일 라이브 수집 중이라, 이 클래스를 지금 실제 KIS WS로 검증하면 그
+    라이브 세션과 리소스(WS 연결 슬롯·approval_key 재발급 빈도)를 다툴 위험이 있다 —
+    비거래일·비거래시간 또는 별도 합의된 시점에 검증하기로 한다. 지금은 mock
+    `WSConnection`으로 단위 테스트만 완료(구현됨≠검증됨, `broker/base.py` 원칙).
+    """
+
+    def __init__(
+        self,
+        creds: KISCredentials,
+        feeds: Sequence[SymbolFeed],
+        archiver: ParquetArchiver,
+        bus: MessageBus | None = None,
+        horizon: Horizon = Horizon.M1,
+        approval_issuer: ApprovalKeyIssuer | None = None,
+        ws_connect: Callable[[str], Any] = websockets.connect,
+        reconnect_initial_backoff_seconds: float = _WS_RECONNECT_INITIAL_BACKOFF_SECONDS,
+        reconnect_max_backoff_seconds: float = _WS_RECONNECT_MAX_BACKOFF_SECONDS,
+    ) -> None:
+        if not feeds:
+            raise ValueError("feeds가 비어 있음 — 구독할 심볼이 최소 1개 필요")
+        if len(feeds) > KISWebSocketClient.MAX_SUBSCRIPTIONS:
+            raise ValueError(
+                f"feeds {len(feeds)}건 > 세션당 구독 슬롯 한도 "
+                f"{KISWebSocketClient.MAX_SUBSCRIPTIONS}건 — ATM±N 롤링(범위 밖) 없이는 불가"
+            )
+        self._creds = creds
+        self._feeds = list(feeds)
+        self._archiver = archiver
+        self._bus = bus
+        self._horizon = horizon
+        self._approval_issuer = approval_issuer or ApprovalKeyIssuer(creds)
+        self._ws_connect = ws_connect
+        self._reconnect_initial_backoff_seconds = reconnect_initial_backoff_seconds
+        self._reconnect_max_backoff_seconds = reconnect_max_backoff_seconds
+        self._parsers_by_tr: dict[str, Callable[..., Tick | None]] = {
+            feed.tr_id: feed.parse_tick for feed in feeds
+        }
+        self._tick_sizes_by_symbol: dict[str, Decimal] = {
+            feed.symbol: feed.tick_size for feed in feeds
+        }
+        self._aggregators = self._fresh_aggregators()
+
+    def _fresh_aggregators(self) -> dict[str, MinuteBarAggregator]:
+        return {
+            feed.symbol: MinuteBarAggregator(feed.symbol, self._horizon) for feed in self._feeds
+        }
+
+    async def run_once(self, on_connected: Callable[[], None] | None = None) -> None:
+        """`TickCollector.run_once()`와 같은 계약이나, 구독을 `feeds` 전부에 대해 반복한다
+        (연결은 여전히 하나 — `KISWebSocketClient.subscribe()`를 여러 번 호출)."""
+        approval_key = await asyncio.to_thread(self._approval_issuer.issue)
+        async with self._ws_connect(tr_codes.MARKET_DATA_WS_DOMAIN) as ws:
+            client = KISWebSocketClient(approval_key, ws)
+            for feed in self._feeds:
+                await client.subscribe(Subscription(feed.tr_id, feed.symbol))
+            if on_connected is not None:
+                on_connected()
+            await client.listen(self._handle_message)
+
+    async def run_forever(self) -> None:
+        """`TickCollector.run_forever()`와 동일한 지수 백오프 재연결 — 재연결 시 등록된
+        심볼 전부의 aggregator를 함께 재생성한다(부분 재생성은 없음, 연결이 하나라 끊기면
+        전 심볼이 동시에 끊긴다)."""
+        backoff = self._reconnect_initial_backoff_seconds
+        was_disconnected = False
+
+        def _on_connected() -> None:
+            nonlocal backoff, was_disconnected
+            if was_disconnected:
+                mlog.log(
+                    "CollectorWSReconnected",
+                    "WS 재연결 성공 — 수신 재개",
+                    symbols=[f.symbol for f in self._feeds],
+                )
+                was_disconnected = False
+            backoff = self._reconnect_initial_backoff_seconds
+
+        while True:
+            try:
+                await self.run_once(on_connected=_on_connected)
+                return
+            except _WS_DISCONNECT_ERRORS as exc:
+                if not was_disconnected:
+                    mlog.log(
+                        "CollectorWSDisconnected",
+                        f"WS 연결 끊김 — {backoff:.0f}초 후 재연결 시도: {exc}",
+                        symbols=[f.symbol for f in self._feeds],
+                    )
+                    was_disconnected = True
+                self._aggregators = self._fresh_aggregators()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self._reconnect_max_backoff_seconds)
+
+    async def flush_final_bar(self) -> None:
+        """등록된 심볼 전부의 미완성 마지막 분봉을 강제 flush(graceful shutdown)."""
+        for aggregator in self._aggregators.values():
+            bar = aggregator.flush_final()
+            if bar is not None:
+                await self._archive_and_publish_bar(bar)
+
+    async def _handle_message(self, message: dict) -> None:
+        raw = message.get("raw")
+        if raw is None:
+            return  # JSON 제어 메시지(구독응답/PINGPONG) — 정규화 대상 아님
+
+        tr_id = _extract_tr_id(raw)
+        parser = self._parsers_by_tr.get(tr_id) if tr_id else None
+        if parser is None:
+            return  # 등록 안 된 TR — 조용히 무시(다른 세션 잔여 메시지 등 방어, mahdi와 동일)
+
+        # tick_size는 심볼별로 다를 수 있어(선물 vs 옵션) 파싱 전엔 아직 어느 심볼인지 모른다
+        # — 우선 파싱 없이 심볼만 뽑을 수는 없으므로, 등록된 심볼들의 tick_size가 전부
+        # 같은 경우가 실무상 대부분이지만 다를 수 있어 일단 대표값(첫 feed)으로 파싱한 뒤
+        # 실제 심볼로 올바른 tick_size였는지 확인 — 다르면 그 심볼의 tick_size로 재파싱한다.
+        provisional = parser(raw, self._feeds[0].tick_size)
+        if provisional is None:
+            return
+        correct_tick_size = self._tick_sizes_by_symbol.get(provisional.symbol)
+        if correct_tick_size is None:
+            return  # 모르는 심볼(같은 TR의 다른 계좌 잔여 등) — 조용히 무시
+        tick = (
+            provisional
+            if correct_tick_size == self._feeds[0].tick_size
+            else parser(raw, correct_tick_size)
+        )
+        if tick is None:
+            return
+
+        if self._bus is not None:
+            try:
+                await self._bus.publish(f"{TOPIC_TICK}.{tick.symbol}", tick)
+            except Exception as exc:  # noqa: BLE001
+                mlog.log("CollectorProcessingError", f"틱 발행 실패: {exc}", symbol=tick.symbol)
+
+        aggregator = self._aggregators.get(tick.symbol)
+        if aggregator is None:
+            return
+        bar = aggregator.add_tick(tick)
+        if bar is not None:
+            await self._archive_and_publish_bar(bar)
+
+    async def _archive_and_publish_bar(self, bar: BarClosed) -> None:
         try:
             self._archiver.append_bar(bar)
         except Exception as exc:  # noqa: BLE001
