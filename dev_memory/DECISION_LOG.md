@@ -549,3 +549,52 @@ DECISION_LOG.md의 "라이브 미검증 항목은 검증 기한을 명기한다"
 --format=%ad`)로 확인 후 기입한다.
 **검증**: `grep -n "2026-07-2[789]\|2026-07-30"`로 세 파일 전수 재검사, 정정 후 재실행
 결과 W24~26(674f387) 한 곳만 2026-07-27로 남고 나머지는 전부 2026-07-26로 일치함을 확인.
+
+---
+
+## 2026-07-27 (11차 — 10차 날짜 정정의 후속 소탕: 코드/pyproject.toml에 남은 동일 오류)
+
+**증상**: 10차에서 `dev_memory/NEXT_TODO.md`·`DECISION_LOG.md`·`Docs/capability_matrix.md`
+세 문서만 대상으로 정정했는데, 저장소 전체(`src`·`scripts`·`tests`·`pyproject.toml`)를
+`grep`으로 다시 훑어보니 같은 종류의 날짜 오류가 4곳 더 있었다: `pyproject.toml`의
+lightgbm 주석("2026-07-27 실측")·pyright pythonVersion 주석("2026-07-27"),
+`src/messiah/features/engine.py`의 deque 버그 docstring/주석 2곳("2026-07-29"),
+`tests/features/test_engine.py`의 회귀 테스트 docstring("2026-07-29 버그").
+**원인**: 10차 정정 작업의 검색 범위 자체가 처음부터 세 문서로 한정돼 있었다 — "완료
+기록이 남는 곳"을 dev_memory·capability_matrix로만 좁혀 생각했지, 코드 docstring·주석에도
+같은 날짜가 인용돼 있을 수 있다는 걸 놓쳤다(모두 `git blame`으로 대조한 결과 실제 커밋
+시각과 어긋난 게 확인됨 — pyproject.toml 두 곳은 각각 a39ae8c 22:32·e0a523f 22:30, engine.py/
+test_engine.py는 54e8c1e 23:10, 전부 2026-07-26).
+**결정**: 네 파일 전부 실제 커밋 시각(2026-07-26)으로 정정.
+**Why**: 10차의 교훈("완료 타임스탬프는 실제 날짜로 확인 후 기입")이 문서에만 적용되고
+코드 주석엔 적용 안 되면 반쪽짜리 수정이다 — 코드 주석도 향후 누군가 "이 버그가 언제
+발견됐지"를 판단하는 근거로 쓰인다.
+**How to apply**: 이런 종류의 전수 정정을 할 때는 검색 범위를 "완료를 기록하는 문서"가
+아니라 저장소 전체로 잡을 것 — `grep -rn`으로 확장자 무관하게 훑는다.
+**검증**: `grep -rn "2026-07-27\|2026-07-28\|2026-07-29\|2026-07-30" src scripts tests
+pyproject.toml Docs *.md`로 재검사, `scripts/agenda.py`(오늘 작업이라 정당하게 07-27) 외
+잔여 없음 확인. 전체 516건 회귀 없음(docstring/주석만 변경, 로직 무변경).
+
+## 2026-07-27 (12차 — 관찰: hmmlearn 0.3.3 + numpy 2.5 DeprecationWarning, 대응 없음)
+
+**증상**: `tests/strategy/regime/` 실행 시 `hmmlearn/utils.py:27`의 `a_sum.shape = shape`가
+`DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5`를
+553건 띄운다(2026-07-27 전체 테스트 실행 로그에서 확인).
+**원인 조사**: hmmlearn 0.3.3(현재 설치·2026-07-27 기준 PyPI 최신, WebSearch로 재확인)의
+내부 구현이 numpy 2.5의 신규 배포 정책(배열 shape 직접 대입 금지 예고)에 아직 안 맞춰져
+있다 — hmmlearn 저장소에 이 정확한 증상에 대한 공개 이슈/수정을 찾지 못했다(우리 코드가
+아니라 서드파티 라이브러리 내부라 우리가 고칠 수 없음). numpy를 낮추는 우회는 lightgbm
+4.7.0 사고(위 5차 절 참고)에서 이미 확인했듯 scipy를 다시 깨뜨려 선택지가 아니다.
+**결정**: 코드 수정 없이 "관찰·추적"만 한다 — DeprecationWarning일 뿐 지금 515건 전체
+테스트 통과에 영향 없다(`lgb.Dataset` 크래시처럼 즉시 조치가 필요한 사고가 아님, 사고가
+아니라 관찰 항목으로 분류한 이유). `pyproject.toml`의 `ml` extras 주석 + Docs/
+capability_matrix.md에 근거를 남기고, NEXT_TODO.md "등록된 관찰 항목(분기회의)"에도
+추가했다.
+**Why**: 경고 문구 자체가 "이 동작이 향후 제거될 것"이라고 예고하고 있어, numpy가 실제로
+제거하는 릴리스가 나오면 이 DeprecationWarning이 그대로 런타임 예외로 바뀌어 `RegimeAI`/
+`RegimeRuntime`(W20~21, W24~26)이 깨진다 — 지금은 무해하지만 "언젠가 터질 수 있는 조용한
+시한폭탄"이라 완전히 무시하지 않고 추적 항목으로 남겨야 한다.
+**How to apply**: numpy 버전을 올릴 일이 생기면(다른 이유로든) 반드시 `tests/strategy/
+regime/`(hmm_model·naming·rules·service·runtime) 전체 통과를 먼저 확인할 것. hmmlearn
+쪽에 이 경고를 없앤 새 릴리스가 나왔는지도 그때 함께 확인.
+**검증**: 해당 없음(코드 변경 없는 관찰 기록) — 문서화만으로 이 절의 목적 달성.

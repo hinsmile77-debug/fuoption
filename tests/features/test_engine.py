@@ -80,7 +80,7 @@ async def test_nan_ratio_is_one_on_first_bar_and_decreases_with_more_history():
 
 
 async def test_slice_based_calculators_produce_real_values_once_warmed(monkeypatch):
-    """회귀 테스트(2026-07-29 버그) — `history`는 `collections.deque`인데 `px_vwap_dev`/
+    """회귀 테스트(2026-07-26 버그) — `history`는 `collections.deque`인데 `px_vwap_dev`/
     `vl_atr` 등 다수의 계산기가 `bars[-window:]` 슬라이스를 쓴다. deque는 슬라이스를
     지원하지 않아(정수 인덱싱만 가능) `handle_bar()`가 deque를 그대로 넘기면 이 계산기들은
     워밍업 완료 여부와 무관하게 항상 TypeError→None이었다. `list(history)`로 변환한 뒤에는

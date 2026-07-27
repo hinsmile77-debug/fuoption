@@ -626,3 +626,8 @@
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)
 - [ ] KRX 야간 파생시장 API 지원 현황 (KIS·LS)
+- [ ] hmmlearn 0.3.3 + numpy 2.5 DeprecationWarning (2026-07-27 등록) — 지금은 무해(경고일 뿐,
+      전체 테스트 통과에 영향 없음)하나 numpy가 향후 릴리스에서 배열 shape 직접 대입을 실제로
+      제거하면 RegimeAI/RegimeRuntime이 깨짐. numpy를 올릴 계기가 생기면(다른 사유로든)
+      tests/strategy/regime/ 전체 통과 확인 + hmmlearn 신규 릴리스 여부 확인
+      (dev_memory/DECISION_LOG.md 12차, Docs/capability_matrix.md 참고)

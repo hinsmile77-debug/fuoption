@@ -203,6 +203,33 @@ numpy 메이저 버전을 요구하는 상태였음. `lightgbm==4.3.0`으로 내
   다시 학습해야 하는지, 아니면 일정 주기로만 재학습할지(레짐 시프트 대응과 안정성의
   트레이드오프)는 아직 정책이 없다.
 
+## hmmlearn 0.3.3 + numpy 2.5 DeprecationWarning (2026-07-27 발견, 추적 중 — 미해결)
+
+`RegimeHMM`(hmmlearn `GaussianHMM`) 관련 테스트를 실행할 때마다
+`hmmlearn/utils.py:27`의 `a_sum.shape = shape`(배열에 shape을 직접 재할당하는 방식)가
+`DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).`을
+띄운다 — 2026-07-27 일일점검 중 전체 테스트 실행 로그에서 553건 확인(`test_hmm_model.py`
+64건·`test_runtime.py` 183건·`test_service.py` 306건).
+
+**원인**: hmmlearn 0.3.3(현재 설치·PyPI 최신 안정판, 2026-07-27 기준 재확인)의 내부 구현이
+아직 numpy 2.5의 신규 배포 정책(배열 shape 직접 대입 금지 예고, `np.reshape`로 대체 권고)에
+맞춰지지 않았다 — 우리 코드가 아니라 hmmlearn 라이브러리 자체의 내부 코드라 우리 쪽에서
+고칠 수 없다. numpy를 낮추는 우회는 이미 lightgbm 사고(위 "lightgbm 4.7.0 Windows 휠 크래시"
+섹션)에서 확인했듯 이 프로젝트의 numpy 2.5.1 고정과 충돌하는 scipy를 다시 깨뜨리므로
+선택지가 아니다.
+
+**현재 영향**: 없음 — `DeprecationWarning`은 예외가 아니라 경고이므로 515건 전체 테스트
+통과에 영향 없다. **잠재 위험**: numpy가 향후 릴리스에서 이 배포 정책대로 실제로 shape
+직접 대입을 제거하면(경고 문구가 그렇게 예고하고 있음), 그 시점 numpy로 올리는 순간
+hmmlearn의 `GaussianHMM` 학습이 예외를 던지며 깨진다 — `RegimeAI`/`RegimeRuntime`(W20~21,
+W24~26) 전체가 영향을 받는다.
+
+**대응**: 코드 수정 없이 추적만 한다 — `pyproject.toml`의 `ml` extras에 주석으로 근거를
+남기고, numpy를 올릴 때는 반드시 `tests/strategy/regime/`(hmm_model·naming·rules·service·
+runtime) 전체 통과를 먼저 확인하도록 명시했다. hmmlearn 쪽 릴리스 노트도 numpy 올리기 전에
+확인할 것 — 이 경고가 없어진 버전이 나왔다면 hmmlearn을 먼저 올리는 게 우선.
+
 ## VL 확장 + FeatureEngine deque 버그 수정 + 15m·30m Expert 검증 (Ver 2.0 §9 W22~23)
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |

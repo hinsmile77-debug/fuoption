@@ -10,7 +10,7 @@ capability_matrix.md 참고) — 계산기 레지스트리(`WINDOWED_FEATURES`/`
 완성봉 규율(Ver 1.2 §2.2): 발행은 `handle_bar()`가 완성봉을 받은 시점에만 한다 — 이 엔진
 자체는 미완성 봉을 절대 보지 않는다(L1이 완성된 봉만 발행하므로).
 
-**버그 발견·수정(2026-07-29)**: 롤링 히스토리를 `collections.deque`로 보관하는데 계산기
+**버그 발견·수정(2026-07-26)**: 롤링 히스토리를 `collections.deque`로 보관하는데 계산기
 다수가 `bars[-window:]` 슬라이스를 쓴다 — `deque`는 슬라이스를 지원하지 않아(정수 인덱싱만
 가능, 파이썬 표준 동작) 슬라이스를 쓰는 계산기는 전부 `TypeError`를 던지고 `_safe_call`이
 조용히 None으로 삼켜 왔다. PX 30개 중 정수 인덱싱만 쓰는 소수(px_ret/px_mom/px_accel 등)를
@@ -77,7 +77,7 @@ class FeatureEngine:
         # 동작, 버그 아니라 deque의 알려진 제약). `history`를 deque 그대로 넘기면 슬라이스를
         # 쓰는 계산기가 전부 TypeError → `_safe_call`이 조용히 None으로 삼켜, PX 30개 중
         # 정수 인덱싱만 쓰는 소수(px_ret/px_mom/px_accel 등)를 제외한 대다수가 워밍업과
-        # 무관하게 항상 NaN이었다(2026-07-29 발견 — 리스트로 바꾸자 실제 값 산출 확인).
+        # 무관하게 항상 NaN이었다(2026-07-26 발견 — 리스트로 바꾸자 실제 값 산출 확인).
         bars = list(history)
         vector = self._build_feature_vector(bar, bars)
         await self._publish(vector)

@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # lightgbm==4.3.0 (범위가 아니라 정확히 이 버전): 4.7.0의 Windows 휠(numpy 2.5.1 +
-# Python 3.12 조합, 2026-07-27 실측)이 lgb.Dataset.construct()의 set_label 단계에서
+# Python 3.12 조합, 2026-07-26 실측)이 lgb.Dataset.construct()의 set_label 단계에서
 # 확정적으로 OSError(access violation)를 일으킴 — Dataset 생성 자체가 안 됨(데이터
 # 크기·내용과 무관, 15행/500행 전부 재현). 처음엔 `>=4.3,<4.7`로 상한만 뒀었는데
 # `uv lock`이 그 범위의 최신인 4.6.0을 골라버려(4.3.0만 실측했지 4.4~4.6은 검증한 적
@@ -32,6 +32,12 @@ dependencies = [
 # weight·feature_name·저장/재로드·feature_importance까지 전부 정상 동작 확인함. 버전을
 # 올리려면(4.4~4.6 어딘가에서 고쳐졌을 수도 있음, 개별 확인 안 함) 반드시
 # tests/strategy/futures/test_expert.py(학습→예측→저장→재로드 전체 경로)로 먼저 검증할 것.
+# hmmlearn 0.3.3(현재 설치·2026-07-27 기준 PyPI 최신)의 내부 코드가 numpy 2.5의 배열
+# shape 직접 대입 금지 예고(DeprecationWarning)에 아직 안 맞춰져 있음 — 우리 코드가 아니라
+# hmmlearn 내부(utils.py)라 지금은 고칠 수 없고, 테스트 통과에도 영향 없어 방치 중
+# (Docs/capability_matrix.md "hmmlearn 0.3.3 + numpy 2.5 DeprecationWarning" 참고). numpy를
+# 올리기 전에 반드시 tests/strategy/regime/ 전체(hmm_model·naming·rules·service·runtime)를
+# 먼저 확인할 것 — 이 경고가 실제 에러로 바뀌는 numpy 릴리스가 나올 수 있다는 경고 문구 그대로.
 ml = ["lightgbm==4.3.0", "scikit-learn>=1.4", "numpy>=1.26", "optuna>=3.6", "hmmlearn>=0.3"]
 ui = ["fastapi>=0.111", "uvicorn>=0.30"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4", "pyright>=1.1"]
@@ -60,5 +66,5 @@ select = ["E", "F", "I", "DTZ"]
 include = ["src"]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"  # requires-python과 동일 — 미지정 시 pyright가 더 낮은 버전을 가정해
-# `tuple[...]`/`dict[...]` 같은 PEP 585 builtin 제네릭 구독을 오탐 오류로 표시함(2026-07-27
+# `tuple[...]`/`dict[...]` 같은 PEP 585 builtin 제네릭 구독을 오탐 오류로 표시함(2026-07-26
 # models/cv.py 작업 중 발견 — 실제로는 3.9+에서 안전, .venv도 3.12).
