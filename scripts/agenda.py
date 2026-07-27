@@ -3,9 +3,27 @@
 일간·주간회의 전에 실행하면 다음을 집계해 마크다운 안건을 출력한다:
   1) dev_memory/NEXT_TODO.md 미결항목 (에이징: 30일↑ 강조, 60일↑ 양자택일 강제)
   2) DECISION_LOG.md의 "라이브 미검증" 항목 (검증 기한 추적, L15)
-  3) 로그 파일의 마지막 세션 마커 이후 WARN/CRITICAL 집계 (L24 — 회전 경계 오탐 방지)
+  3) 로그 파일들의 (파일별) 마지막 세션 마커 이후 WARN/CRITICAL 집계 (L24 — 회전 경계 오탐 방지)
 
-사용:  python scripts/agenda.py [--logs logs/messiah.log] [--out dev_memory/agenda_today.md]
+**로그 경로 갭 정정 (2026-07-27)**: `core/logging.py`의 `mlog.setup()`은 stdout
+StreamHandler만 붙이고 파일에 직접 쓰지 않는다 — 실제 로그는 `run_l1_daily.bat`가
+PowerShell로 stdout을 날짜별 파일(`logs/l1_daily_YYYYMMDD.log`)에 tee한 것뿐이다. 이전
+기본값 `logs/messiah.log`는 아무도 써 본 적 없는 경로라 이 섹션이 항상 "(로그 없음)"만
+찍었다(2026-07-27 일일점검에서 발견). 기본값을 실제 운영 로그 glob 패턴으로 교체하고,
+날짜별로 파일이 나뉘는 실제 구조에 맞춰 여러 파일을 한꺼번에 집계하도록 확장했다 — 파일
+하나 = 하루 세션이 자연 경계이므로 각 파일 안에서 독립적으로 마지막 SessionStart를 찾는다
+(기존 L24 원칙 그대로, 파일 여러 개로 일반화했을 뿐).
+
+사용:  python scripts/agenda.py [--logs logs/l1_daily_*.log] [--days 1]
+       [--out dev_memory/agenda_today.md]
+       일간 회의는 --days 1(기본, 오늘 하루), 주간 회의(금)는 --days 5 권장.
+
+**"라이브 미검증" 오탐 정정 (2026-07-27)**: `collect_unverified()`가 볼드 마커 없이 그
+단어를 언급만 하는 문장(파일 상단 형식 설명 등)까지 실제 태그로 오인해 잡던 버그를 발견 —
+"**라이브 미검증**"(볼드) 매칭으로 좁혀 해결했다. 같은 점검에서 DECISION_LOG.md의 Redis
+실서버 연동 항목(검증 기한 2026-07-24)이 그 기한이 오기도 전인 2026-07-21 당일에 이미
+해소됐는데도 태그가 안 지워져 계속 안건에 잡히던 것도 함께 정리했다(dev_memory/
+DECISION_LOG.md 참고) — 자동 안건화는 "닫힌 항목은 태그를 실제로 지운다"는 규율에 의존한다.
 """
 
 from __future__ import annotations
@@ -15,6 +33,7 @@ import json
 import re
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
 
@@ -50,42 +69,73 @@ def collect_todos(next_todo: Path, today: datetime) -> list[str]:
 
 
 def collect_unverified(decision_log: Path) -> list[str]:
-    """'라이브 미검증' 태그 항목 — 검증 기한 없는 것은 그 자체를 안건화."""
+    """'라이브 미검증' 태그 항목 — 검증 기한 없는 것은 그 자체를 안건화.
+
+    실제 태그는 항상 볼드(`**라이브 미검증**`) 표기라는 게 이 파일 전체의 실제 관례다(모든
+    실사용례가 그렇다) — 평문/인용부호로 이 단어를 언급만 하는 문장(예: 파일 상단의 형식
+    설명 자체, 또는 이 설명을 인용하는 다른 회고 문단)까지 안건으로 잡히던 오탐을 2026-07-27
+    agenda.py 실행 결과에서 발견(L4·이 문서 자체의 회고 절 등). 볼드 마커를 요구해 실제
+    태그만 매칭한다."""
     if not decision_log.exists():
         return ["(DECISION_LOG.md 없음)"]
     out: list[str] = []
     for i, line in enumerate(decision_log.read_text(encoding="utf-8").splitlines(), 1):
-        if "라이브 미검증" in line:
+        if "**라이브 미검증**" in line:
             has_deadline = bool(DATE_RE.search(line))
             suffix = "" if has_deadline else " ← **검증 기한 미기재 (L15 위반)**"
             out.append(f"- L{i}: {line.strip()[:100]}{suffix}")
     return out or ["(라이브 미검증 항목 없음)"]
 
 
-def collect_log_alerts(log_path: Path) -> list[str]:
-    """마지막 SessionStart 마커 이후의 WARN/CRITICAL만 집계 (L24)."""
-    if not log_path.exists():
-        return [f"(로그 없음: {log_path})"]
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    # 마지막 세션 경계 탐색
-    start_idx = 0
-    for i, ln in enumerate(lines):
-        if '"tag": "SessionStart"' in ln or '"tag":"SessionStart"' in ln:
-            start_idx = i
+def resolve_log_paths(root: Path, pattern: str, days: int) -> list[Path]:
+    """`--logs` glob 패턴을 실제 로그 파일 목록(오래된 것 → 최신 것 순)으로 해석한다.
+
+    파일명이 `l1_daily_YYYYMMDD.log`라 문자열 정렬이 곧 날짜 정렬이다. `days`가 양수면
+    최신 파일부터 그만큼만 남긴다(일간 회의=1, 주간 회의=5 등). 패턴에 glob 메타문자(`*`/`?`)가
+    없으면 과거 방식(단일 고정 경로) 호환을 위해 그 경로 하나를 그대로 반환한다 — 존재 여부는
+    호출자(collect_log_alerts)가 판단한다."""
+    if "*" not in pattern and "?" not in pattern:
+        p = Path(pattern)
+        return [p if p.is_absolute() else root / p]
+    matches = sorted(root.glob(pattern))
+    if days > 0:
+        matches = matches[-days:]
+    return matches
+
+
+def collect_log_alerts(log_paths: Path | Sequence[Path]) -> list[str]:
+    """각 로그 파일에서 그 파일의 마지막 SessionStart 마커 이후 WARN 이상만 집계해 합산한다.
+
+    파일 하나 = 하루 세션이 자연 경계이므로(운영 로그가 날짜별로 나뉘어 쌓임), 파일마다
+    독립적으로 마커를 찾은 뒤 전체를 합산한다(L24 — 회전 경계 오탐 방지 원칙을 다중 파일로
+    일반화)."""
+    paths = [log_paths] if isinstance(log_paths, Path) else list(log_paths)
+    existing = [p for p in paths if p.exists()]
+    if not existing:
+        shown = ", ".join(str(p) for p in paths) or "패턴에 매치되는 파일 없음"
+        return [f"(로그 없음: {shown})"]
     counter: Counter[tuple[str, str]] = Counter()
-    for ln in lines[start_idx:]:
-        try:
-            rec = json.loads(ln)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if rec.get("level") in ("WARNING", "ERROR", "CRITICAL"):
-            counter[(rec["level"], rec.get("tag", "-"))] += 1
+    for log_path in existing:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # 마지막 세션 경계 탐색 (파일별 독립)
+        start_idx = 0
+        for i, ln in enumerate(lines):
+            if '"tag": "SessionStart"' in ln or '"tag":"SessionStart"' in ln:
+                start_idx = i
+        for ln in lines[start_idx:]:
+            try:
+                rec = json.loads(ln)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if rec.get("level") in ("WARNING", "ERROR", "CRITICAL"):
+                counter[(rec["level"], rec.get("tag", "-"))] += 1
     if not counter:
-        return ["(현 세션 경보 없음)"]
+        scanned = ", ".join(p.name for p in existing)
+        return [f"(현 세션 경보 없음 — 스캔: {scanned})"]
     return [f"- {lvl} [{tag}] × {n}" for (lvl, tag), n in counter.most_common(20)]
 
 
-def build_agenda(root: Path, log_path: Path) -> str:
+def build_agenda(root: Path, log_paths: Path | Sequence[Path]) -> str:
     today = now_kst()
     sections = [
         f"# 회의 안건 (자동 생성) — {today.strftime('%Y-%m-%d %H:%M KST')}",
@@ -99,7 +149,7 @@ def build_agenda(root: Path, log_path: Path) -> str:
         *collect_unverified(root / "dev_memory" / "DECISION_LOG.md"),
         "",
         "## 3. 현 세션 경보 집계 (세션 마커 이후만)",
-        *collect_log_alerts(log_path),
+        *collect_log_alerts(log_paths),
         "",
     ]
     return "\n".join(sections)
@@ -107,12 +157,23 @@ def build_agenda(root: Path, log_path: Path) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="MESSIAH meeting agenda generator")
-    ap.add_argument("--logs", default="logs/messiah.log")
+    ap.add_argument(
+        "--logs",
+        default="logs/l1_daily_*.log",
+        help="로그 파일 glob 패턴(저장소 루트 기준 상대경로). 기본값은 실제 운영 로그 위치",
+    )
+    ap.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        help="최근 며칠치 로그를 집계할지 (기본 1 = 일간 회의용 오늘 하루, 주간 회의는 5 권장)",
+    )
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
-    agenda = build_agenda(root, Path(args.logs))
+    log_paths = resolve_log_paths(root, args.logs, args.days)
+    agenda = build_agenda(root, log_paths)
     if args.out:
         Path(args.out).write_text(agenda, encoding="utf-8")
         print(f"안건 저장: {args.out}")

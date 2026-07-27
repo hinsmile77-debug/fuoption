@@ -35,7 +35,13 @@ messages.py의 BusMessage 서브클래스 자동 레지스트리에서 복원. �
 **Why**: 신규 메시지를 messages.py에 정의하면 배선 없이 버스에 실린다(수동 등록 버그 차단, L13과
 동일 철학). 미등록 타입 침묵 무시는 L3(침묵 실패) 계열이므로 예외로 시끄럽게.
 **검증**: tests/test_bus_and_scripts.py — 왕복 4건 + 미등록 타입 거부. Redis 실서버 연동은
-**라이브 미검증** (검증 기한: 2026-07-24, Redis 기동 후 self_check로 확인).
+~~라이브 미검증~~ (검증 기한: 2026-07-24) — **2026-07-21 당일 해소**: Docker
+`messiah-redis`(redis:7-alpine) 컨테이너를 포트 6380에 기동하고 `configs/instance.yaml`의
+redis_url을 갱신한 뒤 self_check PASS 확인(NEXT_TODO.md W1~2 "Redis 실서버 연동 검증"
+항목 참고, 같은 날 세션 후반부). 이 절을 쓴 시점엔 아직 실행 전이라 미검증으로 남겨뒀는데,
+기한(07-24)이 오기도 전에 이미 닫혔음에도 태그를 안 지워 2026-07-27 `agenda.py` 실행까지
+계속 회의 안건에 잡히고 있었다(자동 안건화 도구 점검 중 발견 — L15 규율은 "기한을
+명기한다"뿐 아니라 "닫히면 태그를 지운다"도 포함해야 한다는 교훈).
 
 ### [설계결정] self_check가 live+dirty git / live+번들 미지정 시 기동 거부
 
@@ -124,7 +130,7 @@ Expert/전략 코드가 "웜업 전 주문 시도" 같은 실수를 재생 단�
 
 ---
 
-## 2026-07-27 (4차 — Triple Barrier·uniqueness·Walk-Forward/Purged CV, Ver 2.0 §9 W12~13)
+## 2026-07-26 (4차 — Triple Barrier·uniqueness·Walk-Forward/Purged CV, Ver 2.0 §9 W12~13)
 
 ### [설계결정] compute_uniqueness() 격자를 t_start만이 아니라 t_start∪t_end로 확정
 
@@ -192,7 +198,7 @@ Python 3.9+ 전부 안전(PEP 585)하고 실제 .venv도 3.12라 테스트는 �
 
 ---
 
-## 2026-07-27 (5차 — Cost Model v1·Validator 골격·5m Expert 프로토타입 1호, Ver 2.0 §9 W14~16)
+## 2026-07-26 (5차 — Cost Model v1·Validator 골격·5m Expert 프로토타입 1호, Ver 2.0 §9 W14~16)
 
 ### [사고] lightgbm 4.7.0 Windows 휠이 Dataset 생성 단계에서 100% 크래시
 
@@ -259,7 +265,7 @@ handler가 특정 BusMessage 서브클래스로 좁게 타입돼 있어 발생, 
 
 ---
 
-## 2026-07-28 (6차 — 5m Expert 정식(탐색·앙상블·교정) + Meta-Labeler, Ver 2.0 §9 W17~19)
+## 2026-07-26 (6차 — 5m Expert 정식(탐색·앙상블·교정) + Meta-Labeler, Ver 2.0 §9 W17~19)
 
 ### [설계결정] out-of-fold 생성 로직을 HorizonExpert 내부가 아니라 trainer.py에 둠
 
@@ -319,7 +325,7 @@ booster 리스트를 trainer.py가 몰라도 되게 캡슐화가 유지된다(�
 
 ---
 
-## 2026-07-29 (7차 — Regime AI: HMM + 규칙, Ver 2.0 §9 W20~21)
+## 2026-07-26 (7차 — Regime AI: HMM + 규칙, Ver 2.0 §9 W20~21)
 
 ### [설계결정] 통계층(HMM)과 규칙층을 분리하고 규칙층은 지금 1개 규칙만 둠
 
@@ -363,7 +369,7 @@ confidence=1.0 고정, 오버라이드 없을 때 통계층 결과 그대로 통
 
 ---
 
-## 2026-07-29 (8차 — VL 확장 + FeatureEngine deque 버그 수정 + 15m·30m Expert 검증, Ver 2.0 §9 W22~23)
+## 2026-07-26 (8차 — VL 확장 + FeatureEngine deque 버그 수정 + 15m·30m Expert 검증, Ver 2.0 §9 W22~23)
 
 ### [버그] FeatureEngine이 계산 직전 history(deque)를 list로 안 바꿔 슬라이스 기반 계산기 다수가 항상 None
 
@@ -445,3 +451,101 @@ NEXT_TODO.md·capability_matrix.md에 남겨둔다 — "15m Expert 완료"라고
 (M15/M30 파라미터화 4건) 통과, 전체 439건 통과.
 
 ---
+
+## 2026-07-27 (9차 — Aggregator·Meta Decision·Risk Engine·Sizer·Kill Switch, Ver 2.0 §9 W24~26)
+
+### [설계결정] R1(단일 포지션 최대손실 2%)은 RiskEngine 게이트가 아니라 Sizer의 사이징 상한으로 강제
+
+**근거**: Ver 2.0 §5 한도표는 R1을 RiskEngine의 다른 한도(R2~R12)와 같은 줄에 나열하지만,
+실제 파이프라인 순서는 L4에서 Cost→**Risk**→**Sizer** 순이라 RiskEngine이 통과 판정을
+내리는 시점엔 아직 사이징 전이라 "검사할 수량 자체가 없다".
+**결정**: R1은 RiskEngine의 게이트 목록에서 제외하고, PositionSizer가 산출 수량의
+상한 자체를 2% 기준으로 계산하도록 구조적으로 강제한다(사후 검사가 아니라 사전 제약).
+**Why**: 순서상 존재하지 않는 값을 검사하는 게이트를 만드는 대신, 애초에 그 값이
+한도를 넘을 수 없게 만드는 쪽이 "침묵 실패"(계명 L3) 위험이 없다 — 게이트는 사이징이
+끝난 뒤에야 의미가 생기는데, 그 시점엔 이미 Sizer가 상한을 지켰으므로 별도 게이트가
+사실상 죽은 코드가 된다.
+**How to apply**: 향후 한도표에 새 항목을 추가할 때, "사이징 이전에 검사 가능한 값인가"를
+먼저 확인하고 RiskEngine/Sizer 중 어느 쪽 책임인지 결정할 것(risk/risk_engine.py 모듈
+docstring에 근거 기록).
+**검증**: risk_engine 13건·sizer 10건 단위 테스트, `scripts/run_full_path_smoke.py`
+end-to-end(Sizer→RiskEngine→OrderGateway→SimBroker 전 경로 주문 체결 확인).
+
+### [버그] `FuturesView.ts_utc`가 봉 도메인 시각이 아니라 wall clock으로 채워짐 → R11 가짜 데이터단절
+
+**증상**: `scripts/run_full_path_smoke.py` 최초 실행에서 `TradingPipeline`의 R11(데이터단절)
+판정이 "R11 데이터단절 15172559s 지속"이라는 터무니없는 값을 발생시킴.
+**원인**: `Aggregator.compute()`가 신선도(f_h) 계산엔 `as_of`(봉 도메인 시각)를 쓰면서도,
+발행하는 `FuturesView`의 `ts_utc` 필드 자체는 `BusMessage` 기본값(`now_utc()`, wall clock)으로
+채워지고 있었다. 실거래에선 wall clock≈봉 시각이라 안 드러나지만, 재생/스모크처럼 과거·합성
+시각을 빠르게 재생하면 "wall clock 기준 now" vs "봉 도메인 last_bar_confirm_at"을 비교해
+수억 초 단위 가짜 단절이 발생한다.
+**결정**: `Aggregator.compute()`가 `FuturesView(ts_utc=as_of, ...)`로 명시 오버라이드,
+`FuturesAIService._publish()`도 `trigger.ts_utc` 대신 `trigger.valid_until`(봉 도메인 시각)을
+`as_of`로 넘기도록 수정.
+**Why**: `BusMessage` 기본값에 암묵적으로 의존하면 "발행 시각 필드는 항상 wall clock"이라는
+가정이 봉 도메인 메시지에는 성립하지 않는데도 타입 체크만으로는 안 드러난다 — 발행자가
+명시적으로 도메인 시각을 채우는 쪽이 안전하다.
+**How to apply**: 봉 도메인 데이터로부터 파생되는 새 메시지 타입을 만들 때는 `ts_utc`를
+기본값에 맡기지 말고 그 메시지가 대표하는 시각(보통 트리거가 된 상류 메시지의 `valid_until`)을
+반드시 명시할 것.
+**검증**: `tests/strategy/futures/test_aggregator.py`·`test_futures_service.py` 회귀 테스트,
+`run_full_path_smoke.py` 재실행으로 R11 오탐 소멸 확인.
+
+### [버그] 신선도(f_h) 공식이 처음부터 방향이 반대였음
+
+**증상**: 위 버그를 고치는 과정에서 단위 테스트로 재현 — 신선도가 발행 직후 0이 되는(= 이미
+완전히 stale한) 반대 결과가 나옴.
+**원인**: `valid_until` 필드는 스키마 주석("다음 완성봉 시각")과 달리 `features/engine.py`가
+실제로는 "그 봉 자신의 확정 시각"(`bar_confirm_time`)으로 채운다(`RegimeState`·`ExpertView`
+등 다른 모든 발행자도 W6~8부터 전부 이 semantics를 따르는 pre-existing 관례). 최초
+Aggregator 구현은 이를 "미래 만료 시점"으로 오독해 `(valid_until − as_of)/Horizon`으로
+감쇠시켰다.
+**결정**: `(as_of − valid_until)/Horizon`(경과 시간 기준)으로 공식을 반전.
+**Why**: 스키마 주석 자체가 실제 구현과 어긋나 있었다 — 이번 기회에 Aggregator만 고치는
+대신, `valid_until`을 채우는 다른 발행자들과 대조해 "확정 시각" semantics가 프로젝트
+전체의 실제 관례임을 확인하고 그 관례에 Aggregator를 맞췄다(스키마 주석은 향후 정정 대상
+후보로 남겨둠).
+**검증**: `tests/strategy/futures/test_aggregator.py` 신선도 known-value 테스트.
+
+### [설계결정] `OrderGateway.submit()`이 `kind=EMERGENCY`는 halted 상태에서도 통과시킴
+
+**근거**: `scripts/run_full_path_smoke.py` 실행 중 Kill Switch가 발동한 뒤에도 청산 로그가
+매 Horizon 갱신마다 반복 발행되는 것으로 발견 — `OrderGateway.halt()`가 EMERGENCY 주문까지
+차단해 Kill Switch 자신의 청산 주문이 거부되는 모순이 있었다.
+**결정**: `submit()`이 `kind=EMERGENCY`는 `halted` 여부와 무관하게 통과시키도록 수정.
+**Why**: halt()의 원래 목적(계명 1 계열 — 사람 개입 전 신규 진입 차단)이 "청산조차 못 하는"
+상태까지 의도한 게 아니었다 — Kill Switch의 존재 이유 자체가 위험 상황에서 포지션을
+줄이는 것인데, 그 청산 주문이 자신을 촉발한 halt에 막히면 안전장치가 스스로를 무력화한다.
+**How to apply**: 향후 게이트웨이에 새 정지 조건을 추가할 때 EMERGENCY 우회가 여전히
+성립하는지 반드시 회귀 테스트로 확인할 것.
+**검증**: `tests/test_core_w1.py::test_halt_blocks_new_entries_but_not_emergency_liquidation`
+신규, `run_full_path_smoke.py` 재실행으로 청산 로그 반복 소멸 확인. 전체 510건 통과.
+
+---
+
+## 2026-07-27 (10차 — dev_memory/NEXT_TODO.md·DECISION_LOG.md·Docs/capability_matrix.md 완료일자 오류 정정)
+
+**증상**: W12~13(Triple Barrier/CV)부터 W24~26(전 경로 관통)까지 6개 작업 블록의 "완료" 일자가
+문서마다 2026-07-27·07-28·07-29·07-30으로 하루씩 순차적으로 밀려 기록돼 있었음 — 사용자의
+일일 점검 요청(2026-07-27)에 대응해 `git log`로 실제 커밋 시각을 대조하다가 발견.
+**원인**: `git log --format="%ad"`로 확인한 실제 커밋 시각은 다음과 같이 전부 **2026-07-26
+22:28 ~ 2026-07-27 00:01, 약 93분 사이**에 몰려 있었다 — 즉 마스터 플랜상 "6주 분량"(W9~11
+~ W24~26)이 실제로는 하룻밤 연속 세션 하나였는데, 기록 시점에 각 작업 블록을 마스터 플랜의
+주차 번호에 맞춰 순차적인 달력일로 잘못 표기했다(실제 시각을 확인하지 않고 "다음 주차니까
+다음 날"로 넘겨짚은 것으로 추정):
+  - W9~11(79e30f7) 22:28, W12~13(e0a523f) 22:30, W14~16(a39ae8c) 22:32,
+    W17~19(7c2743b) 22:33, W20~21(0a49b7f) 22:37, W22~23(54e8c1e) 23:10 — 전부 07-26
+  - W24~26(674f387) 00:01 — 자정을 1분 넘겨 07-27
+**결정**: 세 문서의 해당 날짜 전부를 실제 커밋 시각 기준으로 정정 — W12~13~W22~23은
+2026-07-26, W24~26만 2026-07-27. DECISION_LOG.md에는 W24~26에 대응하는 절(9차, 위)이
+아예 없었던 것도 함께 채웠다.
+**Why**: NEXT_TODO.md의 "에이징 규칙"(30일/60일 초과 시 주간회의 강제 상정)과
+DECISION_LOG.md의 "라이브 미검증 항목은 검증 기한을 명기한다"(L15) 원칙 둘 다 날짜를
+신뢰할 수 있어야 성립한다 — `scripts/agenda.py`가 이 날짜들을 그대로 파싱해 회의 안건을
+자동 생성하므로, 기록된 날짜가 실제와 다르면 에이징 계산 자체가 왜곡된다.
+**How to apply**: 작업 완료를 문서에 기록할 때는 마스터 플랜 주차 번호와 달력일을 별개로
+취급할 것 — "완료" 타임스탬프는 반드시 그 시점의 실제 날짜(필요시 `git log -1
+--format=%ad`)로 확인 후 기입한다.
+**검증**: `grep -n "2026-07-2[789]\|2026-07-30"`로 세 파일 전수 재검사, 정정 후 재실행
+결과 W24~26(674f387) 한 곳만 2026-07-27로 남고 나머지는 전부 2026-07-26로 일치함을 확인.

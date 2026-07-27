@@ -114,8 +114,82 @@ def test_agenda_flags_aging_and_unverified(tmp_path: Path) -> None:
         "- [ ] 오래된 항목 (2026-01-05 등록)\n- [ ] 최근 항목 (2026-07-20 등록)\n",
         encoding="utf-8",
     )
-    (dm / "DECISION_LOG.md").write_text("**검증**: 라이브 미검증 — 기한 없음\n", encoding="utf-8")
+    (dm / "DECISION_LOG.md").write_text(
+        "**검증**: Redis 연동은 **라이브 미검증** — 기한 없음\n", encoding="utf-8"
+    )
     out = agenda_mod.build_agenda(tmp_path, tmp_path / "no.log")
     assert "에이징" in out  # 60일 초과 항목 강조
     assert "검증 기한 미기재" in out  # L15 위반 자동 안건화
     assert "채택(티켓화) / 보류(기한 명시) / 폐기(사유 기록)" in out
+
+
+def test_collect_unverified_ignores_plain_mentions_requires_bold_tag(tmp_path: Path) -> None:
+    decision_log = tmp_path / "DECISION_LOG.md"
+    decision_log.write_text(
+        '> "라이브 미검증" 항목은 반드시 검증 기한을 명기한다 (L15).\n'
+        "**검증**: 실계좌 확인. Redis 연동은 **라이브 미검증** (검증 기한: 2026-07-24).\n"
+        '어딘가에서 "라이브 미검증"이라는 단어를 다시 인용만 하는 회고 문장도 있다.\n',
+        encoding="utf-8",
+    )
+    out = agenda_mod.collect_unverified(decision_log)
+    assert len(out) == 1  # 볼드 태그가 붙은 실제 항목 하나만 잡힘
+    assert "검증 기한: 2026-07-24" in out[0]
+
+
+def test_resolve_log_paths_glob_picks_recent_n_by_filename_order(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for day in ("20260724", "20260726", "20260727"):
+        (logs / f"l1_daily_{day}.log").write_text("", encoding="utf-8")
+    resolved = agenda_mod.resolve_log_paths(tmp_path, "logs/l1_daily_*.log", days=2)
+    assert [p.name for p in resolved] == ["l1_daily_20260726.log", "l1_daily_20260727.log"]
+
+
+def test_resolve_log_paths_non_glob_pattern_returns_single_path_unchecked(
+    tmp_path: Path,
+) -> None:
+    resolved = agenda_mod.resolve_log_paths(tmp_path, "logs/messiah.log", days=1)
+    assert resolved == [tmp_path / "logs" / "messiah.log"]
+
+
+def test_collect_log_alerts_reports_missing_when_glob_matches_nothing(tmp_path: Path) -> None:
+    out = agenda_mod.collect_log_alerts(
+        agenda_mod.resolve_log_paths(tmp_path, "logs/l1_daily_*.log", days=1)
+    )
+    assert out == ["(로그 없음: 패턴에 매치되는 파일 없음)"]
+
+
+def test_collect_log_alerts_aggregates_across_multiple_daily_files(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "l1_daily_20260726.log").write_text(
+        '{"level": "INFO", "tag": "SessionStart", "msg": "start"}\n'
+        '{"level": "WARNING", "tag": "FeatureNaN"}\n',
+        encoding="utf-8",
+    )
+    (logs / "l1_daily_20260727.log").write_text(
+        '{"level": "INFO", "tag": "SessionStart", "msg": "start"}\n'
+        '{"level": "WARNING", "tag": "FeatureNaN"}\n'
+        '{"level": "CRITICAL", "tag": "FillUnmatched"}\n',
+        encoding="utf-8",
+    )
+    paths = agenda_mod.resolve_log_paths(tmp_path, "logs/l1_daily_*.log", days=2)
+    out = agenda_mod.collect_log_alerts(paths)
+    joined = "\n".join(out)
+    assert "WARNING [FeatureNaN] × 2" in joined  # 두 파일 합산
+    assert "CRITICAL [FillUnmatched] × 1" in joined
+
+
+def test_collect_log_alerts_scopes_to_last_session_start_per_file(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "l1_daily_20260727.log").write_text(
+        '{"level": "WARNING", "tag": "BeforeRestart"}\n'
+        '{"level": "INFO", "tag": "SessionStart", "msg": "restart"}\n'
+        '{"level": "WARNING", "tag": "AfterRestart"}\n',
+        encoding="utf-8",
+    )
+    out = agenda_mod.collect_log_alerts([logs / "l1_daily_20260727.log"])
+    joined = "\n".join(out)
+    assert "AfterRestart" in joined
+    assert "BeforeRestart" not in joined  # 재시작 이전 경보는 이번 세션 집계에서 제외(L24)

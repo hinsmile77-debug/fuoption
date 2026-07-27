@@ -300,7 +300,7 @@
 
 ## W12~13 (Triple Barrier·uniqueness·Walk-Forward/Purged CV 프레임)
 
-- [x] labeling.py + cv.py 신규, px_core.py ATR 공개화 (2026-07-27 완료) —
+- [x] labeling.py + cv.py 신규, px_core.py ATR 공개화 (2026-07-26 완료) —
       **src/messiah/features/px_core.py**: 기존 `_atr`/`_true_ranges`(모듈 내부 전용)를
       `atr`/`true_ranges`로 공개 전환 — models/labeling.py의 배리어 폭 계산이 재사용(ATR
       로직 중복 방지). 리네임 과정에서 **버그 1건 발견·수정**: 단순 문자열 치환으로
@@ -350,7 +350,7 @@
 ## W14~16 (Cost Model v1 + Validator 골격 + 5m Expert 프로토타입 1호)
 
 - [x] risk/cost_model.py + strategy/futures/expert.py + models/{trainer,metrics,validator}.py
-      신규 (2026-07-27 완료) —
+      신규 (2026-07-26 완료) —
       **ml extras(lightgbm/scikit-learn/numpy) 최초 설치** — 여태 선언만 돼 있었고
       실제 설치된 적 없었음. 설치 직후 `lgb.Dataset` 생성이 항상 access violation으로
       죽는 심각한 버그 발견: lightgbm 4.7.0 + numpy 2.5.1 + Python 3.12(이 프로젝트
@@ -403,7 +403,7 @@
 ## W17~19 (5m Expert 정식 — 탐색·앙상블·교정 + Meta-Labeler)
 
 - [x] models/{search,calibration}.py + strategy/futures/{expert 재설계,meta_labeler}.py +
-      models/trainer.py 확장 (2026-07-28 완료) —
+      models/trainer.py 확장 (2026-07-26 완료) —
       **optuna 신규 설치·확인**: 지난주 lightgbm 4.7.0 크래시 사고 이후 습관대로 최소
       스모크(`create_study().optimize()`) 먼저 실행해 확인 — 문제 없음, `ml` extras에
       `optuna>=3.6` 추가.
@@ -455,7 +455,7 @@
 ## W20~21 (Regime AI — HMM + 규칙)
 
 - [x] features/vl_core.py + strategy/regime/{hmm_model,naming,rules,service}.py 신규
-      (2026-07-29 완료) —
+      (2026-07-26 완료) —
       **src/messiah/features/vl_core.py 신규**: `vl_vol_ratio` — W_STD 앞 두 값(5, 20)
       윈도우 표준편차의 비율. 세 번째 값(60)은 30시간 웜업 비용이 커 제외. 모듈 docstring이
       처음엔 "W_STD의 최솟값/최댓값"이라고 잘못 써놨었는데(W_STD=(5,20,60)에서 20은
@@ -495,7 +495,7 @@
 ## W22~23 (15m·30m Expert — VL 확장 + FeatureEngine 버그 수정)
 
 - [x] features/vl_core.py 확장(1→14) + FeatureEngine 결선 + deque 버그 수정 + M15/M30 검증
-      (2026-07-29 완료) —
+      (2026-07-26 완료) —
       **버그 발견·수정(이번 세션의 가장 큰 산출물)**: `features/engine.py`가 롤링 히스토리를
       `collections.deque`로 보관하는데 `px_core`/`vl_core` 계산기 다수가 `bars[-window:]`
       슬라이스를 쓴다 — `deque`는 슬라이스를 지원하지 않아(정수 인덱싱만 가능, 파이썬 표준
@@ -543,7 +543,7 @@
 
 - [x] strategy/{futures/aggregator,futures/service,decision/meta_decision,pipeline}.py +
       strategy/regime/runtime.py + risk/{risk_engine,sizer,kill_switch}.py 신규 +
-      execution/order_gateway.py 확장 (2026-07-30 완료) —
+      execution/order_gateway.py 확장 (2026-07-27 완료) —
       **src/messiah/core/messages.py**: `FuturesView` 신규(Aggregator 산출물, `intel.futures`)
       — score/agg_p_up/agg_p_down/uncertainty/dispersion/regime/n_experts/model_versions/
       top_features/valid_until.
