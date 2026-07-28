@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from messiah.broker.base import BrokerAccount, BrokerPosition
 from messiah.core.config import CapitalConfig
-from messiah.core.messages import DecisionIntent, Side
+from messiah.core.messages import DecisionIntent, GreeksProfile, Side
 from messiah.core.timeutil import KST
 from messiah.risk.risk_engine import RiskEngine, RiskEngineConfig
 
@@ -208,3 +208,114 @@ def test_same_margin_usage_passes_outside_overnight_window():
         )
     )
     assert decision.approved is True
+
+
+# ---------------------------------------------------------------- R7/R8 (options portfolio)
+
+_OPTION_EQUITY = Decimal("50000000")
+
+
+def _greeks(delta: float = 0.0, vega: float = 0.0) -> GreeksProfile:
+    return GreeksProfile(delta=delta, gamma=0.0, theta=0.0, vega=vega, iv=0.2)
+
+
+def _option_position(symbol: str = "A", *, delta: float = 0.0, vega: float = 0.0) -> BrokerPosition:
+    return BrokerPosition(symbol=symbol, qty=1, avg_price_ticks=100, greeks=_greeks(delta, vega))
+
+
+def test_r7_approves_net_delta_within_limit():
+    engine = RiskEngine(RiskEngineConfig(net_delta_limit_contracts=20.0))
+    positions = [_option_position(delta=15.0)]
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=_OPTION_EQUITY)
+    assert decision.approved is True
+
+
+def test_r7_rejects_net_delta_beyond_limit():
+    engine = RiskEngine(RiskEngineConfig(net_delta_limit_contracts=20.0))
+    positions = [_option_position(delta=25.0)]
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=_OPTION_EQUITY)
+    assert decision.approved is False
+    assert "R7" in decision.reason
+
+
+def test_r7_boundary_is_approved_not_rejected():
+    engine = RiskEngine(RiskEngineConfig(net_delta_limit_contracts=20.0))
+    positions = [_option_position(delta=20.0)]
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=_OPTION_EQUITY)
+    assert decision.approved is True
+
+
+def test_r7_ignores_positions_without_greeks():
+    engine = RiskEngine(RiskEngineConfig(net_delta_limit_contracts=20.0))
+    positions = [BrokerPosition(symbol="FUT", qty=100, avg_price_ticks=100)]  # 선물 — greeks 없음
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=_OPTION_EQUITY)
+    assert decision.approved is True
+
+
+def test_r7_includes_prospective_greeks_in_net_delta():
+    engine = RiskEngine(RiskEngineConfig(net_delta_limit_contracts=20.0))
+    positions = [_option_position(delta=15.0)]
+    decision = engine.evaluate_options_portfolio(
+        option_positions=positions, equity=_OPTION_EQUITY, prospective_greeks=_greeks(delta=10.0)
+    )
+    assert decision.approved is False  # 15+10=25 > 20
+    assert "R7" in decision.reason
+
+
+def test_r8_rejects_net_vega_beyond_equity_pct():
+    engine = RiskEngine(
+        RiskEngineConfig(net_vega_limit_pct_of_equity=0.5, option_point_value_krw=Decimal("50000"))
+    )
+    positions = [_option_position(vega=100.0)]
+    # vega_krw = 100 × 50000 = 5,000,000 ; equity=50,000,000 → 10% ≫ 0.5%
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=_OPTION_EQUITY)
+    assert decision.approved is False
+    assert "R8" in decision.reason
+
+
+def test_r8_approves_net_vega_within_equity_pct():
+    engine = RiskEngine(
+        RiskEngineConfig(net_vega_limit_pct_of_equity=0.5, option_point_value_krw=Decimal("50000"))
+    )
+    positions = [_option_position(vega=1.0)]
+    # vega_krw = 1 × 50000 = 50,000 ; equity=50,000,000 → 0.1% < 0.5%
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=_OPTION_EQUITY)
+    assert decision.approved is True
+
+
+def test_r8_skipped_when_equity_zero():
+    engine = RiskEngine(RiskEngineConfig(net_vega_limit_pct_of_equity=0.5))
+    positions = [_option_position(vega=1000.0)]
+    decision = engine.evaluate_options_portfolio(option_positions=positions, equity=Decimal("0"))
+    assert decision.approved is True
+
+
+# ---------------------------------------------------------------- R9 (forced liquidation)
+
+
+def test_r9_flags_short_option_position_at_two_times_loss():
+    engine = RiskEngine(RiskEngineConfig(short_option_loss_multiple=2.0))
+    positions = [BrokerPosition(symbol="A", qty=-1, avg_price_ticks=10)]  # 수취 프리미엄 10틱
+    flagged = engine.positions_requiring_forced_liquidation(positions, {"A": 30.0})  # 손실 20=10×2
+    assert flagged == positions
+
+
+def test_r9_does_not_flag_short_position_below_threshold():
+    engine = RiskEngine(RiskEngineConfig(short_option_loss_multiple=2.0))
+    positions = [BrokerPosition(symbol="A", qty=-1, avg_price_ticks=10)]
+    flagged = engine.positions_requiring_forced_liquidation(positions, {"A": 25.0})  # 손실 15<20
+    assert flagged == []
+
+
+def test_r9_ignores_long_positions_even_with_large_loss():
+    engine = RiskEngine(RiskEngineConfig(short_option_loss_multiple=2.0))
+    positions = [BrokerPosition(symbol="A", qty=1, avg_price_ticks=10)]  # 매수 — R9 대상 아님
+    flagged = engine.positions_requiring_forced_liquidation(positions, {"A": 100.0})
+    assert flagged == []
+
+
+def test_r9_skips_positions_missing_current_value():
+    engine = RiskEngine(RiskEngineConfig(short_option_loss_multiple=2.0))
+    positions = [BrokerPosition(symbol="A", qty=-1, avg_price_ticks=10)]
+    flagged = engine.positions_requiring_forced_liquidation(positions, {})
+    assert flagged == []

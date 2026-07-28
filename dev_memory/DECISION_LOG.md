@@ -690,3 +690,115 @@ Options AI 인프라(실계좌 WS/REST 개입 필요, 오늘 라이브 파이프
 로깅·`FixedTickScheduler` 실제 연동 등). 전체 570건 통과, ruff 클린, pyright는 신규 파일
 기준 클린(사전 확인된 기존 오탐 2건 — `sys.stdout.reconfigure()`·`Handler`/`BarClosed`
 분산성 — 과 무관함을 개별 대조로 확인).
+
+---
+
+## 2026-07-28 (14차 — Phase 4 전체 착수: Options AI(Vol Engine~안전규칙) + Risk Engine
+R7~R9 + Command Center UI, W27~34)
+
+Master Plan Ver 2.0 §9 Phase 4(W27~34) 세 서브페이즈를 한 세션에서 순서대로 완료 —
+계획 문서(`C:\Users\82108\.claude\plans\lively-frolicking-petal.md`)를 먼저 작성해
+사용자 승인을 받은 뒤 W27~29(Vol Engine·매트릭스) → W30~31(Evaluator·Lifecycle·안전규칙·
+Risk Engine R7~R9) → W32~34(Command Center UI) 순으로 구현. 최종 739건 통과(신규 341건),
+ruff/pyright 전체 클린.
+
+### [설계결정] KIS 원시 Greeks/IV를 신뢰하지 않고 Black-76으로 자체 계산한다 (surface.py)
+
+**근거**: 마흐디 L16(theta 필드가 원화 단위인 줄 모르고 좁은 스키마를 잡아 5일간 데이터가
+조용히 잘린 사고) — 그리고 이 프로젝트엔 현물지수 실시간 피드가 없다(RG 데이터소스 기존
+갭, capability_matrix.md).
+**결정**: `OptionQuoteSnapshot`은 옵션 가격조차 파싱하지 않고 `raw` 그대로 보존(필드 매핑
+근거 없음, FL Feature 갭과 동일 패턴). `strategy/options/surface.py`가 Black-76(현물이 아닌
+선물 기준 — 이미 실시간 수집 중인 A05608을 그대로 씀) 프라이서로 IV·Greeks를 자체 계산.
+**Why**: 없는 데이터(현물지수)를 있다고 가정하거나 검증 안 된 브로커 필드를 신뢰하는 대신,
+있는 데이터(선물가)에 맞는 모델을 골랐다 — 단위도 처음부터 이 프로젝트가 정의하므로 L16류
+사고 자체가 성립하지 않는다.
+**How to apply**: 옵션 REST 응답 필드 매핑이 실측되더라도(docs/efriend 엑셀·실계좌 캡처)
+Greeks/IV는 계속 자체 계산 유지 — 매핑은 가격(bid/ask)까지만 쓴다.
+**검증**: `tests/strategy/options/test_surface.py` 31건 — 특히 손으로 옮긴 델타/감마/베가
+해석식을 프라이서 자기 자신의 유한차분과 교차검증(공식 전사 실수를 그 자리에서 잡아내는
+설계), put-call parity, IV round-trip 전부 통과.
+
+### [버그] Ver 1.3 §4.2 델타 배정("매도=15~30Δ, 매수=30~50Δ")을 신용 스프레드에 문자 그대로
+적용하면 행사가 순서가 뒤집혀 구조가 무효화된다
+
+**증상**: `matrix.py` 최초 구현은 매도/매수 다리 구분 없이 원문 델타 밴드를 그대로 배정.
+`evaluator.py` 작성 중 `BULL_PUT_SPREAD`의 실제 다리(매도풋 vs 매수풋) 행사가 순서를 손으로
+검증하다가 발견.
+**원인**: 콜은 행사가가 낮을수록, 풋은 행사가가 높을수록 델타 절대값이 크다(`surface.py`
+단조성) — 원문 규칙은 차변(debit) 스프레드(매수 다리가 근접 등가격/큰 델타) 기준으로는
+맞지만, 신용(credit) 스프레드는 반대로 **매도 다리가 근접 등가격**이어야 순수취가 나오고
+행사가 순서(매도 행사가 > 매수 행사가, 풋 기준)가 성립한다. 원문 그대로 적용하면 매도
+다리에 작은 델타(낮은 행사가)가 배정돼 매도/매수 행사가가 역전된다.
+**결정**: `matrix._build_spec()`이 신용 스프레드에서는 두 델타 밴드를 바꿔 배정(매도=근접
+등가격 30~50Δ, 매수=날개 15~30Δ), 차변 스프레드는 원문 그대로 유지. 두 모듈(matrix.py·
+evaluator.py) docstring에 계산 근거를 남김.
+**Why**: 실제 시장 관행이 아니라 "매도/매수 행사가 순서가 성립해야 구조 자체가 유효하다"는
+수학적 필요조건에서 나온 결정 — 어느 델타 값을 쓰느냐(캘리브레이션)보다 우선하는 정합성
+문제였다.
+**How to apply**: 향후 델타 밴드 수치를 Walk-Forward로 재조정하더라도, 신용/차변 스프레드의
+밴드 역할(매도↔매수)은 절대 통일하지 말 것 — 통일하는 순간 이 버그가 재발한다.
+**검증**: `tests/strategy/options/test_matrix.py`(신용/차변 밴드 스왑 검증 2건) +
+`tests/strategy/options/test_evaluator.py`(4개 스프레드 구조 전부 실제 행사가 순서 확인,
+Iron Condor 4다리 포함) — 전부 통과.
+
+### [설계결정] 매트릭스가 애초에 네이키드 매도 후보를 만들지 않는다
+
+**근거**: Ver 1.3 §4.1 표는 IV 높음 칸에 "풋매도"·"콜매도"·"Strangle 매도"(전부 네이키드)를
+후보로 적지만 §6-1 "네이키드 매도 금지 — 예외 없음"과 정면 충돌한다.
+**결정**: `matrix.py`가 그 세 라벨을 각각 `BULL_PUT_SPREAD`·`BEAR_CALL_SPREAD`·
+`IRON_CONDOR`(전부 스프레드, 최대손실 유한)로 치환 — `safety.py`가 사후에 걸러낼 필요
+자체를 없앰.
+**Why**: "생성 후 안전규칙이 거른다"보다 "애초에 위반을 생성하지 않는다"가 더 강한 보장 —
+`risk_engine.py`가 R1을 게이트가 아니라 Sizer 사이징 상한으로 구조적으로 막는 것과 같은 철학.
+**검증**: `test_matrix_cell_*_uses_*_not_naked_*` 3건, `evaluator.py`의 `_structural_max_loss`가
+지원 구조 전부에서 항상 유한값 반환함을 회귀로 확인.
+
+### [설계결정] Risk Engine R7/R8/R9은 `evaluate()`와 분리된 별도 메서드, R9는 `safety.py` 재사용
+
+**근거**: R1~R6·R10~R12는 "의도 1개 + 계좌 상태"가 입력인데 R7(순델타)·R8(순베가)은 "옵션
+포트폴리오 전체의 합산 Greeks"가 입력이라 성격이 다르다. R9(매도옵션 손실 2배)는
+`strategy/options/safety.exceeds_loss_limit()`(§6-5)와 임계가 완전히 동일하다.
+**결정**: `evaluate_options_portfolio()`(R7·R8, 신규 게이트)와
+`positions_requiring_forced_liquidation()`(R9, 탐지 전용 — `exceeds_loss_limit()` 그대로
+호출) 두 메서드로 분리 추가. `BrokerPosition`에 `greeks: GreeksProfile | None = None` 필드
+추가(기본값 None, 기존 keyword 생성 호출부 전부 하위호환 확인).
+**Why**: 같은 규칙(§6-5/R9)을 두 곳에서 따로 구현하면 나중에 어긋날 위험이 있다 — Options AI
+Lifecycle Manager의 판정과 Risk Engine의 판정이 정확히 같은 함수를 쓰면 그 위험이 원천
+차단된다.
+**How to apply**: 옵션 주문 실행 경로(다리 여러 개짜리 스프레드 주문 구성)가 생기기 전까지는
+`BrokerPosition.greeks`를 채우는 어댑터가 없다 — R7~R9는 게이트만 준비된 상태(알려진 갭).
+**검증**: `tests/risk/test_risk_engine.py` R7 5건·R8 3건·R9 4건, 기존 R1~R6·R10~R12
+회귀 없음(전체 61건).
+
+### [설계결정] Command Center UI는 `streamlit.testing.v1.AppTest`로 실제 테스트 가능하다
+(계획 문서의 가정을 뒤집음)
+
+**근거**: 계획 수립 시점엔 "Streamlit 앱은 렌더 시마다 스크립트를 통째로 재실행하는 모델이라
+일반 pytest로 못 돌린다"고 가정하고 UI 하위 모듈(state_cache·data_source)만 단위테스트
+대상으로 잡았었다. 구현 후 수동 검증 단계에서 `AppTest`(Streamlit 공식 테스트 API, 브라우저·
+실제 서버 포트 불필요)가 정확히 이 문제를 풀기 위해 존재함을 확인.
+**결정**: `tests/ui/test_app_smoke.py` 신규 — REPLAY 기본 모드 무예외, LIVE 전환(Redis 없이도
+백그라운드 스레드 예외가 메인 스크립트로 안 새어나옴) 무예외, Kill Switch 2단 확인 클릭
+흐름 무예외를 실제로 실행해 확인.
+**Why**: 계획이 틀렸다는 걸 구현 중 발견하면 계획을 고집하지 않고 더 나은 방법(실제 테스트)을
+채택한다 — "이건 테스트 못 한다"는 가정 자체를 매번 재검증할 가치가 있다는 사례.
+**How to apply**: React 이관(Ver 2.2) 전까지 Streamlit 화면을 고칠 때마다 이 스모크 테스트를
+먼저 확장할 것 — 새 존/버튼을 추가하면 최소 "무예외" 테스트 하나는 같이 추가.
+**검증**: `tests/ui/test_app_smoke.py` 3건 + `test_state_cache.py` 8건 + `test_data_source.py`
+11건, 전부 통과.
+
+### [설계결정] LIVE 모드에서 Stream 토픽(`decision.intent`/`exec.fill`)은 pub/sub 구독으로 못
+받는다는 것을 UI 배선 중 재확인
+
+**근거**: `core/bus.py`의 `MessageBus.publish()`는 `STREAM_TOPICS`를 `XADD`로 쓰는데
+`subscribe()`는 `psubscribe`(pub/sub)만 구독한다 — 기존에도 있던 설계지만 UI가 두 종류
+토픽을 동시에 필요로 하면서 처음으로 실무적으로 부딪힘.
+**결정**: `ui/app.py`의 LIVE 배경 스레드가 `CacheSubscriber`(pub/sub)와 `read_stream()`
+폴링 루프(`_poll_streams_forever`, `decision.intent`/`exec.fill` 전용)를 `asyncio.gather()`로
+동시에 돌리도록 분리 배선.
+**How to apply**: 향후 다른 Stream 토픽(`capital.order_request`/`exec.order`)을 화면에
+띄우려면 `_poll_streams_forever`의 `last_ids` 딕셔너리에 추가하기만 하면 됨.
+**검증**: `test_cache_subscriber_updates_cache_by_message_type_name` 등 `CacheSubscriber`
+단위테스트로 pub/sub 경로만 우선 확인 — Stream 폴링 자체는 실제 Redis 없이는 단위테스트
+불가(모듈 docstring에 명시), AppTest로 "예외 없이 스레드가 뜬다"까지만 확인.

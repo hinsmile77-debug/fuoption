@@ -577,3 +577,110 @@ Phase 4(Options AI) 착수 전 필요한 인프라 갭 2건 중 착수 가능한
 - **ATM±N 옵션 체인 구독 롤링(RollingSubscriptionManager 이식) 미구현**: `MultiSymbolTickCollector`는
   생성 시 고정된 심볼 목록만 구독 — 시세에 따라 체인을 동적으로 갈아끼우는 롤링은
   별도 과제(collector.py 모듈 docstring에 명기).
+
+## Options AI — Vol Engine 착수 (Ver 1.3 §3~4, Ver 2.0 §9 W27~29, 2026-07-28)
+
+Phase 4 착수. `data.option_chain_poller.OptionChainPoller`로 OP(옵션체인) REST 폴링 갭을
+닫고, `strategy/options/` 신규 패키지에 Vol Engine(IV Surface·Vol Forecaster)·전략 매트릭스를
+구현했다. KIS 원시 Greeks/IV 필드는 여전히 미해석(마흐디 L16 재발 방지 — 아래 참고) —
+Black-76(선물 기준, 현물지수 피드가 없어 선택) 프라이서로 이 프로젝트가 직접 IV·Greeks를
+계산한다.
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| data.option_chain_poller.OptionChainPoller | ✅ | — | — | `InvestorFlowPoller`와 동일 패턴 — `IndexDerivativesMaster.nearest_expiry_chain()`으로 체인을 얻고 다리별로 `get_asking_price()` 순차 조회, `raw.option_chain.{underlying}`에 발행. 필드는 미해석(`OptionQuoteSnapshot.raw` 그대로 보존 — InvestorFlowSnapshot과 동일 원칙). 단위 테스트 5건(체인 순회·빈 체인 로깅·다리 실패 격리·발행 실패 로깅·스케줄러 연동). **라이브 미검증**(REST field mapping이 없어 이번엔 배관만). |
+| core.messages.OptionQuoteSnapshot / GreeksProfile | ✅ | — | — | 전자는 원시 시세호가 passthrough(가격도 미해석 — bid/ask 필드명 unverified), 후자는 `surface.py`가 계산한 Greeks 전용 값 객체(단위 docstring에 명시, L16 백신). |
+| strategy.options.surface (Black76 프라이서·IV 역산·스마일 피팅) | ✅ | — | — | `math.erf` 기반 정규분포, Newton-Raphson+이분법 IV 역산, `numpy.polyfit` 2차 스마일(SVI 단순화, 문서화됨), `find_strike_for_delta()`(25Δ 탐색). Greeks는 델타/감마/베가 해석식 + theta는 유한차분(자기 자신과의 정합성 우선, 손으로 옮긴 공식의 부호실수 리스크 회피). 단위 테스트 31건 — 특히 델타/감마/베가를 프라이서 자체의 유한차분과 교차검증(손으로 옮긴 해석식이 프라이서와 내적으로 일치함을 보장), put-call parity, IV round-trip. |
+| strategy.options.vol_metrics (IVHistory·Skew·Term Structure·실현변동성·IV-RV) | ✅ | — | — | 전부 순수 함수 + `IVHistory`(deque 롤링, DB 의존 없음). 단위 테스트 9건, 전부 손계산 known-value. |
+| strategy.options.vol_forecast (HAR-RV 기준모델) | ✅ | — | — | Corsi HAR-RV, `numpy.linalg.lstsq` 닫힌 형태 OLS. LightGBM 잔차 보정은 미구현(아래 갭). 단위 테스트 4건 — 알려진 계수로 잡음 없이 생성한 시계열을 fit해 계수를 그대로 복원하는지 검증(강한 정합성 테스트). |
+| strategy.options.matrix / config (전략 후보 매트릭스) | ✅ | — | — | 방향×IV 3×3 매트릭스. **Ver 1.3 §4.1 원문의 "풋매도"/"콜매도"/"Strangle 매도"(네이키드) 라벨을 쓰지 않고 처음부터 `BULL_PUT_SPREAD`/`BEAR_CALL_SPREAD`/`IRON_CONDOR`로 치환**(§6-1 "네이키드 매도 금지, 예외 없음"과의 충돌을 매트릭스 생성 단계에서 해소 — `matrix.py` 모듈 docstring 참고). `configs/options.yaml`은 만들지 않음 — 이 저장소의 실제 관습(dataclass 기본값)을 따름(Ver 1.3 §10 문서와의 의도적 차이). 단위 테스트 19건(매트릭스 9칸 전수 + CandidateSpec 필드 + skew 필터). |
+
+### 알려진 갭 (Options AI Vol Engine, 2026-07-28)
+
+- **OptionChainPoller 라이브 미검증**: `get_asking_price()` 응답의 실제 필드 매핑이 없어
+  이번 세션은 "raw 그대로 발행"까지만 — 실계좌로 돌려 원시 payload를 수집하고 필드를
+  확정하는 것이 다음 단계(FL Feature 갭과 동일 성격, docs/efriend 엑셀 또는 실측 캡처 필요).
+- **surface.py는 아직 실데이터에 물려본 적 없음**: 프라이서·피팅 로직 자체는 known-value·
+  유한차분 교차검증으로 강하게 검증됐지만, `OptionQuoteSnapshot.raw`에서 실제 bid/ask를
+  뽑아 `fit_smile()`에 넣는 배선은 위 필드매핑 갭이 풀려야 가능하다.
+- **RG(현물지수) 대신 근월 선물가로 Black-76을 쓰는 설계 선택**: 현물지수 피드가 없다는
+  기존 갭(위 "옵션/수급 데이터 인프라" 섹션)의 대응으로 Black-Scholes 대신 Black-76을
+  택했다 — 이론적으로 다른 근사가 아니라 관측 가능한 입력에 맞춘 정합적 선택이지만, 향후
+  현물지수 피드가 생기면 재검토 대상.
+- **vol_forecast의 LightGBM 잔차 보정 미구현**: HAR-RV 기준모델만 완성 — Trainer/Validator/
+  Registry 연결은 `HorizonExpert`급 별도 작업(Ver 1.3 §9, 알려진 갭으로 명시).
+- **matrix.py의 CALENDAR 구조는 DTE/델타 규칙이 자리만 있음**: 다른 만기를 걸치는 구조라
+  단일 만기 기준 델타/DTE 로직으로는 표현이 부족 — evaluator.py(다음 서브페이즈) 확장 시
+  다룰 자리.
+- **Evaluator·Safety·Lifecycle·Risk Engine R7-R9 연결은 다음 서브페이즈(W30~31)**: 이번엔
+  후보 "생성 파라미터"(`CandidateSpec`)까지만 — 실제 다리(strike/만기) 구성과 평가는 아직
+  없다.
+
+## Options AI — Evaluator·Lifecycle·안전규칙 + Risk Engine R7-R9 (Ver 1.3 §5~8, Ver 2.0 §9
+W30~31, 2026-07-28)
+
+`intel.options`까지 전 경로 관통. `OptionsAIService`가 `bar.5m`/`intel.futures`를 구독해
+매트릭스→평가→안전규칙 필터→상위 3개(또는 명시적 `NO_OPTION`) 발행까지 끝낸다. Risk Engine에
+R7(순델타)·R8(순베가) 게이트와 R9(매도옵션 손실) 탐지도 추가됐다 — Ver 2.0 §5 한도표 R1~R12
+전 항목이 이제 최소 하나의 형태로는 구현됐다(R1은 원래부터 Sizer 상한으로 구조적 강제,
+`risk_engine.py` 모듈 docstring).
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| strategy.options.evaluator (다리 구성·시나리오 그리드·순위화) | ✅ | — | — | `build_legs()`가 매트릭스 스펙 + 스마일로 실제 행사가를 찾고, 시나리오 그리드(가격 21×IV 7)로 확률가중 손익·POP을 계산. **Max Loss는 그리드가 아니라 구조에서 직접 계산**(모듈 docstring — 항상 유한, §6-1 준수 구조만 들어오므로). 개발 중 **신용 스프레드 델타 배정 버그를 자체 발견·수정**: Ver 1.3 §4.2 델타 배정("매도=15~30Δ, 매수=30~50Δ")을 문자 그대로 신용 스프레드에 적용하면 매도/매수 행사가 순서가 뒤집혀 구조 자체가 무효가 됨을 계산으로 확인 — `matrix.py`가 신용/차변 구조에 따라 델타 밴드를 다르게 배정하도록 수정(두 모듈 docstring에 근거 기록). 단위 테스트 17건(4개 구조 행사가 순서 검증 포함). |
+| strategy.options.safety (§6 Hard Rules) | ✅ | — | — | 독립 모듈 — `matrix`/`evaluator`/`lifecycle` 어느 것도 import 안 함. §6-1(네이키드)·§6-2(credit IV<50)·§6-4(만기일 진입금지)는 완전 구현, §6-3(이벤트 캘린더)는 매크로 이벤트 피드 부재로 부분 구현(호출측이 명시적으로 넘겨야 판정, 모듈 docstring). 단위 테스트 18건. |
+| strategy.options.lifecycle (수명주기 상태기계) | ✅ | — | — | 순수 함수 `evaluate_position()` — 손절(safety.py 재사용)＞만기강제청산＞이벤트전매수청산＞조정＞이익실현＞보유 우선순위. 롤오버는 신호만(실제 롤 다리 구성은 정규 경로 재심사 필요, §8 "관성으로 롤 금지"). Weekly 전용 취급은 미구현(알려진 갭). 단위 테스트 16건. |
+| strategy.options.hedging (밴드 델타 헤징) | ✅ | — | — | `compute_hedge_qty()` 순수 함수. 방향 중립 구조(IRON_CONDOR·CALENDAR)만 대상. 만기 임박 고감마 구간 밴드 자동 축소 구현. 단위 테스트 7건. |
+| strategy.options.service.OptionsAIService | ✅ | — | — | `bar.5m`+`intel.futures` 구독 → `intel.options` 발행. **`smile_provider` 콜백으로 데이터 출처 분리**(핵심 설계 — OP 필드 미해석 갭 때문에 실시간 스마일 배선이 아직 없어, 백테스트/테스트가 합성 스마일을 주입해 나머지 로직 전부를 검증할 수 있게 함, `broker.base.BrokerAdapter`와 같은 "동일 인터페이스" 철학). `intel.futures` 미수신 시 항상 NO_OPTION(낙관적 중립 해석 금지). 단위 테스트 9건. |
+| risk.risk_engine.RiskEngine.evaluate_options_portfolio (R7·R8) | ✅ | — | — | `evaluate()`와 분리된 별도 메서드(선물 단일 심볼 흐름과 옵션 포트폴리오 집계는 성격이 달라 억지로 합치지 않음). `.greeks` 없는 포지션은 집계 제외. R8은 옵션 전용 계약승수 미실측이라 선물과 같은 placeholder(`DEFAULT_POINT_VALUE_KRW`)를 잠정 적용. 단위 테스트 8건. |
+| risk.risk_engine.RiskEngine.positions_requiring_forced_liquidation (R9) | ✅ | — | — | `strategy/options/safety.exceeds_loss_limit()`(§6-5)를 그대로 재사용 — 같은 규칙이 두 곳에서 따로 구현되어 어긋나는 위험 제거. 탐지만 하고 청산 주문 구성은 안 함(옵션 실행 경로 없음, 아래 갭). 단위 테스트 4건. |
+| core.messages (StrategyLeg/StrategyCandidate/OptionsView) | ✅ | — | — | 전부 지수 포인트 단위(KRW 아님) — 옵션 계약승수 미실측이라 소비측이 환산하게 함. |
+| broker.base.BrokerPosition.greeks | ✅ | — | — | 추가 필드(기본 None), 기존 호출부 전부 keyword 생성이라 하위호환 깨짐 없음(실측 확인). |
+
+### 알려진 갭 (Options AI Evaluator~Risk Engine, 2026-07-28)
+
+- **옵션 주문 실행 경로 자체가 없음**: `Sizer`/`OrderRequest`가 단일 심볼 수량만 지원 —
+  다리 여러 개짜리 옵션 스프레드 주문 구성·제출은 이번 스코프 밖(계획 문서에 명시된 경계).
+  `BrokerPosition.greeks`를 실제로 채우는 어댑터도 없어 R7~R9는 게이트만 준비된 상태.
+- **`MetaDecisionEngine` 규칙 ⑥⑦(Options AI 비교·상관노출 합산) 미착수**: rule ⑥은 선물·옵션
+  Net ER을 비교해야 하는데 그 계산이 `pipeline.py`에서 `MetaDecisionEngine.decide()` 호출
+  *이후*에만 이뤄져 — 이미 검증된 실거래 경로를 흔드는 재구조화가 필요해 이번 스코프에서
+  의도적으로 제외(계획 문서에 근거 기록). `TradingPipeline`에 Options AI를 실제로 엮는
+  작업도 마찬가지로 미착수.
+- **CALENDAR 구조는 여전히 자리만 있음**: 단일 만기 가정의 `evaluator.py`로는 다른 만기를
+  걸치는 구조를 정확히 다룰 수 없다(`evaluator.py` 모듈 docstring "spec.dte_low가 곧 채택
+  DTE다" 절 참고).
+- **§6-3(이벤트 캘린더)·§8(IV Crush 사전청산)은 매크로 이벤트 피드가 있어야 실제로 작동**:
+  `core/event_calendar.py`가 KRX 개장일만 알고 FOMC/CPI는 모른다(그 모듈 자체의 기존 갭) —
+  `is_macro_event_window` 파라미터는 항상 호출측이 명시적으로 넘겨야 하고, 지금 이 프로젝트
+  어디에도 그 값을 실제로 채워주는 소스가 없다.
+- **`OptionsAIService`는 만기 1개짜리 `SmileFit`만 다룬다**: 여러 만기 IV Surface를 동시에
+  들고 목표 DTE에 가장 가까운 것을 고르는 로직이 없다 — Term Structure(`vol_metrics.
+  term_structure()`)는 순수 함수로 존재하지만 서비스 배선에는 아직 안 물려있다.
+
+## Command Center UI — Streamlit 1단계 프로토타입 (Ver 1.0.1 §3, Ver 2.0 §9 W32~34, 2026-07-28)
+
+핵심 4존 + 고정 상단바 전부 렌더링. `streamlit.testing.v1.AppTest`(공식 테스트 API)로 실제
+스크립트 실행을 예외 없이 검증 — 이 작업 계획 문서는 "Streamlit 앱은 일반 pytest로 못
+테스트한다"고 가정했지만 실제로는 가능함을 확인(계획 대비 개선점).
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| ui.state_cache (StateCache·CacheSubscriber) | ✅ | — | — | 스레드 세이프 최신값 저장소. `InProcessBus`로 pub/sub 배선 검증. 단위 테스트 8건. |
+| ui.data_source (LiveDataSource·ReplayDataSource·배지) | ✅ | — | — | LIVE/REPLAY는 사용자가 명시적으로 고른다(L18 "폴백은 시끄럽게") — REPLAY는 메시지 자체 타임스탬프가 아무리 최신이어도 절대 LIVE 배지를 내지 않음을 테스트로 고정. 화면별 신선도 임계값 오버라이드 지원. 단위 테스트 11건. |
+| ui.app (Command Center Streamlit 앱) | ✅ | ✅ 2026-07-28(AppTest) | — | 고정 상단바(모드·배지·KILL SWITCH 2단 확인) + 4존(① AI Decision ② Market View ③ Position & Risk ④ Bottom). 캔들 차트는 LIVE/REPLAY 공용으로 항상 Parquet에서 읽음(`ParquetArchiver`가 유일한 진실원천). Stream 토픽(`decision.intent`/`exec.fill`)은 pub/sub 구독으로 못 받는다는 것을 확인해 별도 `read_stream()` 폴링 루프로 분리 배선. **AppTest로 실제 검증**: REPLAY 기본 모드 무예외, LIVE 전환(Redis 없이도 백그라운드 스레드 예외가 메인 스레드로 안 새어나옴) 무예외, Kill Switch 2단 확인 클릭 흐름 무예외 — 스모크 테스트 3건. |
+
+### 알려진 갭 (Command Center UI, 2026-07-28)
+
+- **실제 브라우저·실제 Redis로는 아직 검증 안 됨**: AppTest는 스크립트 실행 자체의 예외
+  유무만 확인한다 — 실제 브라우저 렌더링(레이아웃 깨짐 등)이나 실제 Redis에 연결된 LIVE
+  모드의 배지 갱신은 사람이 눈으로 확인해야 하는 다음 단계.
+- **Position & Risk 존이 `broker.positions()`를 조회하지 않음**: 계좌 실시간 연동 자체가
+  아직 없다(화면에 그 사실을 명시적으로 표시) — Options AI 실행 경로 부재와 같은 성격의 갭.
+- **KILL SWITCH 버튼이 `sys.kill`을 실제로 발행하지 않음**: 2단 확인 UI 흐름은 완성됐지만,
+  확인 후 실제 버스 발행 배선은 다음 단계(현재는 사용자에게 "알려진 갭"임을 명시적으로 알림
+  — L18과 같은 "조용히 가짜로 성공한 척하지 않는다" 원칙).
+- **이벤트 캘린더·Self-Evaluation 미니보드는 자리만**: 각각 `EventCalendar` 미배선, Phase 5
+  Self Evaluation 자체가 아직 없음 — 화면에 이미 "구현 안 됨"으로 명시.
+- **옵션 IV Surface 3D/히트맵·마이크로 탭은 이번 MVP에 없음**: Ver 1.0.1 §3.2 ③의 옵션
+  탭·마이크로 탭 상세는 다음 반복 대상으로 남김(계획 문서에 이미 명시된 경계).

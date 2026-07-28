@@ -154,6 +154,36 @@ class InvestorFlowSnapshot(BusMessage):
     raw: dict[str, object]
 
 
+class OptionQuoteSnapshot(BusMessage):
+    """옵션체인 1개 다리(leg)의 REST 시세호가 스냅샷 (raw.option_chain.{underlying},
+    2026-07-28 신설, `data/option_chain_poller.py`) — `KISRestClient.get_asking_price()`
+    (이미 실측된 TR, `tests/broker/test_kis_rest_client.py`) 응답을 감싼다.
+
+    **가격·Greeks 필드가 여기 없다 — 둘 다 의도적**: `InvestorFlowSnapshot` 모듈 docstring과
+    동일 원칙("필드 미해석 — 의도적") — 이 세션엔 `get_asking_price()` 응답의 실제 JSON 키
+    (매도/매수 호가가 몇 번째 필드인지)를 확정할 근거(docs/efriend 엑셀 또는 실계좌 실측
+    캡처)가 없다. bid/ask를 잘못된 키로 파싱해 잘못된 값을 태우는 것이, 아예 안 태우고
+    `raw`로 보존하는 것보다 위험하다(마흐디 L16 — 필드 단위를 확인 없이 스키마부터 정한
+    사고). Greeks/IV도 KIS 원시 필드를 신뢰하지 않는다 — `strategy/options/surface.py`가
+    (실측 완료된) bid/ask를 확정 파싱하게 되면 그 값으로 Black-Scholes IV·Greeks를 직접
+    계산한다(Ver 1.3 §9 "IV Surface 피팅은 이론이 확립된 영역, ML 불필요") — 그러면 단위가
+    처음부터 이 프로젝트가 정의한 값이라 L16류 사고 자체가 성립하지 않는다. `raw`는 응답
+    전체를 그대로 보존한다(L16 처방 "원시값 로깅" — 실측 캡처가 생기면
+    `normalizer.parse_option_quote()` 유형 함수를 추가해 정규화할 자리, FL Feature 갭과
+    동일 패턴)."""
+
+    underlying: str  # 예: "KOSPI200"
+    option_type: str  # "C" | "P"
+    strike: float
+    expiry: str  # symbol_master.OptionLeg.month_label 원문(예: "콜 202608") — 정형 파싱은 소비측 몫
+    symbol: str
+    source: str = "kis"
+    raw: dict[str, object] = Field(default_factory=dict)
+    # 거래소 체결시각(ts_exchange)은 없음 — InvestorFlowSnapshot과 동일 이유(모듈 docstring):
+    # raw의 실제 시각 필드를 확정 파싱할 근거가 없어 상속받은 BusMessage.ts_utc(폴링 수행
+    # 시각, wall clock)만 신뢰한다.
+
+
 # ---------------------------------------------------------------- L2 Feature
 
 
@@ -166,6 +196,27 @@ class FeatureVector(BusMessage):
     values: dict[str, float | None]  # feature_id -> 값 (None = NaN 마킹)
     nan_ratio: float = 0.0  # 20% 초과 시 해당 Horizon 신호 정지 (Ver 1.1 §2-2)
     valid_until: datetime | None = None  # 다음 완성봉 시각 (신선도 f_h 계산용)
+
+
+class GreeksProfile(BaseModel):
+    """옵션 포지션/후보 1개의 그릭스 프로파일 — `BusMessage`가 아니라 다른 메시지에 내장되는
+    값 객체(Ver 1.3 §10 `StrategyCandidate.greeks`, `broker/base.py`
+    `BrokerPosition.greeks`). `strategy/options/surface.py`의 Black-Scholes 계산에서만
+    나온다(§0 참고) — 그래서 단위가 항상 이 프로젝트가 정의한 값으로 고정된다(마흐디 L16
+    "unit은 스키마 필수 항목" 처방):
+
+    - delta: 기초자산(지수) 1pt 변화당 옵션가 변화(pt), 무차원 비율 [-1, 1]
+    - gamma: 기초자산 1pt 변화당 delta 변화(pt^-1)
+    - theta: 하루 경과당 옵션가 변화(index pt/day, 통상 음수)
+    - vega: IV 1%p(0.01) 변화당 옵션가 변화(index pt)
+    - iv: Black-Scholes 내재변동성(연율화, 예: 0.18 = 18%)
+    """
+
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    iv: float
 
 
 # ---------------------------------------------------------------- L3 Intelligence
@@ -219,6 +270,49 @@ class FuturesView(BusMessage):
     model_versions: list[str] = Field(default_factory=list)  # 기여 Expert들의 번들 ID(중복 제거)
     top_features: list[tuple[str, float]] = Field(default_factory=list)  # XAI 근거 top5
     valid_until: datetime | None = None  # 기여 Horizon 중 가장 이른 다음 갱신 시각
+
+
+class StrategyLeg(BaseModel):
+    """옵션 전략 후보 1개 다리 — `broker/kis/symbol_master.OptionLeg`(체인 조회 결과, dataclass)
+    와는 다른 값 객체다: 이쪽은 "델타 목표로 고른 구성 다리"(`strategy/options/evaluator.py`
+    `build_legs()`)라 목표/실제 델타·매도여부 같은 전략 구성 정보를 담는다. `symbol`은
+    실제 체인 종목코드 매핑 전이면 None(§0 참고 — 이 프로젝트는 아직 옵션체인 그릭스 필드를
+    실측 파싱하지 않아 IVSurface가 실제 체인 종목이 아니라 이론가 계산에서만 나온다)."""
+
+    option_type: str  # "C" | "P"
+    strike: float
+    dte: int
+    is_short: bool
+    delta: float  # 다리 구성에 쓰인 목표 델타(부호 포함 — 콜 양수, 풋 음수)
+    symbol: str | None = None
+
+
+class StrategyCandidate(BaseModel):
+    """옵션 전략 후보 1개의 평가 결과 (Ver 1.3 §5.1~5.2, §10) — `intel.options`
+    (`OptionsView.candidates`)의 구성요소. 금액이 아니라 **지수 포인트** 단위다(`GreeksProfile`
+    과 동일 단위 계약 — KRW 환산은 소비측이 `point_value_krw`로, `risk/sizer.py`의 선물
+    승수와 마찬가지로 옵션 승수도 아직 실측 전이라 이 메시지 자체는 포인트로 남긴다)."""
+
+    structure: str  # strategy/options/matrix.py 구조 이름 상수
+    legs: list[StrategyLeg]
+    net_expected_return: Decimal  # 확률가중 기대손익 − 총비용, 지수 포인트
+    pop: float  # Probability of Profit [0,1]
+    max_loss: Decimal | None  # None = 무한(이 구현은 §6-1 준수로 항상 유한이어야 정상)
+    reward_risk: float | None  # 기대이익/최대손실 — max_loss가 0/None이면 None
+    greeks: GreeksProfile  # 후보 진입 시점 합산 Greeks
+    rationale: dict[str, object] = Field(default_factory=dict)  # 매트릭스 셀·IV Rank 등 XAI
+
+
+class OptionsView(BusMessage):
+    """Options AI 통합 출력 (intel.options) — Ver 1.3 §5.2, §10 `OptionsAIService` 산출물.
+    `candidates`가 비어 있으면 `no_option_reason`이 항상 채워진다(Ver 1.3 §5.2 "NO_OPTION도
+    명시적 출력이다 — 침묵과 관망을 구분한다", `DecisionIntent.rationale`과 동일 철학)."""
+
+    symbol: str
+    underlying: str
+    candidates: list[StrategyCandidate] = Field(default_factory=list)  # 상위 3개
+    no_option_reason: str | None = None
+    valid_until: datetime | None = None
 
 
 class DecisionIntent(BusMessage):

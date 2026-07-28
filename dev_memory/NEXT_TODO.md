@@ -648,6 +648,42 @@
       남은 갭: OP(옵션체인 그릭스)·RG(매크로/현물지수) 폴러 미착수, ATM±N 구독 롤링
       미구현 — capability_matrix.md "옵션/수급 데이터 인프라 착수" 섹션 참고.
 
+## W27~34 (Phase 4 — Options AI Vol Engine·매트릭스·Evaluator·Lifecycle·안전규칙 + Risk
+Engine R7~R9 + Command Center UI)
+
+- [x] W27~29: data/option_chain_poller.py + strategy/options/{surface,vol_metrics,
+      vol_forecast,matrix,config}.py (2026-07-28 완료) — OP REST 폴러(InvestorFlowPoller와
+      동일 패턴, raw passthrough), Black-76 프라이서·IV 역산·스마일 피팅(KIS 원시 Greeks
+      불신, DECISION_LOG.md 14차), HAR-RV 기준모델(LightGBM 잔차 보정은 제외), 방향×IV
+      전략 매트릭스(네이키드 라벨 치환, DECISION_LOG.md 14차). 테스트 68건.
+- [x] W30~31: strategy/options/{evaluator,safety,lifecycle,hedging,service}.py +
+      risk/risk_engine.py R7~R9 (2026-07-28 완료) — 시나리오 그리드 평가(구조상 Max Loss),
+      §6 Hard Rules 독립 모듈, 수명주기 상태기계(신호만, 실행 없음), 밴드 델타 헤징,
+      `OptionsAIService`(intel.options 발행). Risk Engine에 R7(순델타)·R8(순베가)·R9(매도옵션
+      손실, safety.py 재사용) 추가 — Ver 2.0 §5 한도표 R1~R12 전 항목 최소 형태 구현 완료.
+      **신용 스프레드 델타배정 버그 발견·수정**(DECISION_LOG.md 14차 — 가장 중요한 발견).
+      테스트 74건 신규(전체 717건).
+- [x] W32~34: ui/{state_cache,data_source,app}.py — Command Center Streamlit 1단계
+      (2026-07-28 완료) — 고정 상단바 + 핵심 4존, LIVE/REPLAY 명시적 전환(마흐디 L18),
+      캔들 차트는 Parquet 공용 소스. `streamlit.testing.v1.AppTest`로 실제 스크립트 실행
+      검증(계획 문서의 "테스트 불가" 가정을 뒤집음, DECISION_LOG.md 14차). 테스트 22건 신규
+      (전체 739건). pyright 전체 재확인 — 신규 오류 0건(기존 오탐 12건은 미변경 파일).
+
+  **남은 갭(capability_matrix.md에 상세)**:
+  - 옵션 주문 실행 경로 자체 없음 — `Sizer`/`OrderRequest`가 단일 심볼만 지원, 다리 여러
+    개짜리 스프레드 주문 구성·제출 미착수. `BrokerPosition.greeks`를 채우는 어댑터도 없음.
+  - `MetaDecisionEngine` 규칙 ⑥⑦(Options AI 비교·상관노출) 미착수 — `TradingPipeline`이
+    Net ER을 `decide()` 호출 *이후*에만 계산해 재구조화 필요(실거래 경로 안정성 우선, 의도적
+    스코프 제외).
+  - `CALENDAR` 구조는 자리만 있음(단일 만기 가정 한계), `OptionsAIService`는 만기 1개짜리
+    `SmileFit`만 다룸(다중 만기 IV Surface 동시 관리 없음).
+  - §6-3(이벤트 캘린더)·§8(IV Crush 사전청산)은 매크로 이벤트 피드 자체가 없어 항상 호출측
+    수동 입력 의존.
+  - OP(옵션체인) REST 응답 필드 매핑 여전히 미실측 — `OptionQuoteSnapshot.raw`만 보존
+    (2026-07-27 등록 항목의 남은 절반, 아래 관찰 항목 갱신).
+  - Command Center UI 실제 브라우저·실제 Redis LIVE 모드는 사람 눈 확인 필요(AppTest는
+    스크립트 예외 유무만 검증).
+
 ## 등록된 관찰 항목 (분기회의)
 
 - [ ] 키움 신 REST의 국내 선물옵션 확장 발표 여부 (발표 시 브로커 랭킹 재평가)
@@ -664,6 +700,12 @@
 - [ ] FL Feature 필드 매핑 실측 (2026-07-27 등록) — get_investor_flow() 원시 응답 캡처로
       외국인/기관/개인 순매수 필드 위치 확정 필요(docs/efriend 엑셀 또는 실계좌 캡처).
       확정되면 normalizer.py에 parse_investor_flow() 유형 함수 추가
-- [ ] OP(옵션체인 그릭스)·RG(매크로/현물지수) REST 폴러 착수 (2026-07-27 등록) —
-      InvestorFlowPoller와 동일 패턴(FixedTickScheduler+REST+raw 발행)으로 확장 가능.
-      15m/30m Expert가 Ver 1.5 배정의 절반 이하만 받는 문제 해소의 남은 절반
+- [x] OP(옵션체인) REST 폴러 착수 — data/option_chain_poller.py (2026-07-28 완료, W27~34
+      참고). RG(매크로/현물지수) 폴러는 여전히 미착수.
+- [ ] OP 응답 필드 매핑 실측 (2026-07-28 갱신) — `OptionQuoteSnapshot.raw`는 아직 원시
+      dict 그대로 보존 중(FL Feature 갭과 동일 패턴). 실측 캡처 확보되면
+      `normalizer.parse_option_quote()` 유형 함수 추가 → `strategy/options/surface.py`가
+      실제 bid/ask로 IV Surface를 피팅하도록 배선. 15m/30m Expert가 Ver 1.5 배정의 절반
+      이하만 받는 문제 해소의 남은 절반.
+- [ ] RG(매크로/현물지수) REST 폴러 착수 (2026-07-27 등록, 미착수 유지) —
+      InvestorFlowPoller/OptionChainPoller와 동일 패턴으로 확장 가능.

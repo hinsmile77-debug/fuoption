@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
 
-from messiah.core.messages import OrderRequest
+from messiah.core.messages import GreeksProfile, OrderRequest
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,12 @@ class BrokerPosition:
     symbol: str
     qty: int  # 부호 있음: +Long / -Short
     avg_price_ticks: int
+    # 옵션 포지션의 그릭스(Ver 2.0 §9 W30~31, risk/risk_engine.py R7·R8·R9). 선물 포지션은
+    # 항상 None — Greeks 개념 자체가 없다. 옵션 실행 경로(주문 생성·체결)가 아직 없어서
+    # (Options AI는 후보 산출까지만, `strategy/options/service.py` 모듈 docstring) 지금은
+    # 어떤 어댑터도 이 필드를 실제로 채우지 않는다 — R7/R8 게이트를 미리 준비해두되, 실측
+    # 연동은 옵션 주문 실행 경로가 생긴 뒤의 몫(알려진 갭).
+    greeks: GreeksProfile | None = None
 
 
 @dataclass(frozen=True)
