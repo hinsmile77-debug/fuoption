@@ -709,3 +709,181 @@ Engine R7~R9 + Command Center UI)
       이하만 받는 문제 해소의 남은 절반.
 - [ ] RG(매크로/현물지수) REST 폴러 착수 (2026-07-27 등록, 미착수 유지) —
       InvestorFlowPoller/OptionChainPoller와 동일 패턴으로 확장 가능.
+
+## W35~40 (Phase 5 — 진화와 배포: Registry·Shadow Manager·Self Evaluation·릴리스 패키징·
+복제 배포 리허설·잔여 Horizon·G2 페이퍼 트레이딩 하네스)
+
+- [x] models/{registry,release,shadow_manager,self_evaluation}.py 신규 + self_check.py/
+      agenda.py 확장 + 잔여 Horizon(1m·3m·10m) 검증 + G2 하네스 + 릴리스 패키징 + 복제
+      배포 리허설 (2026-07-28 완료, 사용자 요청: "Phase 5를 구현해서 메시아를 완성하고
+      모의투자로 운영을 시작할 수 있는지 조사") —
+      **선행 조사 결과 사용자와 합의한 스코프**: 실제 수집 데이터가 3거래일치뿐이고(G1
+      백테스트 관문을 실제 데이터로 통과한 모델이 전무) G2 관문 자체가 "40거래일 관찰"의
+      산출물이라 이번 세션에서 실제 손익을 만들어낼 수 없음을 먼저 보고 — 사용자가 "Phase 5
+      인프라만 구현"으로 스코프를 확정(손익 조사는 명시적으로 이번 세션 범위 밖).
+      **core/messages.py**: `BundleStatus`(candidate/shadow/live/retired) +
+      `RegistryStatusChanged`·`ShadowFill`·`PromotionProposal`·`SelfEvalReport` 신규(L6
+      Learning/Self Evolution 섹션). **core/bus.py**: `TOPIC_REGISTRY`·`TOPIC_SHADOW_FILL`·
+      `TOPIC_PROMOTION`·`TOPIC_SELF_EVAL` 신규, 전부 Streams(decision.intent와 같은 이유 —
+      사람이 나중에 감사할 이력).
+      **models/registry.py 신규**: `ModelRegistry` — Ver 1.6 §9.2 상태기계(candidate→shadow
+      →live→retired)를 SQLite(표준 라이브러리, 신규 의존성 없음 — Ver 1.1 §5 "파일+Registry
+      (SQLite→PostgreSQL)"의 1단계에 정확히 대응)로 구현. live는 Horizon당 정확히 1개 강제
+      (`promote_to_live()`가 이전 live를 자동 retired, 레코드·파일 보존). 버스 발행은 이
+      클래스가 직접 하지 않고 `drain_events()`로 큐를 꺼내게 함(동기 클래스가 비동기 버스에
+      직접 결합되지 않도록 — Trainer/Validator와 같은 야간배치 성격 유지). `pack_bundle()`은
+      Ver 1.6 §9.1 번들 스펙을 따르되 파일명 규칙은 이미 있는 `HorizonExpert.save()`/
+      `MetaLabeler.save()`의 stem 기반 멀티파일 포맷을 그대로 재사용(중복 직렬화 로직 방지,
+      manifest.yaml이 실제 파일명의 진실 원천). `save_conformal_state()`/
+      `load_conformal_state()`로 번들의 "매일 갱신되는 유일한 부분"(conformal_state.json)도
+      배선.
+      **models/release.py 신규**: `pack_release()`/`verify_release()` — Registry(Horizon 하나
+      짜리 번들 상태기계)와 `configs/instance.yaml`의 `model_bundle`(Ver 1.1 §7.2, 여러
+      Horizon의 live를 한 시점 스냅샷으로 묶는 배포 단위)을 잇는 상위 계층. 부분 릴리스(일부
+      Horizon만 live)를 명시적으로 허용하고 `missing_horizons`에 정직하게 기록 — 지금은
+      전 Horizon이 다 비어 있는 게 정상(G1 미통과 상태).
+      **models/shadow_manager.py 신규**: `ShadowLedger`(Horizon당 단일 포지션, 시간배리어
+      경과 시 청산 — `models/labeling.py`의 `BARRIER_PARAMS` 재사용, Risk Engine/Sizer/
+      OrderGateway를 타지 않는 독립 단순 규칙이라 "상대 비교" 근사임을 모듈 docstring에 명시)
+      + `ShadowManager`(여러 shadow 번들 동시 병행, FuturesAIService와 같은 구독 패턴) +
+      `evaluate_promotion()`(Ver 1.1 §6-4 "20거래일+Net Sharpe 우위+MDD 한도" 그대로 —
+      **자동 제안만 하고 승격은 안 함**, 사람이 `ModelRegistry.promote_to_live()`를 호출해야
+      실제 승격).
+      **models/self_evaluation.py 신규**: `run_self_evaluation()`(승률·PF·Sharpe·MDD 집계 —
+      Regime 정확도는 "정답 정의 자체가 없음"을 이유로 명시적 스코프 제외) +
+      `reconcile_slippage()`(Ver 2.0 §6 "체결 품질 기록 → Cost Model 자기보정"의 실제 계산부
+      — `OrderRequest.msg_id`→`OrderAck.request_id`→`Fill.broker_order_no` 3단 매칭, 지정가
+      주문만 대상). **models/metrics.py 확장**: `win_rate`·`profit_factor`·
+      `equity_curve_from_returns` 신규(기존 순수함수 원칙 유지, Self Evaluation·Shadow
+      Manager 공유).
+      **simulator/engine.py 확장**: `LiveSimBrokerFeed` 신규 — 기존 `DigitalTwinEngine`은
+      유한 봉 시퀀스를 직접 순회하며 자기가 버스 발행까지 하는 배치 재생기라 상시 운영에
+      못 씀. 이 클래스는 `bar.1m.{symbol}`을 **구독만** 해 `SimBroker.on_bar()`→
+      `OrderGateway.on_fill()`로 잇는 얇은 다리 — G2가 실시간 버스(run_l1_daily.py가 이미
+      실계좌로 검증한 그 배선) 위에서 페이퍼 브로커를 돌릴 수 있게 하는 핵심 결선.
+      **scripts/self_check.py 확장**: `check_registry_consistency()` 신규 — live 모드에서
+      릴리스가 가리키는 각 Horizon 번들이 Registry상 지금도 live인지 교차검증("번들 손상
+      배포" 방어, Ver 1.6 §12). **scripts/agenda.py 확장**: 4번째 섹션(Self Evaluation 일일
+      리포트, `logs/self_eval_*.json`) + 5번째 섹션(사람 결정이 필요한 승격 제안,
+      `logs/promotion_proposals.jsonl`) 신규.
+      **scripts/run_g2_paper_trading.py 신규**: `run_l1_daily.py`(L1 수집 전용) 구조를
+      그대로 확장한 G2 일일 운영 진입점(웜업→정규장→장후종료+Self Evaluation). **정직한
+      현재 상태를 모듈 docstring에 명시**: Registry에 live 번들이 하나도 없어 이 스크립트를
+      오늘 당장 돌려도 거래가 전혀 안 남 — 증명하는 건 "시스템이 안 죽고 도는가"(G2 통과기준
+      "시스템 무중단")이지 "우위가 있는가"가 아님. Regime AI도 실측 데이터 부족으로 결선
+      보류(RegimeState 미수신 시 FuturesAIService 기본값 UNKNOWN → Meta Decision 규칙②로
+      안전하게 NO TRADE). 챔피언 일일수익률은 Position Reconciler 부재로 "포트폴리오 평가액
+      변화율" 근사(거래별 실현손익 아님, 명시적 갭) — `logs/g2_daily_returns.jsonl`에 매일
+      追記해 누적, G2 "40거래일"이 의미를 가지려면 이 파일이 40줄 이상 쌓여야 함.
+      **scripts/run_phase5_smoke.py 신규**: Registry pack/register/promote(candidate→shadow
+      →live) → Shadow Manager 가상체결 → Self Evaluation → 승격 제안 → Release 패키징+
+      정합성검증까지 전 경로 1회 실행 확인(`run_full_path_smoke.py`와 동일 패턴, 합성
+      데이터). **scripts/run_replication_rehearsal.py 신규**: 실제 2번째 PC 없이 "설정
+      파일 하나로 인스턴스 분리"(Ver 1.1 §7.2) 자체를 검증 — 서로 다른 instance_id·자본의
+      두 InstanceConfig를 각각 self_check 통과시키고, 실제 messiah-redis로 각자 Health를
+      발행해 `instance_id`가 정확히 자기 것으로 찍히는지 확인(실행 결과: PASS 2/2).
+      **install.ps1 + docker-compose.yml 신규**: Ver 1.1 §7.3 "설치는 명령 한 번" — Redis
+      기동(`docker compose up -d`, messiah-redis 포트 6380 그대로 코드화)→venv 생성→
+      `pip install -e .[ml,ui,dev]`→self_check(무Redis→Redis)→`run_replay.py` 스모크까지
+      한 스크립트로. 영문 주석 전용(레슨런 — `.bat`의 cp949 오분석 사고를 Windows 스크립트
+      전반의 안전 습관으로 일반화). **`docker compose up -d`는 이번 세션에 실행하지 않음**
+      (기존 수동 기동 `messiah-redis` 컨테이너와 이름이 같아 재생성 위험 — 실제 실행은
+      사용자 확인 후).
+      **잔여 Horizon(1m·3m·10m) 검증**: `run_formal_expert_training_smoke.py --horizon`이
+      이미 전 Horizon을 받게 돼 있어(W22~23부터 일반화) 실제로 1m/3m/10m 각각 실행해 확인—
+      1m은 실제 아카이브(33건)로도 정식 파이프라인 성공(흔치 않은 결과), 3m은 실제
+      아카이브(11건)에서 **버그 발견**(아래), 10m은 실제 아카이브(5건)로는 예상대로 데이터
+      부족 실패. 셋 다 합성 데이터로는 탐색→out-of-fold→앙상블→교정→Meta-Labeler 전체
+      성공. Aggregator 가중치 매트릭스(6 Regime×6 Horizon)는 W24~26에서 이미 전 Horizon을
+      상수화해 둔 상태라 이번엔 추가 작업 없이 그대로 재확인만 함.
+      **[버그 발견·수정 1] `models/search.py` — 극소 표본 학습 폴드에서 LightGBM 네이티브
+      크래시**: 3m 실제 아카이브(11봉→레이블 6건)로 `search_hyperparameters(n_splits=2)`
+      실행 중 `lightgbm.basic.LightGBMError: Check failed: (num_data) > (0)`로 전체 스크립트
+      가 죽음(ValueError가 아니라 네이티브 크래시라 기존 "빈 폴드 skip" 가드로도 못 막음).
+      원인: PurgedKFold가 학습 폴드를 1행까지 깎았는데(purge/embargo, n=6·n_splits=2의 자연
+      귀결) `bagging_freq=1`+샘플된 `bagging_fraction`(생산 탐색공간 0.5~0.9)이 그 1행을
+      0행으로 반올림 — LightGBM이 빈 배깅 서브셋으로 Dataset을 못 만듦. 수정: `objective()`
+      의 `lgb.train()` 호출을 `try/except lgb.basic.LightGBMError`로 감싸 그 폴드/그 trial만
+      건너뛰게 함(전체 탐색은 안 죽음). 회귀 테스트 신규
+      (`test_search_survives_single_row_training_fold_bagging_crash`, n=3·n_splits=2로 항상
+      재현되는 최소 반례). 프로덕션 데이터 규모(Ver 1.2 §8.1 "2년치")에서는 폴드가 이 정도로
+      안 작아져 발생하지 않는 경계 조건.
+      **[버그 발견·수정 2] `risk/cost_model.py` — `CostModel`에 `config` 조회 프로퍼티
+      없음**: `models/self_evaluation.py`의 `reconcile_slippage()`가 예측 슬리피지(Ver 2.0 §6)
+      를 읽으려 `cost_model.config.expected_spread_ticks`를 호출했다가 `run_phase5_smoke.py`
+      최초 실행에서 `AttributeError` 실측(사설 `_config`만 있고 공개 프로퍼티가 없었음) —
+      `CostModel.config`(조회 전용) 프로퍼티 신규 추가로 해결. 테스트 2건 추가.
+      테스트 50건 신규(registry 12·release 5·shadow_manager 11·self_evaluation 7·metrics
+      +8·cost_model +2·live_sim_broker_feed 4·search +1), 전체 789건 통과. ruff 전체
+      클린(신규/수정 파일 기준 I001 포함 — 이번 세션 코드는 사전에 정리, 리포 나머지의
+      기존 I001 63건은 여전히 별개 항목). pyright는 신규 파일 기준 0건(search.py/bus.py의
+      lightgbm/optuna/redis.asyncio 미해석은 W17~19·W1부터 있던 기존 venv 미탐지 패턴 —
+      전체 재확인으로 신규 파일 관련 없음 확인).
+      **실측(수동 실행) 확인 항목**: `run_phase5_smoke.py`(Registry 상태기계 전이+Shadow
+      가상체결+Self Evaluation+Release 정합성 전부 실제 실행 성공), `run_replication_
+      rehearsal.py`(실제 messiah-redis로 인스턴스 분리 PASS 2/2), `self_check.py`의
+      `check_registry_consistency`(정상 릴리스 PASS·강등된 번들을 가리키는 stale 릴리스
+      FAIL 둘 다 수동 재현 확인), `agenda.py`의 신규 4·5번 섹션(가짜 로그로 렌더링 확인).
+      **남은 갭(capability_matrix.md 상세)**: G1 백테스트 관문을 실제 데이터로 통과한 모델
+      전무(3거래일치로는 원천 불가 — 데이터 축적이 유일한 해법), Regime AI가 G2 하네스에
+      결선 안 됨, Position Reconciler 부재로 챔피언 일일수익률이 거래별이 아니라 포트폴리오
+      평가액 근사, Self Evaluation의 슬리피지 대사가 아직 실제 OrderRequest/Ack/Fill 이력을
+      안 모음(전부 예측값·0건으로만 찍힘), Conformal 상태 갱신(운영 예측 로그 vs 실제 결과
+      재라벨링)은 별도 파이프라인 필요해 미착수, `docker compose up -d` 실제 실행 미검증
+      (기존 수동 컨테이너와 충돌 위험 회피), Windows 작업 스케줄러에 `run_g2_paper_trading.py`
+      등록 안 함(무인 자동화는 사용자 확인 후).
+
+## Task Scheduler·Docker 자동화 점검 + Docker Desktop 자가 기동 (2026-07-29)
+
+- [x] core/docker_bootstrap.py 신규 + run_l1_daily.py/run_g2_paper_trading.py 결선
+      (2026-07-29 완료, 사용자 요청: "Messiah"/"Messiah-Shutdown" 작업 스케줄러·Docker
+      점검 후 자동 시작·종료 문제없는지 확인) —
+      **조사 결과**: 두 작업 다 등록·정상 가동 중(최근 실행 전부 성공, CRITICAL 0건).
+      `run_l1_daily.bat`의 "Not yet registered" 주석은 stale 문서였음(이번에 정정). 구조적
+      취약점 3가지 발견: (1) Docker Desktop `AutoStart=False`로 배치파일 어디에도 Docker
+      기동 로직 없음 — 사용자 확인 결과 지금까지는 07:30에 **다른 프로젝트**가 자기 필요로
+      Docker Desktop을 띄우는 부수효과에 기대고 있었음, (2) Task 트리거가 `LogonType=
+      Interactive`·`StartWhenAvailable=False`·`WakeToRun=False`라 PC가 꺼져있거나
+      로그오프 상태면 그날은 캐치업 없이 영구히 건너뜀, (3) 실패 시 능동적 알림 없음(로그만
+      남음). 사용자 요청으로 (1)번만 이번 스코프에서 해결.
+      **src/messiah/core/docker_bootstrap.py 신규**: `ensure_docker_ready()` — `docker
+      info`로 daemon 응답 확인, 미응답이면 Docker Desktop 실행(`MESSIAH_DOCKER_DESKTOP_EXE`
+      환경변수로 경로 오버라이드 가능) 후 최대 2분 폴링, 준비되면 `docker start
+      messiah-redis`로 컨테이너까지 재확인. 시간 초과 시 `ready=False` 반환(호출자가 명시적
+      중단 — 조용히 진행 안 함). 전부 `runner`/`popen`/`sleep`/`now` 콜러블 주입 가능해
+      실제 docker CLI·실제 대기 없이 결정론적 테스트 가능(`FixedTickScheduler`와 동일 설계
+      원칙). **run_l1_daily.py/run_g2_paper_trading.py 둘 다 `_run_self_check()`보다 먼저
+      호출**하도록 배선 — self_check의 Redis 점검이 실패하기 전에 이미 Docker가 준비돼
+      있게 만듦.
+      테스트 11건 신규, 전체 800건 통과. ruff 클린. 실제 실행 중인 Docker로
+      `ensure_docker_ready()` 직접 호출해 `already_running=True` 즉시 반환 확인(실통합
+      검증).
+      **남은 갭**: 취약점 (2)·(3)은 사용자가 이번엔 요청하지 않아 미해결 — Task Scheduler의
+      로그온 방식(Interactive→S4U 전환 시 비밀번호 필요)이나 실패 알림(텔레그램 등, Ver 1.1
+      OBS)은 별도 요청 시 착수.
+- [x] Command Center UI(Streamlit)를 데일리 자동화에 통합 (2026-07-29 완료, 사용자 질문
+      "메시아를 실행해도 UI는 없는가"에서 출발) — `run_l1_daily.py`의 `_launch_ui()` 신규,
+      거래일 확인 직후 Streamlit을 별도 백그라운드 프로세스로 기동(`MESSIAH_SKIP_UI=1`로
+      생략 가능, 기동 실패해도 데이터 수집은 계속). `stop_l1_daily.bat` 워치독이
+      `*messiah\ui\app.py*` 패턴도 함께 매칭하도록 확장해 UI 프로세스도 15:40에 정리.
+      실제 실행으로 검증: UI 기동(포트 8501 LISTENING, 브라우저 자동 접속) → 워치독이
+      관련 프로세스 3개(streamlit stub+venv 인터프리터+anaconda base 인터프리터) 전부
+      찾아 강제 종료 확인 — "명령줄 패턴 매칭으로 살아있는 프로세스를 실제로 죽인다"는
+      경로가 다중 프로세스 트리 기준으로는 이번에 처음 확인됨(기존엔 2026-07-24 단일
+      프로세스 기준만 있었음). 남은 갭: UI는 여전히 REPLAY 기본 모드로 뜨고 LIVE 전환은
+      사람이 수동으로 해야 함(기존 원칙 유지, 이번 통합이 안 바꿈), G2 스크립트에는 아직
+      통합 안 함(요청 범위 밖).
+- [x] run_g2_paper_trading.py에도 UI 통합 + core/ui_launcher.py로 공용화 + 중복기동 방지
+      (2026-07-29 완료, 사용자 요청 전 손익 조사 → 승인 후 진행) — 조사 결과(G2 미등록·
+      Registry 비어있어 화면 사실상 빔·watchdog이 15:40에만 돎) 보고 후 사용자가 진행 확정.
+      **실측 중 신규 버그 발견**: `run_l1_daily.py`의 UI가 떠 있는 상태에서 G2도 UI를
+      띄우면, Streamlit/Windows가 이미 점유된 포트 8501에 에러 없이 두 번째 프로세스를
+      또 바인드시켜 두 프로세스가 동시에 LISTENING 상태로 남음(요청이 어느 쪽으로 가는지
+      예측 불가) — 애초 조사에서 못 본 리스크를 구현 중 발견해 그 자리에서 방어.
+      **src/messiah/core/ui_launcher.py 신규**: `launch_command_center()` — 기동 전
+      `is_ui_already_running()`(포트 응답 확인)으로 먼저 확인 후 이미 떠 있으면 생략.
+      `docker_bootstrap.py`와 동일하게 `is_running`/`popen` 주입 가능해 순수 테스트 가능.
+      두 스크립트의 `_launch_ui()`는 이 공용 함수를 부르는 얇은 래퍼로 축소(중복 제거).
+      테스트 8건 신규, 전체 808건 통과. 실제 재현으로 확인: `run_l1_daily.bat`로 UI를 띄운
+      채 G2의 `_launch_ui()` 직접 호출 → "이미 응답 중 — 중복 기동 생략" 정상 출력, 두
+      번째 프로세스 생성 안 됨.

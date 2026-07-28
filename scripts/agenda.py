@@ -4,6 +4,9 @@
   1) dev_memory/NEXT_TODO.md 미결항목 (에이징: 30일↑ 강조, 60일↑ 양자택일 강제)
   2) DECISION_LOG.md의 "라이브 미검증" 항목 (검증 기한 추적, L15)
   3) 로그 파일들의 (파일별) 마지막 세션 마커 이후 WARN/CRITICAL 집계 (L24 — 회전 경계 오탐 방지)
+  4) Self Evaluation 일일 리포트 (Phase 5, Ver 2.0 §9 W35~36 신설 — `logs/self_eval_*.json`)
+  5) Shadow → Live 승격 제안 중 사람 결정이 필요한 것 (Ver 1.1 §6-4 신설 —
+     `logs/promotion_proposals.jsonl`)
 
 **로그 경로 갭 정정 (2026-07-27)**: `core/logging.py`의 `mlog.setup()`은 stdout
 StreamHandler만 붙이고 파일에 직접 쓰지 않는다 — 실제 로그는 `run_l1_daily.bat`가
@@ -135,7 +138,58 @@ def collect_log_alerts(log_paths: Path | Sequence[Path]) -> list[str]:
     return [f"- {lvl} [{tag}] × {n}" for (lvl, tag), n in counter.most_common(20)]
 
 
-def build_agenda(root: Path, log_paths: Path | Sequence[Path]) -> str:
+def collect_self_eval(root: Path, days: int) -> list[str]:
+    """일일 Self Evaluation 리포트(Ver 2.0 §9 W35~36, `models/self_evaluation.py`가 산출)
+    집계 — `logs/self_eval_YYYY-MM-DD.json`, 파일 하나 = `SelfEvalReport` 1건(현재 운영
+    스크립트가 직접 파일로 쓴다는 전제, `scripts/run_g2_paper_trading.py` 참고)."""
+    paths = resolve_log_paths(root, "logs/self_eval_*.json", days)
+    existing = [p for p in paths if p.exists()]
+    if not existing:
+        return ["(Self Evaluation 리포트 없음 — G2 페이퍼트레이딩 미개시 또는 로그 미생성)"]
+    lines: list[str] = []
+    for path in existing:
+        try:
+            r = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            lines.append(f"- {path.name}: (파싱 실패)")
+            continue
+        lines.append(
+            f"- {r.get('date', '?')} {r.get('symbol', '?')}: "
+            f"거래 {r.get('n_trades', 0)}건 · 승률 {r.get('win_rate', 0):.0%} · "
+            f"PF {r.get('profit_factor', 0):.2f} · Sharpe {r.get('sharpe', 0):.2f} · "
+            f"MDD {r.get('max_drawdown', 0):.1%} · Shadow {r.get('n_shadow_bundles', 0)}개 · "
+            f"슬리피지(예측/실현) {r.get('slippage_predicted_ticks', 0):.2f}/"
+            f"{r.get('slippage_realized_ticks', 0):.2f}틱"
+        )
+    return lines
+
+
+def collect_promotion_proposals(root: Path) -> list[str]:
+    """미결 승격 제안(Ver 1.1 §6-4 "자동 제안 + 사람 승인") —
+    `logs/promotion_proposals.jsonl`(append-only, `models/shadow_manager.py`의
+    `evaluate_promotion()` 산출물을 운영 스크립트가 매일 追記). `recommended=true`만
+    사람 결정이 필요한 안건이다(Ver 2.0 §7.1 "허용되는 결론은 3가지" — 채택/보류/폐기)."""
+    path = root / "logs" / "promotion_proposals.jsonl"
+    if not path.exists():
+        return ["(승격 제안 없음)"]
+    recommended: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            p = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if p.get("recommended"):
+            recommended.append(
+                f"- **{p.get('bundle_id', '?')}** ({p.get('horizon', '?')}): "
+                f"{p.get('rationale', '')}"
+            )
+    return recommended or ["(사람 검토가 필요한 승격 제안 없음)"]
+
+
+def build_agenda(root: Path, log_paths: Path | Sequence[Path], days: int = 1) -> str:
     today = now_kst()
     sections = [
         f"# 회의 안건 (자동 생성) — {today.strftime('%Y-%m-%d %H:%M KST')}",
@@ -150,6 +204,12 @@ def build_agenda(root: Path, log_paths: Path | Sequence[Path]) -> str:
         "",
         "## 3. 현 세션 경보 집계 (세션 마커 이후만)",
         *collect_log_alerts(log_paths),
+        "",
+        "## 4. Self Evaluation 일일 리포트 (Phase 5, Ver 2.0 §7)",
+        *collect_self_eval(root, days),
+        "",
+        "## 5. Shadow → Live 승격 제안 (Ver 1.1 §6-4)",
+        *collect_promotion_proposals(root),
         "",
     ]
     return "\n".join(sections)
@@ -173,7 +233,7 @@ def main() -> int:
 
     root = Path(__file__).resolve().parent.parent
     log_paths = resolve_log_paths(root, args.logs, args.days)
-    agenda = build_agenda(root, log_paths)
+    agenda = build_agenda(root, log_paths, args.days)
     if args.out:
         Path(args.out).write_text(agenda, encoding="utf-8")
         print(f"안건 저장: {args.out}")

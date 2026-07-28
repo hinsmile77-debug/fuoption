@@ -802,3 +802,262 @@ Lifecycle Manager의 판정과 Risk Engine의 판정이 정확히 같은 함수�
 **검증**: `test_cache_subscriber_updates_cache_by_message_type_name` 등 `CacheSubscriber`
 단위테스트로 pub/sub 경로만 우선 확인 — Stream 폴링 자체는 실제 Redis 없이는 단위테스트
 불가(모듈 docstring에 명시), AppTest로 "예외 없이 스레드가 뜬다"까지만 확인.
+
+---
+
+## 2026-07-28 (15차 — Phase 5 착수: Registry·Shadow Manager·Self Evaluation·릴리스
+패키징·복제 배포 리허설·잔여 Horizon·G2 페이퍼 트레이딩 하네스, Ver 2.0 §9 W35~40)
+
+사용자가 "Phase 5를 구현해서 메시아를 완성하고 모의투자로 운영을 시작할 수 있는지 조사하고
+그 손익을 조사해서 보고해"를 요청. 구현 착수 전에 먼저 조사한 결과를 사용자에게 보고하고
+스코프를 합의받은 뒤 진행한 세션 — 그 조사·합의 과정 자체가 이번 세션의 첫 번째 중요한
+결정이다.
+
+### [설계결정] "손익 조사"는 이번 세션 스코프에서 뺀다 — "Phase 5 인프라만 구현"으로 합의
+
+**근거**: 조사 결과 (1) 실제 KIS 서버로 수집된 시장 데이터가 단 3거래일치(2026-07-24·27·28)
+뿐이라 Ver 1.2 §8.1 "최소 확보 목표: 틱/호가 2년치"에 한참 못 미치고, (2) 지금까지 학습된
+모든 Expert는 전부 합성(사인파) 데이터 기준이라 G1 백테스트 관문을 실제 데이터로 통과한
+모델이 하나도 없으며, (3) G2 관문 자체가 Ver 2.0 §8 표에 "40거래일" 관찰 기간의 산출물로
+정의돼 있어 하루 세션으로 손익을 만들어낼 방법이 원천적으로 없다.
+**결정**: `AskUserQuestion`으로 세 가지 진행 방향(① Phase 5 인프라만 구현 ② 데이터 축적
+우선, Phase 5는 보류 ③ Phase 5 구현 + 합성/3거래일 데이터로 즉석 추정 손익 보고)을 제시,
+사용자가 ①을 선택. 이후 전 작업을 "실제 우위 검증이 아니라 배관 검증"이라는 틀로 진행하고,
+모든 신규 스크립트·모듈 docstring에 이 사실을 반복 명시했다.
+**Why**: 마스터플랜 §8 스스로 "G3까지 최소 4~5개월: 서두름이 최대의 리스크"라고 경고하는데,
+실제 캘린더는 8일째였다 — 없는 우위를 있는 것처럼 보고하면 이 프로젝트 전체가 서 있는
+"실측으로 검증, 안 되면 정직하게 실패 보고" 원칙(W14~16부터 반복된 패턴)이 무너진다.
+**How to apply**: 앞으로 이 프로젝트에서 "Phase N을 완성해라" 류의 큰 요청이 오면, 코드
+구현 가능 여부와 그 코드가 만들어내는 숫자(손익·정확도 등)가 의미를 가지는지는 별개
+질문이라는 것을 먼저 분리해서 사용자에게 보고할 것 — 데이터/시간이 필요한 관문(G1/G2/G3,
+Shadow 20거래일)은 코드를 아무리 잘 짜도 앞당길 수 없다.
+**검증**: 해당 없음(설계·소통 결정) — 이후 산출물이 전부 이 스코프를 지켰는지는 아래
+항목들의 모듈 docstring·capability_matrix.md "선행 조사" 인용문으로 추적 가능.
+
+### [설계결정] Registry(Horizon 단위 번들 상태기계)와 Release(멀티 Horizon 배포 스냅샷)를
+두 계층으로 분리한다
+
+**근거**: Ver 1.6 §9.1의 `bundle_id`(예: `"5m_v2026.08.01"`)는 Horizon 하나짜리인데,
+`configs/instance.yaml`의 `model_bundle`(Ver 1.1 §7.2 예시 `"release-2026.07.21"`)은 PC
+전체가 참조하는 배포 단위 — 이미 존재하는 `scripts/self_check.py`의 `check_bundle()`이
+`data/models/{model_bundle}/manifest.yaml`을 찾는 것도 이 상위 개념을 전제하고 있었다(W1~2
+부터 있었지만 아무도 안 채운 자리). 두 개념을 하나의 클래스로 합치면 "Horizon마다 승격
+시점이 다르다"는 사실을 표현할 방법이 없어진다.
+**결정**: `models/registry.py`(`ModelRegistry`, Horizon 하나짜리 candidate→shadow→live→
+retired)와 `models/release.py`(`pack_release()`/`verify_release()`, 그 순간 각 Horizon의
+live를 스냅샷으로 묶음)로 분리. `verify_release()`는 릴리스 발행 이후 참조된 번들이
+강등되는 "번들 손상 배포"(Ver 1.6 §12)까지 감지한다.
+**Why**: 실제 배포 시나리오(한 Horizon만 재승격되고 나머지는 그대로인 상태에서 릴리스를
+새로 깎는 것)를 코드가 표현 못 하면, 나중에 "이 릴리스가 정확히 어느 모델들의 조합인지"를
+사람이 수동으로 추적해야 한다 — 그게 바로 Ver 1.1 §7.3이 "릴리스 = git tag + 모델 번들"로
+명시적으로 고정하려는 문제다.
+**How to apply**: 향후 실제 `live` 번들이 생기기 시작하면(G1 통과 후), 릴리스는 항상
+`pack_release()`로 만들고 `configs/instance.yaml`의 `model_bundle`을 그 `release_id`로
+갱신할 것 — Horizon별 `manifest.yaml`을 직접 가리키게 하지 말 것(2계층 원칙이 깨짐).
+**검증**: `tests/models/test_release.py` 5건(부분 릴리스의 `missing_horizons`·전체 커버리지·
+manifest round-trip·정합성 검증 pass/fail 양쪽) + `run_phase5_smoke.py` 실제 실행(릴리스
+1개 Horizon만 채운 상태로 정상 생성, `verify_release()` 문제 없음 확인).
+
+### [설계결정] Shadow Manager는 실주문 경로(Risk Engine·Sizer·OrderGateway)를 타지 않고
+독립된 단순 청산 규칙을 쓴다
+
+**근거**: `FuturesAIService`/`TradingPipeline`(챔피언 경로)을 shadow 번들에도 그대로
+재사용하면 Risk Engine의 증거금 사용률·연속손실 등 "실제 계좌 상태" 전제 로직까지 다시
+거치게 된다 — 가상 모델을 위해 그 상태를 오염시키거나 챔피언/Shadow 분기 처리를 그
+컴포넌트들에 추가하면 계명 1(주문 경로는 OrderGateway 하나)의 정신에 어긋난다.
+**결정**: `ShadowLedger`(포지션 1개, `models/labeling.py`의 `BARRIER_PARAMS` 시간배리어만
+재사용하는 독립 청산 규칙)로 별도 구현. Risk Engine이 거부·축소했을 신호도 Shadow는 전부
+진입한다는 점을 모듈 docstring에 명시.
+**Why**: "Shadow 성적이 챔피언과 정확히 같은 정교함으로 계산되는 것"보다 "실주문 경로에
+부작용을 주지 않는 것"이 더 강한 제약이라고 판단했다 — Shadow는 어차피 "상대 비교"용
+근사치이지 실전 재현이 목적이 아니다(Ver 1.1 §6-4 원문도 "가상 주문 성적 기록"이라고만
+하지 실행 경로 재사용을 요구하지 않는다).
+**How to apply**: Shadow 성적을 근거로 승격 여부를 최종 판단할 때는 이 근사의 한계(Risk
+거부 신호도 전부 카운트됨)를 항상 함께 고려할 것 — `evaluate_promotion()`의 `recommended`는
+그래서 "사람이 검토할 가치가 있다"는 신호일 뿐 자동 승격 근거가 아니다.
+**검증**: `tests/models/test_shadow_manager.py` 11건(피라미딩 금지·시간배리어 청산·메타
+필터링·버스 발행) + `run_phase5_smoke.py`의 직접 시연(강신호 주입으로 실제 `ShadowFill`
+1건 생성 확인, 유기적 재생은 합성 데이터 예측력 부재로 0건 — 기존 갭과 동일 이유).
+
+### [버그] `models/search.py` — 극소 표본 학습 폴드에서 LightGBM이 Python 예외가 아니라
+네이티브 크래시를 낸다
+
+**증상**: 잔여 Horizon(1m·3m·10m) 검증 중 3m 실제 아카이브(11봉)로
+`run_formal_expert_training_smoke.py --horizon 3m`을 실행하자
+`lightgbm.basic.LightGBMError: Check failed: (num_data) > (0)`로 스크립트 전체가 죽음.
+**원인**: Triple Barrier 레이블이 6건뿐이라 `PurgedKFold(n_splits=2)`의 한쪽 폴드가 학습
+표본 1행까지 깎였고, `bagging_freq=1`(고정)+생산 탐색공간의 `bagging_fraction`(0.5~0.9)이
+그 1행을 `floor(1×fraction)=0`행으로 반올림 — LightGBM이 빈 배깅 서브셋으로 학습을 못 함.
+기존 `if not train_idx or not test_idx: continue` 가드는 "폴드가 원래 비었는지"만 보지
+"폴드가 비지 않았지만 배깅 후 비게 되는지"는 못 봐서 못 막았다.
+**결정**: `objective()`의 `lgb.train()` 호출을 `try/except lgb.basic.LightGBMError: continue`
+로 감싸 그 폴드/그 trial만 건너뛴다(전체 탐색은 계속). `n=3, n_splits=2`(폴드 하나가
+결정론적으로 정확히 1행이 되는 최소 반례)로 회귀 테스트 고정.
+**Why**: 원인이 "잘못된 하이퍼파라미터 조합"이 아니라 "너무 작은 데이터 규모의 구조적
+경계 조건"이라 예외를 없애는 게 아니라 그 trial/폴드만 안전하게 버리는 게 맞는 대응이다 —
+프로덕션 규모(2년치)에서는 이 경계 자체가 성립하지 않는다.
+**How to apply**: 실측 아카이브가 지금처럼 작은 동안(며칠~몇 주치) 다른 Horizon·다른 날짜로
+같은 스모크를 돌릴 때 비슷한 네이티브 크래시가 또 나면, 이 가드가 이미 흡수하고 있을
+가능성이 높다 — 만약 여전히 크래시가 나면 다른 종류의 LightGBM 네이티브 오류일 수 있으니
+에러 메시지를 먼저 확인할 것(이번처럼 `bagging_fraction` 반올림이 원인이 아닐 수 있음).
+**검증**: `tests/models/test_search.py::
+test_search_survives_single_row_training_fold_bagging_crash` — 수정 전 코드로는 즉시
+재현, 수정 후 통과 확인. 이어서 `run_formal_expert_training_smoke.py --horizon 3m` 전체
+재실행으로 실제 시나리오 해소 확인(실제 아카이브 out-of-fold 6건 성공).
+
+### [버그] `risk/cost_model.py` — `CostModel`에 설정값 조회용 공개 프로퍼티가 없었다
+
+**증상**: `models/self_evaluation.py`의 `reconcile_slippage()`가 예측 슬리피지(Ver 2.0 §6)를
+읽으려 `cost_model.config.expected_spread_ticks`를 호출 → `run_phase5_smoke.py` 최초 실행
+중 `AttributeError: 'CostModel' object has no attribute 'config'` 실측(사설 `_config`만
+있었고 공개 프로퍼티가 없었음 — 지금까지는 `CostModel` 내부 메서드들만 `self._config`를
+썼지 외부에서 설정값을 읽어야 하는 소비자가 없었다).
+**결정**: `CostModel.config`(조회 전용 프로퍼티) 신규 추가.
+**Why**: `HorizonExpert`가 `feature_set`/`horizon`/`model_version` 등을 이미 같은 방식(사설
+필드 위 공개 프로퍼티)으로 노출하고 있어 — 새 소비자(Self Evaluation)가 생겼을 때 그
+패턴을 그대로 따르는 것이 일관성 있는 선택이었다.
+**검증**: `tests/risk/test_cost_model.py` 2건(커스텀 config 노출·기본값 노출) +
+`run_phase5_smoke.py` 재실행으로 실제 호출 경로 정상 동작 확인.
+
+---
+
+## 2026-07-29 (16차 — Task Scheduler·Docker 자동화 점검 + Docker Desktop 자가 기동)
+
+사용자 요청: "Messiah"/"Messiah-Shutdown" 작업 스케줄러 등록 상태 + Docker를 조사하고
+자동 시작·종료에 문제없는지 점검. 조사 결과를 보고했더니 사용자가 취약점 원인을 정정
+("07:30에 다른 프로젝트가 구동되며 Docker Desktop이 켜진다")하고, MESSIAH 자신이 Docker
+On/Off를 확인해 꺼져 있으면 스스로 켠 뒤 구동하도록 코드 개선을 요청.
+
+### [조사] Task Scheduler·Docker 실측 결과
+
+`schtasks`/`Get-ScheduledTask`로 확인: "Messiah"(평일 08:35, `run_l1_daily.bat`)·
+"Messiah-Shutdown"(평일 15:40, `stop_l1_daily.bat`) 둘 다 등록·활성 상태, 최근 실행 전부
+성공(Last Result 0). 로그 실측(07-24/27/28): 07-27·07-28 두 거래일 모두 08:35 정각 자동
+트리거, CRITICAL 0건, "정상 종료"까지 완주. Shutdown watchdog 5회 실행 전부 "no leftover
+process found"(내부 종료 로직이 지금까지 한 번도 15:40을 넘긴 적 없어 순수 안전망으로만
+존재). **`scripts/run_l1_daily.bat`의 "Not yet registered in Task Scheduler" 주석은 이미
+사실과 어긋난 stale 문서였음** — 실제로는 이미 등록·정상 가동 중.
+
+구조적 취약점 3가지 발견(사고는 아직 없었으나 재발 조건은 존재):
+1. Docker Desktop `AutoStart=False` — 배치파일 어디에도 Docker 기동 로직 없음.
+2. Task 트리거가 `LogonType=Interactive`·`StartWhenAvailable=False`·`WakeToRun=False` —
+   PC가 꺼져있거나 로그오프 상태로 트리거 시각을 지나치면 그날은 영구히 건너뜀(캐치업 없음).
+3. 실패 시 능동적 알림 없음(로그에만 남음, Ver 1.1 OBS "CRITICAL 텔레그램 푸시" 미구현).
+
+`docker inspect` 실측: `messiah-redis`의 `StartedAt`이 2026-07-28 07:30 KST — 사용자 확인
+결과 이는 **다른 프로젝트가 자기 필요로 그 시각에 Docker Desktop을 띄우는 부수효과**였다
+(1번 취약점의 실제 원인 확정). 사용자가 "메시아 스스로 확인 후 필요시 켜라"는 방향으로
+스코프를 확정.
+
+### [설계결정] Docker Desktop 자가 기동을 MESSIAH 자신의 기동 시퀀스에 내재화한다
+
+**근거**: 지금까지 정상 작동해온 이유가 "다른 프로젝트의 우연한 타이밍"이라는 걸 알게 된
+이상, 그 프로젝트의 스케줄이 바뀌거나 그 프로젝트 자체가 그날 안 돌면 MESSIAH의 데이터
+수집이 조용히 통째로 빠진다 — G1 관문 달성을 위한 데이터 축적이 유일한 목적인 지금 단계에서
+하루라도 빠지는 건 누적 손해다.
+**결정**: `core/docker_bootstrap.py` 신규 — `ensure_docker_ready()`가 `docker info`로 daemon
+응답을 먼저 확인하고, 미응답이면 Docker Desktop을 스스로 띄운 뒤 최대 2분(기본값) 폴링,
+daemon이 뜨면 `docker start messiah-redis`로 컨테이너까지 명시적으로 재확인(restart
+policy=unless-stopped로 보통 자동으로 같이 뜨지만 한 번 더 확인). `run_l1_daily.py`·
+`run_g2_paper_trading.py` 둘 다 `_run_self_check()`보다 먼저 이 단계를 실행 — self_check의
+Redis 점검이 실패하기 전에 이미 Docker가 준비돼 있게 만든다. 2분 안에도 안 뜨면(Docker
+Desktop 자체가 설치 안 됐거나 뭔가 근본적으로 문제) `SystemExit`으로 명시적 중단 — 조용히
+넘어가지 않는다(L18 정신).
+**Why**: 취약점 2·3번(로그온 필요·알림 없음)은 이번 스코프에서 안 건드렸다 — 사용자가
+명시적으로 요청한 건 "Docker On/Off 확인 후 필요시 켜기"뿐이었고, Task Scheduler
+설정(로그온 방식)이나 알림 체계 변경은 별도 판단이 필요한 더 큰 변경이라 스코프를 넘지
+않았다.
+**How to apply**: 실행파일 경로는 `MESSIAH_DOCKER_DESKTOP_EXE` 환경변수로 오버라이드
+가능(하드코딩 금지 원칙, SYSTEM.md R4) — 기본값은 표준 설치 경로
+(`C:\Program Files\Docker\Docker\Docker Desktop.exe`). 남은 취약점 2·3번(로그온 필요·
+무알림)은 여전히 존재 — 다음에 "PC를 로그오프한 채로도 자동 수집이 되게 해달라"거나
+"실패하면 알림을 달라"는 요청이 오면 이 두 항목부터 참고할 것.
+**검증**: `tests/test_docker_bootstrap.py` 11건(전부 `runner`/`popen`/`sleep`/`now` 주입,
+실제 docker CLI·실제 대기 없이 결정론적 검증 — `core/scheduler.py`의 `FixedTickScheduler`와
+같은 설계 원칙) + 실제 실행 중인 Docker로 `ensure_docker_ready()` 직접 호출해
+`already_running=True` 즉시 반환 확인(실통합 확인). 전체 테스트 800건 통과, ruff 클린.
+
+### [검증] 실제 등록된 배치파일로 기동→종료 전체 흐름 수동 재현 (2026-07-28 18:20 KST)
+
+사용자 요청으로 `scripts\run_l1_daily.bat`(Task Scheduler "Messiah"가 실제로 호출하는 그
+파일)를 장 마감 후 시각(18:20, 정규장 15:35 마감 이후)에 직접 실행 → 이어서
+`scripts\stop_l1_daily.bat`("Messiah-Shutdown"이 호출하는 그 파일)를 직접 실행. Docker
+자가 기동(이미 떠 있어 즉시 통과, 자동 기동 메시지 없음 — 정상)→self_check PASS(신규
+`registry` 항목 포함)→실제 KIS 마스터파일로 근월물 심볼(A05608) 조회 성공→"이미 15:35 이후
+— 수집 생략" 정상 분기→`daily_close()`→"정상 종료."(exit 0)까지 전부 실제 프로덕션
+진입점으로 확인. 이어서 `stop_l1_daily.bat`도 "no leftover process found"로 정상 판정(이미
+자체 종료됐으므로 죽일 대상 없음 — 설계대로).
+**부작용 없음 확인**: 오늘자 로그 파일(`logs/l1_daily_20260728.log`)에 이번 세션이 두 번째
+`SessionStart`로 정상 추가(L24 다중 세션 처리 설계가 실제로 작동), 오늘 오전 정식 수집분
+parquet 파일(`data/bars/A05608/*/2026-07-28.parquet`) 수정시각은 여전히 15:35:00 그대로(이번
+테스트가 실수집 데이터를 건드리지 않음), `messiah-redis` 컨테이너 uptime도 끊김 없이 11시간
+연속(재기동 없었음).
+**남은 미검증 영역**: `stop_l1_daily.bat`가 **실제로 살아있는** `run_l1_daily.py` 프로세스를
+찾아 죽이는 경로는 이번에도 재현하지 못함(정상 흐름에서 본 프로세스가 watchdog보다 먼저
+항상 스스로 종료하기 때문) — 다만 이 경로 자체는 2026-07-24 개발 중 실제 프로세스로 이미
+1회 확인된 바 있음(`Stop-Process -Id vs 파이프바인딩` 버그를 그때 발견·수정, 스크립트 자체
+주석에 기록) — 인위적으로 오래 붙잡아두는 프로세스를 만들어 재현하는 것은 이번엔 실익 대비
+리스크(실제 KIS WS를 장 마감 후 억지로 열게 됨)가 커 보류.
+
+### [설계결정] 데일리 자동화(`run_l1_daily.bat`)에 Command Center UI(Streamlit)를 통합한다
+
+**근거**: 사용자가 "메시아를 실행해도 UI는 없는가"라고 물어 확인해보니, Streamlit UI(`ui/
+app.py`, Phase 4 W32~34)가 데이터 수집 자동화와 완전히 분리돼 있어 매일 자동으로는 전혀
+뜨지 않고 사람이 수동으로 별도 실행해야만 하는 상태였다. 사용자가 이를 통합해달라고 요청.
+**결정**: `run_l1_daily.py`의 `main()`에 `_launch_ui()` 신규 — 거래일 확인 직후(휴장일에는
+기동 안 함) `subprocess.Popen`으로 Streamlit을 완전히 별도의 백그라운드 프로세스로 띄운다
+(같은 venv의 `streamlit.exe`를 `sys.executable`의 형제 경로로 유도 — 하드코딩 대신).
+`MESSIAH_SKIP_UI=1`로 생략 가능. UI 기동 실패(streamlit 미설치 등)는 데이터 수집을 막지
+않는다(부가 기능이 전제조건이 되면 안 됨 — 로그만 남기고 계속 진행). UI 프로세스는
+`stop_l1_daily.bat`(15:40 워치독)가 `run_l1_daily.py`와 같은 방식(명령줄 패턴 매칭,
+`*messiah\ui\app.py*`)으로 함께 정리하도록 확장 — 새 트리거를 따로 만들지 않고 기존
+독립 워치독을 재사용했다.
+**Why**: 이 프로젝트는 이미 "프로세스 생애주기는 명령줄 패턴 매칭으로 관리"라는 확립된
+패턴(계명, mahdi L3-1)을 갖고 있다 — 새 프로세스(UI)를 위해 별도 관리 체계를 만들기보다
+그 패턴을 그대로 확장하는 게 일관성 있고, watchdog 코드도 한 줄(`-or` 조건 추가)만
+늘어난다.
+**How to apply**: UI는 REPLAY 기본 모드로 뜨고 사용자가 사이드바에서 LIVE로 직접 전환해야
+한다(ui/app.py의 기존 원칙 그대로 — 이번 통합이 그 원칙을 바꾸지 않음). 향후 다른 부가
+프로세스(예: 알림 봇)를 추가하게 되면 같은 패턴(명령줄에 고유 식별 가능한 경로 포함 →
+watchdog 패턴에 `-or` 추가)을 따를 것.
+**검증(실제 실행)**: 장 마감 후(18:32) `run_l1_daily.bat` 실행 → "Command Center UI
+기동(PID=22604)" 로그 확인 → 실제로 `streamlit.exe` 프로세스 확인(`tasklist`), 포트 8501
+LISTENING 확인, 기본 브라우저가 자동으로 접속해 ESTABLISHED 커넥션까지 형성됨을 확인.
+이어서 `stop_l1_daily.bat` 실행 → 명령줄 패턴 매칭으로 **관련 프로세스 3개 전부**(streamlit
+런처 stub 1개 + 그 stub이 실제로 실행한 python.exe 2개, venv 표준 인터프리터 1개 + 그
+venv가 fork한 anaconda3 base 인터프리터 1개 — streamlit 콘솔스크립트 stub의 내부 동작
+방식) 정확히 찾아 강제 종료 확인, 이후 `tasklist`로 PID 소멸·포트 8501 LISTENING 소멸까지
+재확인. **이번 검증으로 "명령줄 패턴 매칭이 실제 살아있는 프로세스를 찾아 죽인다"는 경로
+자체도 처음으로 다중 프로세스 트리 기준 확인됨**(기존엔 2026-07-24 단일 프로세스 기준
+확인만 있었음).
+
+### [설계결정] `run_g2_paper_trading.py`에도 UI를 통합하기 전에 손익(장단점)부터 물어봄 →
+사용자 승인 후 진행, 진행 중 실측으로 새 버그 발견 → `core/ui_launcher.py`로 통합 재설계
+
+**경위**: 사용자가 "지금 run_g2_paper_trading.py 통합의 손익을 조사해줘"라고 요청 —
+바로 구현하지 않고 먼저 조사: G2는 아직 Task Scheduler 미등록(수동 실행 전용)이라
+자동기동의 이득이 적고, Registry가 비어 있어(live 번들 0개) 화면이 사실상 빈 상태이며,
+watchdog이 평일 15:40에만 도니 그 시각 밖에 돌리면 다음날까지 남을 수 있다는 세 가지
+트레이드오프를 보고 → 사용자가 "지금 넣어"로 진행 확정.
+**실측 중 신규 발견**: `run_l1_daily.py`의 UI가 이미 떠 있는 상태에서 `run_g2_paper_
+trading.py`도 같은 방식으로 UI를 띄우게 하면 어떻게 되는지 직접 실험 — Streamlit(Windows)이
+이미 점유된 포트 8501에 **두 번째 프로세스가 바인드를 시도해도 에러 없이 그냥 진행**되고,
+`netstat`상 두 프로세스가 동시에 같은 포트에서 LISTENING 상태로 남는 것을 확인(요청이 둘 중
+어느 쪽으로 가는지 예측 불가능해짐, 자원 낭비). 구현 전 조사 단계에서는 예상 못 했던
+이번 세션의 실질적 신규 리스크.
+**결정**: 중복 코드를 늘리는 대신(이미 `_ensure_docker_ready` 패턴처럼 두 스크립트에
+복붙하려던 참이었음) `src/messiah/core/ui_launcher.py` 신규 — `launch_command_center()`가
+기동 전 `is_ui_already_running()`(포트 응답 확인)으로 먼저 확인하고, 이미 떠 있으면
+새로 안 띄운다. `core/docker_bootstrap.py`와 동일하게 `is_running`/`popen` 콜러블 주입
+가능해 실제 소켓·실제 streamlit 없이 테스트 가능(테스트 8건). `run_l1_daily.py`/
+`run_g2_paper_trading.py`의 `_launch_ui()`는 이제 이 공용 함수를 부르는 얇은 래퍼로 축소.
+**Why**: 애초 조사에서 언급 안 한 리스크(포트 충돌)를 구현 중 발견했을 때, "일단 사용자가
+승인한 범위니 그대로 진행"이 아니라 "새로 발견한 위험은 그 자리에서 막는다"를 택했다 —
+이 프로젝트의 반복된 원칙("실측 중 버그 발견하면 그 자리에서 고친다")과 일치.
+**How to apply**: 앞으로 세 번째 스크립트가 UI를 띄워야 하면 `launch_command_center()`를
+그대로 재사용할 것 — 새 스크립트마다 복붙하지 말 것.
+**검증**: `tests/test_ui_launcher.py` 8건(env skip·이미 실행 중 skip·포트 파라미터화·
+exe/app 없음·정상 기동·기본 포트 상수·기동 예외 처리) + 실제 재현: `run_l1_daily.bat`로
+UI를 띄운 채(포트 8501 LISTENING 확인) `run_g2_paper_trading.py`의 `_launch_ui()`를 직접
+호출 → "이미 응답 중 — 중복 기동 생략" 정상 출력, 두 번째 프로세스 생성 안 됨 확인.
+전체 테스트 808건 통과, ruff/pyright 클린(신규 파일 기준).

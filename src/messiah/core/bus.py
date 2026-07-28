@@ -33,8 +33,24 @@ TOPIC_EXEC_FILL = "exec.fill"  # Streams
 TOPIC_HEALTH = "sys.health"
 TOPIC_KILL = "sys.kill"  # 최우선
 
+# L6 Learning / Self Evolution (Ver 2.0 §9 W35~36, Phase 5) — 전부 감사 이력이 필요해
+# Streams(재생 가능)로 분류. decision.intent와 같은 이유(사람이 나중에 리뷰).
+TOPIC_REGISTRY = "sys.registry"
+TOPIC_SHADOW_FILL = "sys.shadow_fill"
+TOPIC_PROMOTION = "sys.promotion_proposal"
+TOPIC_SELF_EVAL = "sys.self_eval"
+
 STREAM_TOPICS: frozenset[str] = frozenset(
-    {TOPIC_INTENT, TOPIC_ORDER_REQ, TOPIC_EXEC_ORDER, TOPIC_EXEC_FILL}
+    {
+        TOPIC_INTENT,
+        TOPIC_ORDER_REQ,
+        TOPIC_EXEC_ORDER,
+        TOPIC_EXEC_FILL,
+        TOPIC_REGISTRY,
+        TOPIC_SHADOW_FILL,
+        TOPIC_PROMOTION,
+        TOPIC_SELF_EVAL,
+    }
 )
 
 # ---------------------------------------------------------- 코덱 (서버 불필요 — 단위테스트 대상)

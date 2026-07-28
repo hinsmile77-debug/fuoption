@@ -8,12 +8,17 @@ REM (e.g. its own later Task Scheduler trigger) to make sure nothing MESSIAH-rel
 REM running past that, in case the process hung somewhere its own internal deadline logic
 REM couldn't reach.
 REM
-REM Matches by command line content, not window title - MESSIAH has no window-titled process
-REM today (no Command Center UI yet, that's Phase 4 W32-34). This mirrors a lesson learned the
-REM hard way on the sibling mahdi project (2026-07-21 ops review, item 3-1): a window-title-only
-REM kill missed a process that had been restarted by hand outside the normal launch convention,
-REM so both automated shutdowns silently did nothing while the process kept running. Matching
-REM on what a process is actually executing catches it regardless of how it was started.
+REM Also matches the Command Center UI (Streamlit) process that run_l1_daily.py launches as a
+REM separate background process on trading days (2026-07-29 addition, see that script's
+REM _launch_ui()) - the UI is independent of the collection process and would otherwise keep
+REM running forever with no matching shutdown trigger of its own.
+REM
+REM Matches by command line content, not window title - the Streamlit process has no useful
+REM window title for matching either. This mirrors a lesson learned the hard way on the sibling
+REM mahdi project (2026-07-21 ops review, item 3-1): a window-title-only kill missed a process
+REM that had been restarted by hand outside the normal launch convention, so both automated
+REM shutdowns silently did nothing while the process kept running. Matching on what a process is
+REM actually executing catches it regardless of how it was started.
 REM
 REM NOTE: keep this file ASCII-only. cmd.exe interprets .bat files using the system ANSI
 REM codepage (CP949 on Korean Windows), not UTF-8 - a UTF-8-saved file with non-ASCII text
@@ -45,7 +50,7 @@ REM CIM objects expose "ProcessId", not "Id", so piping them straight into Stop-
 REM to bind by property name and silently kills nothing at all - no error, the process just
 REM keeps running. Confirmed by hand, 2026-07-24 (log said "stopping: PID 24556" and it was
 REM still alive afterward).
-powershell -NoProfile -Command "$procs = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*run_l1_daily.py*' }; if ($procs) { foreach ($p in $procs) { Write-Output ('command-line match, stopping: PID {0} - {1}' -f $p.ProcessId, $p.CommandLine); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } } else { Write-Output 'command-line match: no leftover process found' }" >> "%LOG_FILE%" 2>&1
+powershell -NoProfile -Command "$procs = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*run_l1_daily.py*' -or $_.CommandLine -like '*messiah\ui\app.py*') }; if ($procs) { foreach ($p in $procs) { Write-Output ('command-line match, stopping: PID {0} - {1}' -f $p.ProcessId, $p.CommandLine); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } } else { Write-Output 'command-line match: no leftover process found' }" >> "%LOG_FILE%" 2>&1
 
 echo [%date% %time%] ===== MESSIAH shutdown watchdog done (Redis left running) ===== >> "%LOG_FILE%"
 

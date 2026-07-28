@@ -57,6 +57,35 @@ def negative_window_ratio(window_returns: Sequence[float]) -> float:
     return negative / len(window_returns)
 
 
+def win_rate(returns: Sequence[float]) -> float:
+    """승률 — 0이 아닌 수익률(체결) 중 양수 비율. 정확히 0(비용까지 정확히 상쇄)인 거래는
+    승/패 어느 쪽도 아니라 분모에서 제외한다. 표본이 전부 0이거나 비어 있으면 0.0(Sharpe와
+    같은 "계산 불능은 0" 관례, Validator가 자연히 미달로 처리)."""
+    wins = sum(1 for r in returns if r > 0)
+    losses = sum(1 for r in returns if r < 0)
+    total = wins + losses
+    return wins / total if total else 0.0
+
+
+def profit_factor(returns: Sequence[float]) -> float:
+    """Profit Factor = 총이익 / |총손실|. 손실이 전혀 없으면(이익이 있는 경우) 무한대,
+    거래 자체가 없으면 0.0."""
+    gains = sum(r for r in returns if r > 0)
+    losses = -sum(r for r in returns if r < 0)
+    if losses == 0:
+        return float("inf") if gains > 0 else 0.0
+    return gains / losses
+
+
+def equity_curve_from_returns(returns: Sequence[float], starting: float = 1.0) -> list[float]:
+    """수익률(비율) 시퀀스 → 누적 자산곡선. `max_drawdown()`의 입력을 만드는 공용 헬퍼 —
+    `models/shadow_manager.py`·`models/self_evaluation.py`가 공유(중복 방지)."""
+    curve = [starting]
+    for r in returns:
+        curve.append(curve[-1] * (1 + r))
+    return curve
+
+
 def multiclass_brier_score(
     probs: Sequence[Sequence[float]], true_class_idx: Sequence[int]
 ) -> float:

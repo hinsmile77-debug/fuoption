@@ -108,6 +108,17 @@ def test_custom_config_overrides_defaults():
     assert est.market_impact_ticks == pytest.approx(0.1)
 
 
+def test_config_property_exposes_underlying_config():
+    cfg = CostModelConfig(expected_spread_ticks=3.5)
+    model = CostModel(cfg)
+    assert model.config is cfg
+
+
+def test_config_property_exposes_default_when_unspecified():
+    model = CostModel()
+    assert model.config.expected_spread_ticks == CostModelConfig().expected_spread_ticks
+
+
 def test_cost_estimate_addition():
     a = CostEstimate(commission_ticks=1, tax_ticks=2, slippage_ticks=3, market_impact_ticks=4)
     b = CostEstimate(

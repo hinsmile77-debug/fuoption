@@ -1,0 +1,25 @@
+# MESSIAH 로컬 인프라 — Ver 1.1 §7.3 "설치는 명령 한 번: docker compose up -d 또는
+# install.ps1" (Ver 2.0 §9 W37~38, 릴리스 패키징).
+#
+# Redis 포트를 6379가 아니라 6380에 매핑한다 — 이 프로젝트 개발 PC엔 별개 프로젝트
+# `mahdi_redis`가 이미 6379를 점유하고 있어 메시지 버스 혼선을 피하려고 분리했다
+# (dev_memory/DECISION_LOG.md, 2026-07-21). 다른 PC에 복제 배포할 때 6379가 비어 있다면
+# 그대로 6380을 써도 무방하다 — `configs/instance.yaml`의 `redis_url`과 반드시 일치시킬 것.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: messiah-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - messiah-redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  messiah-redis-data:

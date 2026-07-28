@@ -94,7 +94,17 @@ def search_hyperparameters(
             train_set = lgb.Dataset(
                 x[train_idx], label=y_class[train_idx], weight=sample_weight[train_idx]
             )
-            booster = lgb.train(params, train_set, num_boost_round=num_boost_round)
+            try:
+                booster = lgb.train(params, train_set, num_boost_round=num_boost_round)
+            except lgb.basic.LightGBMError:
+                # 극소 표본 폴드(예: purge/embargo가 학습 폴드를 1행까지 깎은 경우)에서
+                # 샘플된 bagging_fraction이 그 1행을 0행으로 반올림해 네이티브 크래시가
+                # 나는 경계 조건 — 실측 발견(2026-07-28, Ver 2.0 §9 W39~40 잔여 Horizon
+                # 검증 중 3m: 실제 아카이브 11봉 → 레이블 6건 → PurgedKFold(2) 한쪽 폴드
+                # 학습 1행). 프로덕션 데이터 규모(Ver 1.2 §8.1 "2년치")에서는 폴드가 이
+                # 정도로 작아지지 않아 발생하지 않는다 — 이 trial의 이 폴드만 건너뛴다
+                # (전체 탐색을 죽이지 않는다, 다른 폴드/trial은 계속 유효).
+                continue
             probs = booster.predict(x[test_idx])
             fold_losses.append(log_loss(y_class[test_idx], probs, labels=[0, 1, 2]))
         return statistics.fmean(fold_losses) if fold_losses else float("inf")

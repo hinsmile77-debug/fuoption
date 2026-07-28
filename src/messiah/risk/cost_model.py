@@ -64,6 +64,12 @@ class CostModel:
     def __init__(self, config: CostModelConfig | None = None) -> None:
         self._config = config or CostModelConfig()
 
+    @property
+    def config(self) -> CostModelConfig:
+        """조회 전용 — Self Evaluation(Phase 5)의 슬리피지 대사(Ver 2.0 §6)가
+        `expected_spread_ticks`(예측값)를 실현 슬리피지와 비교하려면 이 값을 읽어야 한다."""
+        return self._config
+
     def estimate(self, *, qty: int, avg_volume: float) -> CostEstimate:
         """편도(진입 또는 청산 1회) 비용."""
         if qty <= 0:

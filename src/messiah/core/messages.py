@@ -391,3 +391,75 @@ class KillSignal(BusMessage):
 
     reason: str
     triggered_by: str  # R2 손실한도 / R11 데이터 단절 / manual / model_anomaly
+
+
+# ---------------------------------------------------------------- L6 Learning / Self Evolution
+# Ver 1.6 §9.2 Registry 상태기계, Ver 1.1 §6-4 Shadow Trading Manager, Ver 2.0 §7 Self
+# Evaluation — Ver 2.0 §9 W35~36(Phase 5)에서 신설. 기존 `ExpertView.model_version`/
+# `FuturesView.model_versions`(자유 문자열)는 그대로 두고, 이 섹션은 그 버전 문자열이
+# 가리키는 번들의 상태·승격·일일 성적을 감사 가능하게 기록하는 계층이다.
+
+
+class BundleStatus(str, Enum):
+    CANDIDATE = "candidate"
+    SHADOW = "shadow"
+    LIVE = "live"
+    RETIRED = "retired"
+
+
+class RegistryStatusChanged(BusMessage):
+    """모델 번들 상태 전이 감사 이력 (sys.registry) — Ver 1.6 §9.2
+    candidate→shadow→live→retired. `old_status=None`은 최초 등록(candidate)."""
+
+    bundle_id: str
+    horizon: Horizon
+    old_status: BundleStatus | None = None
+    new_status: BundleStatus
+    reason: str = ""
+
+
+class ShadowFill(BusMessage):
+    """Shadow 상태 번들의 가상 체결 (sys.shadow_fill) — 실주문 없이 챔피언과 동일
+    Feature 흐름을 관찰해 기록하는 병행 운용(Ver 1.1 §6-4). `exit_price_ticks=None`은
+    아직 보유 중인 가상 포지션."""
+
+    bundle_id: str
+    horizon: Horizon
+    symbol: str
+    side: Side
+    qty: int
+    entry_price_ticks: int
+    exit_price_ticks: int | None = None
+    net_return_ticks: float | None = None  # 청산 시 비용차감 후 손익(틱) — 보유 중이면 None
+
+
+class PromotionProposal(BusMessage):
+    """Shadow → Live 승격 제안 (sys.promotion_proposal) — Ver 1.1 §6-4 "자동 제안 + 사람
+    승인"의 그 제안. 이 메시지 자체는 승격을 실행하지 않는다(Registry 상태 전이는 사람이
+    `ModelRegistry.promote_to_live()`를 호출해야만 일어난다)."""
+
+    bundle_id: str
+    horizon: Horizon
+    trading_days_observed: int
+    champion_sharpe: float
+    shadow_sharpe: float
+    champion_max_drawdown: float
+    shadow_max_drawdown: float
+    recommended: bool
+    rationale: str = ""
+
+
+class SelfEvalReport(BusMessage):
+    """일일 자가 평가 리포트 (sys.self_eval) — Ver 2.0 §7 "매일 장중 Shadow 병주 → 마감 후
+    Self Evaluation: 승률·PF·Sharpe 집계, 슬리피지 대사"."""
+
+    date: str  # ISO 날짜(YYYY-MM-DD) — 거래일 단위가 자연 키, 시각이 아님
+    symbol: str
+    n_trades: int
+    win_rate: float
+    profit_factor: float
+    sharpe: float
+    max_drawdown: float
+    n_shadow_bundles: int
+    slippage_predicted_ticks: float
+    slippage_realized_ticks: float

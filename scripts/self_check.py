@@ -96,6 +96,38 @@ def check_bundle(cfg: InstanceConfig) -> CheckResult:
     return CheckResult("bundle", manifest.exists(), str(manifest))
 
 
+def check_registry_consistency(cfg: InstanceConfig) -> CheckResult:
+    """live 모드에서 릴리스(`model_bundle`)가 가리키는 각 Horizon 번들이 Registry상
+    지금도 `live` 상태인지 교차검증 — "번들 손상 배포"(Ver 1.6 §12 실패모드표) 방어,
+    Ver 2.0 §9 W37~38. `check_bundle()`은 manifest.yaml의 존재만 보므로, 그 릴리스가
+    가리키는 개별 번들이 이후 강등/재승격돼 릴리스 스냅샷과 어긋난 상태는 놓친다 — 이
+    검사가 그 간극을 메운다. Registry/모델 모듈은 지연 import(ml extras 없이도 dev/replay
+    모드는 self-check 전체가 죽지 않게)."""
+    if cfg.mode != "live":
+        return CheckResult("registry", True, f"{cfg.mode} — 생략")
+    if cfg.model_bundle in ("", "none"):
+        return CheckResult("registry", False, "live 모드에 model_bundle 미지정")
+    try:
+        from messiah.models.registry import ModelRegistry
+        from messiah.models.release import load_release_manifest, verify_release
+
+        release_dir = Path("data/models") / cfg.model_bundle
+        manifest = load_release_manifest(release_dir)
+        registry = ModelRegistry(Path("data/models/registry.db"))
+        try:
+            problems = verify_release(registry, manifest)
+        finally:
+            registry.close()
+        if problems:
+            return CheckResult("registry", False, "; ".join(problems))
+        detail = f"bundles={manifest.bundles}"
+        if manifest.missing_horizons:
+            detail += f" (경고: missing_horizons={manifest.missing_horizons})"
+        return CheckResult("registry", True, detail)
+    except Exception as e:  # noqa: BLE001 — 자가 점검은 모든 실패를 보고
+        return CheckResult("registry", False, str(e))
+
+
 def check_redis(cfg: InstanceConfig, skip: bool) -> CheckResult:
     if skip:
         return CheckResult("redis", True, "--skip-redis")
@@ -126,6 +158,7 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
         results.append(check_git_state(cfg.mode))
         results.append(check_secrets(cfg))
         results.append(check_bundle(cfg))
+        results.append(check_registry_consistency(cfg))
         results.append(check_redis(cfg, skip_redis))
     return results
 

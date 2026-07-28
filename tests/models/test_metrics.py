@@ -1,9 +1,12 @@
 import pytest
 from messiah.models.metrics import (
+    equity_curve_from_returns,
     max_drawdown,
     multiclass_brier_score,
     negative_window_ratio,
+    profit_factor,
     sharpe_ratio,
+    win_rate,
 )
 
 # ---------------------------------------------------------------- sharpe_ratio
@@ -88,3 +91,48 @@ def test_multiclass_brier_score_rejects_mismatched_lengths():
 def test_multiclass_brier_score_rejects_empty_input():
     with pytest.raises(ValueError):
         multiclass_brier_score([], [])
+
+
+# ---------------------------------------------------------------- win_rate
+
+
+def test_win_rate_hand_computed():
+    assert win_rate([0.1, -0.2, 0.3, -0.1, 0.05]) == pytest.approx(3 / 5)
+
+
+def test_win_rate_excludes_exact_zero_trades():
+    assert win_rate([0.1, 0.0, -0.1]) == pytest.approx(0.5)  # 분모에서 0 제외
+
+
+def test_win_rate_empty_or_all_zero_is_zero():
+    assert win_rate([]) == 0.0
+    assert win_rate([0.0, 0.0]) == 0.0
+
+
+# ---------------------------------------------------------------- profit_factor
+
+
+def test_profit_factor_hand_computed():
+    # 이익 0.3+0.2=0.5, 손실 0.1+0.05=0.15 → 0.5/0.15
+    assert profit_factor([0.3, -0.1, 0.2, -0.05]) == pytest.approx(0.5 / 0.15)
+
+
+def test_profit_factor_no_losses_is_infinite():
+    assert profit_factor([0.1, 0.2]) == float("inf")
+
+
+def test_profit_factor_no_trades_is_zero():
+    assert profit_factor([]) == 0.0
+    assert profit_factor([0.0]) == 0.0
+
+
+# ---------------------------------------------------------------- equity_curve_from_returns
+
+
+def test_equity_curve_from_returns_compounds_correctly():
+    curve = equity_curve_from_returns([0.1, -0.1], starting=100.0)
+    assert curve == pytest.approx([100.0, 110.0, 99.0])
+
+
+def test_equity_curve_from_returns_empty_returns_only_starting():
+    assert equity_curve_from_returns([], starting=1.0) == [1.0]
