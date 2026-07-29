@@ -1,8 +1,8 @@
 @echo off
 REM L1 data pipeline daily entrypoint - wraps scripts\run_l1_daily.py.
-REM Not yet registered in Task Scheduler (pending user confirmation) - manual/test use for now.
-REM Assumes a weekday 08:45 KST trigger (see run_l1_daily.py module docstring for the full
-REM warmup -> collect -> daily_close lifecycle).
+REM Registered in Task Scheduler as "Messiah" (weekday 08:35 KST trigger, confirmed by audit
+REM 2026-07-29 - see run_l1_daily.py module docstring for the full warmup -> collect ->
+REM daily_close lifecycle). "Messiah-G2" (run_g2_paper_trading.bat, 08:36) runs alongside it.
 REM
 REM NOTE: keep this file ASCII-only. cmd.exe interprets .bat files using the system ANSI
 REM codepage (CP949 on Korean Windows), not UTF-8 - a UTF-8-saved file with non-ASCII comments

@@ -847,3 +847,28 @@ Streamlit 기본값을 그대로 씀) — MESSIAH 자신의 화면이 아무 경
   8511도 쓰면 같은 클래스의 문제가 재발할 수 있다. 완전한 해결(예: MESSIAH 전용 헬스체크
   엔드포인트로 신원 확인)은 이번 스코프에서 보류(Streamlit 정적 페이지는 앱별 식별 정보를
   초기 HTML에 안 담아 신뢰성 있는 구분이 간단하지 않다는 점도 고려).
+
+## G2 페이퍼 트레이딩 Task Scheduler 등록 — 자체 WS 연결 제거 후 등록 ([MW0601], 2026-07-29)
+
+바로 위 16차(2026-07-28) 기록의 "Windows 작업 스케줄러에 `run_g2_paper_trading.py`를
+등록하지 않았다"는 갭에 대한 후속 — 그대로 등록하기 전에 코드를 다시 읽어보니 그 사이
+새로 발견된 문제가 있어 등록 전에 먼저 고쳤다: G2가 L1과 완전히 같은 계좌·심볼·TR로 자기
+WS 연결을 별도로 열고 있었고, 이는 이미 위(2026-07-23 항목)에 확정된 "동일 계좌 WS 연결
+2개 → 반복 단절" 버그와 정면 충돌하는 설계였다.
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| run_g2_paper_trading.py — 자체 TickCollector/Composer/FeatureEngine 제거 | ✅ | ✅ 2026-07-29 | ✅ | `FuturesAIService`·`TradingPipeline`·`LiveSimBrokerFeed`·`ShadowManager` 전부 `bus.subscribe()`만으로 동작함을 확인 후 G2의 자체 데이터 수집 스택을 전부 제거 — 이제 L1이 버스에 발행한 `bar.*`/`feat.*`를 구독만 함(자체 WS 연결 0개). L1이 실계좌 WS로 정상 수집 중인 장중(2026-07-29 11:57)에 리팩터링본을 실제로 수동 실행해 검증: G2 워커 프로세스의 실제 TCP 연결은 Redis 4건+심볼마스터 REST(HTTPS) 1건뿐, KIS 실시간 WS 엔드포인트(`210.107.75.39:21000`) 연결 0건. 같은 시간 L1의 기존 WS 연결은 `Established` 그대로 유지, L1 로그도 끊김 없이 계속 발행 — G2 가동이 L1에 전혀 영향 없음을 실측 확인 |
+| Task Scheduler "Messiah-G2"(평일 08:36, `run_g2_paper_trading.bat`) | ✅ | ✅ 2026-07-29 | — | 기존 "Messiah" 태스크(`Get-ScheduledTask`로 실측 확인한 설정 그대로 — `MW0601`/`LogonType=Interactive`/`RunLevel=Limited`, `StartWhenAvailable=False`·`WakeToRun=False`·무제한 실행시간, 평일 트리거)와 동일 설정으로 `Register-ScheduledTask` 신규 등록, 08:35(L1)보다 1분 늦은 08:36 — WS 연결이 없어져 순서 자체는 무관해졌지만 두 프로세스의 동시 기동 부하만 살짝 어긋내는 용도. `stop_l1_daily.bat` 15:40 워치독에도 `*run_g2_paper_trading.py*` 패턴 추가해 L1과 동등한 안전망 확보 |
+
+### 알려진 갭 (G2 Task Scheduler 등록, 2026-07-29)
+
+- **Registry가 비어 있어 여전히 "시스템이 안 죽고 도는가"만 증명한다**: G1 백테스트 관문을
+  통과한 모델이 아직 없어(기존 갭, 위 16차 항목과 동일 원인) 매일 자동 실행돼도 실제
+  거래는 여전히 0건 — 데이터 축적이 계속 유일한 선결 조건이다.
+- **L1과 같은 기존 갭을 그대로 공유한다**: `LogonType=Interactive`(로그오프 시 캐치업
+  없음)·`WakeToRun=False`·실패 시 능동 알림 없음(2026-07-29 Task Scheduler 감사 항목과
+  동일) — 이번에 새로 만든 갭이 아니라 L1이 이미 갖고 있던 것을 그대로 물려받음.
+- **첫 자동 트리거는 아직 미검증**: 오늘(2026-07-29)은 수동 실행으로만 검증했고, 등록된
+  Task Scheduler 트리거를 통한 실제 첫 자동 실행은 다음 거래일(2026-07-30) 08:36 —
+  `logs/g2_daily_20260730.log`로 다음 세션에 확인 필요.

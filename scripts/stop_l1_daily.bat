@@ -13,6 +13,11 @@ REM separate background process on trading days (2026-07-29 addition, see that s
 REM _launch_ui()) - the UI is independent of the collection process and would otherwise keep
 REM running forever with no matching shutdown trigger of its own.
 REM
+REM Also matches scripts\run_g2_paper_trading.py (2026-07-29 addition, "Messiah-G2" Task
+REM Scheduler entry, 08:36) - it has its own internal daily_close()/hard-deadline logic
+REM identical in shape to run_l1_daily.py's, so this is purely the same safety-net role for
+REM the second process, not a primary shutdown mechanism.
+REM
 REM Matches by command line content, not window title - the Streamlit process has no useful
 REM window title for matching either. This mirrors a lesson learned the hard way on the sibling
 REM mahdi project (2026-07-21 ops review, item 3-1): a window-title-only kill missed a process
@@ -50,7 +55,7 @@ REM CIM objects expose "ProcessId", not "Id", so piping them straight into Stop-
 REM to bind by property name and silently kills nothing at all - no error, the process just
 REM keeps running. Confirmed by hand, 2026-07-24 (log said "stopping: PID 24556" and it was
 REM still alive afterward).
-powershell -NoProfile -Command "$procs = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*run_l1_daily.py*' -or $_.CommandLine -like '*messiah\ui\app.py*') }; if ($procs) { foreach ($p in $procs) { Write-Output ('command-line match, stopping: PID {0} - {1}' -f $p.ProcessId, $p.CommandLine); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } } else { Write-Output 'command-line match: no leftover process found' }" >> "%LOG_FILE%" 2>&1
+powershell -NoProfile -Command "$procs = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.CommandLine -like '*run_l1_daily.py*' -or $_.CommandLine -like '*run_g2_paper_trading.py*' -or $_.CommandLine -like '*messiah\ui\app.py*') }; if ($procs) { foreach ($p in $procs) { Write-Output ('command-line match, stopping: PID {0} - {1}' -f $p.ProcessId, $p.CommandLine); Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } } else { Write-Output 'command-line match: no leftover process found' }" >> "%LOG_FILE%" 2>&1
 
 echo [%date% %time%] ===== MESSIAH shutdown watchdog done (Redis left running) ===== >> "%LOG_FILE%"
 

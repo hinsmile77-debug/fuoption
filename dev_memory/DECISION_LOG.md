@@ -1116,3 +1116,74 @@ Streamlit 기본값(모든 미설정 Streamlit 앱이 쓰는 값)을 벗어나�
 으로 직접 확인, 이미 8501을 점유 중이던 `options` 프로젝트 프로세스(PID 13944)는 전혀
 건드리지 않고 그대로 유지됨을 함께 확인. 두 번째 호출 시 8511 자체 중복 기동도 정상 스킵
 확인(기존 방어 로직이 새 포트에서도 그대로 작동). 검증에 쓴 프로세스는 종료 후 정리.
+
+## 2026-07-29 (18차 — [MW0601] G2 페이퍼 트레이딩 Task Scheduler 등록)
+
+사용자 요청: 고도화 제안("G2를 L1과 같은 방식(08:35 트리거)으로 Task Scheduler에 등록")의
+구현계획 수립 후 구현. 착수 전 코드를 직접 읽다가 등록을 그대로 진행하면 안 되는 구조적
+이유를 발견해 사용자에게 먼저 확인 → "리팩터링 후 등록"으로 승인받아 진행.
+
+### [조사] G2를 제안대로 그대로 등록하면 안 되는 이유
+
+`scripts/run_g2_paper_trading.py`의 `main()`을 실제로 읽어보니, 이전 dev_memory 서술("G2는
+L1이 이미 발행한 버스를 구독만 한다")과 달리 **실제 코드는 G2도 자기 자신의
+`TickCollector`(L1과 완전히 같은 계좌 자격증명·심볼·TR)를 새로 만들어 독자적인 KIS WS
+연결을 열고 있었다**. `Docs/capability_matrix.md`(2026-07-23)에 이미 실측으로 확정돼 있던
+"동일 계좌로 WS 연결을 2개 열면 서로 반복적으로 끊긴다"는 사실과 정면으로 충돌하는 설계 —
+제안대로 L1과 같은 08:35 트리거로 그대로 등록했다면 매일 아침 그 반복 단절 버그를
+재현했을 것이고, 최악의 경우 아직 무해한 G2(Registry 빈 상태라 거래 자체가 안 남)를 위해
+실제로 가치 있는 L1의 실데이터 수집(G1 관문 달성을 위한 유일한 자산)을 매일 망가뜨렸을
+것이다. `MultiSymbolTickCollector`(2026-07-23, 단일 연결·다중 subscribe)는 **같은 프로세스
+안**에서 여러 (심볼,TR)을 함께 구독하는 경우의 해법이지, **서로 다른 두 프로세스가 각자
+별도 WS 연결을 여는 경우**는 애초에 다룬 적이 없었다.
+
+### [설계결정] G2에서 TickCollector·MultiHorizonBarComposer·FeatureEngine을 전부 제거하고 버스 구독만 남긴다
+
+**근거**: `FuturesAIService`·`TradingPipeline`·`LiveSimBrokerFeed`·`ShadowManager` 넷 다
+확인해보니 전부 `bus.subscribe()`만으로 동작하고(`feat.*`/`bar.*`/`intel.futures` 패턴),
+데이터 수집 계층에 직접 의존하지 않는다 — 즉 G2가 자기 WS 연결을 열 필요가 애초에 없었다.
+**결정**: `main()`에서 `TickCollector`/`MultiHorizonBarComposer`/`FeatureEngine`
+인스턴스화를 전부 제거(관련 import — `KISCredentials`·`tr_codes`·`ParquetArchiver`·
+`parse_futures_tick` — 도 함께 정리), `_run_regular_session()`/`_daily_close()`도 그
+셋을 더는 받지 않도록 시그니처 축소(봉 flush는 이제 L1의 책임). G2는 `run_l1_daily.py`가
+이미 살아서 버스에 발행 중이라는 전제 없이는 아무 신호도 못 받는 상태가 되지만, 애초에
+그게 이 스크립트의 원래 설계 의도였다.
+**Why**: 데이터 수집을 중복 구현하는 대신 이미 검증된 L1의 실시간 배선을 재사용하는 것이
+"WS 연결 자체를 아예 안 여는" 유일하게 안전한 해법이다 — 감지·재시도 로직을 더 정교하게
+만드는 접근은 근본 원인(계좌당 WS 세션 1개 제한으로 추정)을 안 건드리므로 채택하지 않았다.
+**How to apply**: 앞으로 G2에 새 데이터 소스가 필요해지면(예: 옵션) 같은 원칙 — 그 데이터도
+L1(또는 그 데이터의 유일한 발행자)이 버스에 이미 올려주는 것을 구독하는 방향으로 설계할 것,
+G2가 스스로 새 WS 연결을 여는 방향은 다시 검토하지 말 것.
+**검증**: 전체 테스트 809건 통과(이 스크립트를 직접 커버하는 단위테스트는 원래도 없음 —
+통합 스크립트), ruff/pyright 클린(pyright의 `sys.stdout.reconfigure` 관련 에러 2건은
+`run_l1_daily.py`에도 동일하게 있는 기존 패턴, 이번 변경과 무관 확인). **실제 라이브
+재현 확인(가장 중요)**: 오늘 장중(11:57, L1이 실제 계좌로 WS 연결을 열고 정상 수집 중인
+상태)에 리팩터링된 `run_g2_paper_trading.py`를 실제로 수동 실행 →
+`Get-NetTCPConnection`으로 G2의 실제 워커 프로세스(PID 12928) 연결 목록 확인 결과
+Redis(`::1:6380`) 4건 + 심볼마스터 REST(HTTPS 443) 1건뿐, **KIS 실시간 WS 엔드포인트
+(`210.107.75.39:21000`)로의 연결은 0건** — 그 사이 L1의 기존 WS 연결(같은 엔드포인트,
+포트 64260)은 `Established` 상태 그대로 유지, `l1_daily_20260729.log`도 끊김 없이 계속
+발행(11:56:39→11:57:00→11:57:39, 재연결 이벤트 없음)됨을 함께 확인 — G2 가동이 L1에
+아무 영향도 안 준다는 것을 실측으로 증명. 검증에 쓴 프로세스는 종료 후 정리.
+
+### [작업] Task Scheduler "Messiah-G2" 등록 + 관련 배선
+
+- `scripts/run_g2_paper_trading.bat` 신규(`run_l1_daily.bat`와 동일 패턴 — UTF-8 콘솔·
+  ASCII 전용 파일·PowerShell tee로 `logs/g2_daily_YYYYMMDD.log` 기록).
+- `scripts/stop_l1_daily.bat`의 15:40 워치독 명령줄 매칭 패턴에
+  `*run_g2_paper_trading.py*` 추가 — G2도 자체 `daily_close()`/하드 데드라인 로직이
+  있지만(L1과 동일 형태), 혹시 못 끝냈을 때의 안전망을 L1과 동등하게 갖추기 위함.
+  `Get-ScheduledTask -TaskName Messiah`로 기존 설정(트리거 요일 비트마스크 62=평일,
+  `Principal.UserId=MW0601`·`LogonType=Interactive`·`RunLevel=Limited`,
+  `StartWhenAvailable=False`·`WakeToRun=False`·무제한 `ExecutionTimeLimit`)을 그대로
+  확인 후 `Register-ScheduledTask`로 "Messiah-G2"를 **동일 설정·08:36 트리거**(L1보다
+  1분 늦게 — WS 연결이 없어져 순서 자체는 무관해졌지만, 두 프로세스의 동시 기동 부하를
+  살짝 어긋내는 용도로만 유지)로 신규 등록, 등록 직후 `Get-ScheduledTask`로 설정값이
+  의도대로 반영됐는지 재확인 완료.
+- `run_l1_daily.bat`의 오래된 stale 주석("Not yet registered in Task Scheduler")도
+  이 김에 정정(16차에서 "이미 stale"이라고 기록만 해두고 실제 파일은 안 고쳐져 있었음
+  — 실제로는 이미 "Messiah"로 등록·가동 중이라는 사실과 "Messiah-G2"가 나란히 돈다는
+  사실을 반영).
+**남은 갭**: G2도 L1과 같은 기존 갭(로그온 필요·무알림·`WakeToRun=False`)을 그대로
+공유한다 — 이번 스코프에서 새로 만든 갭은 아님. 내일(2026-07-30) 08:36 첫 자동 트리거
+결과는 `logs/g2_daily_20260730.log`로 확인 필요(다음 세션 점검 항목).

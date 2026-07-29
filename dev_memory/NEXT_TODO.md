@@ -912,3 +912,35 @@ Engine R7~R9 + Command Center UI)
       **남은 갭**: 이론상 제3자가 8511도 쓸 가능성 자체는 남아있음(포트는 전역 공유 자원)
       — 재발 시 `is_ui_already_running()`에 실제 신원 확인(MESSIAH 전용 헬스체크 엔드포인트
       등) 도입을 검토할 것, 이번엔 스코프 밖으로 보류.
+
+## G2 페이퍼 트레이딩 Task Scheduler 등록 ([MW0601], 2026-07-29)
+
+- [x] `run_g2_paper_trading.py`에서 자체 `TickCollector`/`MultiHorizonBarComposer`/
+      `FeatureEngine` 제거 + Task Scheduler "Messiah-G2"(평일 08:36) 등록 (2026-07-29
+      완료, 사용자 요청: 고도화 제안 "G2를 L1과 같은 방식으로 등록" 구현) —
+      **착수 전 발견한 블로커**: 코드를 직접 읽어보니 G2가 L1과 완전히 동일한 계좌·심볼·
+      TR로 자기 자신의 WS 연결을 또 여는 구조였다 — `Docs/capability_matrix.md`
+      (2026-07-23)에 이미 확정된 "동일 계좌 WS 연결 2개 → 반복 단절" 버그와 정면 충돌.
+      제안대로 그대로 등록했다면 매일 아침 그 버그를 재현해 아직 무해한 G2를 위해 실제로
+      가치 있는 L1 데이터 수집을 매일 망가뜨렸을 것 — 사용자에게 먼저 보고해 "리팩터링
+      후 등록"으로 승인받고 진행.
+      **수정**: `FuturesAIService`·`TradingPipeline`·`LiveSimBrokerFeed`·`ShadowManager`
+      전부 `bus.subscribe()`만으로 동작한다는 걸 확인하고, G2의 자체 데이터 수집 스택을
+      전부 제거 — 이제 L1이 버스에 이미 발행한 `bar.*`/`feat.*`를 구독만 한다(자체 WS
+      연결 0개).
+      `scripts/run_g2_paper_trading.bat` 신규(`run_l1_daily.bat`와 동일 패턴),
+      `scripts/stop_l1_daily.bat` 워치독에 G2 명령줄 패턴 추가, `run_l1_daily.bat`의
+      stale 주석도 정정.
+      전체 테스트 809건 통과, ruff/pyright 클린. **실제 라이브 검증**: L1이 실계좌 WS로
+      정상 수집 중인 상태(장중)에 리팩터링된 G2를 실제로 수동 실행 →
+      `Get-NetTCPConnection`으로 G2 워커 프로세스 확인 결과 Redis 4건+REST 1건뿐,
+      KIS 실시간 WS 엔드포인트(`210.107.75.39:21000`) 연결 0건 확인. 그 사이 L1의 기존
+      WS 연결은 그대로 `Established` 유지, L1 로그도 끊김 없이 계속 발행 — G2 가동이
+      L1에 전혀 영향 없음을 실측으로 증명. 검증 프로세스는 종료 후 정리.
+      `Register-ScheduledTask`로 "Messiah-G2"를 기존 "Messiah" 태스크와 동일 설정(평일
+      트리거·`MW0601`/Interactive/Limited·무제한 실행시간)으로 08:36 트리거 신규 등록,
+      등록 후 설정값 재확인 완료.
+      **남은 갭**: L1과 동일한 기존 갭(로그온 필요·무알림·`WakeToRun=False`) 공유, 새로
+      만든 갭 아님. 내일(2026-07-30) 08:36 첫 자동 트리거 결과는 `logs/g2_daily_20260730.log`
+      로 다음 세션에서 확인 필요 — Registry가 비어 있어 여전히 "시스템이 안 죽고 도는가"만
+      증명하는 단계(실제 손익은 여전히 무의미).

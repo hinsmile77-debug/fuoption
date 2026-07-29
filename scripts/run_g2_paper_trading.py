@@ -1,9 +1,33 @@
 """G2 페이퍼 트레이딩 일일 운영 — Master Plan Ver 2.0 §8·§9 W39~40.
 
-`scripts/run_l1_daily.py`(L1 수집만)의 구조를 그대로 확장한다: 웜업 → 정규장 운영 →
-장후 종료(Self Evaluation 포함). L1(Collector·Composer·FeatureEngine)에 더해 이번엔
-전략 전 경로(FuturesAIService·TradingPipeline·SimBroker)와 Phase 5 진화 루프
-(ShadowManager·Self Evaluation)까지 같은 실시간 버스에 붙인다.
+`scripts/run_l1_daily.py`(L1 수집만)와 **같은 시각에, 별도 프로세스로, 나란히** 돈다:
+`run_l1_daily.py`가 이미 실계좌 WS 연결로 틱을 모아 `bar.*`/`feat.*`를 버스에 발행하고
+있다는 전제 위에서, 이 스크립트는 전략 전 경로(FuturesAIService·TradingPipeline·
+SimBroker)와 Phase 5 진화 루프(ShadowManager·Self Evaluation)를 그 버스에 **구독자로만**
+붙인다.
+
+## 이 스크립트는 자기 자신의 TickCollector를 열지 않는다 (2026-07-29 [MW0601] 수정)
+
+**예전엔 그렇지 않았다** — 처음 구현 당시 이 스크립트는 `run_l1_daily.py`와 완전히
+동일한 `TickCollector`(같은 계좌 자격증명·같은 심볼·같은 TR)를 자기 것으로 또 하나
+만들어 독자적인 WS 연결을 열고 있었다. `Docs/capability_matrix.md`(2026-07-23)에 이미
+실측으로 확정돼 있던 사실 — **동일 계좌로 WS 연결을 2개 열면 서로 반복적으로 끊긴다**
+(원인 미확인, approval_key 재발급이 같은 계좌의 다른 세션을 무효화하는 것으로 추정) —
+과 정면으로 충돌하는 설계였다. 이 상태로 Task Scheduler에 `run_l1_daily.bat`와 같은
+08:35 트리거로 등록했다면, 매일 아침 L1과 G2가 동시에 각자 WS 연결을 열어 그 반복
+단절 버그를 재현했을 것이고, 최악의 경우 아직 아무 가치도 못 내는 G2(Registry가
+비어 있어 거래가 전혀 안 남, 아래 문단)를 위해 실제로 가치 있는 L1의 실데이터 수집을
+매일 망가뜨렸을 것이다(G1 관문 달성을 위한 데이터 축적이 지금 단계의 유일한 목적).
+
+`MultiSymbolTickCollector`(단일 연결·다중 subscribe, 2026-07-23 신설)가 이 버그의
+구조적 해법이지만, 그건 **같은 프로세스 안에서** 선물+옵션처럼 여러 (심볼,TR)을 함께
+구독하는 경우의 해법이지 **서로 다른 두 프로세스가 각자 별도 WS 연결을 여는 경우**는
+애초에 해결한 적이 없다 — 이 스크립트가 자기 WS 연결 자체를 아예 안 여는 것(TickCollector
+·MultiHorizonBarComposer·FeatureEngine을 전부 제거하고 `bar.*`/`feat.*` 구독만 남김)이
+유일하게 안전한 해법이다. 대가는 이 스크립트가 이제 `run_l1_daily.py`(또는 동등한 데이터
+발행자)가 이미 살아서 버스에 발행 중이라는 전제 없이는 아무 신호도 못 받는다는 것 —
+그런데 애초에 그게 이 스크립트의 원래 설계 의도였다("G2가 실시간 버스 위에서 페이퍼
+브로커를 돌린다").
 
 ## 이 스크립트를 오늘 당장 돌려도 거래가 발생하지 않는다 (의도된 정직한 상태)
 
@@ -46,8 +70,11 @@ Position Reconciler 부재로 거래별 실현손익을 매칭할 수 없다 —
 스스로 Docker Desktop을 띄운 뒤 진행한다.
 
 사용: python scripts/run_g2_paper_trading.py [--configs configs]
-Windows 작업 스케줄러 등록은 안 함(`run_l1_daily.py`와 동일 이유) — 매일 무인 자동화는
-사용자 확인 후 별도 진행.
+Windows 작업 스케줄러에 "Messiah-G2"(평일 08:36, `run_g2_paper_trading.bat`)로 등록해
+`run_l1_daily.py`("Messiah", 08:35)와 나란히 돈다(2026-07-29 [MW0601] — 1분 차이는 엄격한
+순서 보장이 필요해서가 아니라 두 프로세스의 동시 기동 부하를 살짝 어긋내기 위한 것뿐,
+WS 연결을 더는 안 열게 된 이후로는 순서 자체는 무관해졌다). `stop_l1_daily.bat`(15:40
+워치독)도 이 스크립트의 명령줄 패턴을 함께 정리한다.
 """
 
 from __future__ import annotations
@@ -67,8 +94,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from messiah.broker.kis import symbol_master, tr_codes  # noqa: E402
-from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
+from messiah.broker.kis import symbol_master  # noqa: E402
 from messiah.broker.simulator.adapter import SimBroker  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
@@ -81,12 +107,7 @@ from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: 
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import launch_command_center  # noqa: E402
-from messiah.data.archiver import ParquetArchiver  # noqa: E402
-from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
-from messiah.data.collector import TickCollector  # noqa: E402
-from messiah.data.normalizer import parse_futures_tick  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
-from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
@@ -98,7 +119,6 @@ REGULAR_SESSION_STOP = (DEFAULT_SESSION.close_time.hour, DEFAULT_SESSION.close_t
 HARD_SHUTDOWN_DEADLINE = (15, 40)
 
 _MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
-_DATA_DIR = Path("data") / "bars"
 _LOG_DIR = Path("logs")
 _REGISTRY_DB = Path("data/models/registry.db")
 
@@ -192,18 +212,15 @@ def _load_shadow_manager(registry: ModelRegistry, symbol: str, bus: MessageBus) 
 
 
 async def _run_regular_session(
-    collector: TickCollector,
-    composer: MultiHorizonBarComposer,
-    engine: FeatureEngine,
     futures_service: FuturesAIService,
     pipeline: TradingPipeline,
     sim_feed: LiveSimBrokerFeed,
     shadow_manager: ShadowManager,
 ) -> None:
+    """이 스크립트의 데이터 소스는 `run_l1_daily.py`가 같은 버스에 이미 발행 중인 `bar.*`/
+    `feat.*`뿐이다 — 여기엔 자체 TickCollector가 없다(모듈 docstring 참고, WS 이중 연결
+    사고 대응). 넷 다 순수 구독자라 이 asyncio.gather()가 여는 WS 연결은 0개."""
     await asyncio.gather(
-        collector.run_forever(),
-        composer.run_forever(),
-        engine.run_forever(),
         futures_service.run_forever(),
         pipeline.run_forever(),
         sim_feed.run_forever(),
@@ -226,8 +243,6 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 async def _daily_close(
     *,
-    collector: TickCollector,
-    composer: MultiHorizonBarComposer,
     bus: MessageBus,
     broker: SimBroker,
     shadow_manager: ShadowManager,
@@ -236,9 +251,8 @@ async def _daily_close(
     start_equity: Decimal,
     today: str,
 ) -> None:
-    await collector.flush_final_bar()
-    await composer.flush_all_final()
-
+    """봉 flush는 `run_l1_daily.py`의 책임(그 프로세스가 실제 Collector/Composer를 갖고
+    있다) — 이 스크립트는 자기 것이 없으므로 flush할 것도 없다."""
     end_equity = (await broker.account()).total_equity
     daily_return = float((end_equity - start_equity) / start_equity) if start_equity > 0 else 0.0
     returns_path = _LOG_DIR / "g2_daily_returns.jsonl"
@@ -298,27 +312,17 @@ async def main(cfg: InstanceConfig) -> None:
 
     _launch_ui(today.strftime("%Y%m%d"))
 
-    creds = KISCredentials.from_broker_config(cfg.broker)
     symbol = await asyncio.to_thread(_resolve_front_month_symbol)
-    tick_size = Decimal(cfg.futures_tick_size)
-    print(f"근월물 심볼: {symbol} (tick_size={tick_size})", flush=True)
+    print(
+        f"근월물 심볼: {symbol} — 데이터는 run_l1_daily.py가 버스에 발행한 bar.*/feat.*를 "
+        f"구독(자체 WS 연결 없음)",
+        flush=True,
+    )
 
     registry = ModelRegistry(_REGISTRY_DB)
     bus = MessageBus(cfg.redis_url, cfg.instance_id)
     await bus.connect()
 
-    archiver = ParquetArchiver(_DATA_DIR)
-    collector = TickCollector(
-        creds=creds,
-        symbol=symbol,
-        tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
-        tick_size=tick_size,
-        archiver=archiver,
-        bus=bus,
-    )
-    composer = MultiHorizonBarComposer(symbol=symbol, archiver=archiver, bus=bus)
-    engine = FeatureEngine(symbol, bus, feature_set=cfg.feature_set)
     futures_service = _load_futures_service(registry, symbol, bus, cfg.feature_set)
     shadow_manager = _load_shadow_manager(registry, symbol, bus)
 
@@ -342,9 +346,7 @@ async def main(cfg: InstanceConfig) -> None:
         )
         try:
             await asyncio.wait_for(
-                _run_regular_session(
-                    collector, composer, engine, futures_service, pipeline, sim_feed, shadow_manager
-                ),
+                _run_regular_session(futures_service, pipeline, sim_feed, shadow_manager),
                 timeout=remaining,
             )
         except TimeoutError:
@@ -356,8 +358,6 @@ async def main(cfg: InstanceConfig) -> None:
     try:
         await asyncio.wait_for(
             _daily_close(
-                collector=collector,
-                composer=composer,
                 bus=bus,
                 broker=broker,
                 shadow_manager=shadow_manager,
