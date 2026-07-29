@@ -954,3 +954,54 @@ Engine R7~R9 + Command Center UI)
       안 건드림 — SYSTEM.md R3 원칙 그대로, 사람이 읽는 표시줄 하나만 정리한 것.
       `python scripts/self_check.py`로 실제 실행해 `kst=2026-07-29T12:15:05+09:00` 정상
       출력 확인, 전체 테스트 809건 통과, ruff 클린(전용 단위 테스트는 원래 없음).
+
+## Command Center UI — Market View 3건 수정 ([MW0601], 2026-07-29)
+
+- [x] 캔들 x축 UTC 표시 버그 + 자동 새로고침 부재 + LIVE Redis URL 기본값 오류 — 3건
+      동시 수정 (2026-07-29 완료, 사용자 요청: 스크린샷 보여주며 "라이브 모드에서 market
+      view가 업데이트되는지 점검하고 주기는 얼마인가" → 조사 결과 세 가지 다 발견돼 "세가지
+      모두 구현계획 꼼꼼히 수립하고 실수 없이 구현해"로 진행 확정) —
+      **① 캔들 x축이 KST가 아니라 UTC로 보임**: `bar_open_kst`는 만들어질 때
+      (`normalizer.py`의 `_combine_kst()`) 진짜 KST지만, Polars가 Parquet에 tz-aware
+      datetime을 쓸 때 항상 `time_zone='UTC'`로 정규화해 저장(직접 스키마 확인:
+      `Datetime(time_unit='us', time_zone='UTC')`) — `_load_bars()`가 이를 그대로 반환해
+      화면엔 실제보다 9시간 이른 시각이 찍혔다(스크린샷 "00:00~03:00" = 실제 08:35~12:XX
+      KST). `_load_bars()`에 `.dt.convert_time_zone("Asia/Seoul")` 추가로 해결 —
+      `pyproject.toml`이 이미 이 정확한 Windows tzdata 왕복 문제 때문에
+      `tzdata>=2026.1; sys_platform=='win32'`를 넣어뒀던 것(2026-07-22)이라 새 의존성
+      아님. 오늘 실제 parquet(`data/bars/A05608/5m/2026-07-29.parquet`)으로 실측: 수정 전
+      "2026-07-28 23:45:00+00:00", 수정 후 "2026-07-29 08:45:00+09:00" — 첫 봉이 실제
+      웜업 시작 시각과 정확히 일치.
+      **② 자동 새로고침이 전혀 없었다**: `main()` 전체를 읽어봐도 `st.rerun()`/
+      `streamlit_autorefresh` 등 주기적 재실행 트리거가 없어, 화면은 사람이 위젯을
+      만지거나 브라우저를 새로고침해야만 갱신됐다(백그라운드 스레드는 캐시는 계속
+      갱신하지만 그게 화면 rerun을 유발하지 않음). LIVE 모드일 때만
+      `st.fragment(run_every=5)`로 대시보드 본문(`_render_dashboard_body` 신규 분리)을
+      감싸 5초마다 그 부분만 다시 그리도록 함 — 전체 페이지가 아니라 프래그먼트만 다시
+      그려 사이드바 위젯 상태는 안 흔들림. 5초는 기존 `_STALE_AFTER`의 가장 빡빡한
+      임계값(FuturesView 10초)보다 넉넉히 짧게 잡아, 새로고침 사이에 배지가 헛되이
+      STALE로 안 보이게 한 것. REPLAY 모드는 `run_every=None`(데이터가 시간이 지난다고
+      저절로 안 바뀌므로 타이머가 낭비).
+      **③ LIVE 모드 Redis URL 기본값이 실제 포트와 다름**: 사이드바 기본값이
+      `"redis://localhost:6379/0"` 하드코딩이었는데(SYSTEM.md R4 위반이기도 함), 실제
+      MESSIAH Redis는 6380(`configs/instance.yaml`) — 공교롭게 이 PC 6379에도 다른
+      Redis가 떠 있어 `bus.connect()`가 에러 없이 "성공"해버리고 화면은 엉뚱한 Redis에
+      붙은 채 모든 배지가 영원히 NO_DATA로 남는 조용한 오연결이 실측으로 확인됐다.
+      `_default_redis_url()` 신규(`load_instance().redis_url` 조회, 실패 시 6380
+      폴백) — `load_instance()`는 시크릿을 안 읽어 KIS 자격증명 없이도 안전.
+      **부수 발견**: `_run_live_subscriber`가 연결 실패를 `"LiveConnectionError"` 캐시
+      키에 `Health(CRITICAL)`로 이미 남기고 있었는데, 그걸 읽어서 화면에 보여주는
+      `render_*` 함수가 하나도 없어 ①②③ 어떤 조합의 사고가 나도 사람 눈엔 그냥 "NO_DATA"
+      로만 보였다 — `render_top_bar()`에 `LiveConnectionError` 스냅샷을 읽어 `st.error()`
+      로 표시하는 로직 추가.
+      `tests/ui/test_app_helpers.py` 신규 6건(KST 변환·캔들 x축·설정 조회·폴백·회귀 방지)
+      + 기존 UI 테스트(스모크·데이터소스·상태캐시) 22건 전부 통과, 전체 815건 통과, ruff
+      클린. **실제 실행 검증**: 별도 포트(8522)로 실제 streamlit 기동 → HTTP 200 확인 →
+      `AppTest`로 LIVE 전환 후 실제 가동 중인 messiah-redis(6380)에 예외 없이 연결(빈
+      `st.error` 목록, `LIVE` 배지 정상 렌더) 확인 → 검증 프로세스 정리.
+      **남은 갭**: `run_every=5`가 실제 브라우저 세션에서 체감상 자연스러운지는 사람이
+      직접 화면을 열어 확인 필요(자동화 환경엔 실제 브라우저가 없어 타이머 발동 자체는
+      코드 검토+`AppTest` 정적 검증까지만 가능). Redis 오연결 대비책이 "우리 프로젝트
+      Redis"에는 유효하지만, 제3자가 하필 6380도 쓰면 같은 클래스의 문제가 재발할 수
+      있음(포트 충돌은 근본적으로 안 없어짐 — Command Center UI 포트 8511 사고와 같은
+      성격의 잔여 리스크).

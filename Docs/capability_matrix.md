@@ -872,3 +872,30 @@ WS 연결을 별도로 열고 있었고, 이는 이미 위(2026-07-23 항목)에
 - **첫 자동 트리거는 아직 미검증**: 오늘(2026-07-29)은 수동 실행으로만 검증했고, 등록된
   Task Scheduler 트리거를 통한 실제 첫 자동 실행은 다음 거래일(2026-07-30) 08:36 —
   `logs/g2_daily_20260730.log`로 다음 세션에 확인 필요.
+
+## Command Center UI — Market View 3건 버그 수정 ([MW0601], 2026-07-29)
+
+사용자가 실제 화면 스크린샷을 보여주며 "라이브 모드에서 market view가 업데이트되는지
+점검하고 주기는 얼마인가"를 요청 — 조사 중 캔들 x축 타임존·자동 새로고침 부재·LIVE Redis
+URL 기본값 오류 세 가지를 실측으로 발견해 전부 수정.
+
+| 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
+|---|---|---|---|---|
+| ui/app.py `_load_bars()` — 캔들 x축 KST 변환 | ✅ | ✅ 2026-07-29 | ✅ | `bar_open_kst`는 생성 시점엔 진짜 KST지만 Polars가 Parquet 왕복 시 `time_zone='UTC'`로 정규화해 저장(직접 스키마 확인) — 화면엔 실제보다 9시간 이른 시각 표시됨(스크린샷 실증). `.dt.convert_time_zone("Asia/Seoul")` 추가로 해결, `tzdata` 의존성은 이미 있음(`pyproject.toml`, 2026-07-22 다른 이유로 추가). 오늘 실제 parquet으로 실측: 수정 전 `2026-07-28 23:45:00+00:00` → 수정 후 `2026-07-29 08:45:00+09:00`(실제 웜업 시작 시각과 일치) |
+| ui/app.py `_render_dashboard_body` + `st.fragment(run_every=5)` — LIVE 자동 새로고침 | ✅ | ✅ 2026-07-29 | — | 기존엔 자동 재실행 트리거가 전무해 사람이 위젯 조작·새로고침해야만 화면이 갱신됐다(실측 확인). LIVE 모드에서만 5초 간격 프래그먼트 재실행(REPLAY는 `run_every=None`) — 5초는 `_STALE_AFTER`의 가장 빡빡한 임계값(FuturesView 10초)보다 넉넉히 짧게 선택 |
+| ui/app.py `_default_redis_url()` — LIVE Redis URL 기본값 수정 | ✅ | ✅ 2026-07-29 | ✅ | 예전 하드코딩값 `redis://localhost:6379/0`이 실제 MESSIAH Redis 포트(6380, `configs/instance.yaml`)와 달랐다 — 이 PC엔 공교롭게 6379에도 다른 Redis가 떠 있어 `bus.connect()`가 에러 없이 "성공"해버리고 화면은 엉뚱한 서버에 붙은 채 영원히 NO_DATA로 남는 조용한 오연결이 실측 확인됨. `load_instance().redis_url` 조회(실패 시 6380 폴백)로 수정 |
+| ui/app.py `render_top_bar` — LiveConnectionError 화면 노출 | ✅ | ✅ 2026-07-29 | — | `_run_live_subscriber`가 연결 실패를 캐시에 이미 남기고 있었는데 어느 `render_*`도 그걸 안 읽어 사람 눈엔 늘 그냥 "NO_DATA"였다(부수 발견) — `st.error()`로 노출 추가 |
+
+`tests/ui/test_app_helpers.py` 신규 6건 + 기존 UI 테스트 22건 전부 통과, 전체 815건 통과,
+ruff 클린. 실제 streamlit(포트 8522, 별도)로 기동해 HTTP 200 확인 + `AppTest`로 LIVE 전환
+후 실제 가동 중인 messiah-redis(6380)에 예외·오류 배너 없이 정상 연결됨을 확인.
+
+### 알려진 갭 (Command Center UI Market View, 2026-07-29)
+
+- **`run_every=5`의 실제 체감은 브라우저로 미검증**: 자동화 환경에 실제 브라우저가 없어
+  코드 검토 + `AppTest` 정적 검증까지만 했다 — 사람이 화면을 열어 5초 간격이 자연스러운지
+  최종 확인 필요.
+- **Redis 오연결 방지가 포트 충돌 자체를 없애지는 않는다**: 6380을 기본값으로 고쳤어도
+  제3자가 하필 6380을 쓰면 같은 클래스의 문제가 재발할 수 있다 — Command Center UI 자체의
+  포트 8511 사고(위 항목)와 근본적으로 같은 성격의 잔여 리스크(로컬 포트는 전역 공유
+  자원이라는 한계).

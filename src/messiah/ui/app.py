@@ -46,11 +46,13 @@ import polars as pl
 import streamlit as st
 
 from messiah.core.bus import MessageBus
+from messiah.core.config import load_instance
 from messiah.core.messages import (
     BusMessage,
     DecisionIntent,
     Fill,
     FuturesView,
+    Health,
     OptionsView,
     RegimeState,
 )
@@ -123,7 +125,7 @@ async def _poll_streams_forever(bus: MessageBus, cache: StateCache, *, poll_ms: 
 def _error_message(text: str) -> BusMessage:
     # 캐시는 BusMessage만 받는다 — 에러도 그 계약을 지키려 DecisionIntent 재사용은 오해를
     # 부르니, rationale 필드가 있는 아무 메시지나 빌리는 대신 그냥 원문을 로그로만 남긴다.
-    from messiah.core.messages import Health, HealthLevel
+    from messiah.core.messages import HealthLevel
 
     return Health(component="command-center-ui", level=HealthLevel.CRITICAL, detail=text)
 
@@ -142,6 +144,23 @@ def _get_live_cache(redis_url: str, symbol: str) -> StateCache:
     return cache
 
 
+def _default_redis_url() -> str:
+    """LIVE 모드 사이드바의 Redis URL 기본값 — `configs/instance.yaml`의 실제 값을 읽는다
+    (2026-07-29 수정). 예전엔 `"redis://localhost:6379/0"`을 그냥 하드코딩해뒀는데, MESSIAH의
+    실제 Redis(`messiah-redis`)는 6380에서 돈다(`configs/instance.yaml`) — 이 PC엔 공교롭게
+    6379에도 다른(무관한) Redis가 떠 있어서 `bus.connect()`가 에러 없이 "성공"해버리고, 화면은
+    엉뚱한 Redis에 붙은 채 모든 배지가 영원히 NO_DATA로 남는 조용한 오연결이 실측으로 확인됐다
+    (SYSTEM.md R4 하드코딩 금지 원칙과도 어긋났던 값). `load_instance()`는 시크릿을 해석하지
+    않아(`core/config.py`) UI가 KIS 자격증명 없이도 안전하게 호출 가능 — 그래도 설정 파일 자체가
+    없거나 깨졌을 가능성에 대비해 실패하면 프로젝트가 실제로 쓰는 6380 기본값으로 폴백한다(화면
+    전체를 죽이는 것보다 낫다, `core/docker_bootstrap.py`류의 "부가 정보 실패가 본 기능을 막지
+    않는다" 원칙과 동일)."""
+    try:
+        return load_instance().redis_url
+    except Exception:
+        return "redis://localhost:6380/0"
+
+
 # ---------------------------------------------------------------- Parquet 캔들 (LIVE/REPLAY 공용)
 
 
@@ -158,10 +177,19 @@ def _available_dates(symbol: str, horizon: str, bar_dir: Path) -> list[date]:
 
 
 def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> pl.DataFrame | None:
+    """`bar_open_kst`는 만들어질 때(`data/normalizer.py`의 `_combine_kst()`) 진짜 KST
+    (+09:00)이지만, Polars가 tz-aware datetime을 Parquet에 쓸 때 항상 `time_zone='UTC'`로
+    정규화해서 저장한다(그래서 이 값을 그대로 읽으면 물리적으로는 UTC 벽시계 값 — 이름과
+    실제 표시가 어긋난다, 2026-07-29 Command Center 스크린샷 점검 중 실측 발견: 09:00 KST
+    개장 봉이 화면엔 00:00으로 찍힘). `dt.convert_time_zone("Asia/Seoul")`로 KST 벽시계로
+    되돌린다 — `pyproject.toml`이 이미 이 Windows tzdata 왕복 문제 때문에
+    `tzdata>=2026.1; sys_platform == 'win32'`를 명시적으로 넣어뒀으므로(2026-07-22) 새 의존성
+    추가가 아니다."""
     path = bar_dir / symbol / horizon / f"{day.isoformat()}.parquet"
     if not path.exists():
         return None
-    return pl.read_parquet(path)
+    bars = pl.read_parquet(path)
+    return bars.with_columns(pl.col("bar_open_kst").dt.convert_time_zone("Asia/Seoul"))
 
 
 def _candlestick_figure(bars: pl.DataFrame, tick_size: float) -> go.Figure:
@@ -225,6 +253,16 @@ def render_top_bar(source, symbol: str) -> None:
                     "Kill Switch 발동 요청 — LIVE 모드에서 sys.kill 발행 배선은 알려진 갭"
                     "(모듈 docstring, 아직 실제 KillSwitch 프로세스에 연결되지 않음)"
                 )
+
+    # `_run_live_subscriber`가 예외를 삼키고 "LiveConnectionError" 키에 Health(CRITICAL)를
+    # 남긴다(모듈 docstring) — 지금까지는 그 키를 읽는 render_* 함수가 하나도 없어서, 연결
+    # 실패가 모든 배지를 그냥 조용히 영원한 NO_DATA로만 보여줬다(2026-07-29 실측 발견: 잘못된
+    # 기본 Redis URL로 "연결은 성공했지만 엉뚱한 서버"인 경우도 똑같이 조용했다). REPLAY 모드의
+    # `snapshot()`은 이 키를 절대 채우지 않으므로 무조건 호출해도 안전하다.
+    conn_error = source.snapshot("LiveConnectionError")
+    if isinstance(conn_error.message, Health):
+        st.error(f"LIVE 연결 실패: {conn_error.message.detail}")
+
     st.divider()
 
 
@@ -313,6 +351,35 @@ def render_bottom_zone(source) -> None:
 
 # ---------------------------------------------------------------- 진입점
 
+# LIVE 모드 자동 새로고침 주기(초) — 2026-07-29 추가. 이전엔 자동 재실행 트리거가 전혀
+# 없어(`st.rerun()`/autorefresh 전무, 실측 확인) 봉·배지가 사람이 위젯을 조작하거나
+# 브라우저를 새로고침해야만 갱신됐다. `_STALE_AFTER`의 가장 빡빡한 임계값(FuturesView 10초)
+# 보다 넉넉히 짧게 잡아, 두 번의 자동 새로고침 사이에 배지가 헛되이 STALE로 안 보이게 한다.
+_LIVE_REFRESH_SECONDS = 5
+
+
+def _render_dashboard_body(
+    source, *, symbol: str, horizon: str, bar_dir: Path, tick_size: float
+) -> None:
+    """`main()`에서 분리 — LIVE 모드에서만 `st.fragment(run_every=...)`로 감싸 이 부분만
+    주기적으로 다시 그린다(전체 페이지 rerun은 사이드바 위젯 상태를 흔들 필요가 없어 과함)."""
+    render_top_bar(source, symbol)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        render_ai_decision_panel(source)
+    with col2:
+        render_market_view(
+            source,
+            symbol=symbol,
+            horizon=horizon,
+            bar_dir=bar_dir,
+            tick_size=tick_size,
+        )
+    with col3:
+        render_position_risk_panel(source)
+    st.divider()
+    render_bottom_zone(source)
+
 
 def main() -> None:
     st.set_page_config(page_title="MESSIAH Command Center", layout="wide")
@@ -324,28 +391,18 @@ def main() -> None:
     tick_size = st.sidebar.number_input("틱 크기", value=DEFAULT_TICK_SIZE, format="%.4f")
 
     if mode_label == "LIVE":
-        redis_url = st.sidebar.text_input("Redis URL", "redis://localhost:6379/0")
+        redis_url = st.sidebar.text_input("Redis URL", _default_redis_url())
         cache = _get_live_cache(redis_url, symbol)
         source = LiveDataSource(cache, stale_after_seconds=_STALE_AFTER)
+        run_every: int | None = _LIVE_REFRESH_SECONDS
     else:
+        # REPLAY는 선택한 날짜가 바뀔 때만 다시 그리면 된다 — 데이터 자체가 시간이 지난다고
+        # 저절로 안 바뀌므로 타이머로 다시 그려봐야 낭비(불필요한 Parquet 재읽기)만 늘어난다.
         source = ReplayDataSource()
+        run_every = None
 
-    render_top_bar(source, symbol)
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col1:
-        render_ai_decision_panel(source)
-    with col2:
-        render_market_view(
-            source,
-            symbol=symbol,
-            horizon=horizon,
-            bar_dir=DEFAULT_BAR_DIR,
-            tick_size=tick_size,
-        )
-    with col3:
-        render_position_risk_panel(source)
-    st.divider()
-    render_bottom_zone(source)
+    body = st.fragment(run_every=run_every)(_render_dashboard_body)
+    body(source, symbol=symbol, horizon=horizon, bar_dir=DEFAULT_BAR_DIR, tick_size=tick_size)
 
 
 if __name__ == "__main__":
