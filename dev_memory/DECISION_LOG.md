@@ -1299,3 +1299,42 @@ intel.futures, decision.intent, KILL SWITCH])에 CB 배지를 끼워 5컬럼으�
 
 **알려진 갭**: `CircuitBreakerStatus`는 실시간 heartbeat만 있고 영속화가 없어 REPLAY로 과거
 날짜를 봐도 그날 CB가 있었는지는 배지로 알 수 없다(halt 이력 DB 미착수와 같은 근본 원인).
+
+## 2026-07-29 ([MW0601]) — Command Center "Connection error" 팝업 원인 조사·워치독 오프스케줄 방지
+
+**요청**: 사용자가 브라우저에서 Streamlit 표준 팝업("Connection error - Is Streamlit still
+running?")을 목격, 이력 조사와 근본원인 딥다이브를 요청.
+
+**조사 결과 — 같은 날 두 가지 별개 사고를 확인**:
+1. `logs/shutdown_watchdog.log`: `stop_l1_daily.bat`("Messiah-Shutdown", 원래 15:40
+   전용 Task Scheduler 트리거)가 **13:08:03에 오프스케줄로 실행**돼 UI 프로세스 3개(PID
+   16464/25108/26324, `messiah\ui\app.py --server.port 8511`)를 포함해 강제 종료함.
+   같은 시각대에 `run_g2_paper_trading.py` 수동 검증 실행 후 "검증에 쓴 프로세스는 종료 후
+   정리"(위 항목, 11:57 검증 기록)한 정황과 일치 — 명령줄 패턴 매칭 방식이라 어떤 경로로
+   호출되든 UI까지 함께 죽는 구조. `logs/ui_20260729.log`에 13:10:09 재기동 확인, 그 사이
+   브라우저 탭은 WebSocket이 끊겨 정확히 이 팝업을 봤을 것.
+2. 같은 날 15:02:17·15:04:02에도 별도로 `ImportError: cannot import name
+   'CircuitBreakerStatus' from 'messiah.core.messages'`로 앱이 크래시(`logs/ui_20260729.log`)
+   — 커밋 `34c9b8c` 작업 중 `app.py`만 먼저 저장되고 `messages.py`는 아직 저장 전이던
+   순간을 Streamlit 파일워처가 자동 리로드하며 발생. 15:05:40 재시작으로 해소, 커밋
+   완료(15:12:39) 이후로는 재현 안 됨 — **코드 수정 불필요, 별도 클래스의 사고**.
+
+**수정(1번 사고만 대상)**: `scripts/stop_l1_daily.bat`에 15:35 KST 시각 게이트 추가 —
+`run_l1_daily.py`의 `REGULAR_SESSION_STOP`(=`HARD_SHUTDOWN_DEADLINE` 15:40의 5분 전)를
+기준으로 그 이전에 실행되면 아무것도 죽이지 않고 스킵 로그만 남긴다(`MESSIAH_FORCE_SHUTDOWN=1`
+로 강제 우회 가능 — `core/ui_launcher.py`의 `MESSIAH_SKIP_UI` 관례와 동일 패턴). UI를 매칭
+대상에서 빼는 대신(그러면 UI를 영영 아무도 안 치움) 스크립트 자체를 "정말 15:40 안전망"으로
+동작하게 만드는 방향 — 원래 파일 헤더 주석이 이미 그렇게 설명하고 있었지만 실제로는 시각
+검사가 없어 그 설명과 실제 동작이 어긋나 있었다. Task Scheduler 트리거(15:40)는 변경 없음 —
+게이트는 무엇이 이 스크립트를 호출하든(스케줄/수동/Task Scheduler "Run" 버튼) 방어하도록
+스크립트 내부에 둠.
+
+**검증**: 배치파일이라 pytest 대상 아님 — PowerShell로 게이트 로직 3분기(컷오프 이전 스킵 /
+`MESSIAH_FORCE_SHUTDOWN=1` 강제통과 / 컷오프 이후 정상통과) 각각 직접 실행해 예상대로 동작
+확인. 실제 `stop_l1_daily.bat`도 현재시각(15:52, 컷오프 이후) 기준 실행해 기존과 동일하게
+"command-line match: no leftover process found" 로그·프로세스 영향 없음 확인(현재 매칭되는
+MESSIAH 프로세스 자체가 없었음).
+
+**남은 갭**: 2번 사고(파일 저장 타이밍에 따른 import 크래시)는 이번 스코프에서 다루지 않음 —
+편집 중 파일을 개별 저장하는 개발 습관에 기인한 일회성 사고라 구조적 방지책이 필요한지는
+다음에 비슷한 패턴이 재현되면 재검토.
