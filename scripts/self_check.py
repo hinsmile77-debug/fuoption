@@ -49,14 +49,20 @@ def check_schema() -> CheckResult:
 
 
 def check_timezone() -> CheckResult:
-    """시각 건전성 — naive 금지 체계 확인 + KST 오프셋 검증 (L21)."""
+    """시각 건전성 — naive 금지 체계 확인 + KST 오프셋 검증 (L21).
+
+    표시는 KST로 통일한다(2026-07-29 [MW0601]) — 내부 데이터 표준은 여전히 UTC(SYSTEM.md
+    R3, `core/logging.py`의 `ts_utc`와 동일 원칙)지만, 이 줄은 `run_l1_daily.py`/
+    `run_g2_paper_trading.py`가 부팅 시 그대로 로그 파일에 찍는 사람이 읽는 출력이고, 그
+    로그의 나머지 모든 줄(`ts` 필드, `core/logging.py`)은 이미 KST다 — 이 한 줄만 UTC로
+    찍혀 같은 순간을 두 다른 표기로 섞어 보여주는 게 실제 로그 점검 중 눈에 띄어 정리."""
     u, k = now_utc(), now_kst()
     ok = (
         u.tzinfo is not None
         and k.utcoffset() is not None
         and k.utcoffset().total_seconds() == 9 * 3600
     )
-    return CheckResult("timezone", ok, f"utc={u.isoformat(timespec='seconds')}")
+    return CheckResult("timezone", ok, f"kst={k.isoformat(timespec='seconds')}")
 
 
 def check_git_state(mode: str) -> CheckResult:

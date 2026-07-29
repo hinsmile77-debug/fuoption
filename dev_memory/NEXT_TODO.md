@@ -944,3 +944,13 @@ Engine R7~R9 + Command Center UI)
       만든 갭 아님. 내일(2026-07-30) 08:36 첫 자동 트리거 결과는 `logs/g2_daily_20260730.log`
       로 다음 세션에서 확인 필요 — Registry가 비어 있어 여전히 "시스템이 안 죽고 도는가"만
       증명하는 단계(실제 손익은 여전히 무의미).
+
+- [x] `scripts/self_check.py`의 `check_timezone()` 표시를 UTC에서 KST로 통일 ([MW0601],
+      2026-07-29 완료, 사용자 요청: "전체 ts를 KST 형식으로 변경 개선해" — G2 등록 직후
+      재시작 로그 점검 중 self_check 블록만 `utc=...+00:00`으로 찍혀 그 아래 모든 `ts`
+      필드(`core/logging.py`, 이미 KST)와 표기가 섞여 보이는 걸 발견) — `CheckResult`의
+      detail 문자열을 `utc={u.isoformat(...)}`에서 `kst={k.isoformat(...)}`로 변경(판정
+      로직 `ok`는 그대로 UTC/KST 오프셋 둘 다 검증). 내부 데이터 표준(`ts_utc` 등)은 이번에
+      안 건드림 — SYSTEM.md R3 원칙 그대로, 사람이 읽는 표시줄 하나만 정리한 것.
+      `python scripts/self_check.py`로 실제 실행해 `kst=2026-07-29T12:15:05+09:00` 정상
+      출력 확인, 전체 테스트 809건 통과, ruff 클린(전용 단위 테스트는 원래 없음).
