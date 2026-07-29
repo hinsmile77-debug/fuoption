@@ -61,6 +61,13 @@ def test_rejects_stale_data_r11():
     assert "R11" in decision.reason
 
 
+def test_rejects_when_circuit_breaker_active_r13():
+    engine = RiskEngine()
+    decision = engine.evaluate(**_default_kwargs(circuit_breaker_active=True))
+    assert decision.approved is False
+    assert "R13" in decision.reason
+
+
 def test_rejects_after_consecutive_loss_streak_r10():
     engine = RiskEngine(RiskEngineConfig(consecutive_loss_limit=3))
     for _ in range(3):

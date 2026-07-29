@@ -14,20 +14,31 @@ from streamlit.testing.v1 import AppTest
 _APP_PATH = str(Path(__file__).resolve().parents[2] / "src" / "messiah" / "ui" / "app.py")
 
 
-def test_app_runs_without_exception_in_default_replay_mode():
+def test_app_runs_without_exception_in_default_live_mode():
+    # 2026-07-29 사용자 요청으로 기본값이 REPLAY→LIVE로 바뀌었다(`app.py` 모듈 docstring) —
+    # LIVE는 백그라운드 스레드에서 Redis 접속을 시도하지만, 그 실패는 스레드 안 try/except로
+    # 캐치돼(`_run_live_subscriber`) 메인 스크립트 실행 자체는 예외 없이 끝나야 한다.
     at = AppTest.from_file(_APP_PATH)
     at.run(timeout=30)
+    assert at.sidebar.radio[0].value == "LIVE"
     assert list(at.exception) == []
 
 
-def test_app_runs_without_exception_when_switched_to_live_mode():
-    # LIVE 모드는 백그라운드 스레드에서 Redis 접속을 시도한다 — 이 테스트 환경엔 Redis가
-    # 없을 수 있지만, 그 실패는 스레드 안 try/except로 캐치돼(`_run_live_subscriber`) 메인
-    # 스크립트 실행 자체는 예외 없이 끝나야 한다(모듈 docstring 방어 그대로).
+def test_app_runs_without_exception_when_switched_to_replay_mode():
     at = AppTest.from_file(_APP_PATH)
     at.run(timeout=30)
-    at.sidebar.radio[0].set_value("LIVE").run(timeout=30)
+    at.sidebar.radio[0].set_value("REPLAY").run(timeout=30)
     assert list(at.exception) == []
+
+
+def test_circuit_breaker_badge_shows_unused_when_no_status_published():
+    # `circuit_breaker_monitor`를 안 쓰는 경로(스모크·재생 등)에서는 sys.circuit_breaker
+    # 자체가 발행되지 않는다 — "정상"이 아니라 "미사용/데이터 없음"으로 명시돼야 한다
+    # (마흐디 L18 — 값 없음과 정상을 혼동하지 않는다, `app.py` 모듈 docstring 참고).
+    at = AppTest.from_file(_APP_PATH)
+    at.run(timeout=30)
+    assert any("서킷브레이커" in md.value for md in at.markdown)
+    assert any("미사용/데이터 없음" in md.value for md in at.markdown)
 
 
 def test_kill_switch_two_step_confirm_flow_does_not_raise():

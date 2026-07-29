@@ -32,6 +32,7 @@ TOPIC_EXEC_ORDER = "exec.order"  # Streams
 TOPIC_EXEC_FILL = "exec.fill"  # Streams
 TOPIC_HEALTH = "sys.health"
 TOPIC_KILL = "sys.kill"  # 최우선
+TOPIC_CIRCUIT_BREAKER = "sys.circuit_breaker"  # CircuitBreakerStatus heartbeat (Command Center UI)
 
 # L6 Learning / Self Evolution (Ver 2.0 §9 W35~36, Phase 5) — 전부 감사 이력이 필요해
 # Streams(재생 가능)로 분류. decision.intent와 같은 이유(사람이 나중에 리뷰).

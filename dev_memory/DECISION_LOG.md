@@ -1187,3 +1187,115 @@ Redis(`::1:6380`) 4건 + 심볼마스터 REST(HTTPS 443) 1건뿐, **KIS 실시�
 **남은 갭**: G2도 L1과 같은 기존 갭(로그온 필요·무알림·`WakeToRun=False`)을 그대로
 공유한다 — 이번 스코프에서 새로 만든 갭은 아님. 내일(2026-07-30) 08:36 첫 자동 트리거
 결과는 `logs/g2_daily_20260730.log`로 확인 필요(다음 세션 점검 항목).
+
+## 2026-07-29 ([MW0601]) — 거래소 서킷브레이커(CB) 자동 대응 신설
+
+### [설계결정] "미륵" 대응 설계를 반영해 CB를 데이터단절 추정으로 감지, 재개 시 자동복구
+
+**배경**: 사용자가 코스피 급락형 서킷브레이커 발동 스크린샷(한국거래소 20분 정지+10분
+단일가매매)을 제시하며, 별도 선물 시스템 "미륵"(`C:\Users\82108\PycharmProjects\futures`)의
+장중 CB 대응체계를 조사·반영할 것을 요청. 조사 결과 미륵은 KIS류 API가 CB 발동을 직접
+알려주지 않아 "정상 연결 + 분봉 미수신"이라는 간접 신호로 90~300초 단계적 워치독을 돌리며,
+재개(데이터 재수신) 감지 즉시 **사람 확인 없이 자동으로** 포지션을 강제청산하고 정상화한다.
+MESSIAH엔 CB 대응 코드가 전혀 없었으나, 조사 중 `KillSwitch.liquidate()`가 청산주문을
+1회만 시도하고 실패해도 재시도가 없다는 기존 구조적 갭을 발견 — 실제 CB가 오면 청산이
+영구히 누락되고, `KillSwitch`는 "사람 확인 후에만 재가동"이 원칙이라 사람이 올 때까지
+무한정 매매정지된다는, 미륵보다 훨씬 나쁜 결과가 될 수 있었다.
+
+**검토한 옵션**: 재개 처리 — ① 미륵처럼 자동복구 ② `KillSwitch` 철학 유지(사람 확인 후
+재개). 감지 범위 — ① 반응형(데이터 갭 추정)만 ② 반응형+코스피 현물지수 기반 선제 감지.
+`AskUserQuestion`으로 확인한 결과 ①+① 채택 — 선제 감지는 RG(현물지수·매크로) 데이터소스가
+`capability_matrix.md`상 미착수라 스코프 확대가 크다는 이유로 이번엔 제외.
+
+**결정**: `risk/circuit_breaker_monitor.py`(신규) — `RiskEngine`/`KillSwitch`와 동일
+스타일(순수 상태머신, 실행은 호출자)로 NORMAL→WARNING(90s)→SUSPECTED(150s)→
+CONFIRMED(240s) 단계적 추정 + 재개 후 10분 재진입 관망(KRX 단일가매매와 동일)을 구현.
+`risk_engine.py`에 R13(신규 진입 거부) 게이트 추가 — `minutes_to_close`와 동일한
+"호출자가 계산해 주입" 패턴. `strategy/pipeline.py`가 CONFIRMED 시 `gateway.halt()`,
+재개(`just_resumed`) 시 `KillSwitch.liquidate()`를 재사용해 EMERGENCY 강제청산 후
+`gateway.resume()` — 사람 개입 없음. 이벤트 구동 구조라 데이터가 끊긴 동안은
+`handle_futures_view()` 자체가 안 돌기 때문에, `watch_circuit_breaker_forever()`가
+기존 `core/scheduler.py`의 `FixedTickScheduler`로 벽시계 기준 워치독을 별도로 돌린다.
+
+**부수 발견·해결**: `circuit_breaker_monitor` 주입 시 CB로 설명되는 데이터단절 동안은
+`kill_switch.evaluate()`에 `data_age_seconds=0.0`을 넘겨 `KillSwitch`의 R11(30초 지속
+전면정지)이 같은 데이터단절로 별도 발동하지 않게 했다 — 안 그러면 CB 자동복구 직후 같은
+호출 안에서 KillSwitch R11이 다시 `gateway.halt()`를 걸어 자동복구가 무의미해진다.
+
+**Why**: CB는 알려진·시장 전체·일시적 이벤트라 `KillSwitch`(이상 상황 → 사람 판단 필요)와
+다른 철학이 합당하다는 게 사용자와 합의한 판단. R11 30초 임계값이 CB 전용 임계값(90초)보다
+먼저 걸리므로, `CircuitBreakerMonitor`가 실제로 가치를 내는 구간은 재개 후 재진입 관망뿐
+이라는 게 설계의 핵심 근거(`risk_engine.py` R13 절 참고).
+
+**스코프 밖(명시적)**: 코스피 현물지수 기반 선제 감지, 재개 후 피처/국면 버퍼 리셋
+(`FeatureEngine`/`RegimeRuntime`에 reset() API 없음), 능동 알림(Slack 등 인프라 없음),
+halt 이력 DB 영속화(EOD exporter 없음). 임계값(90/150/240초, 재진입 관망 10분)은 미륵의
+실측 보정값을 차용한 미검증 초기값 — MESSIAH 자체 실거래 CB 관측 후 재조정 필요.
+
+**검증**: 신규 `tests/risk/test_circuit_breaker_monitor.py`(8건) + `test_risk_engine.py`
+R13 1건 + `test_pipeline.py` CB 자동청산·재진입관망 2건, 전부 통과. 전체 회귀 무손상
+(`Docs/capability_matrix.md` "거래소 서킷브레이커(CB) 자동 대응" 절 참고).
+
+### [버그] 실전 재시작 직후 콜드스타트를 CB로 오판 — `_last_bar_confirm_at is None`이면 CB 판정 자체를 건너뛰도록 수정
+
+**증상**: 위 CB 기능을 실전 반영하려고 L1/G2를 재시작(14:39:48)한 직후, `watch_circuit_breaker_forever()`
+의 첫 워치독 틱(14:40:00, `FixedTickScheduler` 30초 격자)이 봉을 한 번도 못 본 상태에서
+`_data_age_seconds()`가 반환하는 `inf`를 그대로 CB 판정에 흘려 시작하자마자
+`CircuitBreakerConfirmed(데이터단절 infs)` → `gateway.halt()` → 60초 뒤 첫 실봉 도착으로
+`CircuitBreakerResumed`라는 거짓 CB 이벤트 한 쌍이 실제 로그에 찍힘(`logs/g2_daily_20260729.log`).
+
+**원인**: `inf`는 R11(RiskEngine/KillSwitch) 관점에선 "봉을 아직 못 봐서 최대 위험"이라는
+의도된 값이지만, CB 판정은 "이전에 흐르던 데이터가 끊겼다"는 **편차**를 감지하는 것이라
+기준선 자체가 없는 콜드스타트에는 적용 대상이 아니다.
+
+**수정**: `strategy/pipeline.py`의 `handle_futures_view()`와 `watch_circuit_breaker_forever()`
+양쪽에 `self._last_bar_confirm_at is not None` 가드 추가 — 봉을 한 번도 못 본 동안은
+`CircuitBreakerMonitor.observe()` 자체를 호출하지 않는다. R11(RiskEngine)은 이 경우에도
+`data_age_seconds > 30s`로 이미 신규진입을 막으므로 안전 공백은 없음. 회귀 테스트
+`test_cold_start_without_bars_does_not_false_positive_circuit_breaker` 추가.
+
+**부수 발견(미해결, 별도 스코프)**: 같은 콜드스타트 상황에서 `kill_switch.evaluate()`에도
+`data_age_seconds=inf`가 그대로 들어가 R11이 `gateway.halt("kill switch triggered")`를
+걸 수 있다는 것을 단위테스트로 확인(`handle_futures_view()`가 `handle_bar()`보다 먼저
+호출되는 경로가 이론상 가능 — 실제로는 오늘 재현 안 됨, L1/G2가 별도 프로세스라 Redis
+pub/sub 교차 채널 순서가 보장 안 되는 구조적 위험은 남아있음). CB 기능과 무관한 기존
+`handle_futures_view()`의 잠재 결함이라 이번 스코프에서 고치지 않고 사용자에게 보고만 함
+— 다음 세션에서 필요하면 별도로 다룰 것.
+
+**실전 검증**: 수정 후 L1/G2 재재시작(14:48:46) → self-check PASS, KIS WS
+(`210.107.75.39:21000`) 연결, Redis(6380) 연결, Command Center UI(`localhost:8511`)
+HTTP 200, ERROR/CRITICAL/Traceback 0건, 거짓 CB 이벤트 재현 안 됨 확인. 전체 테스트
+827건 통과, ruff/pyright 클린.
+
+## 2026-07-29 ([MW0601]) — Command Center UI: CB 상태 배지 신설 + 모드 기본값 LIVE 전환
+
+**요청**: 사용자가 (1) Market View에 CB 상태를 알 수 있는 표시가 없다며 나이스하게 추가,
+(2) 사이드바 데이터소스 모드 기본값을 LIVE로 바꿔달라고 요청.
+
+**결정 1 — CB 상태를 버스로 발행**: `CircuitBreakerMonitor`가 `TradingPipeline` 내부
+상태로만 존재해(위 항목) UI(별도 프로세스)가 볼 방법이 없었다. `core/messages.py`에
+`CircuitBreakerStatus`(신규, `sys.circuit_breaker`) 추가 — `Health`(5초 heartbeat)와
+같은 철학으로 phase가 그대로여도 `observe()` 호출마다(이벤트 구동 경로 + 30초 워치독
+양쪽) 매번 발행한다. "값이 조용히 그대로"와 "발행이 멈췄다(STALE)"를 구분하려면 heartbeat여야
+하기 때문 — 전이 시에만 발행했다면 UI의 기존 신선도 배지 인프라(`_STALE_AFTER`, 마흐디
+L18)를 못 재사용했을 것.
+
+**결정 2 — Top Bar에 5번째 컬럼으로 배지 추가**: `render_top_bar()`의 기존 4컬럼([모드,
+intel.futures, decision.intent, KILL SWITCH])에 CB 배지를 끼워 5컬럼으로 확장. phase별
+색상(normal 청록/warning 앰버/suspected 주황/confirmed 적색, `_CB_PHASE_COLOR`)과 재진입
+관망 남은 시간 캡션을 보여준다. `circuit_breaker_monitor`를 안 쓰는 구성(스모크 등)에서는
+토픽 자체가 안 와서 "미사용/데이터 없음"으로 명시 — "정상(normal)"과 혼동되지 않게
+마흐디 L18 원칙을 그대로 적용.
+
+**결정 3 — 모드 기본값 REPLAY→LIVE**: `st.sidebar.radio(..., index=1)`로 변경.
+`ui/data_source.py`가 이미 갖춘 "착각의 여지 없음" 방어(LIVE 배지 항상 신선도 노출,
+연결실패 시 `st.error` 노출)가 REPLAY 기본값이었던 이유였는데, 그 방어 자체는 그대로
+살아있으므로 기본값만 바꿔도 안전하다는 판단 — 평소 장중 모니터링이 압도적으로 많은
+용도라 매번 수동 전환하는 게 번거로웠다는 사용자 피드백 반영.
+
+**검증**: 신규 테스트(`test_pipeline.py` CB 상태 발행 1건, `test_app_smoke.py` 기본모드
+재확인·REPLAY 전환·배지 렌더 3건) 포함 전체 829건 통과, ruff/pyright 클린. L1/G2 재시작
+(15:05)으로 Command Center UI(`localhost:8511`) HTTP 200, ERROR/CRITICAL 0건 확인.
+
+**알려진 갭**: `CircuitBreakerStatus`는 실시간 heartbeat만 있고 영속화가 없어 REPLAY로 과거
+날짜를 봐도 그날 CB가 있었는지는 배지로 알 수 없다(halt 이력 DB 미착수와 같은 근본 원인).

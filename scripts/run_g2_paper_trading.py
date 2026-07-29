@@ -111,6 +111,7 @@ from messiah.execution.order_gateway import OrderGateway  # noqa: E402
 from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
+from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor  # noqa: E402
 from messiah.simulator.engine import LiveSimBrokerFeed  # noqa: E402
 from messiah.strategy.futures.service import FuturesAIService  # noqa: E402
 from messiah.strategy.pipeline import TradingPipeline  # noqa: E402
@@ -219,10 +220,14 @@ async def _run_regular_session(
 ) -> None:
     """이 스크립트의 데이터 소스는 `run_l1_daily.py`가 같은 버스에 이미 발행 중인 `bar.*`/
     `feat.*`뿐이다 — 여기엔 자체 TickCollector가 없다(모듈 docstring 참고, WS 이중 연결
-    사고 대응). 넷 다 순수 구독자라 이 asyncio.gather()가 여는 WS 연결은 0개."""
+    사고 대응). 전부 순수 구독자(또는 벽시계 워치독)라 이 asyncio.gather()가 여는 WS 연결은
+    0개 — `watch_circuit_breaker_forever()`는 `pipeline.run_forever()`가 못 보는 정지 구간
+    (데이터 미수신 중)에도 CB phase를 갱신하는 벽시계 폴링(`strategy/pipeline.py` 모듈
+    docstring "거래소 서킷브레이커 자동 대응" 참고)."""
     await asyncio.gather(
         futures_service.run_forever(),
         pipeline.run_forever(),
+        pipeline.watch_circuit_breaker_forever(),
         sim_feed.run_forever(),
         shadow_manager.run_forever(),
     )
@@ -331,7 +336,12 @@ async def main(cfg: InstanceConfig) -> None:
     start_equity = (await broker.account()).total_equity
     gateway = OrderGateway(broker)
     pipeline = TradingPipeline(
-        symbol, broker, gateway, bus, event_calendar=EventCalendar.from_file()
+        symbol,
+        broker,
+        gateway,
+        bus,
+        event_calendar=EventCalendar.from_file(),
+        circuit_breaker_monitor=CircuitBreakerMonitor(),
     )
     sim_feed = LiveSimBrokerFeed(symbol, broker, gateway, bus)
 

@@ -393,6 +393,19 @@ class KillSignal(BusMessage):
     triggered_by: str  # R2 손실한도 / R11 데이터 단절 / manual / model_anomaly
 
 
+class CircuitBreakerStatus(BusMessage):
+    """거래소 서킷브레이커(CB) 추정 상태 (sys.circuit_breaker) — Command Center UI 배지용
+    (2026-07-29, `risk/circuit_breaker_monitor.py` 반영). `strategy/pipeline.py`가
+    `CircuitBreakerMonitor.observe()` 호출마다(이벤트 구동 경로 + 벽시계 워치독 양쪽) 발행하는
+    heartbeat다 — `phase`가 그대로면 "조용히 정상"이 아니라 매번 다시 확인시켜주는 쪽을
+    택했다(`Health`가 5초 주기로 heartbeat하는 것과 같은 이유, UI의 신선도 배지가 이 주기에
+    기대어 STALE을 판정한다)."""
+
+    symbol: str
+    phase: str  # CircuitBreakerPhase.value 그대로("normal"/"warning"/"suspected"/"confirmed")
+    reentry_cooldown_until: datetime | None = None
+
+
 # ---------------------------------------------------------------- L6 Learning / Self Evolution
 # Ver 1.6 §9.2 Registry 상태기계, Ver 1.1 §6-4 Shadow Trading Manager, Ver 2.0 §7 Self
 # Evaluation — Ver 2.0 §9 W35~36(Phase 5)에서 신설. 기존 `ExpertView.model_version`/

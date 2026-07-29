@@ -15,9 +15,11 @@ Streamlit/Dash로") — 확정판이 아니라 React 이관(Ver 2.2) 전 레이�
 ## LIVE/STALE/REPLAY는 항상 명시적이다 (마흐디 L18)
 
 사이드바에서 사용자가 LIVE 또는 REPLAY를 직접 고른다 — 어느 한쪽이 실패했다고 조용히
-다른 쪽으로 전환하지 않는다(`ui/data_source.py` 모듈 docstring). 기본값은 REPLAY다: LIVE는
-Redis 접속을 시도하므로, 아무 설정 없이 이 앱을 열었을 때 "혹시 진짜 라이브인가" 하는
-착각의 여지를 원천적으로 없앤다 — LIVE를 보려면 사용자가 명시적으로 전환해야 한다.
+다른 쪽으로 전환하지 않는다(`ui/data_source.py` 모듈 docstring). 기본값은 LIVE다(2026-07-29
+사용자 요청으로 REPLAY→LIVE 변경 — 평소 장중 모니터링 용도가 대부분이라 매번 수동 전환하는
+게 번거로웠음). "착각의 여지 없음" 방어 자체는 그대로 유지된다 — LIVE 배지는 항상 신선도를
+드러내고(`_STALE_AFTER`), Redis 연결 실패도 `LiveConnectionError`로 화면에 노출되므로
+(`render_top_bar` 참고), 기본값이 LIVE라고 해서 실패가 조용히 숨겨지지는 않는다.
 
 ## Streams(decision.intent·exec.*)는 pub/sub 구독으로 못 받는다
 
@@ -49,6 +51,7 @@ from messiah.core.bus import MessageBus
 from messiah.core.config import load_instance
 from messiah.core.messages import (
     BusMessage,
+    CircuitBreakerStatus,
     DecisionIntent,
     Fill,
     FuturesView,
@@ -56,6 +59,7 @@ from messiah.core.messages import (
     OptionsView,
     RegimeState,
 )
+from messiah.core.timeutil import now_utc
 from messiah.ui.data_source import (
     DataSourceMode,
     FreshnessBadge,
@@ -72,6 +76,10 @@ _STALE_AFTER: dict[str, float] = {
     "FuturesView": 10.0,
     "RegimeState": 15.0,
     "OptionsView": 15.0,
+    # CircuitBreakerStatus는 워치독이 30초 격자로 heartbeat한다(`strategy/pipeline.py`
+    # `watch_circuit_breaker_forever`) — 그 주기보다 여유 있게 잡아 두 heartbeat 사이에
+    # 배지가 헛되이 STALE로 안 보이게 한다(`_LIVE_REFRESH_SECONDS` 선택과 같은 논리).
+    "CircuitBreakerStatus": 40.0,
 }
 
 _BADGE_COLOR = {
@@ -80,6 +88,54 @@ _BADGE_COLOR = {
     FreshnessBadge.REPLAY: "#8A8F98",  # 그레이 — 중립
     FreshnessBadge.NO_DATA: "#8A8F98",
 }
+
+# 거래소 서킷브레이커(CB) phase별 배지 — `CircuitBreakerPhase.value` 문자열을 그대로 키로 쓴다
+# (`core/messages.py`의 `CircuitBreakerStatus.phase` 참고). 위험도가 올라갈수록
+# 정상(청록)→경고(앰버)→위험 심화(주황)→확정(적색)으로 톤을 올린다 — `_BADGE_COLOR`와
+# 같은 팔레트를 재사용하되 SUSPECTED만 그 사이 단계를 표현할 새 색이 필요해 추가했다.
+_CB_PHASE_COLOR: dict[str, str] = {
+    "normal": "#00C9A7",
+    "warning": "#FFB020",
+    "suspected": "#FF8C42",
+    "confirmed": "#FF5C7A",
+}
+_CB_PHASE_LABEL: dict[str, str] = {
+    "normal": "정상",
+    "warning": "주의(데이터 지연)",
+    "suspected": "CB 의심",
+    "confirmed": "CB 정지 추정",
+}
+
+
+def _render_circuit_breaker_badge(source) -> None:
+    """Top Bar용 CB 상태 배지 — `strategy/pipeline.py`가 `sys.circuit_breaker`에 발행하는
+    `CircuitBreakerStatus` heartbeat를 그대로 보여준다. `circuit_breaker_monitor`를 안 쓰는
+    구성(스모크/재생 등)에서는 이 토픽 자체가 발행되지 않아 항상 NO_DATA — 그 경우 "미사용"
+    문구로 명시해 "정상"과 혼동되지 않게 한다(마흐디 L18과 같은 원칙 — 값이 없는 것과 정상인
+    것을 구분)."""
+    snap = source.snapshot("CircuitBreakerStatus")
+    if not isinstance(snap.message, CircuitBreakerStatus):
+        st.markdown(
+            "**서킷브레이커** &nbsp; <span style='color:#8A8F98'>● 미사용/데이터 없음</span>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    status = snap.message
+    phase = status.phase
+    color = _CB_PHASE_COLOR.get(phase, "#8A8F98")
+    label = _CB_PHASE_LABEL.get(phase, phase)
+    st.markdown(
+        f"**서킷브레이커** &nbsp; <span style='color:{color}'>● {label}</span>",
+        unsafe_allow_html=True,
+    )
+    if snap.badge == FreshnessBadge.STALE:
+        st.caption(f"⚠ 상태 갱신 지연({snap.age_seconds:.0f}초 전)")
+
+    if status.reentry_cooldown_until is not None:
+        remaining = (status.reentry_cooldown_until - now_utc()).total_seconds()
+        if remaining > 0:
+            st.caption(f"재진입 관망 {remaining / 60:.1f}분 남음")
 
 
 # ---------------------------------------------------------------- LIVE 배선 (백그라운드 스레드)
@@ -99,6 +155,7 @@ def _run_live_subscriber(redis_url: str, symbol: str, cache: StateCache) -> None
             "intel.options",
             f"bar.5m.{symbol}",
             "sys.health",
+            "sys.circuit_breaker",
         ]
         pubsub_subscriber = CacheSubscriber(bus, patterns, cache)
         await asyncio.gather(
@@ -231,7 +288,7 @@ def _badge_caption(label: str, snapshot) -> None:
 
 def render_top_bar(source, symbol: str) -> None:
     st.markdown(f"### MESSIAH Command Center — `{symbol}`")
-    cols = st.columns([2, 2, 2, 1])
+    cols = st.columns([2, 2, 2, 2, 1])
     with cols[0]:
         st.metric("모드", source.mode.value)
     with cols[1]:
@@ -241,6 +298,8 @@ def render_top_bar(source, symbol: str) -> None:
         decision_snap = source.snapshot("DecisionIntent")
         _badge_caption("decision.intent", decision_snap)
     with cols[3]:
+        _render_circuit_breaker_badge(source)
+    with cols[4]:
         confirmed = st.button("🛑 KILL SWITCH", type="primary")
         if confirmed:
             st.session_state["kill_confirm_pending"] = True
@@ -385,7 +444,9 @@ def main() -> None:
     st.set_page_config(page_title="MESSIAH Command Center", layout="wide")
 
     st.sidebar.header("데이터 소스")
-    mode_label = st.sidebar.radio("모드", ["REPLAY", "LIVE"], index=0)
+    # 기본값 LIVE(2026-07-29 사용자 요청 — 모듈 docstring "LIVE/STALE/REPLAY는 항상
+    # 명시적이다" 참고, REPLAY로 명시 전환도 여전히 가능).
+    mode_label = st.sidebar.radio("모드", ["REPLAY", "LIVE"], index=1)
     symbol = st.sidebar.text_input("종목", DEFAULT_SYMBOL)
     horizon = st.sidebar.selectbox("차트 Horizon", ["1m", "3m", "5m", "10m", "15m", "30m"], index=2)
     tick_size = st.sidebar.number_input("틱 크기", value=DEFAULT_TICK_SIZE, format="%.4f")

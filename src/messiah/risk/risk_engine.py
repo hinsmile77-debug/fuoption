@@ -56,6 +56,16 @@ KRX 세션 개념이 무의미한 경로)이면 두 게이트 모두 조용히 �
 docstring — Options AI는 후보 산출까지만) `BrokerPosition.greeks`를 실제로 채우는 어댑터가
 아직 없다 — 이 메서드들은 게이트만 준비됐고, 살아있는 옵션 포지션이 흘러들어오는 배선은
 옵션 주문 실행이 생긴 뒤의 몫이다.
+
+## R13(거래소 서킷브레이커) — `CircuitBreakerMonitor` 도입("미륵" 대응 설계 반영)
+
+R11(데이터단절 30초)이 이미 이 클래스 안에서 신규진입을 차단하는데 왜 별도 게이트가
+필요한가: R11은 데이터가 재수신되는 즉시 풀리지만, 실제 거래소 서킷브레이커는 재개 후에도
+10분간 단일가매매 구간이 이어진다 — 이 구간을 커버하려면 R11보다 긴 관망이 필요하다.
+`risk/circuit_breaker_monitor.py`의 `CircuitBreakerMonitor.blocks_entry()`가 "정지 추정
+중 + 재개 후 재진입 관망"을 판정해 bool로 계산하고, `strategy/pipeline.py`가 `minutes_to_close`
+(Event Calendar)와 동일한 패턴으로 이 값을 계산해 `evaluate()`에 주입한다 — 임계값·상태
+자체는 이 클래스가 모르며, 순수 판정 함수라는 원칙(모듈 docstring 서두)을 그대로 유지한다.
 """
 
 from __future__ import annotations
@@ -142,6 +152,7 @@ class RiskEngine:
         data_age_seconds: float,
         as_of: datetime,
         minutes_to_close: float | None = None,
+        circuit_breaker_active: bool = False,
     ) -> RiskDecision:
         cfg = self._config
 
@@ -156,6 +167,9 @@ class RiskEngine:
                 f"R11 데이터 단절 {data_age_seconds:.0f}s > "
                 f"{cfg.data_staleness_limit_seconds:.0f}s — 신규 진입 차단"
             )
+
+        if circuit_breaker_active:
+            return self._reject("R13 거래소 서킷브레이커 정지/재진입 관망 중 — 신규 진입 거부")
 
         if self._consecutive_losses >= cfg.consecutive_loss_limit:
             return self._reject(

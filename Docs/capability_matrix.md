@@ -899,3 +899,82 @@ ruff 클린. 실제 streamlit(포트 8522, 별도)로 기동해 HTTP 200 확인 
   제3자가 하필 6380을 쓰면 같은 클래스의 문제가 재발할 수 있다 — Command Center UI 자체의
   포트 8511 사고(위 항목)와 근본적으로 같은 성격의 잔여 리스크(로컬 포트는 전역 공유
   자원이라는 한계).
+
+## 거래소 서킷브레이커(CB) 자동 대응 ([MW0601], 2026-07-29)
+
+사용자가 코스피 급락형 서킷브레이커 발동 스크린샷을 제시하며 "미륵"(별도 선물 시스템)의
+장중 서킷브레이커 대응체계를 조사·반영할 것을 요청. 미륵은 API로 직접 알 수 없는 CB를
+"정상 연결 + 데이터 미수신" 간접 신호로 추정하는 상태머신을 쓰며, 재개 시 사람 확인 없이
+자동으로 포지션을 강제청산하고 정상화한다 — 이 설계를 MESSIAH에 반영했다. 조사 과정에서
+`KillSwitch.liquidate()`가 청산주문을 1회만 시도하고 재시도가 없다는 기존 구조적 갭도
+함께 발견해 이번 구현으로 같이 해소됨(§ 아래 "R11/KillSwitch 충돌 회피" 참고).
+
+| 기능 | 구현 | 단위테스트 | 비고 |
+|---|---|---|---|
+| `risk/circuit_breaker_monitor.py` — `CircuitBreakerMonitor` | ✅ | ✅ 2026-07-29 | NORMAL→WARNING(90s)→SUSPECTED(150s)→CONFIRMED(240s) 단계적 추정 상태머신. `RiskEngine`/`KillSwitch`와 동일 스타일(순수 판정, 실행은 호출자). `blocks_entry()`가 재개 후 10분 재진입 관망(KRX 단일가매매와 동일)을 판정 |
+| `risk/risk_engine.py` — R13 신규 게이트 | ✅ | ✅ 2026-07-29 | `circuit_breaker_active` bool 주입 방식(`minutes_to_close`와 동일 패턴) — CONFIRMED 또는 재진입 관망 중이면 신규 진입 거부 |
+| `strategy/pipeline.py` — CB 자동 감지·자동 복구 배선 | ✅ | ✅ 2026-07-29 | CONFIRMED 최초 도달 시 `gateway.halt()`. 재개(`just_resumed`) 감지 시 **사람 확인 없이 자동으로** `KillSwitch.liquidate()`를 재사용해 EMERGENCY 강제청산 후 `gateway.resume()` — `KillSwitch`(사람 확인 후에만 재가동)와 의도적으로 다른 철학. `watch_circuit_breaker_forever()`가 `FixedTickScheduler`(기존 `core/scheduler.py`)로 데이터가 끊긴 동안에도(완전 이벤트 구동 구조라 원래는 아무 코드도 안 돎) 단계적 phase 갱신을 담당 |
+| `scripts/run_g2_paper_trading.py` 실배선 | ✅ | — | `TradingPipeline`에 `CircuitBreakerMonitor()` 주입 + `_run_regular_session()`의 `asyncio.gather()`에 `watch_circuit_breaker_forever()` 추가 |
+
+**R11(`KillSwitch`)과의 충돌 회피**: `circuit_breaker_monitor`가 WARNING 이상이거나 이번
+호출이 `just_resumed`면 `kill_switch.evaluate()`에 `data_age_seconds=0.0`을 넘긴다 —
+그렇지 않으면 CB 자동복구(청산+`gateway.resume()`) 직후 같은 호출 안에서 KillSwitch의
+R11이 동일한 데이터단절을 보고 다시 `gateway.halt()`를 걸어버려(사람이 KillSwitch를
+`reset()`해야만 풀림) 자동복구가 무의미해지는 것을 막는다. `circuit_breaker_monitor`
+주입 시 데이터단절 기반 전면정지 판단은 이 컴포넌트가 전담하고 KillSwitch는 R2·수동·
+모델이상만 계속 감시한다 (`strategy/pipeline.py` 모듈 docstring 참고).
+
+`pytest tests/risk/test_circuit_breaker_monitor.py tests/risk/test_risk_engine.py
+tests/strategy/test_pipeline.py` 전체 통과, 전체 회귀 무손상.
+
+### 알려진 갭 (거래소 서킷브레이커 자동 대응, 2026-07-29)
+
+- **코스피 현물지수 기반 선제 감지 미착수**: KRX 공식 CB 발동 기준(8/15/20% 1분 지속)을
+  직접 계산하는 방식은 RG(현물지수·매크로) 데이터소스 자체가 미착수라 이번 스코프에서
+  제외(사용자 확인) — 지금은 데이터 갭 추정(반응형)만 구현.
+- **재개 후 피처/국면 버퍼 "오염 제거" 없음**: 미륵의 `_post_exchange_cb_resume`(예측 버퍼
+  리셋, 스케일러 재적합, 재학습 예약) 상당 조치가 없다 — `FeatureEngine`/`RegimeRuntime`에
+  현재 reset() API 자체가 없어 신규 설계가 필요한 별도 작업.
+- **능동 알림(Slack/텔레그램) 없음**: MESSIAH에 알림 인프라 자체가 아직 없음(2026-07-29
+  Task Scheduler 감사 항목과 동일한 기존 갭) — 구조화 로그(`mlog.log`, `CircuitBreaker*`
+  태그)까지만.
+- **halt 이력 DB 영속화·EOD 리포트 요약 없음**: 미륵의 `record_exchange_cb_halt`/
+  `daily_exporter.py` 상당 — MESSIAH엔 EOD 리포트/exporter 모듈 자체가 아직 없어(확인됨)
+  구조화 로그 grep으로 사후 확인하는 수준까지만.
+- **임계값 미검증**: 90/150/240초, 재진입 관망 10분은 미륵의 실측 보정값(6/8·6/23·6/26·
+  7/7 CB 관측)을 차용한 초기값 — MESSIAH 자체는 아직 실거래 CB를 관측한 적이 없어
+  타당성 미검증. 실측이 쌓이면 재조정 필요.
+- **(수정 완료) 콜드스타트 오탐**: 실전 반영 직후 재시작 실측에서 발견 — `_last_bar_confirm_at
+  is None`일 때 `data_age_seconds=inf`를 CB 판정에 그대로 흘려 시작하자마자 거짓
+  CircuitBreakerConfirmed/Resumed 쌍이 찍히는 버그를 당일 발견·수정(가드 추가, 회귀 테스트
+  포함). 상세는 `dev_memory/DECISION_LOG.md` "실전 재시작 직후 콜드스타트를 CB로 오판" 항목.
+- **(미해결, 별도 스코프) KillSwitch R11의 동일한 콜드스타트 취약점**: 위 버그를 조사하다
+  발견 — `handle_futures_view()`가 `handle_bar()`보다 먼저 호출되는 경로가 있으면
+  `kill_switch.evaluate()`도 `data_age_seconds=inf`를 그대로 받아 R11이 스스로
+  `gateway.halt()`를 걸 수 있다(단위테스트로 재현 확인, 실전에서는 오늘 재현 안 됨). CB
+  기능과 무관한 `handle_futures_view()`의 기존 결함이라 이번 스코프에서 고치지 않음 — 다음
+  세션 검토 항목.
+
+## Command Center UI — CB 상태 배지 + LIVE 기본값 ([MW0601], 2026-07-29)
+
+사용자 요청 2건: ① Market View에 CB 상태를 보여주는 배지가 없어 나이스하게 추가, ②
+사이드바 "모드" 기본값을 REPLAY→LIVE로 변경.
+
+| 기능 | 구현 | 단위테스트 | 비고 |
+|---|---|---|---|
+| `core/messages.py` `CircuitBreakerStatus` + `core/bus.py` `TOPIC_CIRCUIT_BREAKER`(`sys.circuit_breaker`) | ✅ | — | `Health`와 같은 heartbeat 철학 — phase가 그대로여도 매 `observe()` 호출마다(이벤트 구동+워치독 양쪽) 발행 |
+| `strategy/pipeline.py` `_publish_circuit_breaker_status()` 배선 | ✅ | ✅ 2026-07-29 | `handle_futures_view()`·`watch_circuit_breaker_forever()` 양쪽에서 호출, `CircuitBreakerEvent`를 그대로 실어나름 |
+| `ui/app.py` `_render_circuit_breaker_badge()` — Top Bar 5번째 컬럼 | ✅ | ✅ 2026-07-29 | phase별 색상(normal 청록/warning 앰버/suspected 주황/confirmed 적색) + 재진입 관망 남은 시간 캡션. CB 미사용 구성(스모크 등)에서는 "미사용/데이터 없음"으로 명시(마흐디 L18 — 값 없음과 정상을 혼동하지 않음) |
+| `ui/app.py` 사이드바 모드 기본값 REPLAY→LIVE | ✅ | ✅ 2026-07-29 | `st.sidebar.radio(..., index=1)`. "착각의 여지 없음" 방어(LIVE 배지 신선도 노출, 연결실패 화면 노출)는 그대로 유지 — 기본값만 바뀜 |
+
+신규 테스트: `tests/strategy/test_pipeline.py::test_circuit_breaker_status_published_for_command_center_ui`,
+`tests/ui/test_app_smoke.py`의 기본모드 재확인(`test_app_runs_without_exception_in_default_live_mode`)
++ REPLAY 명시전환(`test_app_runs_without_exception_when_switched_to_replay_mode`) +
+배지 렌더(`test_circuit_breaker_badge_shows_unused_when_no_status_published`). 전체 829건
+통과, ruff/pyright 클린. 실제 L1/G2 재시작으로 UI(`localhost:8511`) HTTP 200 확인.
+
+### 알려진 갭 (CB 상태 배지, 2026-07-29)
+
+- **REPLAY 모드에서 과거 CB 이력 조회 불가**: `CircuitBreakerStatus`는 실시간 heartbeat만
+  있고 DB/Parquet 영속화가 없어(위 "halt 이력 DB 영속화 없음" 갭과 동일 원인) REPLAY로
+  과거 날짜를 봐도 그날 CB가 있었는지 배지로는 알 수 없다 — 항상 "미사용/데이터 없음".
