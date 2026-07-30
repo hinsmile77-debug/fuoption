@@ -1,7 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
-import polars as pl
 from messiah.core.messages import BarClosed, Horizon
 from messiah.core.timeutil import KST
 from messiah.data.archiver import ParquetArchiver
@@ -158,9 +157,10 @@ async def test_archives_composite_bar(tmp_path: Path):
         await composer.handle_one_minute_bar(_m1(minute))
     await composer.flush_due_horizon(Horizon.M5)
 
-    path = tmp_path / "A05608" / "5m" / "2026-07-23.parquet"
-    assert path.exists()
-    df = pl.read_parquet(path)
+    # 물리 배치(장중 조각 vs 통합본)는 `read_day()` 뒤에 숨는다 — 경로가 아니라 "그날치를
+    # 다시 읽을 수 있는가"를 본다(`data/archiver.py` "조각 쓰기").
+    df = ParquetArchiver(tmp_path).read_day("A05608", Horizon.M5, date(2026, 7, 23))
+    assert df is not None
     assert df.height == 1
 
 
@@ -211,4 +211,6 @@ async def test_publish_failure_is_logged_and_does_not_raise(tmp_path: Path, monk
     await composer.flush_due_horizon(Horizon.M5)  # 예외 없이 끝나야 함
 
     assert any(tag == "CollectorProcessingError" for tag, _ in logged)
-    assert (tmp_path / "A05608" / "5m" / "2026-07-23.parquet").exists()  # 적재는 성공
+    assert (
+        ParquetArchiver(tmp_path).read_day("A05608", Horizon.M5, date(2026, 7, 23)) is not None
+    )  # 적재는 성공

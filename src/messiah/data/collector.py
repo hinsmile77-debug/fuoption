@@ -13,14 +13,56 @@ run_observation_loop(단일 연결, 끊기면 예외 전파)과 run_observation_
 있어 이 설계를 못 썼다)의 구조적 해법이다. ATM±N 옵션 체인 구독 롤링
 (RollingSubscriptionManager 이식) 자체는 여전히 범위 밖 — 이 클래스는 생성 시 주어진
 고정 심볼 목록만 구독한다(체인을 시세에 따라 동적으로 갈아끼우는 롤링은 별도 과제).
+
+## 조용한 스톨 탐지 (2026-07-30 추가)
+
+재연결은 "소켓이 끊기면"만 작동한다 — 그런데 실측된 장애는 그 형태가 아니었다: 2026-07-28
+10:13~10:43, 2026-07-29 12:32~13:02 두 번 모두 **소켓은 살아 있는데 틱만 30분간 안 들어왔고**,
+프로세스는 그 30분 동안 로그를 단 한 줄도 남기지 않았다(1분봉 아카이브에 그대로 구멍이 났고,
+`FeaturePublish`도 12:31:38 → 13:02:11로 끊겼다). 예외가 안 나니 `run_forever()`의 재연결
+경로가 아예 안 타는 것이다.
+
+`_StallWatchdog`이 그 자리를 메운다 — 마지막 틱 이후 경과를 벽시계로 감시하다 임계를 넘으면
+`TickStallError`(= `ConnectionError`, 즉 `OSError` 계열)를 던져 **기존 재연결 경로를 그대로
+태운다**. 새 복구 메커니즘을 만드는 게 아니라, 이미 있는 것이 발동하지 못하던 구멍을 막는 것.
+
+콜드스타트 가드는 `strategy/pipeline.py`의 CB 워치독과 같은 논리다 — 첫 틱을 받기 전에는
+기준선이 없으므로 판정하지 않는다. 이게 없으면 08:35 기동 후 첫 틱(실측 08:45)까지의 10분을
+스톨로 오판해 무한 재연결 루프에 빠진다.
+
+## 데이터 흐름의 1차 책임은 수집기에 있다 (고도화 4, 2026-07-30)
+
+2026-07-30 점검에서 드러난 구조적 문제는 **탐지와 복구가 서로 다른 프로세스에 흩어져 있고
+연결돼 있지 않다**는 것이었다: 데이터 단절을 감지하는 코드는 G2의 `CircuitBreakerMonitor`
+(`strategy/pipeline.py`)에 있는데, 그걸 실제로 고칠 수 있는 유일한 곳 — WS 재연결 — 은 L1의
+이 파일에 있었다. 그래서 07-28·07-29의 30분 공백은 "아무도 감지하지 못했고, 감지했더라도
+아무도 고칠 수 없었던" 상태였다.
+
+계층을 이렇게 나눈다:
+
+- **L1 수집기(이 파일)** — 데이터 흐름의 **탐지 + 복구**: 스톨 판정, 강제 재연결,
+  `sys.health`로 자기 상태 보고. 마지막 틱 시각을 아는 유일한 곳이라 여기가 맡는다.
+- **G2 CB 모니터** — 그 위에서 **매매 판단**: 신규진입 차단·자동청산·재진입 관망. 포지션과
+  게이트웨이를 아는 유일한 곳이라 거기가 맡는다.
+
+즉 "데이터가 흐르는가"는 여기서 판정하고(`health()`), "그래서 거래를 어떻게 할 것인가"는
+G2가 판정한다. 두 판정이 어긋나면(예: 여기가 CRITICAL인데 CB는 정상) 둘 중 하나가 틀린
+것이므로, 일일 무결성 리포트가 그 불일치를 따로 잡아낸다(`ops/integrity_report.py`의
+`analyze_data_flow_ownership()`).
+
+**의도적으로 하지 않은 것**: CB의 판정 입력을 이 컴포넌트의 heartbeat로 바꾸지 않았다.
+리스크 경로 변경이라 별도 합의가 필요하고, 지금은 두 판정이 독립적으로 서 있으면서 어긋날
+때 드러나는 편이 안전하다(한쪽 버그가 조용히 다른 쪽을 오염시키지 않는다).
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 import websockets
 
@@ -29,7 +71,9 @@ from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.ws_client import ApprovalKeyIssuer, KISWebSocketClient, Subscription
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, TOPIC_TICK, MessageBus
+from messiah.core.health import HealthStatus, staleness_status
 from messiah.core.messages import BarClosed, Horizon, Tick
+from messiah.core.timeutil import now_kst
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.normalizer import MinuteBarAggregator
 
@@ -40,6 +84,110 @@ from messiah.data.normalizer import MinuteBarAggregator
 _WS_DISCONNECT_ERRORS = (OSError, websockets.WebSocketException)
 _WS_RECONNECT_INITIAL_BACKOFF_SECONDS = 5.0
 _WS_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
+
+# 스톨 임계 — 정규장 미니선물은 가장 한산한 구간에도 분당 수십 틱이 들어온다(2026-07-30 실측
+# 최저 54틱/분). 120초는 "정상적인 한산함"과 명백히 구분되면서, 실측된 30분 공백을 30분이
+# 아니라 2분 만에 잡는 값이다. 30초 격자로 확인한다(CB 워치독과 같은 주기).
+_TICK_STALL_TIMEOUT_SECONDS = 120.0
+_TICK_STALL_CHECK_INTERVAL_SECONDS = 30.0
+
+
+class TickStallError(ConnectionError):
+    """소켓은 열려 있으나 틱이 끊긴 상태 — `ConnectionError`(→`OSError`)를 상속해
+    `_WS_DISCONNECT_ERRORS`에 자연히 걸린다. 재연결 경로를 새로 만들지 않고 기존 것을
+    재사용하기 위한 의도적 선택이다."""
+
+
+class _StallWatchdog:
+    """마지막 틱 이후 경과를 감시 — `TickCollector`/`MultiSymbolTickCollector` 공용.
+
+    두 수집기가 같은 listen 루프 구조를 갖고 있어 각자 구현하면 갈라진다(한쪽만 고쳐지는
+    사고가 실제로 이 파일에서 이미 한 번 있었다 — 모듈 docstring의 `run_forever` 이력 참고).
+    """
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        check_interval_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._timeout_seconds = timeout_seconds
+        self._check_interval_seconds = check_interval_seconds
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._last_tick_at: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._timeout_seconds > 0
+
+    def reset(self) -> None:
+        """새 연결마다 호출 — 이전 연결의 마지막 틱 시각을 기준선으로 쓰면 안 된다."""
+        self._last_tick_at = None
+
+    def mark_tick(self) -> None:
+        self._last_tick_at = self._monotonic()
+
+    @property
+    def seen_first_tick(self) -> bool:
+        return self._last_tick_at is not None
+
+    def seconds_since_last_tick(self) -> float | None:
+        """None은 "이 연결에서 아직 틱을 못 봤다" — "0초 전에 받았다"와 구분된다."""
+        if self._last_tick_at is None:
+            return None
+        return self._monotonic() - self._last_tick_at
+
+    async def run_until_stalled(self, *, describe: str) -> None:
+        """스톨을 감지하면 `TickStallError`를 던진다 — 그 전까지는 영원히 돌아간다."""
+        while True:
+            await self._sleep(self._check_interval_seconds)
+            if self._last_tick_at is None:
+                continue  # 콜드스타트/워밍업 — 기준선 없음(모듈 docstring 근거)
+            age = self._monotonic() - self._last_tick_at
+            if age >= self._timeout_seconds:
+                mlog.log(
+                    "CollectorTickStall",
+                    f"소켓은 열려 있으나 {age:.0f}초간 틱 없음 — 강제 재연결",
+                    stalled_seconds=age,
+                    **({"symbol": describe} if describe else {}),
+                )
+                raise TickStallError(f"{age:.0f}초간 틱 수신 없음(소켓은 열려 있음)")
+
+
+async def _listen_with_stall_watchdog(
+    client: KISWebSocketClient,
+    handler: Callable[[dict], Awaitable[None]],
+    watchdog: _StallWatchdog,
+    *,
+    describe: str,
+) -> None:
+    """`client.listen()`과 스톨 감시를 동시에 돌리고, 먼저 끝난 쪽의 결과를 전파한다.
+
+    감시가 먼저 끝나면(= 스톨) listen을 취소하고 `TickStallError`를 올린다 — 호출측
+    `run_once()`의 `async with`가 소켓을 닫고, `run_forever()`가 백오프 후 재연결한다.
+    """
+    if not watchdog.enabled:
+        await client.listen(handler)
+        return
+
+    listen_task = asyncio.create_task(client.listen(handler))
+    watchdog_task = asyncio.create_task(watchdog.run_until_stalled(describe=describe))
+    try:
+        done, pending = await asyncio.wait(
+            {listen_task, watchdog_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        for task in (listen_task, watchdog_task):
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    for task in done:
+        task.result()  # 예외가 있으면 여기서 전파(TickStallError 포함)
 
 
 class TickCollector:
@@ -57,6 +205,10 @@ class TickCollector:
         ws_connect: Callable[[str], Any] = websockets.connect,
         reconnect_initial_backoff_seconds: float = _WS_RECONNECT_INITIAL_BACKOFF_SECONDS,
         reconnect_max_backoff_seconds: float = _WS_RECONNECT_MAX_BACKOFF_SECONDS,
+        stall_timeout_seconds: float = _TICK_STALL_TIMEOUT_SECONDS,
+        stall_check_interval_seconds: float = _TICK_STALL_CHECK_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """
         입력: tr_id/parse_tick은 짝을 맞춰 넘긴다 — 선물은
@@ -66,6 +218,8 @@ class TickCollector:
              테스트에서 실제 네트워크 없이 가짜 연결을 주입하기 위한 것(기본값
              websockets.connect). reconnect_*_backoff_seconds는 run_forever() 전용 — 테스트가
              실제로 몇 초씩 기다리지 않도록 주입 가능하게 노출(기본값은 mahdi와 동일한 5~60초).
+             stall_timeout_seconds=0이면 스톨 감시를 끈다(모듈 docstring "조용한 스톨 탐지");
+             monotonic/sleep은 그 감시를 실시간 대기 없이 테스트하기 위한 주입점.
         """
         self._creds = creds
         self._symbol = symbol
@@ -80,6 +234,12 @@ class TickCollector:
         self._reconnect_initial_backoff_seconds = reconnect_initial_backoff_seconds
         self._reconnect_max_backoff_seconds = reconnect_max_backoff_seconds
         self._aggregator = MinuteBarAggregator(symbol, horizon)
+        self._watchdog = _StallWatchdog(
+            timeout_seconds=stall_timeout_seconds,
+            check_interval_seconds=stall_check_interval_seconds,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
 
     async def run_once(self, on_connected: Callable[[], None] | None = None) -> None:
         """
@@ -96,7 +256,10 @@ class TickCollector:
             await client.subscribe(Subscription(self._tr_id, self._symbol))
             if on_connected is not None:
                 on_connected()
-            await client.listen(self._handle_message)
+            self._watchdog.reset()  # 이 연결의 첫 틱부터 새로 센다
+            await _listen_with_stall_watchdog(
+                client, self._handle_message, self._watchdog, describe=self._symbol
+            )
 
     async def run_forever(self) -> None:
         """
@@ -148,6 +311,21 @@ class TickCollector:
         if bar is not None:
             await self._archive_and_publish_bar(bar)
 
+    def seconds_since_last_tick(self) -> float | None:
+        """None은 "이 연결에서 아직 틱을 못 봤다"(웜업) — "0초 전에 받았다"와 구분된다."""
+        return self._watchdog.seconds_since_last_tick()
+
+    def health(self) -> HealthStatus:
+        """`sys.health` heartbeat용 자가 판정 (고도화 4 — 데이터 흐름의 1차 책임은 수집기에
+        있다). 임계는 스톨 워치독과 같은 값을 쓴다: WARN은 그 절반 지점이라 "곧 강제 재연결이
+        일어날 것"을 화면이 미리 보여주고, CRITICAL이 뜨는 시점이 곧 재연결 시점이다."""
+        return staleness_status(
+            self.seconds_since_last_tick(),
+            warn_after=_TICK_STALL_TIMEOUT_SECONDS / 2,
+            critical_after=_TICK_STALL_TIMEOUT_SECONDS,
+            warming_up_detail="웜업 — 장 개시 전(첫 틱 대기)",
+        )
+
     async def _handle_message(self, message: dict) -> None:
         raw = message.get("raw")
         if raw is None:
@@ -156,6 +334,8 @@ class TickCollector:
         tick = self._parse_tick(raw, self._tick_size)
         if tick is None:
             return  # 정규화 실패 — normalizer 계약과 동일하게 조용히 무시
+
+        self._note_tick_received()
 
         if self._bus is not None:
             try:
@@ -166,6 +346,24 @@ class TickCollector:
         bar = self._aggregator.add_tick(tick)
         if bar is not None:
             await self._archive_and_publish_bar(bar)
+
+    def _note_tick_received(self) -> None:
+        """스톨 워치독 갱신 + 연결 후 첫 틱 시각 기록.
+
+        첫 틱 로그는 진단용이다(2026-07-30 추가). 이 스크립트의 설계 문서는 "실제로 틱이 오기
+        시작하는 건 장이 열려야 하므로 9시까지 대기 로직은 필요 없다"고 적어 뒀는데, 실측은
+        3거래일 연속 **08:45:00 정각부터** 틱이 들어왔다(정규장 개시 09:00보다 15분 앞). 그
+        구간 데이터가 예상체결인지 실체결인지에 따라 아카이브·피처 처리 방침이 달라지므로,
+        우선 "언제부터 들어왔는지"를 매일 로그에 남겨 판단 근거를 쌓는다."""
+        first = not self._watchdog.seen_first_tick
+        self._watchdog.mark_tick()
+        if first:
+            mlog.log(
+                "CollectorFirstTick",
+                "연결 후 첫 틱 수신",
+                symbol=self._symbol,
+                received_kst=now_kst().isoformat(),
+            )
 
     async def _archive_and_publish_bar(self, bar: BarClosed) -> None:
         """완성봉 적재/발행은 파싱과 달리 인프라 실패라 침묵하면 안 됨(L22) — 잡아서 로깅하고
@@ -223,6 +421,10 @@ class MultiSymbolTickCollector:
         ws_connect: Callable[[str], Any] = websockets.connect,
         reconnect_initial_backoff_seconds: float = _WS_RECONNECT_INITIAL_BACKOFF_SECONDS,
         reconnect_max_backoff_seconds: float = _WS_RECONNECT_MAX_BACKOFF_SECONDS,
+        stall_timeout_seconds: float = _TICK_STALL_TIMEOUT_SECONDS,
+        stall_check_interval_seconds: float = _TICK_STALL_CHECK_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not feeds:
             raise ValueError("feeds가 비어 있음 — 구독할 심볼이 최소 1개 필요")
@@ -247,6 +449,14 @@ class MultiSymbolTickCollector:
             feed.symbol: feed.tick_size for feed in feeds
         }
         self._aggregators = self._fresh_aggregators()
+        # 연결이 하나뿐이라(모듈 docstring) 워치독도 하나로 충분하다 — 어느 심볼이든 틱이
+        # 들어오면 그 연결은 살아있다는 뜻이고, 끊기면 전 심볼이 동시에 끊긴다.
+        self._watchdog = _StallWatchdog(
+            timeout_seconds=stall_timeout_seconds,
+            check_interval_seconds=stall_check_interval_seconds,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
 
     def _fresh_aggregators(self) -> dict[str, MinuteBarAggregator]:
         return {
@@ -263,7 +473,13 @@ class MultiSymbolTickCollector:
                 await client.subscribe(Subscription(feed.tr_id, feed.symbol))
             if on_connected is not None:
                 on_connected()
-            await client.listen(self._handle_message)
+            self._watchdog.reset()
+            await _listen_with_stall_watchdog(
+                client,
+                self._handle_message,
+                self._watchdog,
+                describe=",".join(f.symbol for f in self._feeds),
+            )
 
     async def run_forever(self) -> None:
         """`TickCollector.run_forever()`와 동일한 지수 백오프 재연결 — 재연결 시 등록된
@@ -333,6 +549,16 @@ class MultiSymbolTickCollector:
         )
         if tick is None:
             return
+
+        first = not self._watchdog.seen_first_tick
+        self._watchdog.mark_tick()
+        if first:
+            mlog.log(
+                "CollectorFirstTick",
+                "연결 후 첫 틱 수신",
+                symbol=tick.symbol,
+                received_kst=now_kst().isoformat(),
+            )
 
         if self._bus is not None:
             try:

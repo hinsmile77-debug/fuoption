@@ -38,7 +38,6 @@ LIVE/REPLAY의 차이는 "오늘"과 "과거 날짜 선택"뿐이다.
 from __future__ import annotations
 
 import asyncio
-import glob
 import threading
 from datetime import date
 from pathlib import Path
@@ -49,6 +48,7 @@ import streamlit as st
 
 from messiah.core.bus import MessageBus
 from messiah.core.config import load_instance
+from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
 from messiah.core.messages import (
     BusMessage,
     CircuitBreakerStatus,
@@ -56,10 +56,12 @@ from messiah.core.messages import (
     Fill,
     FuturesView,
     Health,
+    Horizon,
     OptionsView,
     RegimeState,
 )
 from messiah.core.timeutil import now_utc
+from messiah.data.archiver import ParquetArchiver, day_signature
 from messiah.ui.data_source import (
     DataSourceMode,
     FreshnessBadge,
@@ -72,6 +74,16 @@ DEFAULT_BAR_DIR = Path("data") / "bars"
 DEFAULT_SYMBOL = "A05608"
 DEFAULT_TICK_SIZE = 0.02  # 미니선물(A05608) 2026-07-22 실측값(core/config.py 동일 placeholder)
 
+# 화면에 항상 자리를 잡아둘 컴포넌트 — **고정 목록인 것이 핵심이다**. 동적으로 "수신된 것만"
+# 보여주면 프로세스가 통째로 죽었을 때 그 줄이 화면에서 사라져 버려, 사고가 오히려 안 보이게
+# 된다(2026-07-30 UI 크래시가 32분간 안 보였던 것과 같은 실패 형태). 안 들어오는 항목을
+# "데이터 없음"으로 남겨 둬야 침묵이 신호가 된다(`core/health.py` "침묵도 상태다").
+_HEALTH_COMPONENTS: tuple[tuple[str, str], ...] = (
+    ("l1.collector", "수집기(WS)"),
+    ("l1.feature_engine", "피처엔진"),
+    ("g2.pipeline", "G2 파이프라인"),
+)
+
 _STALE_AFTER: dict[str, float] = {
     "FuturesView": 10.0,
     "RegimeState": 15.0,
@@ -80,6 +92,12 @@ _STALE_AFTER: dict[str, float] = {
     # `watch_circuit_breaker_forever`) — 그 주기보다 여유 있게 잡아 두 heartbeat 사이에
     # 배지가 헛되이 STALE로 안 보이게 한다(`_LIVE_REFRESH_SECONDS` 선택과 같은 논리).
     "CircuitBreakerStatus": 40.0,
+    # 컴포넌트 heartbeat는 10초 주기(`core/health.py`) — 그 3배를 넘게 안 오면 그 프로세스가
+    # 죽었거나 멈춘 것으로 본다(CB 배지 40초 선택과 같은 논리).
+    **{
+        health_cache_key(component): HEALTH_STALE_AFTER_SECONDS
+        for component, _label in _HEALTH_COMPONENTS
+    },
 }
 
 _BADGE_COLOR = {
@@ -138,7 +156,62 @@ def _render_circuit_breaker_badge(source) -> None:
             st.caption(f"재진입 관망 {remaining / 60:.1f}분 남음")
 
 
+# ---------------------------------------------------------------- 컴포넌트 헬스 신호등
+
+_HEALTH_LEVEL_COLOR: dict[str, str] = {
+    "OK": "#00C9A7",  # `_BADGE_COLOR`/`_CB_PHASE_COLOR`와 같은 팔레트 재사용
+    "WARN": "#FFB020",
+    "CRITICAL": "#FF5C7A",
+}
+
+
+def _render_health_strip(source) -> None:
+    """컴포넌트별 신호등 (고도화 1).
+
+    `CircuitBreakerStatus` 배지와 같은 구조를 컴포넌트 수만큼 늘린 것 — 그 배지가 이미
+    "heartbeat를 그대로 보여준다"는 패턴으로 검증됐으므로 새 방식을 만들지 않았다.
+
+    STALE(= heartbeat가 임계보다 오래 안 옴)은 "그 프로세스가 죽었거나 멈췄다"는 뜻이라
+    레벨과 무관하게 경고색으로 덮어쓴다 — 마지막으로 받은 값이 OK였다는 이유로 초록으로
+    남아 있으면 정확히 이번 사고(죽은 뒤에도 화면은 멀쩡해 보였다)를 반복한다.
+    """
+    st.caption("컴포넌트 상태")
+    cols = st.columns(len(_HEALTH_COMPONENTS))
+    for col, (component, label) in zip(cols, _HEALTH_COMPONENTS):
+        snap = source.snapshot(health_cache_key(component))
+        message = snap.message
+        with col:
+            if not isinstance(message, Health):
+                st.markdown(
+                    f"<span style='color:#8A8F98'>● {label} — 데이터 없음</span>",
+                    unsafe_allow_html=True,
+                )
+                continue
+            if snap.badge == FreshnessBadge.STALE:
+                st.markdown(
+                    f"<span style='color:#FF5C7A'>● {label} — 응답 없음"
+                    f"({snap.age_seconds:.0f}초)</span>",
+                    unsafe_allow_html=True,
+                )
+                continue
+            color = _HEALTH_LEVEL_COLOR.get(message.level.value, "#8A8F98")
+            detail = f" · {message.detail}" if message.detail else ""
+            st.markdown(
+                f"<span style='color:{color}'>● {label} — {message.level.value}{detail}</span>",
+                unsafe_allow_html=True,
+            )
+
+
 # ---------------------------------------------------------------- LIVE 배선 (백그라운드 스레드)
+
+
+def _cache_key_for(message: BusMessage) -> str:
+    """`sys.health`는 여러 컴포넌트가 **같은 토픽**에 발행한다 — `CacheSubscriber`의 기본
+    키(메시지 타입 이름)를 그대로 쓰면 전부 `"Health"` 하나로 뭉쳐 마지막 발행자만 남는다.
+    Health만 컴포넌트별로 쪼개고 나머지는 기존 규약(타입 이름)을 그대로 유지한다."""
+    if isinstance(message, Health):
+        return health_cache_key(message.component)
+    return type(message).__name__
 
 
 def _run_live_subscriber(redis_url: str, symbol: str, cache: StateCache) -> None:
@@ -157,7 +230,7 @@ def _run_live_subscriber(redis_url: str, symbol: str, cache: StateCache) -> None
             "sys.health",
             "sys.circuit_breaker",
         ]
-        pubsub_subscriber = CacheSubscriber(bus, patterns, cache)
+        pubsub_subscriber = CacheSubscriber(bus, patterns, cache, topic_key_fn=_cache_key_for)
         await asyncio.gather(
             pubsub_subscriber.run_forever(),
             _poll_streams_forever(bus, cache),
@@ -222,18 +295,81 @@ def _default_redis_url() -> str:
 
 
 def _available_dates(symbol: str, horizon: str, bar_dir: Path) -> list[date]:
-    pattern = str(bar_dir / symbol / horizon / "*.parquet")
-    dates = []
-    for path in sorted(glob.glob(pattern)):
-        stem = Path(path).stem
+    """아카이버에 묻는다 — 장중에는 조각 디렉터리, 장후에는 통합본 파일로 배치가 다르므로
+    여기서 glob 패턴을 직접 쓰면 당일이 목록에서 빠진다(`data/archiver.py` "조각 쓰기")."""
+    return ParquetArchiver(bar_dir).available_days(symbol, Horizon(horizon))
+
+
+class _BarFileCache:
+    """봉 Parquet 읽기 캐시 겸 방어층 (2026-07-30 UI 크래시 사고 대응).
+
+    두 가지를 동시에 한다.
+
+    **① 재읽기 억제**: LIVE 모드는 `st.fragment(run_every=5)`로 5초마다 이 경로를 탄다 —
+    파일이 안 바뀌었으면(mtime·크기 동일) 파싱을 통째로 건너뛴다. 봉은 Horizon당 1분에 한 번
+    바뀌므로 대부분의 재실행은 캐시 히트다.
+
+    **② 찢어진 읽기 흡수**: 수집기(`data/archiver.py`)는 이제 원자적 교체로 쓰지만, 이 화면은
+    수집기와 별도 프로세스라 "파일이 언제든 통째로 갈릴 수 있다"는 전제는 그대로다. 읽기가
+    실패하면 **직전 성공본을 그대로 쓰고 화면에 그 사실을 표시**한다 — 실패를 조용히 삼키지도
+    (L18), 화면 전체를 죽이지도 않는다. 2026-07-30 08:57에 바로 이 지점에서 UI 프로세스가
+    통째로 죽었다(로그 한 줄 안 남기고).
+
+    읽기에 `read_parquet_without_mmap()`을 쓰는 것도 같은 사고 대응이다 — `pl.read_parquet(
+    path)`의 메모리 매핑은 ⓐ 수집기의 원자적 교체를 `OSError(1224)`로 막아 봉을 잃게 만들고
+    ⓑ 매핑된 페이지가 교체로 무효화되면 파이썬 예외가 아니라 access violation으로 프로세스가
+    즉사한다(그게 실제로 일어난 일이다).
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str, str, str], tuple[tuple, pl.DataFrame]] = {}
+
+    def load(
+        self, archiver: ParquetArchiver, symbol: str, horizon: Horizon, day: date
+    ) -> tuple[pl.DataFrame | None, str | None]:
+        """반환: (프레임, 경고문). 경고문이 None이 아니면 프레임은 최신이 아닐 수 있다.
+
+        하루치가 파일 하나가 아니라 여러 조각일 수 있으므로(`data/archiver.py` "조각 쓰기")
+        캐시 지문도 파일 집합 전체로 잡는다 — 하나만 보면 새 시간대 조각이 생겼을 때 갱신을
+        놓친다.
+        """
+        key = (str(archiver.base_dir), symbol, horizon.value, day.isoformat())
+        sources = archiver.day_sources(symbol, horizon, day)
+        if not sources:
+            return None, None  # 그날 데이터 없음 — 호출측이 "데이터 없음"으로 다룬다(경고 아님)
+
+        cached = self._entries.get(key)
+        signature = day_signature(sources)
+        if cached is not None and cached[0] == signature:
+            return cached[1], None
+
         try:
-            dates.append(date.fromisoformat(stem))
-        except ValueError:
-            continue
-    return dates
+            frame = archiver.read_day(symbol, horizon, day)
+        except Exception as exc:  # noqa: BLE001 — 어떤 실패든 화면이 죽으면 안 됨
+            return self._degraded(cached, exc.__class__.__name__)
+        if frame is None:
+            return self._degraded(cached, "읽기 실패")
+
+        frame = frame.with_columns(pl.col("bar_open_kst").dt.convert_time_zone("Asia/Seoul"))
+        self._entries[key] = (signature, frame)
+        return frame, None
+
+    @staticmethod
+    def _degraded(cached, reason: str) -> tuple[pl.DataFrame | None, str | None]:
+        if cached is None:
+            return None, f"봉 파일을 읽지 못했습니다({reason}) — 다음 갱신에 재시도"
+        return (
+            cached[1],
+            f"봉 파일이 갱신 중이라 직전 값을 표시합니다({reason}) — 다음 갱신에 재시도",
+        )
 
 
-def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> pl.DataFrame | None:
+_BAR_CACHE = _BarFileCache()
+
+
+def _load_bars_with_status(
+    symbol: str, horizon: str, day: date, bar_dir: Path
+) -> tuple[pl.DataFrame | None, str | None]:
     """`bar_open_kst`는 만들어질 때(`data/normalizer.py`의 `_combine_kst()`) 진짜 KST
     (+09:00)이지만, Polars가 tz-aware datetime을 Parquet에 쓸 때 항상 `time_zone='UTC'`로
     정규화해서 저장한다(그래서 이 값을 그대로 읽으면 물리적으로는 UTC 벽시계 값 — 이름과
@@ -242,11 +378,13 @@ def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> pl.DataFr
     되돌린다 — `pyproject.toml`이 이미 이 Windows tzdata 왕복 문제 때문에
     `tzdata>=2026.1; sys_platform == 'win32'`를 명시적으로 넣어뒀으므로(2026-07-22) 새 의존성
     추가가 아니다."""
-    path = bar_dir / symbol / horizon / f"{day.isoformat()}.parquet"
-    if not path.exists():
-        return None
-    bars = pl.read_parquet(path)
-    return bars.with_columns(pl.col("bar_open_kst").dt.convert_time_zone("Asia/Seoul"))
+    return _BAR_CACHE.load(ParquetArchiver(bar_dir), symbol, Horizon(horizon), day)
+
+
+def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> pl.DataFrame | None:
+    """프레임만 필요한 호출자용 얇은 래퍼 — 신선도 경고까지 보려면
+    `_load_bars_with_status()`를 쓴다."""
+    return _load_bars_with_status(symbol, horizon, day, bar_dir)[0]
 
 
 def _candlestick_figure(bars: pl.DataFrame, tick_size: float) -> go.Figure:
@@ -278,7 +416,7 @@ def _candlestick_figure(bars: pl.DataFrame, tick_size: float) -> go.Figure:
 def _badge_caption(label: str, snapshot) -> None:
     color = _BADGE_COLOR[snapshot.badge]
     st.markdown(
-        f"**{label}** &nbsp; " f"<span style='color:{color}'>● {snapshot.badge.value}</span>",
+        f"**{label}** &nbsp; <span style='color:{color}'>● {snapshot.badge.value}</span>",
         unsafe_allow_html=True,
     )
 
@@ -322,6 +460,7 @@ def render_top_bar(source, symbol: str) -> None:
     if isinstance(conn_error.message, Health):
         st.error(f"LIVE 연결 실패: {conn_error.message.detail}")
 
+    _render_health_strip(source)
     st.divider()
 
 
@@ -375,7 +514,9 @@ def render_market_view(
         chosen = available[-1]
         st.caption(f"오늘({chosen.isoformat()}) 봉 — LIVE는 항상 최신 날짜")
 
-    bars = _load_bars(symbol, horizon, chosen, bar_dir)
+    bars, stale_reason = _load_bars_with_status(symbol, horizon, chosen, bar_dir)
+    if stale_reason is not None:
+        st.warning(stale_reason)  # 조용히 넘어가지 않는다(L18) — 화면이 최신이 아닐 수 있음
     if bars is None or bars.is_empty():
         st.warning("선택한 날짜의 봉 데이터가 비어 있음")
         return

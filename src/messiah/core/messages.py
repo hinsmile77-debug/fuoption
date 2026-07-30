@@ -468,6 +468,11 @@ class SelfEvalReport(BusMessage):
 
     date: str  # ISO 날짜(YYYY-MM-DD) — 거래일 단위가 자연 키, 시각이 아님
     symbol: str
+    # 이름과 달리 "체결 건수"가 아니라 **집계에 쓰인 수익률 표본 수**다. 현재 유일한 호출자
+    # (`scripts/run_g2_paper_trading.py`)는 Position Reconciler 부재로 체결 단위 손익을 못 내고
+    # 하루 1개(당일 총자산 변화율)를 표본으로 넘긴다 — 그래서 실무상 값은 "누적 거래일 수"다
+    # (2026-07-29 리포트의 n_trades=1은 체결 1건이 아니라 데이터 1일치라는 뜻). 필드명 정정은
+    # 스키마 변경이라 Position Reconciler 결선 때 함께 하고, 그전까지는 여기 명시해 둔다.
     n_trades: int
     win_rate: float
     profit_factor: float

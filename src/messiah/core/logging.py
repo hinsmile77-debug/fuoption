@@ -15,6 +15,7 @@ import logging
 import subprocess
 import sys
 from datetime import datetime
+from math import isfinite
 from typing import Any
 
 from messiah.core.timeutil import now_kst
@@ -60,6 +61,18 @@ TAG_LEVELS: dict[str, int] = {
     "CircuitBreakerConfirmed": logging.WARNING,  # 거래소 CB 추정 확정 — 신규진입 차단
     "CircuitBreakerResumed": logging.INFO,  # CB 해제 추정(데이터 재수신) — WSReconnected와 동급
     "CircuitBreakerLiquidating": logging.WARNING,  # CB 재개 직후 자동 강제청산 — KillSwitch와 동급
+    "CollectorTickStall": logging.WARNING,  # 소켓은 살아있는데 틱이 끊김 — 강제 재연결
+    "CollectorFirstTick": logging.INFO,  # 세션 첫 틱 수신 시각 — 장전 구간 유입 여부 진단용
+    "CommandCenterUIDown": logging.WARNING,  # UI 프로세스 사망 감지 — 자동 재기동 시도
+    "CommandCenterUIRestarted": logging.INFO,  # UI 자동 재기동 성공
+    "CommandCenterUIRestartGaveUp": logging.ERROR,  # 재기동 한도 소진 — 사람이 봐야 함
+    "FeatureWarmStart": logging.INFO,  # 기동 시 과거 봉으로 롤링 윈도 사전 충전
+    "FeatureWarmStartFailed": logging.WARNING,  # 웜스타트 실패 — 수집은 계속(콜드스타트로 진행)
+    "HealthPublishError": logging.ERROR,  # sys.health heartbeat 발행 실패 — 처리 루프는 계속(L22)
+    "IntegrityReportGenerated": logging.INFO,  # 일일 무결성 리포트 산출
+    "IntegrityThresholdBreached": logging.WARNING,  # 무결성 지표가 임계 초과 — 사람이 봐야 함
+    "ArchiveCompacted": logging.INFO,  # 장중 조각 파일 → 일자 파일 통합 완료
+    "ArchiveCompactionFailed": logging.WARNING,  # 통합 실패 — 조각은 그대로 남아 읽기는 계속 가능
 }
 
 _logger = logging.getLogger("messiah")
@@ -90,13 +103,32 @@ class JsonFormatter(logging.Formatter):
         extra = getattr(record, "fields", None)
         if extra:
             payload.update(extra)
-        return json.dumps(payload, ensure_ascii=False, default=_json_default)
+        return json.dumps(_json_safe(payload), ensure_ascii=False, default=_json_default)
 
 
 def _json_default(o: Any) -> str:
     if isinstance(o, datetime):
         return o.isoformat()
     return str(o)
+
+
+def _json_safe(o: Any) -> Any:
+    """비유한 float(inf/-inf/nan)을 null로 바꾼다 — `json.dumps`는 이걸 `Infinity`/`NaN`이라는
+    **JSON 표준에 없는 리터럴**로 그대로 찍는다(파이썬 자신은 되읽지만 표준 파서는 거부).
+
+    실제로 2026-07-29 `CircuitBreakerConfirmed` 라인이 `"data_age_seconds": Infinity`로
+    남았다 — 콜드스타트 구간의 `_data_age_seconds()`가 `inf`를 돌려주던 시절의 로그다.
+    그 오탐 자체는 이미 고쳤지만(`strategy/pipeline.py`), 로그가 표준 JSON이 아니게 되는
+    경로는 그대로 남아 있었다. 로그 1줄 = JSON 1줄은 사후 집계(`scripts/agenda.py`)의
+    전제라(모듈 docstring) 여기서 원천 차단한다.
+    """
+    if isinstance(o, float):
+        return o if isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    return o
 
 
 def setup(instance_id: str, stream: Any = None) -> None:

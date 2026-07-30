@@ -8,9 +8,9 @@ FeatureEngine)을 실제 매매일 하루 동안 무인으로 돌리기 위한 �
 시간대(KST, 전부 하드코딩 아님 — 아래 상수만 바꾸면 됨):
 - 08:35(작업 스케줄러 "Messiah" 실제 트리거 시각) ~ 09:00: 웜업 — **Docker Desktop 응답
   확인/자동 기동**(아래 항목), self_check, 근월물 심볼 확인, Redis 연결, Collector/Composer/
-  Engine 구성, **WS는 이 시점에 이미 연결·구독까지 끝내 둔다**(9시 정각에 연결부터 새로
-  맺느라 첫 틱을 놓치지 않도록 — "첫봉 대기 준비완료" 요건). 실제로 틱이 오기 시작하는 건
-  장이 열려야 하므로 별도의 "9시까지 대기" 로직은 필요 없다.
+  Engine 구성, **피처 웜스타트**(아래 `_load_warmup_artifacts()`), **WS는 이 시점에 이미
+  연결·구독까지 끝내 둔다**(9시 정각에 연결부터 새로 맺느라 첫 틱을 놓치지 않도록 — "첫봉
+  대기 준비완료" 요건). 별도의 "9시까지 대기" 로직은 두지 않는다.
 - 09:00~15:35: 정규장 수집(REGULAR_SESSION_STOP까지 run_forever() 3개를 동시 구동).
 - 15:35 도달: 수집 중단 신호 → daily_close()(미완성 봉 flush·버스 종료) → 15:40
   HARD_SHUTDOWN_DEADLINE까지 끝내지 못하면 강제 종료(운영 사고 시 무한정 떠 있는 프로세스
@@ -38,10 +38,21 @@ Streamlit Command Center(`src/messiah/ui/app.py`)를 완전히 별도의 백그�
 `run_l1_daily.py`와 같은 방식(명령줄 패턴 매칭)으로 함께 정리한다 — 매일 자정 없이 쌓이지
 않는다.
 
-**아직 없는 것**: 스캘러/모델 로딩(_load_warmup_artifacts, Phase 3 이후 실제 모델이 생기면
-채울 자리만 미리 파둠), 옵션(K200_OPT) 동시 수집(오늘 세션 실측으로 같은 계좌 WS 연결을
-2개 열면 서로 끊기는 문제 확인됨 — 별도 연결이 아니라 단일 연결·다중 subscribe()로 풀어야
-하는 별도 작업, 이 스크립트는 선물 1개만).
+**장전 08:45~09:00 구간 (2026-07-30 실측, 미해결 결정 사항)**: 이 docstring은 원래 "실제로
+틱이 오기 시작하는 건 장이 열려야 하므로"라고 적혀 있었는데 **틀린 가정이었다**. 3거래일
+(07-28·07-29·07-30) 연속으로 **08:45:00 정각부터** 틱이 들어왔고, 그 15분치가 정규장 봉과
+구분 없이(`quality_ok=True`) 아카이브·피처·차트에 그대로 섞여 들어가고 있다(07-30 08:45봉
+거래량 526 — 09:00 개장봉 506보다 오히려 많다). 이 프린트가 **예상체결인지 실체결인지**에
+따라 처리 방침이 갈린다: 예상체결이면 학습 데이터 오염이므로 09:00 이전 틱을 버려야 하고,
+실체결이면 `BarClosed`에 세션 구분 필드를 더해 명시적으로 보존해야 한다. 원시 프레임 확인이
+필요한데 라이브 세션과 WS 연결을 다툴 수 없어(같은 계좌 2연결 = 상호 단절, 아래 항목)
+비거래시간 검증으로 미뤄 둔다. 그때까지 판단 근거를 쌓기 위해 `TickCollector`가 연결 후 첫
+틱 시각을 `CollectorFirstTick`으로 매일 남긴다.
+
+**아직 없는 것**: 스캘러/모델 로딩(`_load_warmup_artifacts()`는 2026-07-30에 피처 웜스타트만
+먼저 채웠고, 스캘러·모델 자리는 Phase 3 이후 실제 모델이 생기면 채움), 옵션(K200_OPT) 동시
+수집(오늘 세션 실측으로 같은 계좌 WS 연결을 2개 열면 서로 끊기는 문제 확인됨 — 별도 연결이
+아니라 단일 연결·다중 subscribe()로 풀어야 하는 별도 작업, 이 스크립트는 선물 1개만).
 
 사용: python scripts/run_l1_daily.py [--configs configs]
 Windows 작업 스케줄러에 "Messiah"(평일 08:35, `run_l1_daily.bat`)로 실제 등록·가동 중
@@ -56,7 +67,7 @@ import asyncio
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -75,13 +86,19 @@ from messiah.core.docker_bootstrap import (  # noqa: E402
     ensure_docker_ready,
 )
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: E402
+from messiah.core.health import HealthReporter  # noqa: E402
+from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
-from messiah.core.ui_launcher import launch_command_center  # noqa: E402
+from messiah.core.ui_launcher import (  # noqa: E402
+    launch_command_center,
+    watch_command_center_forever,
+)
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
 from messiah.data.collector import TickCollector  # noqa: E402
 from messiah.data.normalizer import parse_futures_tick  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
+from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 
 # 정규장 마감(연속거래 종료) 시각 — event_calendar.DEFAULT_SESSION과 같은 값을 직접
 # 참조해 단일 소스를 유지한다(두 곳이 따로 하드코딩돼 있다가 어긋나는 사고 방지).
@@ -147,13 +164,53 @@ def _resolve_front_month_symbol() -> str:
     return symbol
 
 
-def _load_warmup_artifacts() -> None:
-    """스캘러·모델 로딩 자리 — Phase 3(W17~) 이전엔 실제 모델이 없어 지금은 아무 것도 안 함.
-    호출 시점(웜업 구간, 09:00 이전)만 미리 정해 둔다."""
-    return
+def _load_warmup_artifacts(
+    engine: FeatureEngine, archiver: ParquetArchiver, symbol: str, today: date
+) -> None:
+    """웜업 구간(09:00 이전)에 FeatureEngine의 롤링 윈도우를 아카이브로 미리 채운다
+    (2026-07-30 구현 — 그 전까지는 자리만 잡아둔 빈 스텁이었다).
+
+    필요성의 근거는 `features/engine.py`의 `warm_start()` docstring 참고 — 요약하면 매 기동이
+    콜드스타트라 15m/30m 피처는 하루 종일 2/3가 NaN이었고, 장중 재시작 한 번이면 그때까지의
+    워밍업이 전부 날아갔다. **오늘 날짜 파일도 포함**해서 읽는 게 중요하다: 장중 재시작 복구가
+    이 함수의 주 용도다.
+
+    실패해도 수집은 계속한다 — 웜스타트는 부가 기능이지 기동 전제조건이 아니다
+    (`core/docker_bootstrap.py`와 같은 원칙). 다만 조용히 넘어가지는 않는다(L18/L22).
+
+    스캘러·모델 로딩 자리는 여전히 비어 있다 — Phase 3(W17~) 이전엔 실제 모델이 없다.
+    """
+    try:
+        history = {
+            horizon: archiver.load_recent_bars(
+                symbol, horizon, on_or_before=today, max_bars=engine.history_capacity
+            )
+            for horizon in Horizon
+        }
+        loaded = engine.warm_start(history)
+    except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 수집을 막으면 안 됨
+        mlog.log(
+            "FeatureWarmStartFailed",
+            f"피처 웜스타트 실패 — 콜드스타트로 진행: {exc}",
+            symbol=symbol,
+        )
+        return
+
+    summary = {horizon.value: count for horizon, count in loaded.items()}
+    mlog.log(
+        "FeatureWarmStart",
+        f"과거 완성봉으로 롤링 윈도 사전 충전 (용량 {engine.history_capacity}봉)",
+        symbol=symbol,
+        bars_by_horizon=summary,
+    )
+    print(f"피처 웜스타트: {summary}", flush=True)
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _ui_log_path(today_str: str) -> Path:
+    return Path("logs") / f"ui_{today_str}.log"
 
 
 def _launch_ui(today_str: str) -> subprocess.Popen | None:
@@ -163,14 +220,89 @@ def _launch_ui(today_str: str) -> subprocess.Popen | None:
     return launch_command_center(
         caller_tag="run_l1_daily",
         project_root=_PROJECT_ROOT,
-        log_path=Path("logs") / f"ui_{today_str}.log",
+        log_path=_ui_log_path(today_str),
     )
 
 
 async def _run_regular_session(
-    collector: TickCollector, composer: MultiHorizonBarComposer, engine: FeatureEngine
+    collector: TickCollector,
+    composer: MultiHorizonBarComposer,
+    engine: FeatureEngine,
+    bus: MessageBus,
+    today_str: str,
 ) -> None:
-    await asyncio.gather(collector.run_forever(), composer.run_forever(), engine.run_forever())
+    """수집 3종 + UI 생존 감시 + 컴포넌트 heartbeat를 동시에 돌린다.
+
+    UI 감시와 heartbeat는 부가 임무다 — 둘 다 예외를 밖으로 내지 않으므로 이 gather를 죽이지
+    않는다(UI 감시는 재기동 한도를 넘으면 ERROR 로그를 남기고 감시만 접고, heartbeat는 발행
+    실패를 로깅하고 다음 주기에 재시도한다). 2026-07-30 08:57에 UI가 네이티브 크래시로 죽고
+    32분간 아무도 몰랐던 사고의 대응 — 경위는 `core/ui_launcher.py`/`core/health.py` 참고.
+
+    heartbeat의 `probe`는 각 컴포넌트가 스스로 구현한 `health()`다 — 데이터 흐름의 상태를
+    판정할 근거(마지막 틱/발행 시각)를 실제로 갖고 있는 쪽이 판정한다(고도화 4의 계층 분리)."""
+    await asyncio.gather(
+        collector.run_forever(),
+        composer.run_forever(),
+        engine.run_forever(),
+        watch_command_center_forever(
+            caller_tag="run_l1_daily",
+            project_root=_PROJECT_ROOT,
+            log_path=_ui_log_path(today_str),
+        ),
+        HealthReporter(bus, "l1.collector", probe=collector.health).run_forever(),
+        HealthReporter(bus, "l1.feature_engine", probe=engine.health).run_forever(),
+    )
+
+
+def _write_integrity_report(today: date, symbol: str, instance_id: str) -> None:
+    """장후 무결성 리포트 (고도화 2) — 그날의 봉 결손·재기동·NaN 비율·네이티브 크래시를
+    집계해 `logs/daily_integrity_YYYYMMDD.json`에 남긴다.
+
+    2026-07-30 점검에서 사람이 손으로 파야만 보였던 것들을 코드로 고정한 것이다(근거는
+    `ops/integrity_report.py` 모듈 docstring). 봉 flush가 끝난 **뒤**에 불러야 그날 마지막
+    봉까지 집계에 들어간다.
+
+    실패해도 종료 절차를 막지 않는다 — 리포트는 관측 수단이지 운영 전제조건이 아니다."""
+    try:
+        generate_and_write(day=today, symbol=symbol, instance_id=instance_id)
+    except Exception as exc:  # noqa: BLE001
+        mlog.log(
+            "IntegrityThresholdBreached",
+            f"무결성 리포트 산출 실패 — 수동 확인 필요: {exc}",
+            date=today.isoformat(),
+            symbol=symbol,
+        )
+
+
+def _compact_archive(archiver: ParquetArchiver, symbol: str, today: date) -> None:
+    """장중 시간대 조각을 하루 1개 통합본으로 되돌린다 (고도화 3).
+
+    조각화는 장중 쓰기 비용을 줄이는 내부 최적화일 뿐, 저장 포맷 변경이 아니다 — Digital
+    Twin·백테스트 하니스가 보는 과거 데이터는 예전과 똑같이 `{date}.parquet` 하나여야 한다
+    (`data/archiver.py`의 `compact_day()` docstring). 마지막 봉 flush **뒤**에 불러야 그날
+    마지막 조각까지 통합에 들어간다.
+
+    실패해도 종료 절차를 막지 않는다 — 통합이 안 돼도 `read_day()`가 조각을 그대로 읽으므로
+    데이터가 사라지지는 않는다(다음 기동의 통합에서 자연히 정리된다)."""
+    for horizon in Horizon:
+        try:
+            rows = archiver.compact_day(symbol, horizon, today)
+        except Exception as exc:  # noqa: BLE001
+            mlog.log(
+                "ArchiveCompactionFailed",
+                f"{horizon.value} 조각 통합 실패 — 조각은 그대로 남아 읽기는 가능: {exc}",
+                symbol=symbol,
+                horizon=horizon.value,
+            )
+            continue
+        if rows:
+            mlog.log(
+                "ArchiveCompacted",
+                f"{horizon.value} 조각 → 일자 통합본 {rows}행",
+                symbol=symbol,
+                horizon=horizon.value,
+                rows=rows,
+            )
 
 
 async def _daily_close(
@@ -199,8 +331,6 @@ async def main(cfg: InstanceConfig) -> None:
     tick_size = Decimal(cfg.futures_tick_size)
     print(f"근월물 심볼: {symbol} (tick_size={tick_size})", flush=True)
 
-    _load_warmup_artifacts()
-
     bus = MessageBus(cfg.redis_url, cfg.instance_id)
     await bus.connect()
 
@@ -217,6 +347,9 @@ async def main(cfg: InstanceConfig) -> None:
     composer = MultiHorizonBarComposer(symbol=symbol, archiver=archiver, bus=bus)
     engine = FeatureEngine(symbol, bus, feature_set=cfg.feature_set)
 
+    # 첫 틱이 들어오기 전에 끝내야 한다 — 웜업 구간(09:00 이전)에 부르는 이유가 그것이다.
+    await asyncio.to_thread(_load_warmup_artifacts, engine, archiver, symbol, today)
+
     now = now_kst()
     session_stop = _today_at(now, *REGULAR_SESSION_STOP)
     hard_deadline = _today_at(now, *HARD_SHUTDOWN_DEADLINE)
@@ -226,7 +359,8 @@ async def main(cfg: InstanceConfig) -> None:
         print(f"정규장 수집 시작 — {session_stop.isoformat()}까지 ({remaining:.0f}초)", flush=True)
         try:
             await asyncio.wait_for(
-                _run_regular_session(collector, composer, engine), timeout=remaining
+                _run_regular_session(collector, composer, engine, bus, today.strftime("%Y%m%d")),
+                timeout=remaining,
             )
         except TimeoutError:
             print("수집 중단 신호 도달 — 장후 종료 절차 시작", flush=True)
@@ -243,6 +377,10 @@ async def main(cfg: InstanceConfig) -> None:
         )
         raise SystemExit(1) from None
 
+    # 통합 → 리포트 순서 (조각이 남아 있어도 `read_day()`가 읽으므로 순서가 결과를 바꾸지는
+    # 않지만, 리포트가 최종 물리 배치를 보고 산출되는 편이 사후 조사와 일치한다)
+    _compact_archive(archiver, symbol, today)
+    _write_integrity_report(today, symbol, cfg.instance_id)
     print("정상 종료.", flush=True)
 
 

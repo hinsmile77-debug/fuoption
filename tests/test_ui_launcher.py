@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import subprocess
 
-from messiah.core.ui_launcher import DEFAULT_PORT, launch_command_center
+import pytest
+from messiah.core.ui_launcher import (
+    DEFAULT_PORT,
+    launch_command_center,
+    watch_command_center_forever,
+)
 
 
 def _fake_popen(pid: int = 4242):
@@ -168,3 +173,148 @@ def test_launch_failure_is_caught_and_returns_none(tmp_path):
         popen=_raising_popen,
     )
     assert result is None
+
+
+# ---------------------------------------------------------------- UI 생존 감시 (2026-07-30)
+
+
+class _StopLoop(Exception):
+    """무한 감시 루프를 테스트에서 끊기 위한 신호 — 프로덕션 코드는 이 예외를 모른다."""
+
+
+class _Ticker:
+    """주입된 sleep 대역 — 매 호출마다 정해둔 부수효과(UI 사망 등)를 일으키고, 준비된
+    행동이 끝나면 _StopLoop으로 루프를 끊는다."""
+
+    def __init__(self, *actions):
+        self._actions = list(actions)
+        self.calls = 0
+
+    async def __call__(self, _seconds: float) -> None:
+        if self.calls >= len(self._actions):
+            raise _StopLoop
+        self._actions[self.calls]()
+        self.calls += 1
+
+
+def _port_state(alive: bool = True):
+    """포트 응답 여부를 상태로 모델링 — launch_command_center()도 내부에서 같은 콜러블을
+    한 번 더 부르므로, 호출 횟수 기반 시퀀스보다 상태 기반이 견고하다."""
+    state = {"alive": alive}
+    return state, lambda port: state["alive"]
+
+
+def _reviving_popen(state, pid: int = 4242):
+    """기동에 성공하면 포트가 다시 응답하게 되는 실제 동작을 재현."""
+    calls = []
+
+    def _popen(*args, **kwargs):
+        calls.append((args, kwargs))
+        state["alive"] = True
+        proc = subprocess.Popen.__new__(subprocess.Popen)
+        proc.pid = pid  # type: ignore[misc]
+        return proc
+
+    return _popen, calls
+
+
+def _launchable_project(tmp_path):
+    """`launch_command_center()`가 실제로 기동 단계까지 가려면 실행파일·앱 경로가 존재해야
+    한다 — 감시 루프 자체를 보는 테스트라 둘 다 빈 스텁으로 만든다."""
+    exe = tmp_path / "streamlit.exe"
+    exe.write_text("stub")
+    app_dir = tmp_path / "src" / "messiah" / "ui"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "app.py").write_text("")
+    return exe
+
+
+async def test_watcher_returns_immediately_when_skip_env_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESSIAH_SKIP_UI", "1")
+    ticker = _Ticker()
+    state, is_running = _port_state()
+    popen, calls = _reviving_popen(state)
+
+    await watch_command_center_forever(
+        caller_tag="test",
+        project_root=tmp_path,
+        log_path=tmp_path / "ui.log",
+        is_running=is_running,
+        popen=popen,
+        sleep=ticker,
+    )
+
+    assert ticker.calls == 0
+    assert calls == []
+
+
+async def test_watcher_does_not_touch_a_healthy_ui(tmp_path):
+    state, is_running = _port_state(alive=True)
+    popen, calls = _reviving_popen(state)
+    ticker = _Ticker(lambda: None, lambda: None, lambda: None)
+
+    with pytest.raises(_StopLoop):
+        await watch_command_center_forever(
+            caller_tag="test",
+            project_root=tmp_path,
+            log_path=tmp_path / "ui.log",
+            is_running=is_running,
+            popen=popen,
+            sleep=ticker,
+        )
+
+    assert calls == []  # 살아있는 동안엔 아무 것도 안 한다
+
+
+async def test_watcher_relaunches_after_the_ui_dies(tmp_path):
+    """2026-07-30 08:57 회귀 방지 — UI가 죽으면 32분씩 방치되지 않고 다음 점검에서 살아난다."""
+    exe = _launchable_project(tmp_path)
+    state, is_running = _port_state(alive=True)
+    popen, calls = _reviving_popen(state)
+    # 1틱: 정상 → 2틱 직전 UI 사망 → 2틱에서 감지·재기동 → 3틱: 다시 정상
+    ticker = _Ticker(lambda: None, lambda: state.__setitem__("alive", False), lambda: None)
+
+    with pytest.raises(_StopLoop):
+        await watch_command_center_forever(
+            caller_tag="test",
+            project_root=tmp_path,
+            log_path=tmp_path / "ui.log",
+            streamlit_exe=exe,
+            is_running=is_running,
+            popen=popen,
+            sleep=ticker,
+        )
+
+    assert len(calls) == 1
+    assert state["alive"] is True
+
+
+async def test_watcher_gives_up_after_restart_limit(tmp_path):
+    """고쳐지지 않는 크래시 루프를 무한 반복하지 않는다 — 한도를 넘으면 감시를 접되,
+    조용히가 아니라 ERROR 로그를 남기고 접는다(태그 CommandCenterUIRestartGaveUp)."""
+    exe = _launchable_project(tmp_path)
+    dead_calls = []
+
+    def _never_reviving_popen(*args, **kwargs):
+        dead_calls.append(args)
+        proc = subprocess.Popen.__new__(subprocess.Popen)
+        proc.pid = 1  # type: ignore[misc]
+        return proc
+
+    # 포트가 영원히 무응답 — 매 틱마다 재기동을 시도하다 한도에서 스스로 반환해야 한다
+    await watch_command_center_forever(
+        caller_tag="test",
+        project_root=tmp_path,
+        log_path=tmp_path / "ui.log",
+        max_restarts=3,
+        streamlit_exe=exe,
+        is_running=lambda port: False,
+        popen=_never_reviving_popen,
+        sleep=_noop_sleep,
+    )
+
+    assert len(dead_calls) == 3  # 한도만큼만 시도하고 멈춘다
+
+
+async def _noop_sleep(_seconds: float) -> None:
+    return None

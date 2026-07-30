@@ -18,6 +18,7 @@ from typing import Sequence
 import polars as pl
 
 from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon, bar_confirm_time
+from messiah.data.archiver import ParquetArchiver
 
 
 class ParquetBarReplaySource:
@@ -43,22 +44,23 @@ class ParquetBarReplaySource:
              재생도 그 인과 순서를 그대로 지켜야 FeatureEngine 등 하위 소비자가 실제와
              동일한 순서로 이벤트를 받는다.
         """
+        archiver = ParquetArchiver(self._base_dir)
         bars: list[BarClosed] = []
         for horizon in self._horizons:
-            horizon_dir = self._base_dir / self._symbol / horizon.value
-            if not horizon_dir.exists():
-                continue
             for day in _date_range(start_date, end_date):
-                path = horizon_dir / f"{day.isoformat()}.parquet"
-                if not path.exists():
+                # 경로를 직접 조립하지 않고 아카이버에 묻는다 — 장중에는 시간대 조각으로,
+                # 장후에는 통합본 하나로 물리 배치가 달라진다(`data/archiver.py` "조각 쓰기").
+                # 재생은 보통 지난 날짜(= 통합본)를 보지만, 장중 재생·당일 리허설도 가능해야
+                # 하므로 두 배치를 다 아는 쪽에 위임한다.
+                df = archiver.read_day(self._symbol, horizon, day)
+                if df is None:
                     continue
-                bars.extend(self._read_file(path, horizon))
+                bars.extend(self._to_bars(df, horizon))
 
         bars.sort(key=lambda b: (bar_confirm_time(b), HORIZON_SECONDS[b.horizon]))
         return bars
 
-    def _read_file(self, path: Path, horizon: Horizon) -> list[BarClosed]:
-        df = pl.read_parquet(path)
+    def _to_bars(self, df: pl.DataFrame, horizon: Horizon) -> list[BarClosed]:
         return [
             BarClosed(
                 symbol=self._symbol,

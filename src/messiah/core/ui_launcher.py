@@ -39,15 +39,24 @@ streamlit·실제 소켓 없이 순수하게 테스트 가능.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
+
+from messiah.core import logging as mlog
 
 DEFAULT_PORT = 8511  # MESSIAH 전용 고정 포트 — Streamlit 기본값(8501)과 의도적으로 다름
 DEFAULT_SKIP_ENV_VAR = "MESSIAH_SKIP_UI"
+
+# 감시 주기 — UI가 죽은 걸 늦어도 30초 안에 알아채면 사람이 화면을 보고 이상을 느끼기 전에
+# 대개 복구된다. 재기동 한도는 "고쳐지지 않는 크래시 루프"를 무한 반복하지 않기 위한 것으로,
+# 한도를 넘으면 재기동을 포기하고 ERROR로 남긴다(조용히 멈추지 않는다).
+_UI_CHECK_INTERVAL_SECONDS = 30.0
+_UI_MAX_RESTARTS = 5
 
 
 def is_ui_already_running(
@@ -124,3 +133,77 @@ def launch_command_center(
         flush=True,
     )
     return process
+
+
+async def watch_command_center_forever(
+    *,
+    caller_tag: str,
+    project_root: Path,
+    log_path: Path,
+    port: int = DEFAULT_PORT,
+    check_interval_seconds: float = _UI_CHECK_INTERVAL_SECONDS,
+    max_restarts: int = _UI_MAX_RESTARTS,
+    streamlit_exe: Path | None = None,
+    skip_env_var: str = DEFAULT_SKIP_ENV_VAR,
+    is_running: Callable[[int], bool] = is_ui_already_running,
+    popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """UI가 죽으면 다시 띄운다 (2026-07-30 사고 대응).
+
+    `launch_command_center()`는 프로세스를 띄우고 나면 그 뒤를 아무도 안 봤다. 2026-07-30
+    08:57:05에 UI가 네이티브 크래시(access violation, `data/archiver.py` 모듈 docstring 참고)로
+    죽었는데 **32분간 아무 로그도 알림도 재기동도 없었고**, 사용자가 브라우저의 "Connection
+    error"를 보고서야 발견했다. 크래시의 근본 원인은 따로 고쳤지만(원자적 쓰기 + 읽기 방어층),
+    "UI가 어떤 이유로든 죽으면 조용히 사라진다"는 구조 자체가 문제라 여기서 별도로 막는다.
+
+    수집 프로세스의 본 임무를 절대 막지 않는다 — 이 코루틴은 예외를 밖으로 내지 않고, 재기동
+    한도를 넘으면 감시를 접는다(호출측 `asyncio.gather`를 죽이지 않는다).
+
+    포트 응답만 보고 판단하는 한계는 `is_ui_already_running()`과 동일하다 — 제3의 프로세스가
+    8511을 선점하면 "살아있다"로 오판해 재기동을 안 한다. 그 경우는 원래도 UI가 안 뜨는
+    상황이고 `launch_command_center()`가 기동 시점에 이미 WARN을 찍어둔다.
+    """
+    if os.environ.get(skip_env_var) == "1":
+        return
+
+    restarts = 0
+    while True:
+        await sleep(check_interval_seconds)
+        if is_running(port):
+            continue
+
+        if restarts >= max_restarts:
+            mlog.log(
+                "CommandCenterUIRestartGaveUp",
+                f"Command Center UI 자동 재기동 {max_restarts}회 소진 — 감시 중단, 수동 확인 필요",
+                port=port,
+                caller=caller_tag,
+            )
+            return
+
+        restarts += 1
+        mlog.log(
+            "CommandCenterUIDown",
+            f"포트 {port} 무응답 — Command Center UI 재기동 시도 ({restarts}/{max_restarts})",
+            port=port,
+            caller=caller_tag,
+        )
+        process = launch_command_center(
+            caller_tag=caller_tag,
+            project_root=project_root,
+            log_path=log_path,
+            port=port,
+            streamlit_exe=streamlit_exe,
+            skip_env_var=skip_env_var,
+            is_running=is_running,
+            popen=popen,
+        )
+        if process is not None:
+            mlog.log(
+                "CommandCenterUIRestarted",
+                "Command Center UI 재기동 완료",
+                port=port,
+                pid=process.pid,
+                caller=caller_tag,
+            )

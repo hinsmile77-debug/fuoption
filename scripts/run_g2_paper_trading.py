@@ -104,6 +104,7 @@ from messiah.core.docker_bootstrap import (  # noqa: E402
     ensure_docker_ready,
 )
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: E402
+from messiah.core.health import HealthReporter  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import launch_command_center  # noqa: E402
@@ -217,19 +218,26 @@ async def _run_regular_session(
     pipeline: TradingPipeline,
     sim_feed: LiveSimBrokerFeed,
     shadow_manager: ShadowManager,
+    bus: MessageBus,
 ) -> None:
     """이 스크립트의 데이터 소스는 `run_l1_daily.py`가 같은 버스에 이미 발행 중인 `bar.*`/
     `feat.*`뿐이다 — 여기엔 자체 TickCollector가 없다(모듈 docstring 참고, WS 이중 연결
     사고 대응). 전부 순수 구독자(또는 벽시계 워치독)라 이 asyncio.gather()가 여는 WS 연결은
     0개 — `watch_circuit_breaker_forever()`는 `pipeline.run_forever()`가 못 보는 정지 구간
     (데이터 미수신 중)에도 CB phase를 갱신하는 벽시계 폴링(`strategy/pipeline.py` 모듈
-    docstring "거래소 서킷브레이커 자동 대응" 참고)."""
+    docstring "거래소 서킷브레이커 자동 대응" 참고).
+
+    `HealthReporter`는 이 프로세스의 생존만 주장하는 단순 heartbeat다(probe 없음) — 데이터
+    흐름의 상태는 이 프로세스가 판정할 근거를 안 갖고 있고(자체 WS 연결 0개), 그 판정은
+    `l1.collector`가 자기 heartbeat로 직접 보고한다(고도화 4의 계층 분리). 여기서 또 추정하면
+    같은 사실에 대한 판정이 두 곳에서 갈릴 수 있다."""
     await asyncio.gather(
         futures_service.run_forever(),
         pipeline.run_forever(),
         pipeline.watch_circuit_breaker_forever(),
         sim_feed.run_forever(),
         shadow_manager.run_forever(),
+        HealthReporter(bus, "g2.pipeline").run_forever(),
     )
 
 
@@ -255,6 +263,7 @@ async def _daily_close(
     symbol: str,
     start_equity: Decimal,
     today: str,
+    instance_id: str,
 ) -> None:
     """봉 flush는 `run_l1_daily.py`의 책임(그 프로세스가 실제 Collector/Composer를 갖고
     있다) — 이 스크립트는 자기 것이 없으므로 flush할 것도 없다."""
@@ -269,6 +278,7 @@ async def _daily_close(
         symbol=symbol,
         champion_returns=champion_returns,
         n_shadow_bundles=len(shadow_manager.active_bundles),
+        instance_id=instance_id,
     )
     (_LOG_DIR / f"self_eval_{today}.json").write_text(
         report.model_dump_json(indent=2), encoding="utf-8"
@@ -356,7 +366,7 @@ async def main(cfg: InstanceConfig) -> None:
         )
         try:
             await asyncio.wait_for(
-                _run_regular_session(futures_service, pipeline, sim_feed, shadow_manager),
+                _run_regular_session(futures_service, pipeline, sim_feed, shadow_manager, bus),
                 timeout=remaining,
             )
         except TimeoutError:
@@ -375,6 +385,7 @@ async def main(cfg: InstanceConfig) -> None:
                 symbol=symbol,
                 start_equity=start_equity,
                 today=today.isoformat(),
+                instance_id=cfg.instance_id,
             ),
             timeout=shutdown_budget,
         )

@@ -10,7 +10,15 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from messiah.ui.app import _candlestick_figure, _default_redis_url, _load_bars
+from messiah.core.messages import BarClosed, Horizon
+from messiah.data.archiver import ParquetArchiver
+from messiah.ui.app import (
+    _available_dates,
+    _candlestick_figure,
+    _default_redis_url,
+    _load_bars,
+    _load_bars_with_status,
+)
 
 _KST = timezone(timedelta(hours=9))  # core/timeutil.py의 KST와 동일 정의(고정 오프셋)
 
@@ -86,3 +94,135 @@ def test_default_redis_url_falls_back_when_config_load_fails(monkeypatch):
 def test_default_redis_url_is_never_the_old_wrong_default(monkeypatch, bad_url):
     # 회귀 방지 — 예전 하드코딩 값이 실수로 다시 기본값이 되는 걸 명시적으로 막는다.
     assert _default_redis_url() != bad_url
+
+
+# ---------------------------------------------------------------- 봉 읽기 방어층 (2026-07-30)
+
+
+def test_load_bars_with_status_returns_no_warning_on_healthy_read(tmp_path):
+    bar_dir = tmp_path / "bars"
+    _write_bar_parquet(bar_dir / "A05608" / "1m" / "2026-07-29.parquet", open_hour_kst=9)
+
+    bars, warning = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    assert bars is not None
+    assert warning is None
+
+
+def test_load_bars_with_status_missing_file_is_not_a_warning(tmp_path):
+    """파일이 아직 없는 건 장애가 아니라 '데이터 없음'이다 — 경고로 올리면 매일 아침
+    첫 봉 전까지 헛경고가 뜬다."""
+    bars, warning = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), tmp_path / "bars")
+
+    assert bars is None
+    assert warning is None
+
+
+def test_load_bars_falls_back_to_last_good_frame_when_file_is_torn(tmp_path):
+    """2026-07-30 08:57 UI 즉사 지점의 회귀 방지 — 수집기가 파일을 갈아끼우는 순간을 읽어도
+    화면은 직전 값으로 살아남고, 그 사실을 조용히 숨기지 않는다(L18)."""
+    bar_dir = tmp_path / "bars"
+    path = bar_dir / "A05608" / "1m" / "2026-07-29.parquet"
+    _write_bar_parquet(path, open_hour_kst=9)
+
+    good, _ = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+    assert good is not None
+
+    path.write_bytes(b"")  # 교체 도중의 truncate 상태를 그대로 재현
+
+    bars, warning = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    assert bars is not None
+    assert bars["bar_open_kst"][0].hour == 9  # 직전 성공본 그대로
+    assert warning is not None and "직전 값" in warning
+
+
+def test_load_bars_reports_failure_when_there_is_no_last_good_frame(tmp_path):
+    bar_dir = tmp_path / "bars"
+    path = bar_dir / "A05608" / "1m" / "2026-07-29.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a parquet file")
+
+    bars, warning = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    assert bars is None
+    assert warning is not None and "읽지 못했" in warning
+
+
+def test_load_bars_reads_intraday_shards_before_compaction(tmp_path):
+    """장중에는 하루치가 시간대 조각으로 흩어져 있다 — 화면이 그걸 못 읽으면 당일 차트가
+    통째로 빈다(`data/archiver.py` "조각 쓰기")."""
+    bar_dir = tmp_path / "bars"
+    archiver = ParquetArchiver(bar_dir)
+    for hour in (9, 10):
+        archiver.append_bar(
+            BarClosed(
+                symbol="A05608",
+                horizon=Horizon.M1,
+                bar_open_kst=datetime(2026, 7, 29, hour, 0, tzinfo=_KST),
+                o_ticks=1,
+                h_ticks=1,
+                l_ticks=1,
+                c_ticks=1,
+                volume=1,
+                quality_ok=True,
+            )
+        )
+
+    bars, warning = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    assert warning is None
+    assert bars is not None and bars.height == 2
+
+
+def test_available_dates_sees_intraday_shard_directories(tmp_path):
+    bar_dir = tmp_path / "bars"
+    ParquetArchiver(bar_dir).append_bar(
+        BarClosed(
+            symbol="A05608",
+            horizon=Horizon.M1,
+            bar_open_kst=datetime(2026, 7, 29, 9, 0, tzinfo=_KST),
+            o_ticks=1,
+            h_ticks=1,
+            l_ticks=1,
+            c_ticks=1,
+            volume=1,
+            quality_ok=True,
+        )
+    )
+
+    assert _available_dates("A05608", "1m", bar_dir) == [date(2026, 7, 29)]
+
+
+def test_load_bars_does_not_reparse_unchanged_file(tmp_path, monkeypatch):
+    """LIVE는 5초마다 이 경로를 탄다 — 봉은 분당 한 번만 바뀌므로 대부분 캐시 히트여야 한다."""
+    bar_dir = tmp_path / "bars"
+    _write_bar_parquet(bar_dir / "A05608" / "1m" / "2026-07-29.parquet", open_hour_kst=9)
+
+    calls = {"n": 0}
+    real = ParquetArchiver.read_day
+
+    def _counting(self, *args, **kwargs):
+        calls["n"] += 1
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ParquetArchiver, "read_day", _counting)
+
+    for _ in range(5):
+        _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    assert calls["n"] == 1
+
+
+def test_load_bars_rereads_after_file_changes(tmp_path):
+    bar_dir = tmp_path / "bars"
+    path = bar_dir / "A05608" / "1m" / "2026-07-29.parquet"
+    _write_bar_parquet(path, open_hour_kst=9)
+    first, _ = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+    assert first is not None and first["bar_open_kst"][0].hour == 9
+
+    _write_bar_parquet(path, open_hour_kst=10)
+    second, warning = _load_bars_with_status("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    assert warning is None
+    assert second is not None and second["bar_open_kst"][0].hour == 10

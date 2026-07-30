@@ -21,13 +21,21 @@ capability_matrix.md 참고) — 계산기 레지스트리(`WINDOWED_FEATURES`/`
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from datetime import timedelta
-from typing import Sequence
+from typing import Callable, Mapping, Sequence
 
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, TOPIC_FEAT, BusLike
-from messiah.core.messages import HORIZON_SECONDS, BarClosed, FeatureVector, Horizon
+from messiah.core.health import HealthStatus, staleness_status
+from messiah.core.messages import (
+    HORIZON_SECONDS,
+    BarClosed,
+    FeatureVector,
+    HealthLevel,
+    Horizon,
+)
 from messiah.features import px_core, vl_core
 
 # px_hurst(W_SLOW_HURST 최대 120) · px_accel(W_STD 최대 60이면 2*60+1=121 필요)를 전부
@@ -48,6 +56,7 @@ class FeatureEngine:
         bus: BusLike,
         feature_set: str,
         horizons: Sequence[Horizon] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._symbol = symbol
         self._bus = bus
@@ -57,6 +66,92 @@ class FeatureEngine:
             h: deque(maxlen=_MAX_HISTORY) for h in self._horizons
         }
         self._session = px_core.SessionState()
+        self._monotonic = monotonic
+        self._last_publish_at: float | None = None
+        self._last_nan_ratio: dict[Horizon, float] = {}
+
+    def seconds_since_last_publish(self) -> float | None:
+        if self._last_publish_at is None:
+            return None
+        return self._monotonic() - self._last_publish_at
+
+    def last_nan_ratios(self) -> dict[str, float]:
+        return {horizon.value: ratio for horizon, ratio in self._last_nan_ratio.items()}
+
+    def health(self) -> HealthStatus:
+        """`sys.health` heartbeat용 자가 판정.
+
+        두 가지를 함께 본다 — ① 발행이 아예 멈췄는가(= 봉이 안 들어옴) ② 발행은 되는데
+        값이 쓸모없는가(nan_ratio가 Ver 1.1 §2-2의 신호정지 임계 20%를 넘음). ②는 2026-07-30
+        점검에서 15m/30m가 **하루 종일 NaN 2/3**였는데도 화면 어디에도 안 드러났던 문제의
+        대응이다(사람이 로그를 직접 파싱해야만 보였다).
+
+        M1 봉이 1분 주기이므로 발행 정체 임계는 그 배수로 잡는다(2분 WARN / 4분 CRITICAL) —
+        수집기 스톨(120초)이 먼저 잡히고 그 여파로 여기 CRITICAL이 뜨는 순서가 되게 한다.
+        """
+        status = staleness_status(
+            self.seconds_since_last_publish(),
+            warn_after=120.0,
+            critical_after=240.0,
+            warming_up_detail="웜업 — 아직 첫 발행 전",
+        )
+        if status.level is not HealthLevel.OK:
+            return status
+
+        degraded = {
+            horizon.value: ratio
+            for horizon, ratio in self._last_nan_ratio.items()
+            if ratio > _NAN_RATIO_HALT_THRESHOLD
+        }
+        if degraded:
+            worst = ", ".join(f"{h} {r:.0%}" for h, r in sorted(degraded.items()))
+            return HealthStatus(HealthLevel.WARN, f"NaN 비율 임계 초과 — 신호 정지 권고: {worst}")
+        return status
+
+    @property
+    def history_capacity(self) -> int:
+        """웜스타트 호출측이 "몇 개를 읽어와야 하는지" 알기 위한 값 — `_MAX_HISTORY`를
+        호출측에 다시 하드코딩하지 않게 노출한다(단일 소스)."""
+        return _MAX_HISTORY
+
+    def warm_start(
+        self, bars_by_horizon: Mapping[Horizon, Sequence[BarClosed]]
+    ) -> dict[Horizon, int]:
+        """과거 완성봉으로 롤링 윈도우를 미리 채운다 — 발행은 하지 않는다.
+
+        **왜 필요한가 (2026-07-30 로그 실측)**: 이 엔진은 매 기동마다 빈 deque로 시작했다.
+        그 결과 ① 매일 아침 전 Horizon이 nan_ratio 0.96에서 출발해 1m조차 30분 넘게 쓸모가
+        없었고 ② 15m/30m는 하루에 각각 26/14봉밖에 안 생겨 **최대 윈도우를 영영 못 채웠다**
+        (2026-07-29 실측 최저 nan_ratio 15m 0.678 / 30m 0.694 — 하루 종일 피처의 2/3가 NaN)
+        ③ 장중 재시작 한 번이면 그때까지 쌓인 워밍업이 통째로 날아갔다(같은 날 12:16·14:49에
+        1m nan_ratio가 0.025 → 0.702 → 0.959로 리셋된 것이 로그에 그대로 남아 있다).
+        Parquet 아카이브에 필요한 봉이 이미 다 있는데도 안 읽고 있었을 뿐이다.
+
+        `SessionState`도 함께 채운다 — M1 봉만, 시간 오름차순으로 흘린다(`handle_bar()`와
+        같은 규율). 이건 부수효과가 아니라 목적 중 하나다: `px_gap_open`은
+        `prev_day_close_ticks`가 있어야 값이 나오는데, 콜드스타트에서는 전일 종가를 볼 방법이
+        없어 **항상 None이었다**. 전일 봉을 시간순으로 흘리면 `on_bar()`의 일자 롤오버가
+        자연스럽게 전일 종가를 채운다.
+
+        입력: Horizon별 완성봉 목록. 심볼/Horizon이 안 맞는 봉은 버린다. 시간순이 아니어도
+             되며(여기서 정렬한다), 용량(`history_capacity`)을 넘으면 최신 것만 남는다.
+        반환: Horizon별로 실제 적재된 봉 수 — 호출측이 로그로 남긴다.
+        """
+        for horizon, bars in bars_by_horizon.items():
+            history = self._history.get(horizon)
+            if history is None:
+                continue  # 이 엔진이 구독하지 않는 Horizon
+            accepted = sorted(
+                (b for b in bars if b.symbol == self._symbol and b.horizon == horizon),
+                key=lambda b: b.bar_open_kst,
+            )
+            history.clear()
+            history.extend(accepted)  # deque(maxlen)이 알아서 오래된 것부터 버린다
+
+        for bar in self._history.get(Horizon.M1, ()):
+            self._session.on_bar(bar)
+
+        return {horizon: len(history) for horizon, history in self._history.items()}
 
     async def handle_bar(self, bar: BarClosed) -> None:
         """
@@ -139,6 +234,8 @@ class FeatureEngine:
                 horizon=vector.horizon.value,
             )
             return
+        self._last_publish_at = self._monotonic()
+        self._last_nan_ratio[vector.horizon] = vector.nan_ratio
         mlog.log(
             "FeaturePublish",
             "FeatureVector 발행",

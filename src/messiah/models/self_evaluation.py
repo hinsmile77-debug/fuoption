@@ -88,12 +88,22 @@ def run_self_evaluation(
     fills: Sequence[Fill] = (),
     cost_model: CostModel | None = None,
     periods_per_year: float = 252.0,
+    instance_id: str | None = None,
 ) -> SelfEvalReport:
     """하루치 챔피언 실현수익률(`champion_returns`, 비율 단위 — Position Reconciler 부재로
     호출자가 직접 산출해 넘긴다, 모듈 docstring)로 승률·PF·Sharpe·MDD를 집계하고, 그날의
-    주문/체결로 슬리피지를 대사한다."""
+    주문/체결로 슬리피지를 대사한다.
+
+    `instance_id`는 명시적으로 받는다(2026-07-30 수정) — `BusMessage.instance_id`는 보통
+    `MessageBus.publish()`가 발행 시점에 채워 넣는데(`core/bus.py`), 이 리포트는 버스를 안
+    거치고 `logs/self_eval_{date}.json`으로 곧장 저장돼 기본값 `"unset"`이 그대로 파일에
+    남았다(2026-07-29 산출물 실측). 멀티 PC 리포트 병합이 이 필드의 존재 이유라
+    (`core/messages.py` 모듈 docstring, Ver 1.1 §7.3) 비어 있으면 나중에 어느 PC 결과인지
+    복원할 수 없다.
+    """
     slippage = reconcile_slippage(orders, acks, fills, cost_model=cost_model)
     report = SelfEvalReport(
+        **({"instance_id": instance_id} if instance_id else {}),
         date=date,
         symbol=symbol,
         n_trades=len(champion_returns),

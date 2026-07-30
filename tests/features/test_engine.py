@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
-from messiah.core.messages import BarClosed, FeatureVector, Horizon
+from messiah.core.messages import BarClosed, FeatureVector, HealthLevel, Horizon
 from messiah.core.timeutil import KST
 from messiah.features.engine import FeatureEngine
 from messiah.features.px_core import STATEFUL_FEATURES as PX_STATEFUL_FEATURES
@@ -234,3 +234,185 @@ async def test_high_nan_ratio_after_warmup_logs_feature_nan_warning(monkeypatch)
 
     await engine.handle_bar(_bar(2))  # 3번째 봉 — 워밍업 완료 시점, 여전히 100% None이라 경고
     assert any(tag == "FeatureNaN" for tag, _ in logged)
+
+
+# ---------------------------------------------------------------- 웜스타트 (2026-07-30)
+
+
+def _bar_on(day: int, minute: int, horizon: Horizon = Horizon.M5, c=100) -> BarClosed:
+    return BarClosed(
+        symbol="A05608",
+        horizon=horizon,
+        bar_open_kst=datetime(2026, 7, day, 9, 0, tzinfo=KST) + timedelta(minutes=minute),
+        o_ticks=c,
+        h_ticks=c + 5,
+        l_ticks=c - 5,
+        c_ticks=c,
+        volume=10,
+        quality_ok=True,
+    )
+
+
+async def test_warm_start_fills_history_without_publishing():
+    """웜스타트는 과거 봉으로 창을 채울 뿐, 실시간 토픽에 과거 피처를 흘리면 안 된다."""
+    bus = FakeBus()
+    engine = FeatureEngine("A05608", bus, feature_set="v-test", horizons=[Horizon.M5])
+
+    loaded = engine.warm_start({Horizon.M5: [_bar_on(23, m) for m in range(10)]})
+
+    assert loaded[Horizon.M5] == 10
+    assert bus.published == []  # 발행 없음
+
+
+async def test_warm_start_makes_the_first_live_bar_immediately_useful():
+    """2026-07-30 핵심 회귀 — 예전엔 매 기동이 콜드스타트라 첫 봉의 nan_ratio가 0.96이었다."""
+    bus = FakeBus()
+    cold = FeatureEngine("A05608", bus, feature_set="v-test", horizons=[Horizon.M5])
+    await cold.handle_bar(_bar_on(24, 0))
+    cold_nan = bus.published[-1][1].nan_ratio
+
+    warm_bus = FakeBus()
+    warm = FeatureEngine("A05608", warm_bus, feature_set="v-test", horizons=[Horizon.M5])
+    warm.warm_start({Horizon.M5: [_bar_on(23, m, c=100 + m) for m in range(130)]})
+    await warm.handle_bar(_bar_on(24, 0))
+    warm_nan = warm_bus.published[-1][1].nan_ratio
+
+    assert cold_nan > 0.9  # 콜드스타트는 거의 전부 NaN
+    assert warm_nan < 0.1  # 웜스타트 후 첫 봉부터 사실상 전부 계산됨
+
+
+def test_warm_start_respects_history_capacity():
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    loaded = engine.warm_start(
+        {Horizon.M5: [_bar_on(23, m) for m in range(engine.history_capacity + 50)]}
+    )
+
+    assert loaded[Horizon.M5] == engine.history_capacity
+
+
+def test_warm_start_sorts_out_of_order_input():
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+    shuffled = [_bar_on(23, 5), _bar_on(23, 1), _bar_on(23, 3)]
+
+    engine.warm_start({Horizon.M5: shuffled})
+
+    minutes = [b.bar_open_kst.minute for b in engine._history[Horizon.M5]]
+    assert minutes == sorted(minutes)
+
+
+def test_warm_start_drops_foreign_symbols_and_horizons():
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+    other_symbol = BarClosed(
+        symbol="OTHER",
+        horizon=Horizon.M5,
+        bar_open_kst=datetime(2026, 7, 23, 9, 0, tzinfo=KST),
+        o_ticks=1,
+        h_ticks=1,
+        l_ticks=1,
+        c_ticks=1,
+        volume=1,
+        quality_ok=True,
+    )
+
+    loaded = engine.warm_start({Horizon.M5: [_bar_on(23, 0), other_symbol, _bar_on(23, 1)]})
+
+    assert loaded[Horizon.M5] == 2
+
+
+def test_warm_start_ignores_unsubscribed_horizons():
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    loaded = engine.warm_start(
+        {Horizon.M5: [_bar_on(23, 0)], Horizon.M30: [_bar_on(23, 0, horizon=Horizon.M30)]}
+    )
+
+    assert Horizon.M30 not in loaded
+    assert loaded[Horizon.M5] == 1
+
+
+async def test_warm_start_recovers_prev_day_close_for_gap_open():
+    """px_gap_open은 전일 종가가 있어야 값이 나온다 — 콜드스타트에서는 볼 방법이 없어 항상
+    None이었다. 전일 M1 봉을 시간순으로 흘리면 SessionState의 일자 롤오버가 이를 채운다."""
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M1])
+
+    engine.warm_start({Horizon.M1: [_bar_on(23, m, horizon=Horizon.M1, c=100) for m in range(30)]})
+
+    assert engine._session.current_day == date(2026, 7, 23)
+    assert engine._session._last_close_ticks == 100
+
+    await engine.handle_bar(_bar_on(24, 0, horizon=Horizon.M1, c=110))
+
+    assert engine._session.prev_day_close_ticks == 100  # 전일 종가가 살아났다
+    assert engine._session.session_open_ticks == 110  # 새 세션 시가로 리셋
+
+
+def test_warm_start_on_empty_input_is_harmless():
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    loaded = engine.warm_start({})
+
+    assert loaded == {Horizon.M5: 0}
+
+
+# ---------------------------------------------------------------- 자가 헬스 판정 (고도화 1)
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_health_is_ok_before_the_first_publish():
+    clock = _Clock()
+    engine = FeatureEngine(
+        "A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5], monotonic=clock
+    )
+
+    status = engine.health()
+
+    assert status.level is HealthLevel.OK
+    assert "웜업" in status.detail
+
+
+async def test_health_goes_critical_when_publishing_stops():
+    clock = _Clock()
+    engine = FeatureEngine(
+        "A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5], monotonic=clock
+    )
+    engine.warm_start({Horizon.M5: [_bar_on(23, m, c=100 + m) for m in range(130)]})
+    await engine.handle_bar(_bar_on(24, 0))
+
+    assert engine.health().level is HealthLevel.OK
+    clock.now += 130.0
+    assert engine.health().level is HealthLevel.WARN
+    clock.now += 130.0
+    assert engine.health().level is HealthLevel.CRITICAL
+
+
+async def test_health_warns_when_nan_ratio_exceeds_the_halt_threshold():
+    """2026-07-30 실측: 15m/30m가 하루 종일 NaN 2/3였는데 화면 어디에도 안 드러났다."""
+    clock = _Clock()
+    engine = FeatureEngine(
+        "A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5], monotonic=clock
+    )
+    await engine.handle_bar(_bar_on(24, 0))  # 콜드스타트 — nan_ratio가 매우 높다
+
+    status = engine.health()
+
+    assert status.level is HealthLevel.WARN
+    assert "5m" in status.detail
+
+
+async def test_health_is_ok_once_warm_started_features_are_dense():
+    clock = _Clock()
+    engine = FeatureEngine(
+        "A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5], monotonic=clock
+    )
+    engine.warm_start({Horizon.M5: [_bar_on(23, m, c=100 + m) for m in range(130)]})
+    await engine.handle_bar(_bar_on(24, 0))
+
+    assert engine.health().level is HealthLevel.OK

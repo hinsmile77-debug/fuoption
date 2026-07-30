@@ -3,11 +3,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
-import polars as pl
 import pytest
 from messiah.broker.kis import tr_codes
 from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.ws_client import ApprovalKeyIssuer
+from messiah.core.messages import Horizon
 from messiah.core.timeutil import now_kst
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.collector import MultiSymbolTickCollector, SymbolFeed, TickCollector
@@ -39,6 +39,13 @@ _REAL_TICK_2 = (
 _TICK_NEXT_MINUTE = _REAL_TICK_1.replace("152953", "153010")
 
 _TICK_SIZE = Decimal("0.02")
+_TODAY = now_kst().date()
+
+
+def _archived(tmp_path, symbol: str = "A05608"):
+    """물리 배치(장중 조각 vs 통합본)를 테스트가 알 필요 없다 — 아카이버에게 그날치를
+    묻는다(`data/archiver.py` "조각 쓰기")."""
+    return ParquetArchiver(tmp_path).read_day(symbol, Horizon.M1, _TODAY)
 
 
 class FakeConnection:
@@ -118,7 +125,7 @@ async def test_run_once_subscribes_and_archives_completed_bar(tmp_path: Path):
     sent = json.loads(conn.sent[0])
     assert sent["body"]["input"] == {"tr_id": tr_codes.WS_TR_FUTURES_CONTRACT, "tr_key": "A05608"}
 
-    df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
+    df = _archived(tmp_path)
     assert df.height == 1
     row = df.row(0, named=True)
     assert row["o_ticks"] == 54015  # 1080.30 / 0.02
@@ -148,7 +155,7 @@ async def test_run_once_works_without_bus(tmp_path: Path):
     with pytest.raises(ConnectionError):
         await collector.run_once()  # bus=None이어도 예외 없이 archiver까지는 정상 동작해야 함
 
-    assert (tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet").exists()
+    assert _archived(tmp_path) is not None
 
 
 async def test_handle_message_ignores_json_control_messages(tmp_path: Path):
@@ -157,7 +164,7 @@ async def test_handle_message_ignores_json_control_messages(tmp_path: Path):
     with pytest.raises(ConnectionError):
         await collector.run_once()
 
-    assert not (tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet").exists()  # 완성봉 없음(정상)
+    assert _archived(tmp_path) is None  # 완성봉 없음(정상)
 
 
 async def test_archiver_failure_is_logged_and_does_not_crash_loop(tmp_path: Path, monkeypatch):
@@ -269,7 +276,7 @@ async def test_run_forever_reconnects_with_backoff_and_resumes_archiving(
     # 재연결: 시도3(시도1~2의 단절에서 복구), 시도4(시도3 이후 단절에서 복구) 각각 1회 = 2건
     assert len(reconnect_logs) == 2
 
-    df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
+    df = _archived(tmp_path)
     assert df.height == 1  # 시도3에서 완성된 1분봉이 정상 적재됨
 
 
@@ -300,12 +307,11 @@ async def test_flush_final_bar_archives_remaining_partial_bar(tmp_path: Path):
 
     with pytest.raises(ConnectionError):
         await collector.run_once()
-    partial_path = tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet"
-    assert not partial_path.exists()  # 아직 봉 미완성(1틱뿐)
+    assert _archived(tmp_path) is None  # 아직 봉 미완성(1틱뿐)
 
     await collector.flush_final_bar()
 
-    df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
+    df = _archived(tmp_path)
     assert df.height == 1
     assert df.row(0, named=True)["quality_ok"] is False  # 1틱 < MIN_TICKS_FOR_QUALITY_OK(3)
 
@@ -374,11 +380,11 @@ async def test_multi_symbol_routes_ticks_to_correct_symbol_by_tr_id(tmp_path: Pa
     with pytest.raises(ConnectionError):
         await collector.run_once()
 
-    fut_df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
+    fut_df = _archived(tmp_path)
     assert fut_df.height == 1
     assert fut_df.row(0, named=True)["volume"] == 2
 
-    opt_df = pl.read_parquet(tmp_path / _OPT_SYMBOL / "1m" / f"{_TODAY_STR}.parquet")
+    opt_df = _archived(tmp_path, _OPT_SYMBOL)
     assert opt_df.height == 1
     assert opt_df.row(0, named=True)["volume"] == 3  # 2+1
 
@@ -397,7 +403,7 @@ async def test_multi_symbol_uses_correct_tick_size_per_symbol(tmp_path: Path):
         await collector.run_once()
     await collector.flush_final_bar()  # 미완성 1틱짜리 봉을 강제 flush(가격 변환만 확인 목적)
 
-    opt_df = pl.read_parquet(tmp_path / _OPT_SYMBOL / "1m" / f"{_TODAY_STR}.parquet")
+    opt_df = _archived(tmp_path, _OPT_SYMBOL)
     assert opt_df.row(0, named=True)["o_ticks"] == 525  # 5.25 / 0.01, 0.02였다면 262(반올림) 나옴
 
 
@@ -455,7 +461,7 @@ async def test_multi_symbol_flush_final_bar_flushes_all_symbols(tmp_path: Path):
 
     await collector.flush_final_bar()
 
-    fut_df = pl.read_parquet(tmp_path / "A05608" / "1m" / f"{_TODAY_STR}.parquet")
-    opt_df = pl.read_parquet(tmp_path / _OPT_SYMBOL / "1m" / f"{_TODAY_STR}.parquet")
+    fut_df = _archived(tmp_path)
+    opt_df = _archived(tmp_path, _OPT_SYMBOL)
     assert fut_df.height == 1
     assert opt_df.height == 1
