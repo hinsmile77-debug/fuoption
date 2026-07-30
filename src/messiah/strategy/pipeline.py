@@ -36,6 +36,25 @@ Aggregator의 S는 이미 여러 Horizon을 통합한 값이라 "어느 Horizon 
 남는다(risk_engine.py 모듈 docstring 참고). 재생/스모크(`run_full_path_smoke.py` 등)처럼
 KRX 세션 개념이 무의미한 경로는 지금까지처럼 `event_calendar`를 안 넘기면 된다.
 
+## 장전 구간(08:45~09:00)은 웜업만 — 거래는 안 한다 (2026-07-30, 사용자 결정)
+
+실측으로 3거래일 연속 **08:45:00부터** 틱이 들어온다는 것이 확인됐다(`scripts/run_l1_daily.py`
+모듈 docstring). 그 데이터를 버리지 않기로 했다 — 수집·아카이브·봉차트·피처 웜업에는 **그대로
+쓴다**. 다만 정규장(09:00) 전에는 **주문을 내지 않는다**: 진입도 청산도 없이 시스템만 데워
+놓고 개장을 기다린다.
+
+게이트는 `decision.intent` 발행 **뒤**에 둔다. 판단 자체는 평소와 똑같이 수행하고 그 결과도
+그대로 발행하되 주문 제출만 건너뛰는 것 — 그래야 "장전에 시스템이 무엇을 하려 했는가"가
+화면과 로그에 남아 개장 직후 동작을 예측·검증할 수 있다(`OutOfSessionNoTrade` 로그).
+
+같은 판정이 마감(15:35) 이후도 함께 막는다 — `EventCalendar.is_regular_session()`이
+반개구간 [09:00, 15:35)이라 자연히 양쪽을 덮는다. `event_calendar` 미주입이면 이 게이트는
+비활성(재생/스모크의 기존 동작 유지, R4/R6·CB와 같은 옵션 패턴).
+
+**적용 범위**: 이 게이트는 `handle_futures_view()`의 신규 주문 경로만 막는다. KillSwitch·CB의
+비상 청산 경로는 그대로 둔다 — 안전 이벤트에 대한 반응이고, 어차피 장 밖에서는 거래소가
+주문을 거부하므로 막을 실익이 없다.
+
 ## R10(연속손실) 결선은 이번 스코프 밖
 
 `RiskEngine.record_trade_result()`는 진입가·청산가를 매칭해 실현손익을 계산하는 포지션
@@ -92,6 +111,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime
 from decimal import Decimal
+from typing import Callable
 
 from messiah.broker.base import BrokerAdapter, BrokerPosition
 from messiah.core.bus import TOPIC_BAR, TOPIC_CIRCUIT_BREAKER, TOPIC_FUTURES, TOPIC_INTENT, BusLike
@@ -107,7 +127,7 @@ from messiah.core.messages import (
     bar_confirm_time,
 )
 from messiah.core.scheduler import FixedTickScheduler
-from messiah.core.timeutil import now_utc
+from messiah.core.timeutil import now_utc, to_kst
 from messiah.execution.order_gateway import OrderGateway
 from messiah.features.px_core import atr as compute_atr
 from messiah.models.labeling import DEFAULT_ATR_WINDOW
@@ -142,6 +162,7 @@ class TradingPipeline:
         atr_window: int = DEFAULT_ATR_WINDOW,
         event_calendar: EventCalendar | None = None,
         circuit_breaker_monitor: CircuitBreakerMonitor | None = None,
+        now: Callable[[], datetime] = now_utc,
     ) -> None:
         self._symbol = symbol
         self._broker = broker
@@ -161,6 +182,12 @@ class TradingPipeline:
         # 미지정(None)이면 CB 대응 전체가 비활성(기존 동작, 회귀 없음) — 모듈 docstring
         # "거래소 서킷브레이커 자동 대응" 절 참고.
         self._circuit_breaker_monitor = circuit_breaker_monitor
+        # 벽시계 주입점 (2026-07-30). `handle_futures_view()`의 데이터 신선도는 `view.ts_utc`
+        # (그 데이터가 대표하는 시각)에서 오지만, `watch_circuit_breaker_forever()`는 "데이터가
+        # 안 오는 동안"을 재는 순수 벽시계 폴링이라 실제 시각이 필요하다 — 그 경로를 실시간
+        # 대기 없이 테스트하려면 주입이 유일한 방법이다(`core/scheduler.py`·`data/collector.py`의
+        # 스톨 워치독과 같은 주입 원칙).
+        self._now = now
         self._bars: deque[BarClosed] = deque(maxlen=_BAR_HISTORY_LIMIT)
         self._last_bar_confirm_at: datetime | None = None
         self._daily_start_equity: Decimal | None = None
@@ -225,6 +252,18 @@ class TradingPipeline:
         if intent.side == Side.NO_TRADE:
             return
 
+        # 정규장(09:00~15:35) 밖이면 여기서 멈춘다 — 판단은 다 하고 주문만 안 낸다.
+        # `decision.intent`는 이미 발행됐으므로 "그때 시스템이 무엇을 하려 했는지"는 화면·
+        # 로그에 그대로 남는다(모듈 docstring "장전 구간" 참고).
+        if not self._in_regular_session(view.ts_utc):
+            log(
+                "OutOfSessionNoTrade",
+                f"정규장 밖({to_kst(view.ts_utc):%H:%M}) — 판단은 수행, 주문은 생략",
+                symbol=self._symbol,
+                side=intent.side.value,
+            )
+            return
+
         bars = list(self._bars)
         atr_ticks = compute_atr(bars, self._atr_window) if bars else None
         if atr_ticks is None or atr_ticks <= 0:
@@ -269,6 +308,13 @@ class TradingPipeline:
         if ack is None:
             self._risk_engine.record_order_error(view.ts_utc)
 
+    def _in_regular_session(self, as_of: datetime) -> bool:
+        """`event_calendar` 미주입이면 항상 True — 재생/스모크처럼 KRX 세션 개념이 없는
+        경로의 기존 동작을 그대로 둔다(R4/R6·CB 주입과 같은 옵션 패턴)."""
+        if self._event_calendar is None:
+            return True
+        return self._event_calendar.is_regular_session(as_of)
+
     def _data_age_seconds(self, as_of: datetime) -> float:
         if self._last_bar_confirm_at is None:
             return float("inf")  # 데이터를 한 번도 못 봤음 — R11 관점에서 최대 위험
@@ -310,20 +356,24 @@ class TradingPipeline:
         더해 정지 중에도 단계적으로 phase가 올라가게 한다. 청산은 시도하지 않는다(재개 시점에만
         — 모듈 docstring 근거와 동일: 정지 중엔 주문 자체가 거부된다). 모니터 미주입이면
         즉시 반환."""
-        monitor = self._circuit_breaker_monitor
-        if monitor is None:
+        if self._circuit_breaker_monitor is None:
             return
+        await FixedTickScheduler(tick_seconds=30.0).run_forever(self.observe_circuit_breaker_tick)
 
-        async def _tick() -> None:
-            if self._last_bar_confirm_at is None:
-                return  # 콜드스타트/워밍업 — 기준선 없음, CB 판정 대상 아님(위 docstring 근거)
-            data_age_seconds = self._data_age_seconds(now_utc())
-            event = monitor.observe(data_age_seconds, now_utc())
-            await self._publish_circuit_breaker_status(event)
-            if event.just_confirmed:
-                await self._gateway.halt("circuit breaker confirmed")
+    async def observe_circuit_breaker_tick(self) -> None:
+        """워치독의 **1틱**만 수행 — `watch_circuit_breaker_forever()`가 30초 격자로 부른다.
 
-        await FixedTickScheduler(tick_seconds=30.0).run_forever(_tick)
+        루프에서 떼어낸 이유는 검증 때문이다: 주입된 시계와 짝지으면 실제로 몇 분을 기다리지
+        않고도 "데이터가 안 오는 동안 phase가 단계적으로 올라가는가"를 그대로 재현할 수 있다
+        (`now` 주입 근거는 `__init__` 참고)."""
+        monitor = self._circuit_breaker_monitor
+        if monitor is None or self._last_bar_confirm_at is None:
+            return  # 콜드스타트/워밍업 — 기준선 없음, CB 판정 대상 아님(위 docstring 근거)
+        as_of = self._now()
+        event = monitor.observe(self._data_age_seconds(as_of), as_of)
+        await self._publish_circuit_breaker_status(event)
+        if event.just_confirmed:
+            await self._gateway.halt("circuit breaker confirmed")
 
     async def run_forever(self) -> None:
         patterns = [f"{TOPIC_BAR}.{Horizon.M1.value}.{self._symbol}", TOPIC_FUTURES]

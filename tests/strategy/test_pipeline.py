@@ -14,7 +14,7 @@ from messiah.core.messages import (
     Side,
     bar_confirm_time,
 )
-from messiah.core.timeutil import KST
+from messiah.core.timeutil import KST, now_utc
 from messiah.execution.order_gateway import OrderGateway
 from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor, CircuitBreakerPhase
 from messiah.risk.kill_switch import KillSwitch, KillSwitchConfig
@@ -24,6 +24,19 @@ from messiah.strategy.pipeline import TradingPipeline
 _SYMBOL = "TEST"
 _START = datetime(2026, 7, 30, 9, 0, tzinfo=KST)
 _NEAR_CLOSE_START = datetime(2026, 7, 30, 15, 10, tzinfo=KST)  # 15:35 마감 25분 전부터 워밍업
+_WARMUP_BARS = 20
+
+# `_view()`의 기본 타임스탬프 — 워밍업 마지막 봉이 확정된 직후(09:20:05).
+#
+# 예전엔 기본값이 `FuturesView`의 필드 기본값(`now_utc()`, 즉 **실제 벽시계**)이었다. 봉은
+# 2026-07-30 09:00~09:19로 고정돼 있는데 뷰만 실시간이라, `_data_age_seconds()`가
+# "지금 − 09:20"이 되어 시간이 갈수록 커진다. 커밋 b1a366d(2026-07-27) 시점엔 그 날짜가
+# **미래**라 값이 음수 → 임계 미달로 통과했지만, 2026-07-30이 도래하자 데이터단절 1355초가
+# 되어 CB가 확정되고 R11이 신규진입을 막아 4건이 한꺼번에 깨졌다(그대로 두면 **매일** 실패).
+#
+# `FuturesView.ts_utc`는 "그 뷰가 대표하는 시장 데이터의 시각"이므로, 워밍업 봉과 같은
+# 타임라인에 두는 것이 원래 의미에도 맞다 — 벽시계와 무관해져 언제 돌려도 결과가 같다.
+_DEFAULT_VIEW_TS = _START + timedelta(minutes=_WARMUP_BARS, seconds=5)
 
 
 def _m1_bars(n: int, start: datetime = _START) -> list[BarClosed]:
@@ -59,8 +72,7 @@ def _view(*, score=0.5, agg_p_up=0.8, agg_p_down=0.1, uncertainty=0.0, dispersio
         n_experts=2,
         model_versions=["v1"],
     )
-    if ts is not None:
-        kwargs["ts_utc"] = ts
+    kwargs["ts_utc"] = ts if ts is not None else _DEFAULT_VIEW_TS
     return FuturesView(**kwargs)
 
 
@@ -73,7 +85,7 @@ async def _make_pipeline(**overrides):
     return bus, broker, gateway, pipeline
 
 
-async def _warm_up(pipeline, broker, n=20, start: datetime = _START):
+async def _warm_up(pipeline, broker, n=_WARMUP_BARS, start: datetime = _START):
     bars = _m1_bars(n, start)
     for bar in bars:
         broker.on_bar(bar)
@@ -296,3 +308,136 @@ async def test_circuit_breaker_status_published_for_command_center_ui():
     assert len(published) == 1
     assert published[0].symbol == _SYMBOL
     assert published[0].phase == CircuitBreakerPhase.NORMAL.value
+
+
+# ---------------------------------------------------------------- 벽시계 주입 (2026-07-30)
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_watchdog_uses_the_injected_clock():
+    """`watch_circuit_breaker_forever()`는 "데이터가 안 오는 동안"을 재는 순수 벽시계
+    폴링이라, 주입 없이는 실제로 몇 분을 기다려야만 검증할 수 있었다."""
+    fake_now = _START + timedelta(minutes=_WARMUP_BARS)  # 마지막 봉 확정 직후
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: fake_now
+    )
+    await _warm_up(pipeline, broker)
+    published: list[CircuitBreakerStatus] = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["sys.circuit_breaker"], collector)
+
+    await pipeline.observe_circuit_breaker_tick()  # 워치독 1틱만 수행
+
+    assert published and published[0].phase == CircuitBreakerPhase.NORMAL.value
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_watchdog_confirms_when_the_injected_clock_advances():
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    now_holder["t"] += timedelta(seconds=250)  # confirmed 임계(240초) 초과
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert pipeline._circuit_breaker_monitor.phase == CircuitBreakerPhase.CONFIRMED
+    assert gateway.halted is True
+
+
+@pytest.mark.asyncio
+async def test_default_clock_is_the_real_wall_clock():
+    """주입을 안 하면 기존 동작 그대로 — 회귀 방지."""
+    bus, broker, gateway, pipeline = await _make_pipeline()
+    assert pipeline._now is not None  # noqa: SLF001
+    assert (now_utc() - pipeline._now()).total_seconds() < 5  # noqa: SLF001
+
+
+# ---------------------------------------------------------------- 장전 세션 게이트 (2026-07-30)
+
+
+_PRE_OPEN_START = datetime(2026, 7, 30, 8, 45, tzinfo=KST)  # 실측상 틱이 실제로 들어오는 시각
+
+
+@pytest.mark.asyncio
+async def test_pre_open_evaluates_but_does_not_trade():
+    """장전 08:45~09:00은 웜업만 — 판단은 하되 주문은 내지 않는다(2026-07-30 사용자 결정)."""
+    # `atr_window`를 줄인 이유는 아래 `test_gate_is_inactive_without_an_event_calendar`와
+    # 동일 — 이 테스트가 검증하려는 건 게이트지 ATR 워밍업이 아니다.
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        event_calendar=EventCalendar.from_file(), atr_window=5
+    )
+    intents = []
+
+    async def collector(msg):
+        intents.append(msg)
+
+    await bus.subscribe(["decision.intent"], collector)
+    bars = await _warm_up(pipeline, broker, n=10, start=_PRE_OPEN_START)  # 08:45~08:54
+    fresh_ts = bar_confirm_time(bars[-1]) + timedelta(seconds=5)  # 08:55:05 — 아직 개장 전
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=fresh_ts))
+
+    assert len(intents) == 1
+    assert intents[0].side == Side.LONG  # 판단은 평소대로 수행·발행된다
+    assert await broker.positions() == []  # 그러나 주문은 나가지 않는다
+
+
+@pytest.mark.asyncio
+async def test_regular_session_still_trades_normally():
+    """게이트가 정규장까지 막아버리면 시스템이 아무것도 못 한다 — 경계 확인."""
+    bus, broker, gateway, pipeline = await _make_pipeline(event_calendar=EventCalendar.from_file())
+    await _warm_up(pipeline, broker)  # 09:00~09:19
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+
+    assert len(await broker.positions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_open_bars_still_feed_the_warmup():
+    """거래는 막되 **데이터는 버리지 않는다** — 장전 봉으로 ATR 워밍업이 채워져야 개장
+    직후 첫 뷰에서 바로 거래할 수 있다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(event_calendar=EventCalendar.from_file())
+    await _warm_up(pipeline, broker, n=15, start=_PRE_OPEN_START)  # 08:45~08:59 전부 장전
+
+    assert len(pipeline._bars) == 15  # noqa: SLF001 — 장전 봉이 그대로 쌓였다
+
+    # 개장(09:00) 이후 첫 뷰 — 장전에 쌓인 봉만으로 ATR이 서서 즉시 진입된다
+    open_ts = datetime(2026, 7, 30, 9, 0, 5, tzinfo=KST)
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=open_ts))
+
+    assert len(await broker.positions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_after_close_is_blocked_by_the_same_gate():
+    """[09:00, 15:35) 반개구간이라 마감 이후도 같은 판정이 막는다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(event_calendar=EventCalendar.from_file())
+    after_close_start = datetime(2026, 7, 30, 15, 36, tzinfo=KST)
+    bars = await _warm_up(pipeline, broker, start=after_close_start)
+    fresh_ts = bar_confirm_time(bars[-1]) + timedelta(seconds=5)
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=fresh_ts))
+
+    assert await broker.positions() == []
+
+
+@pytest.mark.asyncio
+async def test_gate_is_inactive_without_an_event_calendar():
+    """재생/스모크의 기존 동작 유지 — 미주입이면 세션 개념 자체가 없다.
+
+    `atr_window`를 줄여 ATR 워밍업(기본 15봉 필요)이 이 테스트의 변수가 되지 않게 한다 —
+    같은 장전 시각·같은 봉 수로 위 `test_pre_open_evaluates_but_does_not_trade`와 정확히
+    대비시켜, 차이가 오직 `event_calendar` 주입 여부에서만 오도록 만든다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(atr_window=5)  # event_calendar 미주입
+    bars = await _warm_up(pipeline, broker, n=10, start=_PRE_OPEN_START)
+    fresh_ts = bar_confirm_time(bars[-1]) + timedelta(seconds=5)  # 08:55:05 — 장전
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=fresh_ts))
+
+    assert len(await broker.positions()) == 1

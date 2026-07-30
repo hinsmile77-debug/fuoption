@@ -73,6 +73,7 @@ TAG_LEVELS: dict[str, int] = {
     "IntegrityThresholdBreached": logging.WARNING,  # 무결성 지표가 임계 초과 — 사람이 봐야 함
     "ArchiveCompacted": logging.INFO,  # 장중 조각 파일 → 일자 파일 통합 완료
     "ArchiveCompactionFailed": logging.WARNING,  # 통합 실패 — 조각은 그대로 남아 읽기는 계속 가능
+    "OutOfSessionNoTrade": logging.INFO,  # 정규장 밖 주문 생략 — 정상 동작(RiskReject와 동급)
 }
 
 _logger = logging.getLogger("messiah")
