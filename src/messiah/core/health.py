@@ -52,6 +52,11 @@ HEALTH_STALE_AFTER_SECONDS = 30.0
 # 이름(`"Health"`)을 그대로 키로 쓰면 서로 덮어써서 마지막 하나만 남는다.
 HEALTH_KEY_PREFIX = "health:"
 
+# 수집기 컴포넌트 이름 — 발행측(`scripts/run_l1_daily.py`)과 구독측(`strategy/pipeline.py`의
+# CB 판정)이 같은 문자열을 봐야 한다. 양쪽에 따로 하드코딩하면 한쪽 오타로 **조용히** 결선이
+# 끊긴다(CB가 영영 "수집기 상태를 모름"으로 남아 오탐 억제가 안 걸린다).
+COLLECTOR_COMPONENT = "l1.collector"
+
 
 def health_cache_key(component: str) -> str:
     return f"{HEALTH_KEY_PREFIX}{component}"

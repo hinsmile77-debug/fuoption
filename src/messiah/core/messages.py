@@ -111,6 +111,26 @@ class Tick(BusMessage):
         return ensure_aware(v)
 
 
+class BarSession(str, Enum):
+    """봉이 속한 세션 구분 (2026-07-31 신설).
+
+    `PRE_OPEN`은 정규장 개시(09:00) 이전에 들어온 프린트로 만들어진 봉이다. 이 구분이 필요한
+    이유는 2026-07-31 실측이다: 그날 08:45~09:04의 20봉이 **전부 `o=h=l=c=46633`으로 완전히
+    고정**돼 있었고(분당 1~4계약), 09:05에 49488로 튀며 실제 거래가 시작됐다 — 6.1% 점프다.
+    같은 구간이 07-29·07-30엔 실제로 움직였고 거래량도 500대였으므로(그래서 그때는 "실체결로
+    보인다"고 판단했다), **날마다 성격이 다르다**는 것이 확인된 셈이다.
+
+    2026-07-30에 "장전은 웜업만, 거래는 안 한다"고 정했지만 그 결정은 **주문만** 막았다 —
+    아카이브·피처 웜스타트·차트에는 그대로 들어갔고, 09:05봉은 스테일 값과 실거래 값을 합친
+    6% 범위의 합성 봉이 되어 ATR·변동성 계열을 오염시켰다. 이 필드는 그 데이터를 **버리지
+    않되 지울 수 없게 표시**하기 위한 것이다(파기는 되돌릴 수 없고, 소비자별 정책은 나중에
+    바꿀 수 있다).
+    """
+
+    REGULAR = "regular"
+    PRE_OPEN = "pre_open"
+
+
 class BarClosed(BusMessage):
     """완성봉 확정 이벤트 (bar.{horizon}) — 완성봉 규율의 기준점 (Ver 1.2 §2.2)."""
 
@@ -123,6 +143,9 @@ class BarClosed(BusMessage):
     c_ticks: int
     volume: int
     quality_ok: bool = True  # 틱 수 부족 등 저품질 플래그 (마흐디 방식)
+    # 기본값이 REGULAR인 이유: 이 필드가 생기기 전에 적재된 Parquet과 재생·스모크 경로가
+    # 전부 정규장 데이터라, 없는 값을 정규장으로 읽는 것이 사실과 맞다(`data/archiver.py`).
+    session: BarSession = BarSession.REGULAR
 
     @field_validator("bar_open_kst")
     @classmethod
@@ -399,11 +422,18 @@ class CircuitBreakerStatus(BusMessage):
     `CircuitBreakerMonitor.observe()` 호출마다(이벤트 구동 경로 + 벽시계 워치독 양쪽) 발행하는
     heartbeat다 — `phase`가 그대로면 "조용히 정상"이 아니라 매번 다시 확인시켜주는 쪽을
     택했다(`Health`가 5초 주기로 heartbeat하는 것과 같은 이유, UI의 신선도 배지가 이 주기에
-    기대어 STALE을 판정한다)."""
+    기대어 STALE을 판정한다).
+
+    `gateway_halted`는 **추정 상태가 아니라 실제 주문 게이트의 상태**다(2026-07-31 추가).
+    2026-07-31엔 `phase`가 정상으로 돌아온 뒤에도 `OrderGateway`가 halted로 남아 있었는데
+    (해제 경로 누락, `risk/circuit_breaker_monitor.py` 모듈 docstring 참고) 화면에는 그
+    사실이 전혀 안 보였다 — 6시간 42분간 주문이 막혀 있었다는 걸 아무도 몰랐다. 추정과 실제를
+    한 메시지에 나란히 실어 둘이 어긋나면 즉시 드러나게 한다."""
 
     symbol: str
     phase: str  # CircuitBreakerPhase.value 그대로("normal"/"warning"/"suspected"/"confirmed")
     reentry_cooldown_until: datetime | None = None
+    gateway_halted: bool = False
 
 
 # ---------------------------------------------------------------- L6 Learning / Self Evolution
@@ -464,16 +494,26 @@ class PromotionProposal(BusMessage):
 
 class SelfEvalReport(BusMessage):
     """일일 자가 평가 리포트 (sys.self_eval) — Ver 2.0 §7 "매일 장중 Shadow 병주 → 마감 후
-    Self Evaluation: 승률·PF·Sharpe 집계, 슬리피지 대사"."""
+    Self Evaluation: 승률·PF·Sharpe 집계, 슬리피지 대사".
+
+    ## `n_trades`가 사라지고 `n_return_samples`/`n_fills`로 갈라졌다 (2026-07-31)
+
+    예전 필드명은 `n_trades`였는데 **이름이 값과 달랐다** — 실제로는 체결 건수가 아니라
+    집계에 쓰인 수익률 표본 수였고, 유일한 호출자(`scripts/run_g2_paper_trading.py`)가 하루
+    1개(당일 총자산 변화율)를 표본으로 넘기므로 실무상 "누적 거래일 수"였다.
+
+    2026-07-29에 한 번 오해했고(그땐 주석으로만 정정했다), 2026-07-31 리포트의 `n_trades=3`이
+    **주문 0건·체결 0건인 날**에 다시 같은 오해를 만들었다. 주석은 리포트 JSON을 읽는 사람에게
+    안 따라간다 — 이름 자체를 고친다.
+
+    - `n_return_samples`: 승률·PF·Sharpe·MDD 계산에 실제로 들어간 수익률 표본 수.
+    - `n_fills`: 진짜 체결 건수. Position Reconciler가 없어 아직 셀 수 없으므로 **`None`**이다
+      — 0이 아니라 None인 것이 핵심이다(모르는 것과 없는 것을 구분, 마흐디 L18).
+    """
 
     date: str  # ISO 날짜(YYYY-MM-DD) — 거래일 단위가 자연 키, 시각이 아님
     symbol: str
-    # 이름과 달리 "체결 건수"가 아니라 **집계에 쓰인 수익률 표본 수**다. 현재 유일한 호출자
-    # (`scripts/run_g2_paper_trading.py`)는 Position Reconciler 부재로 체결 단위 손익을 못 내고
-    # 하루 1개(당일 총자산 변화율)를 표본으로 넘긴다 — 그래서 실무상 값은 "누적 거래일 수"다
-    # (2026-07-29 리포트의 n_trades=1은 체결 1건이 아니라 데이터 1일치라는 뜻). 필드명 정정은
-    # 스키마 변경이라 Position Reconciler 결선 때 함께 하고, 그전까지는 여기 명시해 둔다.
-    n_trades: int
+    n_return_samples: int
     win_rate: float
     profit_factor: float
     sharpe: float
@@ -481,3 +521,4 @@ class SelfEvalReport(BusMessage):
     n_shadow_bundles: int
     slippage_predicted_ticks: float
     slippage_realized_ticks: float
+    n_fills: int | None = None

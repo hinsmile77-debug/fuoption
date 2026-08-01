@@ -79,6 +79,25 @@ KRX 세션 개념이 무의미한 경로는 지금까지처럼 `event_calendar`�
 - 데이터가 끊긴 동안은 이 메서드 자체가 호출되지 않으므로(완전 이벤트 구동 구조), 정지 중에도
   단계적으로 phase가 올라가려면 별도 벽시계 워치독이 필요하다 — `watch_circuit_breaker_forever()`
   가 `core/scheduler.py`의 `FixedTickScheduler`로 이를 담당한다.
+- **위 정지·해제 반응은 두 경로가 반드시 똑같이 한다** — `_apply_circuit_breaker_event()`
+  하나만 통과하기 때문이다(2026-07-31 수정). 그 전에는 워치독 쪽에 해제 처리가 통째로 빠져
+  있었고, live 번들이 0개라 `intel.futures`가 아예 안 오는 날에는 **해제 코드가 있는 유일한
+  경로 자체가 죽어 있어** 게이트가 하루 종일 안 풀렸다(2026-07-31 실측 6시간 42분).
+
+## "한산"과 "단절"의 구분 — 수집기 heartbeat 결선 (2026-07-31)
+
+이 파이프라인은 자체 WS 연결이 없어(`scripts/run_g2_paper_trading.py`) 데이터 흐름의 실제
+상태를 직접 잴 근거가 없다 — 아는 건 "마지막 **봉**이 언제 확정됐나"뿐이다. 그런데 봉은 체결이
+있어야 생기므로, 체결이 뜸한 시장에서는 **연결이 멀쩡해도 봉이 안 만들어진다**. 2026-07-31의
+CB 오탐 15건(의심 10·확정 5)이 전부 이 형태였다.
+
+그래서 `run_forever()`가 `sys.health`를 함께 구독해 `l1.collector`의 heartbeat를 받아두고,
+`observe(collector_healthy=...)`로 넘긴다 — 수집기가 OK라고 말하는 동안엔 CB가 CONFIRMED로
+승격하지 못한다(SUSPECTED까지는 그대로 올라간다). 판정 근거와 완화 범위는
+`risk/circuit_breaker_monitor.py` 모듈 docstring "한산과 단절" 절 참고.
+
+heartbeat가 아예 없거나(구독 전/미발행) 끊긴 지 오래면 **"모른다"로 다뤄 억제하지 않는다** —
+수집기 프로세스가 죽은 상황을 정상으로 오해하면 안 되기 때문이다(`_collector_healthy()`).
 - **콜드스타트 오탐 방지**: `_last_bar_confirm_at is None`(봉을 한 번도 못 본 워밍업 구간)이면
   CB 판정 자체를 건너뛴다 — 이 경우 `_data_age_seconds()`가 `inf`를 반환하는데(R11 관점에선
   "최대 위험"이 맞는 값), CB 판정에 그대로 흘리면 "기준선 자체가 없음"을 "CB로 갑자기
@@ -114,14 +133,24 @@ from decimal import Decimal
 from typing import Callable
 
 from messiah.broker.base import BrokerAdapter, BrokerPosition
-from messiah.core.bus import TOPIC_BAR, TOPIC_CIRCUIT_BREAKER, TOPIC_FUTURES, TOPIC_INTENT, BusLike
+from messiah.core.bus import (
+    TOPIC_BAR,
+    TOPIC_CIRCUIT_BREAKER,
+    TOPIC_FUTURES,
+    TOPIC_HEALTH,
+    TOPIC_INTENT,
+    BusLike,
+)
 from messiah.core.event_calendar import EventCalendar
+from messiah.core.health import COLLECTOR_COMPONENT, HEALTH_STALE_AFTER_SECONDS
 from messiah.core.logging import log
 from messiah.core.messages import (
     BarClosed,
     BusMessage,
     CircuitBreakerStatus,
     FuturesView,
+    Health,
+    HealthLevel,
     Horizon,
     Side,
     bar_confirm_time,
@@ -191,6 +220,9 @@ class TradingPipeline:
         self._bars: deque[BarClosed] = deque(maxlen=_BAR_HISTORY_LIMIT)
         self._last_bar_confirm_at: datetime | None = None
         self._daily_start_equity: Decimal | None = None
+        # 수집기의 마지막 heartbeat — CB 오탐 억제의 유일한 입력(모듈 docstring "한산과 단절",
+        # `risk/circuit_breaker_monitor.py` 동명 절). 이 필드가 None이면 판정 자체를 안 한다.
+        self._last_collector_health: Health | None = None
 
     async def start_day(self) -> None:
         """장 시작 시 1회 호출 — 당일 시작 자본을 현재 계좌 스냅샷으로 고정하고(R2·Kill
@@ -225,12 +257,13 @@ class TradingPipeline:
         # 이벤트가 실전에서 재현됨 — R11(RiskEngine)은 이 경우에도 이미 신규진입을 막으므로
         # (`data_age_seconds > 30s`) 여기서 건너뛰어도 안전 공백은 없다.
         if self._circuit_breaker_monitor is not None and self._last_bar_confirm_at is not None:
-            cb_event = self._circuit_breaker_monitor.observe(data_age_seconds, view.ts_utc)
-            await self._publish_circuit_breaker_status(cb_event)
-            if cb_event.just_confirmed:
-                await self._gateway.halt("circuit breaker confirmed")
+            cb_event = self._circuit_breaker_monitor.observe(
+                data_age_seconds,
+                view.ts_utc,
+                collector_healthy=self._collector_healthy(view.ts_utc),
+            )
+            await self._apply_circuit_breaker_event(cb_event, positions)
             if cb_event.just_resumed:
-                await self._liquidate_after_circuit_breaker(positions)
                 positions = await self._broker.positions()  # 청산 반영된 최신 스냅샷
             circuit_breaker_active = self._circuit_breaker_monitor.blocks_entry(view.ts_utc)
             # KillSwitch R11과의 충돌 회피 — 모듈 docstring 참고.
@@ -315,10 +348,59 @@ class TradingPipeline:
             return True
         return self._event_calendar.is_regular_session(as_of)
 
+    def _collector_healthy(self, as_of: datetime) -> bool | None:
+        """수집기가 "내 연결은 멀쩡하다"고 말하고 있는가 — `None`은 "모른다"(정상 아님).
+
+        세 가지를 구분한다:
+
+        - `None` — heartbeat를 아직 못 받았거나 끊긴 지 오래됐다(`HEALTH_STALE_AFTER_SECONDS`).
+          수집기 프로세스가 죽었을 수도 있는 상황이라 **정상으로 봐서는 절대 안 된다**.
+          `CircuitBreakerMonitor.observe()`는 `None`이면 기존대로 CONFIRMED까지 승격한다.
+        - `True` — OK. 소켓도 살아 있고 틱도 자기 임계 안에 들어오는데 봉만 안 만들어지는
+          상태 = 한산이다. CB 승격을 막는다.
+        - `False` — WARN/CRITICAL. 수집기 스스로 "흐름이 이상하다"고 말하는 중이라 CB가
+          정지시키는 게 맞다. WARN도 정상으로 안 쳐주는 건, WARN이 뜨는 시점이 이미 적응
+          임계의 절반이라 곧 강제 재연결이 걸릴 구간이기 때문이다(`data/collector.py`
+          `health()`).
+        """
+        health = self._last_collector_health
+        if health is None:
+            return None
+        if (as_of - health.ts_utc).total_seconds() > HEALTH_STALE_AFTER_SECONDS:
+            return None
+        return health.level is HealthLevel.OK
+
     def _data_age_seconds(self, as_of: datetime) -> float:
         if self._last_bar_confirm_at is None:
             return float("inf")  # 데이터를 한 번도 못 봤음 — R11 관점에서 최대 위험
         return (as_of - self._last_bar_confirm_at).total_seconds()
+
+    async def _apply_circuit_breaker_event(
+        self, event: CircuitBreakerEvent, positions: list[BrokerPosition] | None = None
+    ) -> None:
+        """CB 이벤트에 대한 **실제 실행**(정지·청산·재개·화면 발행)을 한 곳에 모은 것
+        (2026-07-31 신설).
+
+        이벤트 구동 경로(`handle_futures_view`)와 벽시계 워치독(`observe_circuit_breaker_tick`)
+        둘 다 여기를 통과한다. 원래는 각자 자기 반응을 갖고 있었고, 그 결과 **워치독 쪽에만
+        `just_resumed` 처리가 통째로 빠져 있었다** — 2026-07-31엔 Registry에 live 번들이 0개라
+        `intel.futures`가 아예 발행되지 않아 `handle_futures_view()`가 하루 종일 한 번도 안
+        불렸고(= 해제 코드가 있는 유일한 경로가 죽어 있었고), 워치독이 08:53에 건 정지가 15:35
+        종료까지 6시간 42분간 안 풀렸다. 두 경로가 갈릴 수 있는 구조 자체를 없앤다.
+
+        `positions`가 `None`이면 필요할 때(해제 청산 시점) 직접 조회한다 — 워치독은 평소엔
+        브로커를 안 건드리는 순수 폴링이라 매 틱 조회를 강제하지 않기 위함이다.
+
+        발행(`_publish_circuit_breaker_status`)은 **반응 뒤**에 한다 — `gateway_halted`를 함께
+        싣기 때문에, 먼저 발행하면 화면이 한 틱 늦은 게이트 상태를 본다.
+        """
+        if event.just_confirmed:
+            await self._gateway.halt("circuit breaker confirmed")
+        if event.just_resumed:
+            if positions is None:
+                positions = await self._broker.positions()
+            await self._liquidate_after_circuit_breaker(positions)
+        await self._publish_circuit_breaker_status(event)
 
     async def _liquidate_after_circuit_breaker(self, positions: list[BrokerPosition]) -> None:
         """CB 해제 추정 직후 사람 확인 없이 자동 강제청산(모듈 docstring "거래소 서킷브레이커
@@ -339,13 +421,17 @@ class TradingPipeline:
     async def _publish_circuit_breaker_status(self, event: CircuitBreakerEvent) -> None:
         """Command Center UI 배지용 heartbeat (`sys.circuit_breaker`) — phase가 그대로여도
         매번 발행한다(모듈 `core/messages.py`의 `CircuitBreakerStatus` docstring 근거,
-        `Health`와 같은 heartbeat 철학)."""
+        `Health`와 같은 heartbeat 철학).
+
+        `gateway_halted`를 함께 싣는다(2026-07-31) — 추정 phase가 정상으로 돌아와도 게이트가
+        실제로 열렸는지는 별개 사실이고, 2026-07-31엔 그 둘이 6시간 42분간 어긋나 있었다."""
         await self._bus.publish(
             TOPIC_CIRCUIT_BREAKER,
             CircuitBreakerStatus(
                 symbol=self._symbol,
                 phase=event.phase.value,
                 reentry_cooldown_until=event.reentry_cooldown_until,
+                gateway_halted=self._gateway.halted,
             ),
         )
 
@@ -353,9 +439,10 @@ class TradingPipeline:
         """`handle_futures_view()`는 `FuturesView` 도착이 있어야만 실행되는 완전 이벤트 구동
         경로라, 데이터가 끊긴 동안은 CB phase가 전혀 갱신되지 않는다 — 이 메서드가
         `FixedTickScheduler`(드리프트 없는 고정 틱, `core/scheduler.py`)로 벽시계 기준 관찰을
-        더해 정지 중에도 단계적으로 phase가 올라가게 한다. 청산은 시도하지 않는다(재개 시점에만
-        — 모듈 docstring 근거와 동일: 정지 중엔 주문 자체가 거부된다). 모니터 미주입이면
-        즉시 반환."""
+        더해 정지 중에도 단계적으로 phase가 올라가게 한다. 정지 **중**에는 청산을 시도하지
+        않는다(모듈 docstring 근거와 동일: 정지 중엔 주문 자체가 거부된다) — 다만 재개 시점의
+        청산·게이트 재개는 이 경로도 반드시 수행한다(2026-07-31 수정,
+        `_apply_circuit_breaker_event()` docstring 참고). 모니터 미주입이면 즉시 반환."""
         if self._circuit_breaker_monitor is None:
             return
         await FixedTickScheduler(tick_seconds=30.0).run_forever(self.observe_circuit_breaker_tick)
@@ -370,13 +457,22 @@ class TradingPipeline:
         if monitor is None or self._last_bar_confirm_at is None:
             return  # 콜드스타트/워밍업 — 기준선 없음, CB 판정 대상 아님(위 docstring 근거)
         as_of = self._now()
-        event = monitor.observe(self._data_age_seconds(as_of), as_of)
-        await self._publish_circuit_breaker_status(event)
-        if event.just_confirmed:
-            await self._gateway.halt("circuit breaker confirmed")
+        event = monitor.observe(
+            self._data_age_seconds(as_of),
+            as_of,
+            collector_healthy=self._collector_healthy(as_of),
+        )
+        await self._apply_circuit_breaker_event(event)
 
     async def run_forever(self) -> None:
-        patterns = [f"{TOPIC_BAR}.{Horizon.M1.value}.{self._symbol}", TOPIC_FUTURES]
+        patterns = [
+            f"{TOPIC_BAR}.{Horizon.M1.value}.{self._symbol}",
+            TOPIC_FUTURES,
+            # 수집기 heartbeat — CB 오탐 억제용(모듈 docstring "한산과 단절"). 이 프로세스는
+            # 자체 WS 연결이 없어(`scripts/run_g2_paper_trading.py`) 데이터 흐름의 실제
+            # 상태를 직접 잴 근거가 없다 — 그걸 아는 쪽의 보고를 받는다.
+            TOPIC_HEALTH,
+        ]
         await self._bus.subscribe(patterns, self._dispatch)
 
     async def _dispatch(self, msg: BusMessage) -> None:
@@ -384,3 +480,5 @@ class TradingPipeline:
             await self.handle_bar(msg)
         elif isinstance(msg, FuturesView):
             await self.handle_futures_view(msg)
+        elif isinstance(msg, Health) and msg.component == COLLECTOR_COMPONENT:
+            self._last_collector_health = msg

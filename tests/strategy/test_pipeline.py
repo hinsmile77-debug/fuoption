@@ -5,10 +5,13 @@ from decimal import Decimal
 import pytest
 from messiah.broker.simulator.adapter import SimBroker
 from messiah.core.event_calendar import EventCalendar
+from messiah.core.health import COLLECTOR_COMPONENT
 from messiah.core.messages import (
     BarClosed,
     CircuitBreakerStatus,
     FuturesView,
+    Health,
+    HealthLevel,
     Horizon,
     Regime,
     Side,
@@ -347,6 +350,175 @@ async def test_circuit_breaker_watchdog_confirms_when_the_injected_clock_advance
 
     assert pipeline._circuit_breaker_monitor.phase == CircuitBreakerPhase.CONFIRMED
     assert gateway.halted is True
+
+
+@pytest.mark.asyncio
+async def test_watchdog_alone_completes_the_halt_resume_round_trip():
+    """2026-07-31 실측 회귀 — 그날은 Registry에 live 번들이 0개라 `intel.futures`가 아예 발행되지
+    않았고, 따라서 `handle_futures_view()`가 하루 종일 **한 번도 안 불렸다**. 해제 처리가 그
+    경로에만 있었기 때문에 08:53에 걸린 정지가 15:35 종료까지 안 풀렸다. 이 테스트는 워치독
+    틱만으로 정지→해제가 완결되는지를 본다(FuturesView 0건)."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    bars = await _warm_up(pipeline, broker)
+
+    now_holder["t"] += timedelta(seconds=250)
+    await pipeline.observe_circuit_breaker_tick()
+    assert gateway.halted is True
+
+    # 데이터 재수신 — 새 봉이 들어오되, 확정 지연 때문에 data_age는 WARNING 대역(90~150초)에
+    # 떨어진다(2026-07-31에 실제로 일어난 형태).
+    resume_bar = _m1_bars(1, start=bar_confirm_time(bars[-1]) + timedelta(seconds=260))[0]
+    broker.on_bar(resume_bar)
+    await pipeline.handle_bar(resume_bar)
+    now_holder["t"] = bar_confirm_time(resume_bar) + timedelta(seconds=100)
+
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert pipeline._circuit_breaker_monitor.phase == CircuitBreakerPhase.WARNING  # noqa: SLF001
+    assert gateway.halted is False  # 워치독 단독으로 게이트가 풀렸다
+
+
+@pytest.mark.asyncio
+async def test_watchdog_resume_liquidates_open_positions():
+    """워치독 경로도 해제 시 강제청산을 한다 — 포지션 인자를 안 받으므로 스스로 조회해야 한다."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    bars = await _warm_up(pipeline, broker)
+    await pipeline.start_day()
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+    assert len(await broker.positions()) == 1
+
+    now_holder["t"] += timedelta(seconds=250)
+    await pipeline.observe_circuit_breaker_tick()
+    assert gateway.halted is True
+
+    resume_bar = _m1_bars(1, start=bar_confirm_time(bars[-1]) + timedelta(seconds=260))[0]
+    broker.on_bar(resume_bar)
+    await pipeline.handle_bar(resume_bar)
+    now_holder["t"] = bar_confirm_time(resume_bar) + timedelta(seconds=1)
+
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert await broker.positions() == []
+    assert gateway.halted is False
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_status_carries_actual_gateway_state():
+    """추정 phase와 실제 게이트 상태를 함께 싣는다 — 2026-07-31엔 둘이 6시간 42분간 어긋났는데
+    화면에 그 사실이 전혀 안 보였다."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    published: list[CircuitBreakerStatus] = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["sys.circuit_breaker"], collector)
+    await _warm_up(pipeline, broker)
+
+    await pipeline.observe_circuit_breaker_tick()
+    assert published[-1].gateway_halted is False
+
+    now_holder["t"] += timedelta(seconds=250)
+    await pipeline.observe_circuit_breaker_tick()
+    # 발행이 반응 뒤에 일어나므로 같은 틱에서 이미 정지 상태가 보여야 한다(한 틱 늦지 않는다)
+    assert published[-1].phase == CircuitBreakerPhase.CONFIRMED.value
+    assert published[-1].gateway_halted is True
+
+
+# ------------------------------------------------ 수집기 heartbeat 결선 (2026-07-31, P0-2)
+
+
+def _collector_health(level: HealthLevel, ts) -> Health:
+    return Health(component=COLLECTOR_COMPONENT, level=level, detail="", pid=1, ts_utc=ts)
+
+
+@pytest.mark.asyncio
+async def test_healthy_collector_heartbeat_suppresses_false_circuit_breaker():
+    """2026-07-31 실측 회귀 — 상한가 고착으로 체결이 뜸해 봉만 안 만들어지던 구간을 CB가
+    데이터 단절로 오판해 하루 5회 정지시켰다. 수집기가 OK를 보내는 동안엔 정지까지 안 간다."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    now_holder["t"] += timedelta(seconds=250)  # confirmed 임계 초과
+    await pipeline._dispatch(  # noqa: SLF001 — 실제 sys.health 구독 경로를 그대로 탄다
+        _collector_health(HealthLevel.OK, now_holder["t"] - timedelta(seconds=5))
+    )
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert pipeline._circuit_breaker_monitor.phase == CircuitBreakerPhase.SUSPECTED  # noqa: SLF001
+    assert gateway.halted is False
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_collector_heartbeat_still_allows_circuit_breaker():
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    now_holder["t"] += timedelta(seconds=250)
+    await pipeline._dispatch(  # noqa: SLF001
+        _collector_health(HealthLevel.CRITICAL, now_holder["t"] - timedelta(seconds=5))
+    )
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert gateway.halted is True
+
+
+@pytest.mark.asyncio
+async def test_stale_collector_heartbeat_is_treated_as_unknown_not_healthy():
+    """수집기 프로세스가 죽어 heartbeat가 끊긴 상황을 "정상"으로 오해하면, 진짜 단절에
+    CB가 영영 안 걸린다 — 모르는 것은 정상이 아니다."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    # OK를 한 번 받았지만 그 뒤로 heartbeat가 끊겼다(임계 30초를 훨씬 넘김)
+    await pipeline._dispatch(_collector_health(HealthLevel.OK, now_holder["t"]))  # noqa: SLF001
+    now_holder["t"] += timedelta(seconds=250)
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert gateway.halted is True
+
+
+@pytest.mark.asyncio
+async def test_health_from_other_components_is_ignored():
+    """`sys.health`는 여러 컴포넌트가 같이 쓰는 토픽이다 — 피처엔진 heartbeat를 수집기 것으로
+    잘못 읽으면 엉뚱한 근거로 CB를 억제하게 된다."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    now_holder["t"] += timedelta(seconds=250)
+    await pipeline._dispatch(  # noqa: SLF001
+        Health(
+            component="l1.feature_engine",
+            level=HealthLevel.OK,
+            detail="",
+            pid=1,
+            ts_utc=now_holder["t"],
+        )
+    )
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert gateway.halted is True  # 수집기 상태는 여전히 "모름"
 
 
 @pytest.mark.asyncio

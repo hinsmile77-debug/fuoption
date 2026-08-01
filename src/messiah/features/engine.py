@@ -46,9 +46,43 @@ _MAX_HISTORY = 130
 
 _NAN_RATIO_HALT_THRESHOLD = 0.20  # Ver 1.1 §2-2: 20% 초과 시 해당 Horizon 신호 정지
 
+# "가격 퇴화" 판정 창 (2026-07-31) — 최근 이만큼의 봉 종가가 전부 같은 값이면, 그 구간의
+# 롤링 표준편차 계열(px_zscore·px_bb_*·vl_rv·vl_atr_rel …)은 **0으로 나누게 되어 정의 자체가
+# 안 된다**. 값이 "빠진" 게 아니라 "없는" 것이다.
+#
+# 창 크기는 `px_core.W_STD`/`vl_core.W_STD`의 중간값 20을 쓴다 — 최솟값(5)은 정상 시장에서도
+# 우연히 5봉 연속 동일가가 나올 수 있어 오탐이 잦고, 최댓값(60)은 2026-07-31 15:20 시점처럼
+# "최근 20봉만 고정, 그 앞은 움직임"인 실제 형태를 못 잡는다(그날 nan_ratio가 0.0165에서
+# 0.3306으로 뛴 구간이 정확히 이 형태였다).
+_DEGENERATE_WINDOW = 20
+
+
+def _is_price_degenerate(history: Sequence[BarClosed]) -> bool:
+    """최근 `_DEGENERATE_WINDOW`봉의 종가가 전부 같은가 — "NaN인데 결측은 아닌" 경우의 판정.
+
+    종가만 본다(고가·저가는 안 본다). 판정 목적이 "표준편차 계열이 0으로 나누는가"이고, 그
+    계열들은 전부 종가 수익률에서 나오기 때문이다 — 봉 내부에서 가격이 조금 흔들렸어도
+    종가가 동일하면 수익률은 0의 연속이라 결과는 같다.
+    """
+    if len(history) < _DEGENERATE_WINDOW:
+        return False
+    return len({bar.c_ticks for bar in history[-_DEGENERATE_WINDOW:]}) == 1
+
 
 class FeatureEngine:
-    """단일 심볼용 — 전 Horizon의 완성봉을 구독해 PX+VL Feature를 계산·발행한다."""
+    """단일 심볼용 — 전 Horizon의 완성봉을 구독해 PX+VL Feature를 계산·발행한다.
+
+    ## NaN에는 원인이 세 가지 있고, 셋은 다른 사건이다 (2026-07-31)
+
+    - **워밍업**: 롤링 윈도를 아직 못 채웠다. 정상이고, 그래서 경고하지 않는다(2026-07-24).
+    - **결측**: 봉이 안 들어오거나 계산이 실패했다. 진짜 데이터 사고 — `FeatureNaN`.
+    - **퇴화**: 가격이 아예 안 움직여 표준편차 계열이 **정의 불가**다. 데이터는 멀쩡하다 —
+      `FeatureDegenerate`.
+
+    셋을 한 문구로 찍으면 사람이 매번 처음부터 조사하게 된다. 2026-07-31이 그 경우였다:
+    15:20 이후 1m NaN 33% 경고가 15회 찍혔는데 전부 퇴화(상한가 고착, 14:21부터 마감까지
+    51814틱 고정)였고, 결측과 구분이 안 돼 수집 장애를 먼저 의심하게 만들었다.
+    """
 
     def __init__(
         self,
@@ -197,13 +231,31 @@ class FeatureEngine:
         # 도달해 "워밍업이 끝났어야 할 시점"이 된 뒤에도 nan_ratio가 여전히 높을 때만 경고한다.
         warmed_up = len(history) >= _MAX_HISTORY
         if warmed_up and nan_ratio > _NAN_RATIO_HALT_THRESHOLD:
-            mlog.log(
-                "FeatureNaN",
-                f"NaN 비율 {nan_ratio:.0%} — {bar.horizon.value} 신호 정지 권고",
-                symbol=self._symbol,
-                horizon=bar.horizon.value,
-                nan_ratio=nan_ratio,
-            )
+            if _is_price_degenerate(history):
+                # 원인이 데이터 결측이 아니라 시장 상태다 — 같은 문구로 찍으면 사람이 매번
+                # 수집 장애를 의심하며 처음부터 조사하게 된다(2026-07-31 실측: 15:20 이후
+                # 1m NaN 33% 경고 15회가 전부 이 경우였는데 결측과 구분이 안 됐다).
+                mlog.log(
+                    "FeatureDegenerate",
+                    f"NaN 비율 {nan_ratio:.0%} — {bar.horizon.value} 최근 {_DEGENERATE_WINDOW}봉 "
+                    f"종가가 전부 {history[-1].c_ticks}틱으로 고정, 변동성 계열 정의 불가"
+                    "(결측 아님 — 상한/하한 고착 또는 일방시장 의심)",
+                    symbol=self._symbol,
+                    horizon=bar.horizon.value,
+                    nan_ratio=nan_ratio,
+                    cause="degenerate",
+                    flat_close_ticks=history[-1].c_ticks,
+                    flat_window=_DEGENERATE_WINDOW,
+                )
+            else:
+                mlog.log(
+                    "FeatureNaN",
+                    f"NaN 비율 {nan_ratio:.0%} — {bar.horizon.value} 신호 정지 권고",
+                    symbol=self._symbol,
+                    horizon=bar.horizon.value,
+                    nan_ratio=nan_ratio,
+                    cause="missing",
+                )
 
         return FeatureVector(
             symbol=self._symbol,

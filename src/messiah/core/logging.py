@@ -26,6 +26,13 @@ TAG_LEVELS: dict[str, int] = {
     "BarClosed": logging.DEBUG,
     "FeaturePublish": logging.DEBUG,
     "FeatureNaN": logging.WARNING,
+    # 가격이 아예 안 움직여 롤링 표준편차 계열이 **정의 불가**가 된 경우 — 데이터 사고가
+    # 아니라 시장 상태다(2026-07-31 상한가 고착 구간). `FeatureNaN`과 같은 WARNING이지만
+    # 태그를 나눠야 무결성 리포트 집계에서 "결측"과 "퇴화"가 구분된다.
+    "FeatureDegenerate": logging.WARNING,
+    # 직전 완성봉 종가 대비 시가가 임계 이상 벌어짐 — 스테일 프린트/피드 이상 의심
+    # (2026-07-31 09:05봉이 6.1% 점프인데도 quality_ok=True로 통과했다).
+    "TickPriceJump": logging.WARNING,
     "FeatureSetMismatch": logging.ERROR,  # L3: 침묵(DEBUG) 금지 — 무조건 ERROR
     "OrderSubmit": logging.INFO,
     "OrderPendingSet": logging.INFO,

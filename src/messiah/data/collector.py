@@ -30,6 +30,10 @@ run_observation_loop(단일 연결, 끊기면 예외 전파)과 run_observation_
 기준선이 없으므로 판정하지 않는다. 이게 없으면 08:35 기동 후 첫 틱(실측 08:45)까지의 10분을
 스톨로 오판해 무한 재연결 루프에 빠진다.
 
+**임계는 2026-07-31부터 고정값이 아니라 최근 관측된 한산함에서 파생된다** — 그날 상한가
+고착 구간(분당 1~17계약)에서 고정 120초가 정상 상태를 6회 오판했고, 그 재연결들이 오히려
+결손을 키웠다. 상세와 근거는 `_StallWatchdog` 클래스 docstring "적응 임계" 절 참고.
+
 ## 데이터 흐름의 1차 책임은 수집기에 있다 (고도화 4, 2026-07-30)
 
 2026-07-30 점검에서 드러난 구조적 문제는 **탐지와 복구가 서로 다른 프로세스에 흩어져 있고
@@ -59,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal
@@ -85,11 +90,21 @@ _WS_DISCONNECT_ERRORS = (OSError, websockets.WebSocketException)
 _WS_RECONNECT_INITIAL_BACKOFF_SECONDS = 5.0
 _WS_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
 
-# 스톨 임계 — 정규장 미니선물은 가장 한산한 구간에도 분당 수십 틱이 들어온다(2026-07-30 실측
-# 최저 54틱/분). 120초는 "정상적인 한산함"과 명백히 구분되면서, 실측된 30분 공백을 30분이
-# 아니라 2분 만에 잡는 값이다. 30초 격자로 확인한다(CB 워치독과 같은 주기).
+# 스톨 임계의 **하한** — 정규장 미니선물은 가장 한산한 구간에도 분당 수십 틱이 들어온다는
+# 2026-07-30 실측(최저 54틱/분)에서 나온 값이다. 30초 격자로 확인한다(CB 워치독과 같은 주기).
+#
+# 이 값을 **고정 임계로 쓰는 것은 2026-07-31에 틀린 것으로 판명됐다** — 아래 `_StallWatchdog`
+# "적응 임계" 절 참고. 이제 하한으로만 쓰고, 실제 임계는 최근 관측된 한산함에서 파생된다.
 _TICK_STALL_TIMEOUT_SECONDS = 120.0
 _TICK_STALL_CHECK_INTERVAL_SECONDS = 30.0
+
+# 적응 임계 파라미터 (2026-07-31 신설, 전부 미검증 초기값)
+_STALL_QUIET_WINDOW_SECONDS = 1800.0  # 최근 30분의 틱 도착 이력만 본다
+_STALL_QUIET_SLACK = 2.0  # 그 구간 최장 무틱 간격의 2배까지는 "정상적인 한산함"
+_STALL_MAX_TIMEOUT_SECONDS = 600.0  # 아무리 한산해도 10분을 넘기면 진짜 이상이다
+_STALL_TICK_HISTORY = 2048  # 메모리 상한(바쁜 구간에선 30분보다 짧은 창이 된다 — 무해)
+_STALL_RELIEF_TICKS = 10  # 재연결 후 이만큼 틱이 다시 들어오면 "그 재연결은 효과가 있었다"
+_STALL_MAX_PENALTY_DOUBLINGS = 3  # 연속 무효 재연결 페널티 상한(×8)
 
 
 class TickStallError(ConnectionError):
@@ -103,6 +118,38 @@ class _StallWatchdog:
 
     두 수집기가 같은 listen 루프 구조를 갖고 있어 각자 구현하면 갈라진다(한쪽만 고쳐지는
     사고가 실제로 이 파일에서 이미 한 번 있었다 — 모듈 docstring의 `run_forever` 이력 참고).
+
+    ## 적응 임계 (2026-07-31 실측 대응)
+
+    임계는 원래 고정 120초였다. 근거는 2026-07-30 실측 "정규장 최저 54틱/분"이었는데, **그
+    관측이 시장 전체를 대표하지 않았다.** 2026-07-31 오후 A05608은 14:21부터 마감까지 가격이
+    51814틱(= 그날 고가, 10:06에 처음 닿은 뒤 한 번도 안 넘김)에 완전히 고정된 채 **분당
+    1~17계약**만 체결됐다 — 상한가/일방시장에 준하는 상태다. 그 구간에서 고정 임계 120초는
+    "정상적인 한산함"을 장애로 오판했고, 워치독은 6회 강제 재연결을 걸었다.
+
+    문제는 그 치료가 병보다 비쌌다는 것이다 — 재연결 자체는 매번 5~8초 만에 성공했지만
+    **재연결 후 첫 틱까지가 오래 걸렸다**: 14:53:37 스톨 → 14:56:14 첫 틱(2분 37초),
+    15:08:26 스톨 → 15:11:06 첫 틱(2분 40초). 그날 결손 30분·최장 공백 8분(15:04~15:13)의
+    상당 부분이 이 워치독이 만든 것이다.
+
+    그래서 임계를 **최근 관측된 한산함에서 파생**시킨다:
+
+        임계 = clamp(최근 30분 최장 무틱 간격 × 2, 하한 120초, 상한 600초) × 2^(연속 무효 재연결)
+
+    - **최장(max) 간격**을 쓰는 이유: 중앙값을 쓰면 "가끔 2분씩 조용한 시장"에서 임계가
+      여전히 낮게 잡혀 같은 오탐이 난다. 최근에 실제로 일어난 최악의 정적을 정상 범위로
+      인정해야 오탐이 사라진다.
+    - **바쁜 구간에서는 자동으로 하한(120초)으로 수렴한다** — 틱이 초당 여러 개면 최장
+      간격 자체가 1초 미만이라 곱해도 하한을 못 넘는다. 즉 진짜 30분 공백(2026-07-28·29)을
+      2분 만에 잡던 성질은 그대로 유지된다.
+    - **상한 600초**: 아무리 한산해도 10분 무틱은 시장 상태가 아니라 장애로 본다.
+    - **연속 무효 재연결 페널티**: 재연결했는데 틱이 다시 안 들어오면(= `_STALL_RELIEF_TICKS`
+      개를 못 채우면) 그 재연결은 효과가 없었다는 뜻이다. 임계를 배로 늘려 같은 실패를
+      반복하지 않는다(2026-07-31의 6연속 무의미한 재연결이 이 경우).
+
+    이력(`_tick_times`)은 `reset()`으로 안 지운다 — 그건 **연결의 상태가 아니라 시장의
+    상태**라 재연결로 무효화되지 않는다. 다만 `_last_tick_at`은 지우므로 연결 경계를 넘는
+    가짜 간격이 이력에 들어가지는 않는다.
     """
 
     def __init__(
@@ -112,23 +159,51 @@ class _StallWatchdog:
         check_interval_seconds: float,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        quiet_window_seconds: float = _STALL_QUIET_WINDOW_SECONDS,
+        quiet_slack: float = _STALL_QUIET_SLACK,
+        max_timeout_seconds: float = _STALL_MAX_TIMEOUT_SECONDS,
+        relief_ticks: int = _STALL_RELIEF_TICKS,
     ) -> None:
         self._timeout_seconds = timeout_seconds
         self._check_interval_seconds = check_interval_seconds
         self._monotonic = monotonic
         self._sleep = sleep
+        self._quiet_window_seconds = quiet_window_seconds
+        self._quiet_slack = quiet_slack
+        self._max_timeout_seconds = max_timeout_seconds
+        self._relief_ticks = relief_ticks
         self._last_tick_at: float | None = None
+        self._tick_times: deque[float] = deque(maxlen=_STALL_TICK_HISTORY)
+        # (관측시각, 직전 틱과의 간격) — 간격을 **따로** 쌓는 이유는 재연결 경계 때문이다.
+        # `_tick_times`의 연속 두 값에서 간격을 역산하면 단절 구간 자체가 "이 시장은 이만큼
+        # 조용하다"는 증거로 둔갑해 임계를 스스로 밀어올린다(다음 장애 감지가 느려진다).
+        # `mark_tick()`이 `_last_tick_at is None`(= reset 직후)일 때 간격을 기록하지 않으므로
+        # 연결을 넘는 간격은 애초에 여기 안 들어온다.
+        self._intervals: deque[tuple[float, float]] = deque(maxlen=_STALL_TICK_HISTORY)
+        self._consecutive_stalls = 0
+        self._ticks_since_stall = 0
 
     @property
     def enabled(self) -> bool:
         return self._timeout_seconds > 0
 
     def reset(self) -> None:
-        """새 연결마다 호출 — 이전 연결의 마지막 틱 시각을 기준선으로 쓰면 안 된다."""
+        """새 연결마다 호출 — 이전 연결의 마지막 틱 시각을 기준선으로 쓰면 안 된다.
+        틱 도착 이력은 남긴다(위 docstring "이력은 reset으로 안 지운다")."""
         self._last_tick_at = None
 
     def mark_tick(self) -> None:
-        self._last_tick_at = self._monotonic()
+        now = self._monotonic()
+        if self._last_tick_at is not None:  # reset 직후엔 간격을 안 남긴다(위 `_intervals` 주석)
+            self._intervals.append((now, now - self._last_tick_at))
+        self._last_tick_at = now
+        self._tick_times.append(now)
+        if self._consecutive_stalls:
+            self._ticks_since_stall += 1
+            if self._ticks_since_stall >= self._relief_ticks:
+                # 재연결이 실제로 효과가 있었다 — 페널티 해제
+                self._consecutive_stalls = 0
+                self._ticks_since_stall = 0
 
     @property
     def seen_first_tick(self) -> bool:
@@ -140,6 +215,28 @@ class _StallWatchdog:
             return None
         return self._monotonic() - self._last_tick_at
 
+    def recent_max_gap_seconds(self) -> float:
+        """최근 창에서 실제로 관측된 최장 무틱 간격 — 표본이 없으면 0(= 임계는 하한 그대로)."""
+        cutoff = self._monotonic() - self._quiet_window_seconds
+        return max((gap for at, gap in self._intervals if at >= cutoff), default=0.0)
+
+    def ticks_within(self, seconds: float) -> int:
+        """최근 `seconds`초 안에 받은 틱 수 — 스톨 로그의 진단 재료.
+
+        `_STALL_TICK_HISTORY` 상한 때문에 아주 바쁜 구간에서는 실제보다 작게 나올 수 있다.
+        이 값의 용도는 "한산함의 정도"를 남기는 것이라 작은 쪽이 정확하면 충분하다.
+        """
+        cutoff = self._monotonic() - seconds
+        return sum(1 for t in self._tick_times if t >= cutoff)
+
+    def current_timeout_seconds(self) -> float:
+        """지금 적용 중인 스톨 임계 — 감시·헬스 판정이 같은 값을 쓰도록 한 곳에서만 계산한다."""
+        if not self.enabled:
+            return self._timeout_seconds
+        adaptive = max(self._timeout_seconds, self.recent_max_gap_seconds() * self._quiet_slack)
+        penalty = 2 ** min(self._consecutive_stalls, _STALL_MAX_PENALTY_DOUBLINGS)
+        return min(adaptive * penalty, self._max_timeout_seconds)
+
     async def run_until_stalled(self, *, describe: str) -> None:
         """스톨을 감지하면 `TickStallError`를 던진다 — 그 전까지는 영원히 돌아간다."""
         while True:
@@ -147,11 +244,20 @@ class _StallWatchdog:
             if self._last_tick_at is None:
                 continue  # 콜드스타트/워밍업 — 기준선 없음(모듈 docstring 근거)
             age = self._monotonic() - self._last_tick_at
-            if age >= self._timeout_seconds:
+            threshold = self.current_timeout_seconds()
+            if age >= threshold:
+                self._consecutive_stalls += 1
+                self._ticks_since_stall = 0
                 mlog.log(
                     "CollectorTickStall",
-                    f"소켓은 열려 있으나 {age:.0f}초간 틱 없음 — 강제 재연결",
+                    f"소켓은 열려 있으나 {age:.0f}초간 틱 없음 — 강제 재연결"
+                    f"(임계 {threshold:.0f}초)",
                     stalled_seconds=age,
+                    threshold_seconds=threshold,
+                    recent_max_gap_seconds=self.recent_max_gap_seconds(),
+                    ticks_last_60s=self.ticks_within(60.0),
+                    ticks_last_300s=self.ticks_within(300.0),
+                    consecutive_stalls=self._consecutive_stalls,
                     **({"symbol": describe} if describe else {}),
                 )
                 raise TickStallError(f"{age:.0f}초간 틱 수신 없음(소켓은 열려 있음)")
@@ -218,8 +324,10 @@ class TickCollector:
              테스트에서 실제 네트워크 없이 가짜 연결을 주입하기 위한 것(기본값
              websockets.connect). reconnect_*_backoff_seconds는 run_forever() 전용 — 테스트가
              실제로 몇 초씩 기다리지 않도록 주입 가능하게 노출(기본값은 mahdi와 동일한 5~60초).
-             stall_timeout_seconds=0이면 스톨 감시를 끈다(모듈 docstring "조용한 스톨 탐지");
-             monotonic/sleep은 그 감시를 실시간 대기 없이 테스트하기 위한 주입점.
+             stall_timeout_seconds=0이면 스톨 감시를 끈다(모듈 docstring "조용한 스톨 탐지").
+             0이 아니면 그 값은 **임계의 하한**이고 실제 임계는 최근 한산함에서 파생된다
+             (`_StallWatchdog` "적응 임계"); monotonic/sleep은 그 감시를 실시간 대기 없이
+             테스트하기 위한 주입점.
         """
         self._creds = creds
         self._symbol = symbol
@@ -317,12 +425,17 @@ class TickCollector:
 
     def health(self) -> HealthStatus:
         """`sys.health` heartbeat용 자가 판정 (고도화 4 — 데이터 흐름의 1차 책임은 수집기에
-        있다). 임계는 스톨 워치독과 같은 값을 쓴다: WARN은 그 절반 지점이라 "곧 강제 재연결이
-        일어날 것"을 화면이 미리 보여주고, CRITICAL이 뜨는 시점이 곧 재연결 시점이다."""
+        있다). 임계는 스톨 워치독과 **같은 값**을 쓴다: WARN은 그 절반 지점이라 "곧 강제
+        재연결이 일어날 것"을 화면이 미리 보여주고, CRITICAL이 뜨는 시점이 곧 재연결 시점이다.
+
+        워치독이 적응 임계로 바뀐 뒤로는 그 값을 매번 물어본다(2026-07-31) — 고정 상수를
+        그대로 쓰면 한산한 구간에 화면만 CRITICAL로 붉어지고 정작 재연결은 안 일어나는,
+        "두 판정이 어긋나는" 상태가 된다."""
+        threshold = self._watchdog.current_timeout_seconds()
         return staleness_status(
             self.seconds_since_last_tick(),
-            warn_after=_TICK_STALL_TIMEOUT_SECONDS / 2,
-            critical_after=_TICK_STALL_TIMEOUT_SECONDS,
+            warn_after=threshold / 2,
+            critical_after=threshold,
             warming_up_detail="웜업 — 장 개시 전(첫 틱 대기)",
         )
 

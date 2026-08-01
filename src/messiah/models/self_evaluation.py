@@ -106,7 +106,10 @@ def run_self_evaluation(
         **({"instance_id": instance_id} if instance_id else {}),
         date=date,
         symbol=symbol,
-        n_trades=len(champion_returns),
+        n_return_samples=len(champion_returns),
+        # 체결 건수는 호출자가 그날의 실제 `Fill`을 넘겼을 때만 셀 수 있다 — 안 넘겼으면
+        # "0건"이 아니라 "모름"(None)이다(`core/messages.py`의 `SelfEvalReport` docstring).
+        n_fills=len(fills) if fills else None,
         win_rate=win_rate(champion_returns),
         profit_factor=profit_factor(champion_returns),
         sharpe=sharpe_ratio(champion_returns, periods_per_year=periods_per_year),
@@ -120,7 +123,8 @@ def run_self_evaluation(
         "일일 자가평가 리포트",
         date=date,
         symbol=symbol,
-        n_trades=report.n_trades,
+        n_return_samples=report.n_return_samples,
+        n_fills=report.n_fills,
         sharpe=report.sharpe,
     )
     return report

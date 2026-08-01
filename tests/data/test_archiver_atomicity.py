@@ -14,7 +14,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import BarClosed, BarSession, Horizon
 from messiah.core.timeutil import KST
 from messiah.data.archiver import (
     ParquetArchiver,
@@ -24,7 +24,14 @@ from messiah.data.archiver import (
 )
 
 
-def _bar(minute: int, *, day: int = 22, horizon: Horizon = Horizon.M1, c_ticks: int = 102):
+def _bar(
+    minute: int,
+    *,
+    day: int = 22,
+    horizon: Horizon = Horizon.M1,
+    c_ticks: int = 102,
+    session: BarSession = BarSession.REGULAR,
+):
     return BarClosed(
         symbol="A05608",
         horizon=horizon,
@@ -35,6 +42,7 @@ def _bar(minute: int, *, day: int = 22, horizon: Horizon = Horizon.M1, c_ticks: 
         c_ticks=c_ticks,
         volume=10,
         quality_ok=True,
+        session=session,
     )
 
 
@@ -314,6 +322,54 @@ def test_load_recent_bars_round_trips_all_fields(tmp_path: Path):
     assert bar.volume == 10
     assert bar.quality_ok is True
     assert bar.horizon is Horizon.M1
+
+
+def test_session_label_round_trips(tmp_path: Path):
+    """2026-07-31 신설 필드 — 장전 표시가 Parquet 왕복에서 살아남아야 그 데이터를 나중에
+    골라낼 수 있다(`core/messages.py`의 `BarSession`)."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(29, session=BarSession.PRE_OPEN))
+    archiver.append_bar(_bar(30))
+
+    bars = archiver.load_recent_bars(
+        "A05608", Horizon.M1, on_or_before=date(2026, 7, 22), max_bars=10
+    )
+
+    assert [b.session for b in bars] == [BarSession.PRE_OPEN, BarSession.REGULAR]
+
+
+def test_old_parquet_without_the_session_column_still_reads(tmp_path: Path):
+    """2026-07-31 이전에 적재된 파일에는 `session` 컬럼 자체가 없다 — 스키마 변경이 조용한
+    데이터 사고(그날 데이터가 통째로 안 보임)로 번지지 않는지 못박는다."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(29))
+    legacy_path = _target(tmp_path)
+    pl.read_parquet(legacy_path).drop("session").write_parquet(legacy_path)  # 옛 스키마 재현
+
+    frame = archiver.read_day("A05608", Horizon.M1, date(2026, 7, 22))
+    bars = archiver.load_recent_bars(
+        "A05608", Horizon.M1, on_or_before=date(2026, 7, 22), max_bars=10
+    )
+
+    assert frame is not None and frame.height == 1
+    assert [b.session for b in bars] == [BarSession.REGULAR]  # 없으면 정규장으로 읽는다
+
+
+def test_mixed_schema_shards_merge_without_losing_the_day(tmp_path: Path):
+    """컬럼이 추가되는 **그날**엔 통합본은 옛 스키마, 새 조각은 새 스키마인 상태가 실제로
+    생긴다 — 기본 `pl.concat`은 여기서 예외를 던지고, 그러면 UI·웜스타트·리포트에서 그날이
+    통째로 사라진다."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(29))
+    archiver.compact_day("A05608", Horizon.M1, date(2026, 7, 22))
+    canonical = tmp_path / "A05608" / "1m" / "2026-07-22.parquet"
+    pl.read_parquet(canonical).drop("session").write_parquet(canonical)  # 통합본만 옛 스키마
+
+    archiver.append_bar(_bar(31, session=BarSession.PRE_OPEN))  # 새 조각은 새 스키마
+
+    frame = archiver.read_day("A05608", Horizon.M1, date(2026, 7, 22))
+
+    assert frame is not None and frame.height == 2
 
 
 def test_load_recent_bars_does_not_leak_polars_frame_types(tmp_path: Path):

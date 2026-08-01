@@ -32,8 +32,10 @@ from datetime import date, datetime
 from datetime import time as dtime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from messiah.core.messages import BarClosed, Horizon, Tick
-from messiah.core.timeutil import KST, now_kst
+from messiah.core import logging as mlog
+from messiah.core.event_calendar import DEFAULT_SESSION
+from messiah.core.messages import BarClosed, BarSession, Horizon, Tick
+from messiah.core.timeutil import KST, now_kst, to_kst
 
 # H0IFCNT0(지수선물 실시간체결가) 필드 인덱스 — "^" 구분, 0-based. 실제 메시지는 50개 필드를
 # 갖지만(2026-07-22 라이브 캡처로 확인 — 매도/매수호가 등 idx34~37까지 포함) 이 파서는 symbol/
@@ -130,15 +132,37 @@ class MinuteBarAggregator:
 
     마흐디 mahdi/data/collector.py MinuteBarAggregator(102-183) 이식 — OFI/VWAP/microprice/
     스프레드는 messiah BarClosed에 없는 필드라 제외(L2 Feature Engine 몫).
+
+    ## 세션 구분과 시세 정합성 (2026-07-31 신설)
+
+    두 가지를 봉에 표시한다. 둘 다 **버리지 않고 표시만** 한다 — 파기는 되돌릴 수 없고,
+    "이 데이터를 쓸 것인가"는 소비자(웜스타트·Trainer·차트)별로 나중에 정할 수 있다.
+
+    - **`session`**: `bar_open_kst`가 정규장 개시(09:00) 전이면 `PRE_OPEN`
+      (`core/messages.py`의 `BarSession` docstring에 2026-07-31 실측 근거).
+    - **`quality_ok=False` + `TickPriceJump` 로그**: 직전 완성봉 종가 대비 시가 변화율이
+      `PRICE_JUMP_RATIO`를 넘으면. 2026-07-31 09:05봉이 정확히 이 경우였다 —
+      `o=46633, h=49488`로 봉 하나가 6.1% 범위였는데 `quality_ok=True`로 통과했고, 그 값이
+      ATR·변동성 피처와 다음날 웜스타트로 그대로 흘러갔다.
+
+    직전 종가는 **이 인스턴스가 만든 봉**만 기준으로 삼는다. 재연결 시 `collector.py`가
+    aggregator를 새로 만드므로 기준선도 함께 리셋되는데, 그게 맞다 — 단절 구간을 사이에 둔
+    두 봉의 변화율은 "가격이 튀었다"가 아니라 "그 사이를 못 봤다"이기 때문이다.
     """
 
     MIN_TICKS_FOR_QUALITY_OK = 3  # mahdi MinuteBarAggregator.MIN_TICKS_FOR_NORMAL_QUALITY와 동일
+
+    # 직전 봉 종가 대비 이 비율을 넘게 시가가 벌어지면 저품질로 표시한다. KOSPI200 미니선물
+    # 1분봉이 정상적으로 3%를 움직이는 일은 없다(2026-07-29~31 실측 최대 1분 변동폭 1.4%) —
+    # 미검증 초기값이며, 실측이 쌓이면 재조정 대상이다.
+    PRICE_JUMP_RATIO = 0.03
 
     def __init__(self, symbol: str, horizon: Horizon = Horizon.M1) -> None:
         self._symbol = symbol
         self._horizon = horizon
         self._current_minute: datetime | None = None
         self._ticks: list[Tick] = []
+        self._prev_close_ticks: int | None = None
 
     def add_tick(self, tick: Tick) -> BarClosed | None:
         """
@@ -173,7 +197,16 @@ class MinuteBarAggregator:
         if not self._ticks or self._current_minute is None:
             return None
         prices = [t.price_ticks for t in self._ticks]
-        return BarClosed(
+        # `open_time`은 naive `time`이라 KST 벽시계로 맞춰 비교한다(aware time과 직접
+        # 비교하면 TypeError). `_combine_kst()`가 항상 KST를 붙이지만, 다른 경로로 들어온
+        # 틱도 안전하도록 명시적으로 변환한다.
+        session = (
+            BarSession.PRE_OPEN
+            if to_kst(self._current_minute).time() < DEFAULT_SESSION.open_time
+            else BarSession.REGULAR
+        )
+        jumped = self._is_price_jump(prices[0])
+        bar = BarClosed(
             symbol=self._symbol,
             horizon=self._horizon,
             bar_open_kst=self._current_minute,
@@ -182,5 +215,32 @@ class MinuteBarAggregator:
             l_ticks=min(prices),
             c_ticks=prices[-1],
             volume=sum(t.qty for t in self._ticks),
-            quality_ok=len(self._ticks) >= self.MIN_TICKS_FOR_QUALITY_OK,
+            quality_ok=len(self._ticks) >= self.MIN_TICKS_FOR_QUALITY_OK and not jumped,
+            session=session,
         )
+        self._prev_close_ticks = bar.c_ticks
+        return bar
+
+    def _is_price_jump(self, open_ticks: int) -> bool:
+        """직전 완성봉 종가 대비 시가가 `PRICE_JUMP_RATIO`를 넘게 벌어졌는가.
+
+        조용히 플래그만 내리지 않고 로그도 남긴다(L18) — `quality_ok=False`는 여러 원인이
+        공유하는 값이라(틱 수 부족 등) 그것만으로는 사후에 "왜 저품질인지"를 복원할 수 없다.
+        """
+        previous = self._prev_close_ticks
+        if previous is None or previous <= 0:
+            return False
+        ratio = abs(open_ticks - previous) / previous
+        if ratio <= self.PRICE_JUMP_RATIO:
+            return False
+        mlog.log(
+            "TickPriceJump",
+            f"직전 종가 {previous}틱 → 시가 {open_ticks}틱 ({ratio:.1%} 점프) — "
+            f"임계 {self.PRICE_JUMP_RATIO:.0%} 초과, quality_ok=False로 표시",
+            symbol=self._symbol,
+            horizon=self._horizon.value,
+            prev_close_ticks=previous,
+            open_ticks=open_ticks,
+            jump_ratio=ratio,
+        )
+        return True

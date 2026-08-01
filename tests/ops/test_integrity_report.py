@@ -11,7 +11,7 @@ import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import BarClosed, BarSession, Horizon
 from messiah.core.timeutil import KST
 from messiah.data.archiver import ParquetArchiver
 from messiah.ops.integrity_report import (
@@ -51,8 +51,17 @@ def _write_log(path: Path, records: list[dict]) -> None:
     )
 
 
-def _no_crashes(_day: date) -> NativeCrashes:
+def _no_crashes(_day: date, **_kwargs) -> NativeCrashes:
+    """`build_report`가 집계 창을 좁히려고 `since=`를 넘긴다(2026-07-31) — 가짜 수집기는
+    그 인자를 무시하지만 시그니처는 받아줘야 한다."""
     return NativeCrashes(available=True, count=0)
+
+
+def _crashes(count: int, *details: str):
+    def _collector(_day: date, **_kwargs) -> NativeCrashes:
+        return NativeCrashes(available=True, count=count, details=list(details))
+
+    return _collector
 
 
 # ---------------------------------------------------------------- 봉 연속성
@@ -205,7 +214,7 @@ def test_the_real_incident_day_trips_every_relevant_threshold(tmp_path: Path):
     report = _report(
         tmp_path,
         logs={"l1_daily": [log]},
-        crash=lambda _day: NativeCrashes(available=True, count=2, details=["13:28:32 x.pyd"]),
+        crash=_crashes(2, "13:28:32 x.pyd"),
     )
 
     joined = " | ".join(report.breaches)
@@ -246,7 +255,7 @@ def test_uncountable_crashes_are_not_reported_as_zero(tmp_path: Path):
     report = _report(
         tmp_path,
         logs={"l1_daily": [log]},
-        crash=lambda _d: NativeCrashes(False, 0, ["Windows 전용"]),
+        crash=lambda _d, **_kw: NativeCrashes(False, 0, ["Windows 전용"]),
     )
 
     assert report.native_crashes.available is False
@@ -305,22 +314,200 @@ def test_cb_confirmed_without_any_l1_trace_is_flagged():
     """2026-07-28·29의 30분 공백과 같은 구조 — 거래는 멈췄는데 데이터 흐름은 아무도 안 고쳤다."""
     findings = analyze_data_flow_ownership({"CircuitBreakerConfirmed": 1})
 
-    assert len(findings) == 1
-    assert "아무도 손대지 않음" in findings[0]
+    assert any("아무도 손대지 않음" in f for f in findings)
 
 
 def test_cb_confirmed_with_an_l1_disconnect_is_consistent():
-    """양쪽이 같은 사건을 봤다면 계층 분리가 의도대로 동작한 것이다."""
+    """양쪽이 같은 사건을 봤고 정지가 해제까지 갔다면 계층 분리가 의도대로 동작한 것이다."""
     assert (
         analyze_data_flow_ownership(
             {
                 "CircuitBreakerConfirmed": 1,
+                "CircuitBreakerResumed": 1,
                 "CollectorWSDisconnected": 1,
                 "CollectorWSReconnected": 1,
             }
         )
         == []
     )
+
+
+def test_unpaired_cb_confirmations_are_flagged():
+    """2026-07-31 실측 회귀 — 그날 확정 5회에 해제 3회였고, 짝이 안 맞는 2회 때문에 주문
+    게이트가 6시간 42분간 풀리지 않은 채 장이 끝났다. 예전 규칙 둘은 "한쪽에 흔적이 **아예**
+    없을 때"만 봐서 이 형태를 통과시켰다(그날 findings 0건)."""
+    findings = analyze_data_flow_ownership(
+        {
+            "CircuitBreakerConfirmed": 5,
+            "CircuitBreakerResumed": 3,
+            "CollectorTickStall": 6,
+            "CollectorWSDisconnected": 6,
+            "CollectorWSReconnected": 6,
+        }
+    )
+
+    assert len(findings) == 1
+    assert "2회가 해제 없이 남음" in findings[0]
+
+
+def test_reconnect_count_alone_is_not_treated_as_a_mismatch():
+    """진짜 단절이 나서 L1이 복구하고 CB가 정지시킨 정상 시나리오와 구분이 안 되므로,
+    "재연결 N회 대 CB 확정 M회" 같은 개수 비교는 의도적으로 안 한다(오탐만 늘린다)."""
+    assert (
+        analyze_data_flow_ownership(
+            {
+                "CircuitBreakerConfirmed": 3,
+                "CircuitBreakerResumed": 3,
+                "CollectorTickStall": 6,
+                "CollectorWSReconnected": 6,
+            }
+        )
+        == []
+    )
+
+
+# ---------------------------------------------------------------- 시장 상태 (2026-07-31)
+
+
+def _write_flat_bars(bar_dir: Path, minutes: list[int], *, price: int = 51814) -> None:
+    """2026-07-31 오후 형태 — o=h=l=c로 완전히 고정된 봉(상한가 고착/일방시장)."""
+    archiver = ParquetArchiver(bar_dir)
+    for minute in minutes:
+        archiver.append_bar(
+            BarClosed(
+                symbol="A05608",
+                horizon=Horizon.M1,
+                bar_open_kst=datetime(2026, 7, 29, 9, 0, tzinfo=KST) + timedelta(minutes=minute),
+                o_ticks=price,
+                h_ticks=price,
+                l_ticks=price,
+                c_ticks=price,
+                volume=2,
+                quality_ok=True,
+            )
+        )
+
+
+def test_flat_price_stretch_is_surfaced_as_a_market_state(tmp_path: Path):
+    """2026-07-31 실측 회귀 — 그날 이상점(스톨 6회·CB 5회·NaN 33%)의 공통 원인이 "가격이
+    1틱도 안 움직였다"였는데, 리포트엔 그걸 가리키는 숫자가 하나도 없어 사람이 Parquet을
+    직접 열어야만 보였다."""
+    _write_flat_bars(tmp_path / "bars", list(range(40)))
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.flat_price_minutes == 40
+    assert any("가격 고정" in f for f in report.market_findings)
+    assert any("가격 고정" in b for b in report.breaches)
+    assert "가격 고정" in format_summary(report)
+
+
+def test_pre_open_bar_count_is_surfaced(tmp_path: Path):
+    """2026-07-31 08:45~09:04의 20봉이 전부 스테일 프린트로 보였다 — 매일 몇 봉이 장전
+    구간에서 들어오는지를 남겨야 "그날 장전이 평소와 달랐는가"를 손으로 안 판다."""
+    archiver = ParquetArchiver(tmp_path / "bars")
+    for minute, session in [(0, BarSession.PRE_OPEN), (1, BarSession.PRE_OPEN), (2, None)]:
+        archiver.append_bar(
+            BarClosed(
+                symbol="A05608",
+                horizon=Horizon.M1,
+                bar_open_kst=datetime(2026, 7, 29, 9, 0, tzinfo=KST) + timedelta(minutes=minute),
+                o_ticks=100,
+                h_ticks=105,
+                l_ticks=95,
+                c_ticks=102,
+                volume=10,
+                quality_ok=True,
+                **({"session": session} if session else {}),
+            )
+        )
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.pre_open_minutes == 2
+    assert "장전 봉: 2개" in format_summary(report)
+
+
+def test_normal_price_movement_is_not_a_market_finding(tmp_path: Path):
+    _write_bars(tmp_path / "bars", list(range(40)))  # o≠h≠l≠c
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.flat_price_minutes == 0
+    assert report.market_findings == []
+
+
+# ---------------------------------------------------------------- 크래시 집계 창 (2026-07-31)
+
+
+def test_crash_window_starts_at_the_first_session_start(tmp_path: Path):
+    """2026-07-31 실측 회귀 — 그날 리포트의 "크래시 8건" 중 2건은 08:35 기동 **두 시간 전**
+    (06:34·06:36)에 이 PC의 다른 파이썬(3.10)이 낸 것이었다. MESSIAH가 돌지도 않던 시간은
+    집계 창에서 빠져야 한다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"ts": "2026-07-29T12:00:00+09:00", "level": "INFO", "tag": "SessionStart"},
+        ],
+    )
+    seen: dict[str, object] = {}
+
+    def _collector(day, **kwargs):
+        seen.update(kwargs)
+        return NativeCrashes(available=True, count=0)
+
+    _report(tmp_path, logs={"l1_daily": [log]}, crash=_collector)
+
+    # naive가 맞다 — Windows 이벤트 로그 조회의 로컬 시각으로 그대로 쓰인다
+    # (`_first_session_start` docstring).
+    assert seen["since"] == datetime(2026, 7, 29, 8, 35, 10)  # noqa: DTZ001
+
+
+def test_crash_window_is_open_when_there_was_no_session_start(tmp_path: Path):
+    """기동 기록이 없으면 창을 좁힐 근거가 없다 — 임의로 좁혀 사고를 놓치느니 그대로 둔다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T09:00:00+09:00", "level": "INFO", "tag": "FeaturePublish"}])
+    seen: dict[str, object] = {}
+
+    def _collector(day, **kwargs):
+        seen.update(kwargs)
+        return NativeCrashes(available=True, count=0)
+
+    _report(tmp_path, logs={"l1_daily": [log]}, crash=_collector)
+
+    assert seen["since"] is None
+
+
+def test_ui_give_up_is_a_breach(tmp_path: Path):
+    """2026-07-31 12:35~15:35 3시간 무화면 — 관측이 통째로 사라진 날인데 리포트엔 아무
+    표시도 안 났다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {
+                "ts": "2026-07-29T12:35:53+09:00",
+                "level": "ERROR",
+                "tag": "CommandCenterUIRestartGaveUp",
+            },
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert any("관측 공백" in b for b in report.breaches)
 
 
 def test_ownership_findings_become_breaches_in_the_report(tmp_path: Path):

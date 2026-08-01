@@ -153,9 +153,14 @@ def collect_self_eval(root: Path, days: int) -> list[str]:
         except (json.JSONDecodeError, ValueError):
             lines.append(f"- {path.name}: (파싱 실패)")
             continue
+        # 2026-07-31 이전 리포트는 `n_trades`(= 실제로는 표본 수)라는 옛 이름을 쓴다 — 이미
+        # 쌓인 파일을 다시 못 쓰므로 둘 다 읽고, 화면 문구는 정정된 의미로 적는다.
+        samples = r.get("n_return_samples", r.get("n_trades", 0))
+        fills = r.get("n_fills")
+        fills_text = "체결 미집계" if fills is None else f"체결 {fills}건"
         lines.append(
             f"- {r.get('date', '?')} {r.get('symbol', '?')}: "
-            f"거래 {r.get('n_trades', 0)}건 · 승률 {r.get('win_rate', 0):.0%} · "
+            f"표본 {samples}개 · {fills_text} · 승률 {r.get('win_rate', 0):.0%} · "
             f"PF {r.get('profit_factor', 0):.2f} · Sharpe {r.get('sharpe', 0):.2f} · "
             f"MDD {r.get('max_drawdown', 0):.1%} · Shadow {r.get('n_shadow_bundles', 0)}개 · "
             f"슬리피지(예측/실현) {r.get('slippage_predicted_ticks', 0):.2f}/"

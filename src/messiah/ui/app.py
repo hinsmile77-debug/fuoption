@@ -42,6 +42,15 @@ import threading
 from datetime import date
 from pathlib import Path
 
+# numpy를 **직접** 임포트한다 — 이 모듈은 numpy를 직접 쓰지 않지만, plotly와 polars가 둘 다
+# numpy를 **지연 임포트**한다(plotly는 `_plotly_utils.optional_imports.get_module`, polars는
+# 변환 경로에서). Streamlit LIVE 모드는 `st.fragment(run_every=5)`로 렌더 경로를 별도
+# ScriptRunner 스레드에서 돌리는데, 그 스레드 둘이 동시에 numpy의 **최초** 임포트를 밟으면
+# `AttributeError: partially initialized module 'numpy' has no attribute 'ndarray'
+# (most likely due to a circular import)`가 난다 — 2026-07-31 UI 로그에 실제로 3건 기록됐다
+# (12:21:20·12:21:20·12:31:55, 전부 재기동 직후 2초 이내 = 콜드스타트 레이스).
+# 여기서 단일 스레드(모듈 임포트 시점)에 미리 완료시키면 그 경합 자체가 성립하지 않는다.
+import numpy  # noqa: F401
 import plotly.graph_objects as go
 import polars as pl
 import streamlit as st
@@ -149,6 +158,12 @@ def _render_circuit_breaker_badge(source) -> None:
     )
     if snap.badge == FreshnessBadge.STALE:
         st.caption(f"⚠ 상태 갱신 지연({snap.age_seconds:.0f}초 전)")
+
+    # 추정 phase와 **실제 게이트 상태**는 별개 사실이다 — 2026-07-31엔 phase가 정상으로 돌아온
+    # 뒤에도 게이트가 6시간 42분간 halted로 남았는데 화면엔 아무 흔적이 없었다
+    # (`core/messages.py`의 `CircuitBreakerStatus.gateway_halted` docstring 참고).
+    if status.gateway_halted:
+        st.caption("🛑 주문 게이트 정지 중 — 신규 주문 차단 상태")
 
     if status.reentry_cooldown_until is not None:
         remaining = (status.reentry_cooldown_until - now_utc()).total_seconds()
@@ -319,10 +334,30 @@ class _BarFileCache:
     path)`의 메모리 매핑은 ⓐ 수집기의 원자적 교체를 `OSError(1224)`로 막아 봉을 잃게 만들고
     ⓑ 매핑된 페이지가 교체로 무효화되면 파이썬 예외가 아니라 access violation으로 프로세스가
     즉사한다(그게 실제로 일어난 일이다).
+
+    **③ polars 호출 직렬화 (2026-07-31 추가)**: 위 ①②를 다 넣은 뒤에도 2026-07-31에 **같은
+    fault offset**(`_polars_runtime.pyd` +0x083973c7, 0xc0000005)으로 6번 더 죽었다 — 07-29 3건,
+    07-30 1건과 완전히 동일한 주소다. 즉 남은 크래시는 "찢어진 파일"이 아니다.
+
+    남은 유력 원인은 **프로세스 내 동시성**이다. 근거: ⓐ 같은 날 UI 로그에 `partially
+    initialized module 'numpy'`(= 두 스레드가 동시에 numpy 최초 임포트를 밟을 때만 나오는
+    형태)가 3건 찍혔다, ⓑ 07-30 조사 기록에 "첫 polars 크래시가 `st.fragment(run_every=5)`
+    도입 커밋 53분 뒤였고 그 이전 날짜엔 polars 크래시 0건"이 남아 있다, ⓒ 07-31 크래시는
+    08:35 기동 후가 아니라 **10:42부터** 시작됐다(Streamlit은 브라우저 세션이 붙어야 스크립트를
+    실행한다 = 사람이 화면을 연 시점).
+
+    이 클래스는 모듈 전역 싱글턴(`_BAR_CACHE`)이라, 여기 락을 하나 걸면 **모든 ScriptRunner
+    스레드의 Parquet 파싱·프레임 접근이 직렬화된다**. 프레임은 하루치 380행 남짓이고 갱신은
+    Horizon당 1분에 한 번이라 직렬화 비용은 무시할 수준이다.
+
+    주의: 이건 **가설에 기반한 완화**다. 위 ⓐⓑⓒ는 정황이고, 네이티브 크래시라 파이썬 레벨
+    스택이 안 남아 인과를 직접 증명하지 못했다. 다음 거래일 크래시 0건이 확인되기 전까지
+    "고쳤다"고 말하면 안 된다 — 07-29·07-30에 두 번 그렇게 판단했다가 같은 오프셋으로 재발했다.
     """
 
     def __init__(self) -> None:
         self._entries: dict[tuple[str, str, str, str], tuple[tuple, pl.DataFrame]] = {}
+        self._lock = threading.Lock()
 
     def load(
         self, archiver: ParquetArchiver, symbol: str, horizon: Horizon, day: date
@@ -332,7 +367,16 @@ class _BarFileCache:
         하루치가 파일 하나가 아니라 여러 조각일 수 있으므로(`data/archiver.py` "조각 쓰기")
         캐시 지문도 파일 집합 전체로 잡는다 — 하나만 보면 새 시간대 조각이 생겼을 때 갱신을
         놓친다.
+
+        전 구간을 락으로 감싼다(위 docstring ③) — 캐시 딕셔너리 보호가 아니라 **polars 네이티브
+        호출의 직렬화**가 목적이라 파일 읽기까지 안에 들어가야 한다.
         """
+        with self._lock:
+            return self._load_locked(archiver, symbol, horizon, day)
+
+    def _load_locked(
+        self, archiver: ParquetArchiver, symbol: str, horizon: Horizon, day: date
+    ) -> tuple[pl.DataFrame | None, str | None]:
         key = (str(archiver.base_dir), symbol, horizon.value, day.isoformat())
         sources = archiver.day_sources(symbol, horizon, day)
         if not sources:
@@ -388,14 +432,34 @@ def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> pl.DataFr
 
 
 def _candlestick_figure(bars: pl.DataFrame, tick_size: float) -> go.Figure:
+    """polars 객체를 plotly에 **직접 넘기지 않는다**(2026-07-31).
+
+    2026-07-31 크래시 6건의 파이썬 레벨 흔적은 전부 이 함수 안이었다
+    (`app.py:_candlestick_figure` → `go.Candlestick` → `_plotly_utils.basevalidators.
+    is_homogeneous_array` → `np.ndarray` 접근). plotly의 값 검증기는 넘어온 객체가 무엇인지
+    모른 채 numpy/배열 프로토콜을 더듬는데, 그 대상이 polars Series면 네이티브 변환 경로를
+    타게 된다. 여기서 미리 순수 파이썬 리스트로 바꿔 넘기면 그 경로 자체가 없어진다.
+
+    비용은 하루치 380행 × 5컬럼의 리스트 변환 — 5초 주기 재렌더에서 무시할 수준이고,
+    애초에 `_BarFileCache`가 파일이 안 바뀌면 재파싱을 건너뛴다.
+    """
+    opens, highs, lows, closes = (
+        [v * tick_size for v in bars[col].to_list()]
+        for col in ("o_ticks", "h_ticks", "l_ticks", "c_ticks")
+    )
+    # tzinfo를 떼어 **naive KST 벽시계**로 넘긴다 — 값은 이미 `_load_bars()`가
+    # `convert_time_zone("Asia/Seoul")`로 KST로 되돌려 놓았고(2026-07-29 UTC 축 버그 대응),
+    # tz-aware인 채로 넘기면 plotly가 다시 자기 기준으로 해석할 여지가 생긴다. 그 버그를
+    # 두 번 겪지 않으려고 여기서 벽시계 값으로 못박는다.
+    x_values = [ts.replace(tzinfo=None) for ts in bars["bar_open_kst"].to_list()]
     fig = go.Figure(
         data=[
             go.Candlestick(
-                x=bars["bar_open_kst"],
-                open=bars["o_ticks"] * tick_size,
-                high=bars["h_ticks"] * tick_size,
-                low=bars["l_ticks"] * tick_size,
-                close=bars["c_ticks"] * tick_size,
+                x=x_values,
+                open=opens,
+                high=highs,
+                low=lows,
+                close=closes,
                 increasing_line_color="#00C9A7",
                 decreasing_line_color="#FF5C7A",
             )

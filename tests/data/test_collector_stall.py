@@ -138,6 +138,138 @@ async def test_reset_clears_the_baseline():
         await watchdog.run_until_stalled(describe="A05608")
 
 
+# ---------------------------------------------------------------- 적응 임계 (2026-07-31)
+
+
+def _feed_ticks(clock: _FakeClock, watchdog, *, count: int, interval: float) -> None:
+    """`interval`초 간격으로 틱을 넣어 "이 시장은 이만큼 한산하다"는 이력을 만든다."""
+    for _ in range(count):
+        watchdog.mark_tick()
+        clock.now += interval
+
+
+async def test_quiet_market_does_not_trip_the_fixed_120s_threshold():
+    """2026-07-31 실측 회귀 — 상한가 고착 구간은 분당 1~17계약이 **정상**이었는데 고정
+    120초 임계가 이걸 6회 장애로 오판했고, 그 재연결들이 오히려 결손을 키웠다(재연결 후 첫
+    틱까지 2분 37초·2분 40초). 최근 최장 무틱 100초가 관측된 시장이면 임계는 200초다."""
+    clock = _FakeClock(max_sleeps=5)  # 150초 경과 — 옛 고정 임계(120초)라면 여기서 터졌다
+    watchdog = _watchdog(clock)
+    _feed_ticks(clock, watchdog, count=5, interval=100.0)
+    watchdog.mark_tick()
+
+    assert watchdog.current_timeout_seconds() == 200.0
+    with pytest.raises(_StopLoop):
+        await watchdog.run_until_stalled(describe="A05608")
+
+
+async def test_quiet_market_still_trips_once_its_own_threshold_is_passed():
+    """한산함을 봐주는 것이지 감시를 끄는 게 아니다 — 그 시장 기준으로도 이상하면 터진다."""
+    clock = _FakeClock(max_sleeps=20)
+    watchdog = _watchdog(clock)
+    _feed_ticks(clock, watchdog, count=5, interval=100.0)
+    watchdog.mark_tick()
+
+    with pytest.raises(TickStallError):
+        await watchdog.run_until_stalled(describe="A05608")
+
+    assert clock.sleeps == 7  # 30초 격자 7번 = 210초 ≥ 임계 200초
+
+
+async def test_busy_market_falls_back_to_the_floor_threshold():
+    """바쁜 구간에서는 최장 간격 자체가 작아 곱해도 하한(120초)을 못 넘는다 — 2026-07-28·29의
+    진짜 30분 공백을 2분 만에 잡던 성질이 그대로 유지된다."""
+    clock = _FakeClock()
+    watchdog = _watchdog(clock)
+    _feed_ticks(clock, watchdog, count=20, interval=1.0)
+    watchdog.mark_tick()
+
+    assert watchdog.current_timeout_seconds() == 120.0
+    with pytest.raises(TickStallError):
+        await watchdog.run_until_stalled(describe="A05608")
+    assert clock.sleeps == 4
+
+
+def test_threshold_is_capped_so_a_real_outage_is_never_ignored():
+    """아무리 한산해도 10분 무틱은 시장 상태가 아니라 장애로 본다."""
+    clock = _FakeClock()
+    watchdog = _watchdog(clock)
+    _feed_ticks(clock, watchdog, count=3, interval=500.0)
+    watchdog.mark_tick()
+
+    assert watchdog.current_timeout_seconds() == 600.0  # 500×2=1000이 아니라 상한
+
+
+async def test_ineffective_reconnect_doubles_the_threshold():
+    """재연결했는데 틱이 안 돌아오면 그 재연결은 효과가 없었다 — 같은 실패를 반복하지 않는다
+    (2026-07-31의 6연속 무의미한 재연결)."""
+    clock = _FakeClock(max_sleeps=30)
+    watchdog = _watchdog(clock)
+    watchdog.mark_tick()
+
+    with pytest.raises(TickStallError):
+        await watchdog.run_until_stalled(describe="A05608")
+    assert watchdog.current_timeout_seconds() == 240.0  # 120 × 2
+
+    watchdog.reset()
+    watchdog.mark_tick()
+    with pytest.raises(TickStallError):
+        await watchdog.run_until_stalled(describe="A05608")
+    assert watchdog.current_timeout_seconds() == 480.0  # 120 × 4
+
+
+async def test_recovered_tick_flow_clears_the_stall_penalty():
+    clock = _FakeClock(max_sleeps=30)
+    watchdog = _watchdog(clock)
+    watchdog.mark_tick()
+    with pytest.raises(TickStallError):
+        await watchdog.run_until_stalled(describe="A05608")
+    assert watchdog.current_timeout_seconds() > 120.0
+
+    watchdog.reset()
+    _feed_ticks(clock, watchdog, count=10, interval=1.0)  # 재연결이 실제로 효과가 있었다
+
+    assert watchdog.current_timeout_seconds() == 120.0  # 페널티 해제
+
+
+def test_reset_keeps_the_market_activity_history():
+    """`reset()`이 지우는 건 **연결**의 기준선이지 **시장**의 한산함 이력이 아니다 — 재연결
+    한 번으로 "이 시장이 얼마나 조용한지"를 잊으면 같은 오탐이 즉시 재발한다."""
+    clock = _FakeClock()
+    watchdog = _watchdog(clock)
+    _feed_ticks(clock, watchdog, count=5, interval=100.0)
+
+    watchdog.reset()
+
+    assert watchdog.seen_first_tick is False  # 연결 기준선은 지워졌다
+    assert watchdog.recent_max_gap_seconds() == 100.0  # 시장 이력은 남았다
+    assert watchdog.current_timeout_seconds() == 200.0
+
+
+def test_tick_rate_diagnostics_are_available_for_the_stall_log():
+    """스톨 로그가 "133초간 틱 없음"만 남기면 그게 장애인지 한산함인지 사후에도 알 수 없다."""
+    clock = _FakeClock()
+    watchdog = _watchdog(clock)
+    _feed_ticks(clock, watchdog, count=6, interval=50.0)  # 300초 동안 6틱
+
+    assert watchdog.ticks_within(60.0) == 1  # 마지막 60초 안에 들어온 틱
+    assert watchdog.ticks_within(300.0) == 6
+    assert watchdog.recent_max_gap_seconds() == 50.0
+
+
+def test_health_follows_the_adaptive_threshold(tmp_path: Path):
+    """헬스 판정과 워치독이 같은 임계를 봐야 한다 — 안 그러면 화면만 CRITICAL로 붉어지고
+    정작 재연결은 안 일어나는 "두 판정이 어긋난" 상태가 된다."""
+    clock = _FakeClock()
+    collector = _health_collector(tmp_path, clock)
+    _feed_ticks(clock, collector._watchdog, count=5, interval=100.0)  # noqa: SLF001
+    collector._watchdog.mark_tick()  # noqa: SLF001
+
+    clock.now += 130.0  # 옛 고정 임계(120초)라면 이미 CRITICAL
+    assert collector.health().level is HealthLevel.WARN
+    clock.now += 80.0  # 총 210초 — 적응 임계 200초 초과
+    assert collector.health().level is HealthLevel.CRITICAL
+
+
 def test_watchdog_is_disabled_when_timeout_is_zero():
     clock = _FakeClock()
     assert _watchdog(clock, timeout=0.0).enabled is False

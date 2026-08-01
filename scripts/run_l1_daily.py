@@ -86,8 +86,12 @@ from messiah.core.docker_bootstrap import (  # noqa: E402
     ensure_docker_ready,
 )
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: E402
-from messiah.core.health import HealthReporter  # noqa: E402
-from messiah.core.messages import Horizon  # noqa: E402
+from messiah.core.health import (  # noqa: E402
+    COLLECTOR_COMPONENT,
+    HealthReporter,
+    HealthStatus,
+)
+from messiah.core.messages import HealthLevel, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import (  # noqa: E402
     launch_command_center,
@@ -239,7 +243,22 @@ async def _run_regular_session(
     32분간 아무도 몰랐던 사고의 대응 — 경위는 `core/ui_launcher.py`/`core/health.py` 참고.
 
     heartbeat의 `probe`는 각 컴포넌트가 스스로 구현한 `health()`다 — 데이터 흐름의 상태를
-    판정할 근거(마지막 틱/발행 시각)를 실제로 갖고 있는 쪽이 판정한다(고도화 4의 계층 분리)."""
+    판정할 근거(마지막 틱/발행 시각)를 실제로 갖고 있는 쪽이 판정한다(고도화 4의 계층 분리).
+
+    UI 감시를 포기할 때 `sys.health`에 CRITICAL을 남긴다(2026-07-31 추가) — 그 전에는 ERROR
+    로그 한 줄이 전부였고, **그 로그를 볼 화면이 바로 그 죽은 UI였다**(07-31 12:35~15:35
+    3시간 무화면). 컴포넌트 목록에 고정으로 자리를 잡아두면 화면이 돌아왔을 때 "언제부터
+    감시가 꺼져 있었는지"가 그대로 보인다."""
+
+    async def _report_ui_gave_up() -> None:
+        await HealthReporter(
+            bus,
+            "l1.command_center_ui",
+            probe=lambda: HealthStatus(
+                HealthLevel.CRITICAL, "자동 재기동 한도 소진 — 화면 없음, 수동 확인 필요"
+            ),
+        ).publish_once()
+
     await asyncio.gather(
         collector.run_forever(),
         composer.run_forever(),
@@ -248,8 +267,11 @@ async def _run_regular_session(
             caller_tag="run_l1_daily",
             project_root=_PROJECT_ROOT,
             log_path=_ui_log_path(today_str),
+            on_gave_up=_report_ui_gave_up,
         ),
-        HealthReporter(bus, "l1.collector", probe=collector.health).run_forever(),
+        # 컴포넌트 이름은 상수로 — G2의 `TradingPipeline`이 이 heartbeat를 구독해 CB 오탐을
+        # 억제한다(`strategy/pipeline.py` "한산과 단절"). 문자열이 갈리면 조용히 결선이 끊긴다.
+        HealthReporter(bus, COLLECTOR_COMPONENT, probe=collector.health).run_forever(),
         HealthReporter(bus, "l1.feature_engine", probe=engine.health).run_forever(),
     )
 

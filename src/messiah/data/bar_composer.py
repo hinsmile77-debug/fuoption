@@ -25,7 +25,7 @@ from datetime import datetime
 
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, BusLike
-from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon
+from messiah.core.messages import HORIZON_SECONDS, BarClosed, BarSession, Horizon
 from messiah.core.scheduler import FixedTickScheduler
 from messiah.core.timeutil import KST, UTC, ensure_aware
 from messiah.data.archiver import ParquetArchiver
@@ -119,6 +119,15 @@ class MultiHorizonBarComposer:
             c_ticks=bars[-1].c_ticks,
             volume=sum(b.volume for b in bars),
             quality_ok=len(bars) == expected_minutes and all(b.quality_ok for b in bars),
+            # 구성 1분봉 중 하나라도 장전이면 합성봉도 장전으로 본다(2026-07-31) — 09:00을
+            # 걸치는 봉(예: 08:55~09:00 5분봉)은 장전 프린트를 실제로 품고 있으므로
+            # "정규장 봉"이라고 말하면 사실과 다르다. quality_ok가 구성봉 전부를 요구하는
+            # 것과 같은 보수적 방향.
+            session=(
+                BarSession.PRE_OPEN
+                if any(b.session is BarSession.PRE_OPEN for b in bars)
+                else BarSession.REGULAR
+            ),
         )
         await self._archive_and_publish(composite)
 

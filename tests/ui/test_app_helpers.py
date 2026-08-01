@@ -69,7 +69,26 @@ def test_candlestick_figure_x_axis_matches_kst_wall_clock(tmp_path):
 
     fig = _candlestick_figure(bars, tick_size=0.02)
 
-    assert str(fig.data[0].x[0]) == "2026-07-29T09:00:00.000000"
+    # 2026-07-31부터 x는 naive KST 벽시계 datetime이다(`_candlestick_figure` 주석 참고) —
+    # 표현 형식이 바뀌었을 뿐 "09:00 개장 봉이 09:00으로 보인다"는 원래 검증 의도는 같다.
+    assert fig.data[0].x[0] == datetime(2026, 7, 29, 9, 0)  # noqa: DTZ001 — naive가 검증 대상
+    assert fig.data[0].x[0].tzinfo is None
+
+
+def test_candlestick_figure_passes_plain_python_values_to_plotly(tmp_path):
+    """2026-07-31 크래시 대응 — polars 객체를 plotly 검증기에 그대로 넘기면 네이티브 변환
+    경로를 탄다(`_candlestick_figure` docstring). 순수 파이썬 값만 넘어가는지 못박는다."""
+    bar_dir = tmp_path / "bars"
+    _write_bar_parquet(bar_dir / "A05608" / "1m" / "2026-07-29.parquet", open_hour_kst=9)
+    bars = _load_bars("A05608", "1m", date(2026, 7, 29), bar_dir)
+
+    fig = _candlestick_figure(bars, tick_size=0.02)
+
+    trace = fig.data[0]
+    for values in (trace.x, trace.open, trace.high, trace.low, trace.close):
+        assert not isinstance(values, pl.Series)
+        assert all(isinstance(v, (int, float, datetime)) for v in values)
+    assert trace.close[0] == pytest.approx(48505 * 0.02)
 
 
 def test_default_redis_url_reads_from_instance_config(monkeypatch):

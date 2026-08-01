@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from messiah.core.messages import Horizon
+from messiah.core.messages import BarClosed, BarSession, Horizon, Tick
 from messiah.data.normalizer import MinuteBarAggregator, parse_futures_tick, parse_option_tick
 
 # 2026-07-22 ws_client.py 실측 세션에서 실제로 캡처한 라이브 WS 프레임(미니선물 A05608,
@@ -97,6 +97,85 @@ def test_parse_option_tick_invalid_format_returns_none():
 
 
 # ---------------------------------------------------------------- MinuteBarAggregator
+
+
+# --------------------------------------- 세션 구분 · 시세 정합성 (2026-07-31, P1-2)
+
+
+def _tick(hhmmss: str, price: str) -> Tick:
+    """실캡처 프레임의 시각·가격만 바꿔 재사용 — 필드 배치는 실측 그대로 유지한다."""
+    raw = _REAL_TICK_1.replace("^152953^", f"^{hhmmss}^", 1).replace("^1080.30^", f"^{price}^", 1)
+    tick = parse_futures_tick(raw, _TICK_SIZE, today=_TODAY)
+    assert tick is not None
+    return tick
+
+
+def _bar_from(agg: MinuteBarAggregator, ticks: list[Tick]) -> BarClosed:
+    for tick in ticks:
+        agg.add_tick(tick)
+    bar = agg.flush_final()
+    assert bar is not None
+    return bar
+
+
+def test_pre_open_bars_are_labelled_as_such():
+    """2026-07-31 실측 근거 — 그날 08:45~09:04의 20봉이 전부 `o=h=l=c=46633`으로 고정돼
+    있다가 09:05에 6.1% 점프했다. 정규장 봉과 구분 없이 아카이브·웜스타트·차트에 섞여
+    들어가던 것을 표시한다(버리지는 않는다)."""
+    bar = _bar_from(MinuteBarAggregator(symbol="A05608"), [_tick("084500", "932.66")])
+
+    assert bar.session is BarSession.PRE_OPEN
+
+
+def test_regular_session_bars_keep_the_default_label():
+    bar = _bar_from(MinuteBarAggregator(symbol="A05608"), [_tick("090000", "990.00")])
+
+    assert bar.session is BarSession.REGULAR
+
+
+def test_the_0900_boundary_belongs_to_the_regular_session():
+    """반개구간 [09:00, …) — `EventCalendar.is_regular_session()`과 같은 경계 규약."""
+    assert _bar_from(MinuteBarAggregator("A05608"), [_tick("085959", "990.00")]).session is (
+        BarSession.PRE_OPEN
+    )
+    assert _bar_from(MinuteBarAggregator("A05608"), [_tick("090001", "990.00")]).session is (
+        BarSession.REGULAR
+    )
+
+
+def test_price_jump_between_bars_marks_the_bar_low_quality():
+    """2026-07-31 09:05봉 회귀 — `o=46633, h=49488`로 봉 하나가 6.1% 범위였는데
+    `quality_ok=True`로 통과해 ATR·변동성 피처와 다음날 웜스타트로 그대로 흘러갔다."""
+    agg = MinuteBarAggregator(symbol="A05608")
+    for tick in [_tick("090400", "932.66")] * 3:  # 3틱 — 틱 수 조건은 충족
+        agg.add_tick(tick)
+    first = agg.add_tick(_tick("090500", "989.76"))  # +6.1% 점프한 다음 분
+
+    assert first is not None and first.quality_ok is True  # 직전 봉 자체는 정상
+    jumped = agg.flush_final()
+    assert jumped is not None
+    assert jumped.quality_ok is False  # 점프한 봉이 저품질로 표시된다
+
+
+def test_normal_price_movement_keeps_quality_ok():
+    agg = MinuteBarAggregator(symbol="A05608")
+    for tick in [_tick("090400", "1000.00")] * 3:
+        agg.add_tick(tick)
+    agg.add_tick(_tick("090500", "1005.00"))  # +0.5% — 정상 범위
+    for tick in [_tick("090501", "1005.00")] * 2:
+        agg.add_tick(tick)
+
+    bar = agg.flush_final()
+
+    assert bar is not None and bar.quality_ok is True
+
+
+def test_first_bar_has_no_baseline_so_it_is_never_a_jump():
+    """직전 봉이 없으면 "튀었다"고 말할 근거가 없다 — 매일 첫 봉이 저품질로 찍히면 안 된다."""
+    agg = MinuteBarAggregator(symbol="A05608")
+    bar = _bar_from(agg, [_tick("090000", "5000.00")] * 3)
+
+    assert bar.quality_ok is True
 
 
 def test_minute_bar_aggregator_accumulates_within_same_minute_returns_none():

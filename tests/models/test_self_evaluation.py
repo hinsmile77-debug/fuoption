@@ -85,7 +85,7 @@ def test_run_self_evaluation_aggregates_metrics():
     )
     assert report.date == "2026-07-27"
     assert report.symbol == "TEST"
-    assert report.n_trades == 4
+    assert report.n_return_samples == 4
     assert 0.0 <= report.win_rate <= 1.0
     assert report.n_shadow_bundles == 2
 
@@ -94,10 +94,39 @@ def test_run_self_evaluation_with_no_trades_is_degenerate_but_safe():
     report = run_self_evaluation(
         date="2026-07-27", symbol="TEST", champion_returns=[], n_shadow_bundles=0
     )
-    assert report.n_trades == 0
+    assert report.n_return_samples == 0
     assert report.sharpe == 0.0
     assert report.win_rate == 0.0
     assert report.profit_factor == 0.0
+
+
+def test_fill_count_is_none_when_it_was_never_measured():
+    """2026-07-31 실측 회귀 — 주문 0건·체결 0건인 날의 리포트가 `n_trades=3`으로 찍혀
+    "거래 3건"으로 읽혔다. 실제로는 수익률 표본 3개(=거래일 3일)였다. 세지 않은 것은
+    0이 아니라 **모름**이어야 한다(L18)."""
+    report = run_self_evaluation(
+        date="2026-07-31", symbol="A05608", champion_returns=[0.0, 0.0, 0.0], n_shadow_bundles=0
+    )
+
+    assert report.n_return_samples == 3
+    assert report.n_fills is None  # 0이 아니다 — Position Reconciler 부재로 못 셌다
+
+
+def test_fill_count_is_reported_when_fills_are_supplied():
+    order = _order("1", limit_price_ticks=1000)
+    ack = _ack(order, "B1")
+
+    report = run_self_evaluation(
+        date="2026-07-27",
+        symbol="TEST",
+        champion_returns=[0.01],
+        n_shadow_bundles=0,
+        orders=[order],
+        acks=[ack],
+        fills=[_fill("B1", price_ticks=1002)],
+    )
+
+    assert report.n_fills == 1
 
 
 def test_run_self_evaluation_includes_slippage_reconciliation():

@@ -289,31 +289,95 @@ async def test_watcher_relaunches_after_the_ui_dies(tmp_path):
     assert state["alive"] is True
 
 
-async def test_watcher_gives_up_after_restart_limit(tmp_path):
-    """고쳐지지 않는 크래시 루프를 무한 반복하지 않는다 — 한도를 넘으면 감시를 접되,
-    조용히가 아니라 ERROR 로그를 남기고 접는다(태그 CommandCenterUIRestartGaveUp)."""
-    exe = _launchable_project(tmp_path)
+def _never_reviving_popen():
+    """기동해도 포트가 안 살아나는 크래시 루프 재현."""
     dead_calls = []
 
-    def _never_reviving_popen(*args, **kwargs):
+    def _popen(*args, **kwargs):
         dead_calls.append(args)
         proc = subprocess.Popen.__new__(subprocess.Popen)
         proc.pid = 1  # type: ignore[misc]
         return proc
 
-    # 포트가 영원히 무응답 — 매 틱마다 재기동을 시도하다 한도에서 스스로 반환해야 한다
-    await watch_command_center_forever(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
-        max_restarts=3,
-        streamlit_exe=exe,
-        is_running=lambda port: False,
-        popen=_never_reviving_popen,
-        sleep=_noop_sleep,
-    )
+    return _popen, dead_calls
 
-    assert len(dead_calls) == 3  # 한도만큼만 시도하고 멈춘다
+
+async def test_watcher_stops_relaunching_after_restart_limit(tmp_path):
+    """고쳐지지 않는 크래시 루프를 무한 반복하지 않는다 — 한도를 넘으면 재기동을 접되,
+    조용히가 아니라 ERROR 로그를 남긴다(태그 CommandCenterUIRestartGaveUp)."""
+    exe = _launchable_project(tmp_path)
+    popen, dead_calls = _never_reviving_popen()
+    ticker = _Ticker(*[lambda: None] * 8)  # 포기 이후에도 몇 틱 더 돈다
+
+    with pytest.raises(_StopLoop):
+        await watch_command_center_forever(
+            caller_tag="test",
+            project_root=tmp_path,
+            log_path=tmp_path / "ui.log",
+            max_restarts=3,
+            streamlit_exe=exe,
+            is_running=lambda port: False,
+            popen=popen,
+            sleep=ticker,
+            monotonic=lambda: 0.0,  # 창이 절대 안 지나감 — 한도가 계속 유효
+        )
+
+    assert len(dead_calls) == 3  # 한도만큼만 시도한다
+
+
+async def test_watcher_keeps_reporting_after_it_gives_up(tmp_path):
+    """2026-07-31 회귀 — 예전엔 포기하면서 **반환**해버려, 그 뒤로는 화면이 없다는 사실조차
+    아무도 다시 말해주지 않았다(12:35~15:35 3시간). 재기동만 접고 관측은 계속해야 한다."""
+    exe = _launchable_project(tmp_path)
+    popen, dead_calls = _never_reviving_popen()
+    reports: list[int] = []
+    ticker = _Ticker(*[lambda: None] * 8)
+
+    async def _on_gave_up() -> None:
+        reports.append(1)
+
+    with pytest.raises(_StopLoop):  # 반환이 아니라 루프 소진으로 끝나야 한다
+        await watch_command_center_forever(
+            caller_tag="test",
+            project_root=tmp_path,
+            log_path=tmp_path / "ui.log",
+            max_restarts=2,
+            streamlit_exe=exe,
+            is_running=lambda port: False,
+            popen=popen,
+            sleep=ticker,
+            monotonic=lambda: 0.0,
+            on_gave_up=_on_gave_up,
+        )
+
+    assert len(dead_calls) == 2
+    assert len(reports) >= 5  # 포기 이후 매 점검마다 계속 알린다
+
+
+async def test_restart_limit_is_a_rolling_window_not_a_daily_total(tmp_path):
+    """2026-07-31 회귀 — 그날 크래시는 10:42~12:35에 6번, 즉 **약 2시간에 걸쳐** 났다.
+    하루 누적 한도였기 때문에 소진됐지, 1시간 창이었다면 소진되지 않았다."""
+    exe = _launchable_project(tmp_path)
+    popen, dead_calls = _never_reviving_popen()
+    clock = {"t": 0.0}
+    # 매 점검마다 30분씩 흐른다 — 1시간 창이면 항상 최근 재기동은 2회 이하로 유지된다
+    ticker = _Ticker(*[lambda: clock.__setitem__("t", clock["t"] + 1800.0)] * 6)
+
+    with pytest.raises(_StopLoop):
+        await watch_command_center_forever(
+            caller_tag="test",
+            project_root=tmp_path,
+            log_path=tmp_path / "ui.log",
+            max_restarts=3,
+            restart_window_seconds=3600.0,
+            streamlit_exe=exe,
+            is_running=lambda port: False,
+            popen=popen,
+            sleep=ticker,
+            monotonic=lambda: clock["t"],
+        )
+
+    assert len(dead_calls) == 6  # 한 번도 포기하지 않았다
 
 
 async def _noop_sleep(_seconds: float) -> None:

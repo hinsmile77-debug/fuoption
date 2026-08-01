@@ -47,7 +47,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
-from messiah.core.messages import Horizon
+from messiah.core.messages import BarSession, Horizon
 from messiah.data.archiver import ParquetArchiver
 
 _KST_ZONE_NAME = "Asia/Seoul"
@@ -94,6 +94,9 @@ class IntegrityReport:
     tag_counts: dict[str, int]
     circuit_breaker_events: dict[str, int]
     data_flow_findings: list[str]
+    flat_price_minutes: int
+    pre_open_minutes: int
+    market_findings: list[str]
     native_crashes: NativeCrashes
     breaches: list[str]
 
@@ -239,6 +242,7 @@ def analyze_data_flow_ownership(tag_counts: Mapping[str, int]) -> list[str]:
     disconnects = tag_counts.get("CollectorWSDisconnected", 0)
     reconnects = tag_counts.get("CollectorWSReconnected", 0)
     cb_confirmed = tag_counts.get("CircuitBreakerConfirmed", 0)
+    cb_resumed = tag_counts.get("CircuitBreakerResumed", 0)
 
     findings: list[str] = []
     if stalls > 0 and reconnects == 0:
@@ -248,36 +252,160 @@ def analyze_data_flow_ownership(tag_counts: Mapping[str, int]) -> list[str]:
             f"G2 CB 확정 {cb_confirmed}회인데 L1 단절 흔적 0건 — "
             "거래는 멈췄으나 데이터 흐름은 아무도 손대지 않음"
         )
+    # 3. **정지와 해제의 짝이 안 맞는다** (2026-07-31 신규) — 그날 확정 5회에 해제 3회였고,
+    #    나머지 2회는 게이트가 안 풀린 채 장이 끝났다(6시간 42분 halted). 위 두 규칙은 둘 다
+    #    "한쪽에 흔적이 **아예** 없을 때"만 보므로 이 형태를 통과시켰다(그날 findings 0건).
+    #
+    #    "L1 재연결 N회인데 CB 확정 M회"류의 개수 비교 규칙도 후보였지만 채택하지 않았다 —
+    #    진짜 단절이 나서 L1이 복구하고 CB가 정지시킨 **정상 시나리오**와 구분이 안 돼
+    #    오탐만 늘린다. 짝 불일치는 그런 모호함이 없다: 확정됐으면 해제도 있어야 한다.
+    if cb_confirmed > cb_resumed:
+        findings.append(
+            f"CB 확정 {cb_confirmed}회 대 해제 {cb_resumed}회 — "
+            f"{cb_confirmed - cb_resumed}회가 해제 없이 남음(주문 게이트 잔류 정지 의심)"
+        )
     return findings
+
+
+# ---------------------------------------------------------------- 시장 상태 (2026-07-31)
+
+
+# 가격이 이만큼 오래 1틱도 안 움직이면 "한산"이 아니라 별개의 시장 상태(상한/하한 고착,
+# 일방시장)로 본다 — 스톨 오탐·CB 오탐·피처 퇴화가 전부 이 구간에서 나오므로, 사후 조사가
+# 원인을 한 줄로 짚을 수 있어야 한다.
+_FLAT_PRICE_ALERT_MINUTES = 30
+
+
+def _bar_shape_metrics(bar_dir: Path, symbol: str, day: date) -> tuple[int, int]:
+    """(가격 고정 분 수, 장전 봉 수) — 그날 1분봉의 "모양"에 대한 두 지표.
+
+    **가격 고정(`o=h=l=c`)**: 2026-07-31엔 380봉 중 60봉이 이 형태였고(14:21 이후 마감까지
+    51814 고정), 그게 그날 이상점 대부분의 공통 원인이었는데 리포트엔 그 사실을 가리키는
+    숫자가 하나도 없었다 — 사람이 Parquet을 직접 열어야만 보였다.
+
+    **장전 봉 수**: 같은 날 08:45~09:04의 20봉이 전부 스테일 프린트로 보였다
+    (`core/messages.py`의 `BarSession`). 매일 몇 봉이 장전 구간에서 들어왔는지를 남겨,
+    "그날 장전이 평소와 달랐는가"를 다음 점검이 손으로 안 파도 되게 한다.
+    `session` 컬럼이 없던 시절 파일은 전부 정규장으로 읽히므로 0이 나온다(사실과 맞다 —
+    그때는 구분 자체가 없었다).
+    """
+    frame = _load_day_frame(bar_dir, symbol, Horizon.M1, day)
+    if frame is None or frame.height == 0:
+        return 0, 0
+    flat = (
+        (pl.col("o_ticks") == pl.col("h_ticks"))
+        & (pl.col("h_ticks") == pl.col("l_ticks"))
+        & (pl.col("l_ticks") == pl.col("c_ticks"))
+    )
+    flat_minutes = int(frame.select(flat.sum()).item())
+    if "session" not in frame.columns:
+        return flat_minutes, 0
+    pre_open = int(frame.select((pl.col("session") == BarSession.PRE_OPEN.value).sum()).item())
+    return flat_minutes, pre_open
+
+
+def analyze_market_state(flat_minutes: int, m1: BarContinuity | None) -> list[str]:
+    """시장 자체가 평소와 달랐던 날을 드러낸다 — **장애가 아니라 상태**다.
+
+    이걸 별도 항목으로 두는 이유: 이런 날은 결손·CB·NaN 임계가 한꺼번에 터지는데, 그 셋을
+    각각 "장애"로만 보면 원인을 못 찾고 매번 처음부터 조사하게 된다. 시장 상태를 먼저 적어
+    두면 나머지 초과 항목들이 그 결과라는 게 바로 읽힌다.
+    """
+    findings: list[str] = []
+    if flat_minutes >= _FLAT_PRICE_ALERT_MINUTES:
+        span = f"/{m1.rows}봉" if m1 is not None and m1.rows else ""
+        findings.append(
+            f"가격 고정 {flat_minutes}분{span}(o=h=l=c) — 상한/하한 고착 또는 일방시장 의심, "
+            "이날의 스톨·CB·NaN 초과는 이 상태의 결과일 수 있음"
+        )
+    return findings
+
+
+def _first_session_start(day: date, session_starts: Mapping[str, Sequence[str]]) -> datetime | None:
+    """그날 MESSIAH 프로세스가 처음 기동한 시각(KST 벽시계) — 크래시 집계 창의 시작점.
+
+    로그의 `SessionStart` ts에서 `HH:MM:SS`만 잘라 쓴다(`analyze_logs`가 그렇게 모은다).
+    하나도 없으면 `None` — 그날 아예 안 돌았거나 로그가 없는 경우라 창을 좁힐 근거가 없다.
+
+    반환은 **의도적으로 naive**다 — 이 값의 유일한 소비처가 `Get-WinEvent`의 `StartTime`
+    문자열이고(`_collect_native_crashes`), Windows 이벤트 로그의 시각은 이 PC의 로컬 시각
+    (= KST)이다. tz를 붙이면 오히려 오프셋 변환이 끼어들 여지가 생긴다.
+    """
+    stamps = [s for starts in session_starts.values() for s in starts if s]
+    if not stamps:
+        return None
+    try:
+        # noqa DTZ007: 로그가 남긴 KST 벽시계 문자열이라 tz를 붙일 대상이 아니다(위 docstring).
+        earliest = min(datetime.strptime(s, "%H:%M:%S").time() for s in stamps)  # noqa: DTZ007
+    except ValueError:
+        return None
+    return datetime.combine(day, earliest)
 
 
 # ---------------------------------------------------------------- 네이티브 크래시
 
 
-def _collect_native_crashes(day: date, *, runner=subprocess.run) -> NativeCrashes:
+def _collect_native_crashes(
+    day: date,
+    *,
+    runner=subprocess.run,
+    since: datetime | None = None,
+    python_version_prefix: str | None = None,
+) -> NativeCrashes:
     """`Application Error`(이벤트 ID 1000) 중 해당 날짜의 python.exe 크래시만 센다.
 
     2026-07-30 사고의 **유일한** 흔적이 여기였다 — 네이티브 크래시는 프로세스를 즉사시켜
     애플리케이션 로그에 traceback은커녕 한 줄도 안 남긴다.
+
+    ## 남의 크래시를 세지 않는다 (2026-07-31 수정)
+
+    2026-07-31 리포트는 "네이티브 크래시 8건"으로 임계를 초과했는데, 실측해 보니 그중 2건은
+    MESSIAH가 아니었다: 06:34:53·06:36:19의 두 건은 python.exe **3.10**(MESSIAH의 .venv는
+    3.12) + `KERNELBASE.dll` + 예외코드 `0xc06d007f`로, MESSIAH가 기동하기(08:35) 두 시간
+    전에 이 PC의 다른 프로젝트가 낸 것이었다. 임계 초과 목록이 남의 사고로 오염되면 매일
+    늑대소년이 된다.
+
+    두 가지로 좁힌다:
+
+    - `since`: 그날 첫 `SessionStart` 시각 이후만 본다. 호출측(`build_report`)이 실제 로그에서
+      읽은 값을 넘긴다 — "MESSIAH가 돌지도 않던 시간"을 아예 창에서 뺀다.
+    - `python_version_prefix`: 이벤트에 찍힌 결함 프로세스 버전이 이 접두사로 시작하는 것만
+      센다(기본값은 지금 이 인터프리터의 major.minor). 같은 PC에 여러 파이썬이 있는 환경에서
+      가장 싸게 구분되는 축이다.
+
+    좁힌 뒤에도 **못 세는 것과 0건은 계속 구분한다**(`available=False`, L18) — 이 사고의
+    유일한 흔적이 이 집계였으므로 "못 셌다"는 사실 자체가 중요하다.
     """
     if sys.platform != "win32":
         return NativeCrashes(available=False, count=0, details=["Windows 전용 집계 — 건너뜀"])
 
     start = datetime.combine(day, datetime.min.time())
-    end = start + timedelta(days=1)
-    # 출력은 **ASCII만** 뽑는다(시각 + 오류 모듈 파일명). 이벤트 로그의 `Message`는 시스템
-    # 로캘 언어라(한글 Windows면 한국어) 그대로 받으면 PowerShell이 CP949로 내보내는데,
-    # 파이썬이 utf-8로 디코딩하다 UnicodeDecodeError가 난다(2026-07-30 실측). 로캘 문자열을
-    # 아예 안 건드리는 게 근본 해법 — 필요한 정보(언제, 어느 모듈)는 정규식으로만 뽑는다.
+    if since is not None and since > start:
+        start = since
+    end = datetime.combine(day, datetime.min.time()) + timedelta(days=1)
+    if python_version_prefix is None:
+        python_version_prefix = f"{sys.version_info.major}.{sys.version_info.minor}."
+    # 출력은 **ASCII만** 뽑는다. 이벤트 로그의 `Message`는 시스템 로캘 언어라(한글 Windows면
+    # 한국어) 그대로 받으면 PowerShell이 CP949로 내보내는데, 파이썬이 utf-8로 디코딩하다
+    # UnicodeDecodeError가 난다(2026-07-30 실측).
+    #
+    # 예전엔 그 `Message`에 정규식을 걸어 모듈명을 뽑았는데, 2026-07-31부터 `Properties`
+    # 배열을 직접 읽는다 — 로캘 문자열을 아예 안 건드리고(근본 해법), 필요한 값이 전부
+    # 구조화된 필드로 있다: [0] 프로세스명 · [1] 프로세스 버전 · [3] 결함 모듈 · [6] 예외코드 ·
+    # [7] 결함 오프셋. 특히 **[1] 버전**이 있어야 같은 PC의 다른 파이썬(2026-07-31의 3.10 2건)을
+    # 걸러낼 수 있고, **[7] 오프셋**을 남겨야 "같은 주소에서 또 죽었다"를 사후에 대조할 수 있다
+    # (07-29·07-30·07-31 UI 크래시 10건이 전부 +0x083973c7 동일이었다).
     script = (
         "Get-WinEvent -FilterHashtable @{LogName='Application';"
         "ProviderName='Application Error';"
         f"StartTime='{start:%Y-%m-%d %H:%M:%S}';EndTime='{end:%Y-%m-%d %H:%M:%S}'"
         "} -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.Message -like '*python.exe*' } | "
-        "ForEach-Object { $m = [regex]::Match($_.Message, '[\\w.]+\\.(pyd|dll)'); "
-        "$_.TimeCreated.ToString('HH:mm:ss') + ' ' + "
-        "$(if ($m.Success) { $m.Value } else { 'unknown' }) }"
+        "Where-Object { $_.Properties.Count -ge 8 -and "
+        "$_.Properties[0].Value -like 'python.exe*' -and "
+        f"$_.Properties[1].Value -like '{python_version_prefix}*'"
+        " } | "
+        "ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss') + ' ' + "
+        "$_.Properties[3].Value + ' ' + $_.Properties[6].Value + ' +0x' + $_.Properties[7].Value }"
     )
     try:
         result = runner(
@@ -319,7 +447,6 @@ def build_report(
     """
     limits = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     continuity = analyze_bar_continuity(bar_dir, symbol, day)
-    crashes = crash_collector(day)
 
     per_process = {name: analyze_logs(paths) for name, paths in log_paths.items()}
     logs = analyze_logs([path for paths in log_paths.values() for path in paths])
@@ -328,9 +455,14 @@ def build_report(
     }
     session_starts = {name: result["session_starts"] for name, result in per_process.items()}
 
+    # 크래시 집계 창을 "MESSIAH가 실제로 돌던 시간"으로 좁힌다(2026-07-31 — 그날 08:35 기동
+    # 전인 06:34·06:36의 남의 프로세스 크래시 2건이 리포트에 섞여 임계를 초과시켰다).
+    crashes = crash_collector(day, since=_first_session_start(day, session_starts))
+
     m1 = next((c for c in continuity if c.horizon == Horizon.M1.value), None)
     restarts = max(restarts_by_process.values(), default=0)
     critical_lines = logs["level_counts"].get("CRITICAL", 0)
+    flat_minutes, pre_open_minutes = _bar_shape_metrics(bar_dir, symbol, day)
 
     breaches: list[str] = []
     if m1 is not None and m1.missing_minutes > limits["missing_minutes"]:
@@ -348,9 +480,16 @@ def build_report(
         breaches.append(f"네이티브 크래시 {crashes.count}건")
     if critical_lines > limits["critical_log_lines"]:
         breaches.append(f"CRITICAL 로그 {critical_lines}건")
+    # 화면이 통째로 사라진 날은 "관측 공백"이라 그 자체가 임계 초과다 — 2026-07-31엔
+    # 12:35~15:35 3시간 무화면이었는데 리포트엔 아무 표시도 안 났다.
+    ui_gave_up = logs["tag_counts"].get("CommandCenterUIRestartGaveUp", 0)
+    if ui_gave_up:
+        breaches.append(f"Command Center UI 자동 재기동 포기 {ui_gave_up}회 — 관측 공백 발생")
 
     data_flow_findings = analyze_data_flow_ownership(logs["tag_counts"])
     breaches.extend(data_flow_findings)
+    market_findings = analyze_market_state(flat_minutes, m1)
+    breaches.extend(market_findings)
 
     return IntegrityReport(
         date=day.isoformat(),
@@ -365,6 +504,9 @@ def build_report(
         tag_counts=logs["tag_counts"],
         circuit_breaker_events=logs["circuit_breaker_events"],
         data_flow_findings=data_flow_findings,
+        flat_price_minutes=flat_minutes,
+        pre_open_minutes=pre_open_minutes,
+        market_findings=market_findings,
         native_crashes=crashes,
         breaches=breaches,
     )
@@ -407,6 +549,13 @@ def format_summary(report: IntegrityReport) -> str:
     )
     if report.circuit_breaker_events:
         lines.append(f"  CB 이벤트: {report.circuit_breaker_events}")
+    if report.flat_price_minutes or report.pre_open_minutes:
+        lines.append(
+            f"  가격 고정(o=h=l=c): {report.flat_price_minutes}분 · "
+            f"장전 봉: {report.pre_open_minutes}개"
+        )
+    for finding in report.market_findings:
+        lines.append(f"  ⚠ 시장 상태: {finding}")
     for finding in report.data_flow_findings:
         lines.append(f"  ⚠ 탐지·복구 불일치: {finding}")
 

@@ -68,7 +68,7 @@ from typing import Callable, Sequence
 
 import polars as pl
 
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import BarClosed, BarSession, Horizon
 
 # `core/timeutil.py`의 KST는 고정 오프셋 timezone 객체라 polars의 `convert_time_zone()`에
 # 그대로 못 넘긴다(존 이름 문자열을 받는다) — `ui/app.py`가 쓰는 것과 같은 IANA 이름을 쓴다.
@@ -160,7 +160,8 @@ class ParquetArchiver:
         new_row = self._bar_to_frame(bar)
 
         if path.exists():
-            combined = pl.concat([read_parquet_without_mmap(path), new_row])
+            # 기존 조각이 옛 스키마일 수 있다(`read_day()`의 `diagonal_relaxed`와 같은 이유).
+            combined = pl.concat([read_parquet_without_mmap(path), new_row], how="diagonal_relaxed")
         else:
             combined = new_row
 
@@ -207,8 +208,13 @@ class ParquetArchiver:
                 continue
         if not frames:
             return None
+        # `how="diagonal_relaxed"`: 스키마가 서로 다른 조각도 합친다(없는 컬럼은 null).
+        # 컬럼이 추가되는 날(2026-07-31의 `session`)에는 **하루 안에서도** 통합본은 옛 스키마,
+        # 새 조각은 새 스키마인 상태가 실제로 생긴다 — 기본 `concat`은 그 순간 예외를 던지고,
+        # 그러면 그날 데이터가 UI·웜스타트·리포트에서 통째로 사라진다(스키마 변경이 조용한
+        # 데이터 사고로 번지는 전형적 경로).
         return (
-            pl.concat(frames)
+            pl.concat(frames, how="diagonal_relaxed")
             .unique(subset=["bar_open_kst", "horizon"], keep="last")
             .sort("bar_open_kst")
         )
@@ -325,6 +331,10 @@ class ParquetArchiver:
                 c_ticks=row["c_ticks"],
                 volume=row["volume"],
                 quality_ok=row["quality_ok"],
+                # `session`은 2026-07-31에 추가됐다 — 그 전 Parquet에는 컬럼 자체가 없고,
+                # `diagonal_relaxed` 병합에서는 null로 들어온다. 둘 다 REGULAR로 읽는다
+                # (`core/messages.py`의 `BarClosed.session` 기본값과 같은 근거).
+                session=row.get("session") or BarSession.REGULAR,
             )
             for row in frame.iter_rows(named=True)
         ]
@@ -354,6 +364,7 @@ class ParquetArchiver:
                 "c_ticks": [bar.c_ticks],
                 "volume": [bar.volume],
                 "quality_ok": [bar.quality_ok],
+                "session": [bar.session.value],
             }
         )
 

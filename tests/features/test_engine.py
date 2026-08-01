@@ -236,6 +236,87 @@ async def test_high_nan_ratio_after_warmup_logs_feature_nan_warning(monkeypatch)
     assert any(tag == "FeatureNaN" for tag, _ in logged)
 
 
+# ------------------------------------------------- NaN 원인 구분: 결측 vs 퇴화 (2026-07-31)
+
+
+def _break_all_features(monkeypatch) -> None:
+    """모든 계산기를 실패시켜 nan_ratio를 1.0으로 만든다 — 이 테스트들이 보려는 건
+    "NaN이 났을 때 원인을 어떻게 분류하는가"이지 계산기 정확도가 아니다."""
+
+    def _boom(*args):
+        raise RuntimeError("계산 실패")
+
+    monkeypatch.setattr("messiah.features.px_core.WINDOWED_FEATURES", [("px_ret", _boom, (5,))])
+    monkeypatch.setattr("messiah.features.px_core.STATEFUL_FEATURES", [])
+    monkeypatch.setattr("messiah.features.vl_core.WINDOWED_FEATURES", [])
+    monkeypatch.setattr("messiah.features.vl_core.STATEFUL_FEATURES", [])
+
+
+def _capture_logs(monkeypatch) -> list[tuple[str, str, dict]]:
+    logged: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.features.engine.mlog.log",
+        lambda tag, msg, **f: logged.append((tag, msg, f)),
+    )
+    return logged
+
+
+async def test_flat_price_nan_is_reported_as_degenerate_not_missing(monkeypatch):
+    """2026-07-31 실측 회귀 — 15:20 이후 1m NaN 33% 경고 15회는 전부 "가격이 14:21부터 마감까지
+    51814틱에 고정돼 표준편차 계열이 정의 불가"인 경우였는데, 결측과 같은 문구로 찍혀 매번
+    수집 장애를 먼저 의심하게 만들었다."""
+    logged = _capture_logs(monkeypatch)
+    monkeypatch.setattr("messiah.features.engine._MAX_HISTORY", 5)
+    monkeypatch.setattr("messiah.features.engine._DEGENERATE_WINDOW", 3)
+    _break_all_features(monkeypatch)
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    for i in range(5):
+        await engine.handle_bar(_bar(i, c=51814))  # 종가가 계속 동일
+
+    tags = [tag for tag, _msg, _f in logged]
+    assert "FeatureDegenerate" in tags
+    assert "FeatureNaN" not in tags
+    fields = next(f for tag, _m, f in logged if tag == "FeatureDegenerate")
+    assert fields["cause"] == "degenerate"
+    assert fields["flat_close_ticks"] == 51814
+
+
+async def test_moving_price_nan_is_still_reported_as_missing(monkeypatch):
+    """가격이 움직이는데도 NaN이면 그건 진짜 데이터 사고다 — 퇴화 분류가 그걸 가리면 안 된다."""
+    logged = _capture_logs(monkeypatch)
+    monkeypatch.setattr("messiah.features.engine._MAX_HISTORY", 5)
+    monkeypatch.setattr("messiah.features.engine._DEGENERATE_WINDOW", 3)
+    _break_all_features(monkeypatch)
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    for i in range(5):
+        await engine.handle_bar(_bar(i, c=100 + i))  # 매 봉 종가가 다름
+
+    tags = [tag for tag, _msg, _f in logged]
+    assert "FeatureNaN" in tags
+    assert "FeatureDegenerate" not in tags
+    fields = next(f for tag, _m, f in logged if tag == "FeatureNaN")
+    assert fields["cause"] == "missing"
+
+
+async def test_degenerate_classification_needs_a_full_window(monkeypatch):
+    """표본이 창을 못 채웠으면 "고정됐다"고 단정하지 않는다 — 정상 시장에서도 두세 봉
+    연속 동일가는 흔하다."""
+    logged = _capture_logs(monkeypatch)
+    monkeypatch.setattr("messiah.features.engine._MAX_HISTORY", 2)
+    monkeypatch.setattr("messiah.features.engine._DEGENERATE_WINDOW", 10)
+    _break_all_features(monkeypatch)
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    for i in range(3):
+        await engine.handle_bar(_bar(i, c=51814))
+
+    tags = [tag for tag, _msg, _f in logged]
+    assert "FeatureNaN" in tags
+    assert "FeatureDegenerate" not in tags
+
+
 # ---------------------------------------------------------------- 웜스타트 (2026-07-30)
 
 
