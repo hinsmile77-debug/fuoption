@@ -72,10 +72,19 @@ class OrderGateway:
         self._broker = broker
         self._pending = PendingRegistry()
         self._halted = False
+        # 결선 완성도 계측 (2026-08-03 고도화 C). 여기가 "모든 주문의 유일한 관문"이라
+        # (클래스 docstring) 주문 수를 세기에 자연스러운 유일한 자리다 —
+        # 호출자마다 세면 경로가 하나 늘 때마다 조용히 빠진다.
+        self._accepted_orders = 0
 
     @property
     def halted(self) -> bool:
         return self._halted
+
+    @property
+    def accepted_orders(self) -> int:
+        """브로커가 접수한 주문 수 — 거부·롤백은 안 센다(`models/wiring_completeness.py`)."""
+        return self._accepted_orders
 
     async def submit(self, req: OrderRequest) -> OrderAck | None:
         """pending 선등록 → 전송 → 실패 시 롤백. (L1 패턴의 유일한 구현처)
@@ -99,6 +108,7 @@ class OrderGateway:
 
         final_key = f"{req.symbol}:{result.broker_order_no}"
         await self._pending.rekey(temp_key, final_key)
+        self._accepted_orders += 1
         log(
             "OrderSubmit", "accepted", request_id=req.msg_id, broker_order_no=result.broker_order_no
         )

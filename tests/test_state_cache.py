@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import timedelta
 
 from messiah.core.messages import DecisionIntent, FuturesView, Side
+from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_utc
 from messiah.simulator.inprocess_bus import InProcessBus
-from messiah.ui.state_cache import CacheSubscriber, StateCache
 
 _SYMBOL = "TEST"
 

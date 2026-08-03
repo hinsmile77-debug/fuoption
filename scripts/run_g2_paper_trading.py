@@ -113,6 +113,7 @@ from messiah.execution.order_gateway import OrderGateway  # noqa: E402
 from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
+from messiah.models.wiring_completeness import WiringCompleteness  # noqa: E402
 from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor  # noqa: E402
 from messiah.simulator.engine import LiveSimBrokerFeed  # noqa: E402
 from messiah.strategy.futures.service import FuturesAIService  # noqa: E402
@@ -255,12 +256,40 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
+def _assess_wiring(
+    registry: ModelRegistry,
+    shadow_manager: ShadowManager,
+    pipeline: TradingPipeline,
+    gateway: OrderGateway,
+) -> WiringCompleteness:
+    """오늘 G2가 실제로 어디까지 결선돼 돌았는지 (2026-08-03 고도화 C).
+
+    2026-08-03까지 자가평가 리포트는 `sharpe=0.0`을 4거래일 연속 출력했는데, 그건 성적이
+    아니라 **모델이 하나도 안 붙은 채 파이프라인만 돌았다**는 뜻이었다(그날 G2 로그 첫 줄이
+    `live 번들 결선: []`). 그 사실을 리포트가 스스로 말하게 한다
+    (`models/wiring_completeness.py` 모듈 docstring).
+    """
+    live_bundles = [live.bundle_id for h in Horizon if (live := registry.get_live(h)) is not None]
+    return WiringCompleteness(
+        live_bundles=live_bundles,
+        shadow_bundles=len(shadow_manager.active_bundles),
+        n_decisions=pipeline.decisions_emitted,
+        n_orders=gateway.accepted_orders,
+        # Position Reconciler가 아직 없어 실제 체결을 셀 수단이 없다(알려진 갭 —
+        # `core/messages.py`의 `SelfEvalReport.n_fills`가 항상 None인 것과 같은 이유).
+        # 그 컴포넌트가 결선되면 여기가 True가 되고 손익 지표가 비로소 측정값이 된다.
+        fills_countable=False,
+    )
+
+
 async def _daily_close(
     *,
     bus: MessageBus,
     broker: SimBroker,
     shadow_manager: ShadowManager,
     registry: ModelRegistry,
+    pipeline: TradingPipeline,
+    gateway: OrderGateway,
     symbol: str,
     start_equity: Decimal,
     today: str,
@@ -274,22 +303,33 @@ async def _daily_close(
     _append_jsonl(returns_path, {"date": today, "symbol": symbol, "return": daily_return})
     champion_returns = [r["return"] for r in _read_jsonl(returns_path) if r.get("symbol") == symbol]
 
+    wiring = _assess_wiring(registry, shadow_manager, pipeline, gateway)
     report = run_self_evaluation(
         date=today,
         symbol=symbol,
         champion_returns=champion_returns,
         n_shadow_bundles=len(shadow_manager.active_bundles),
         instance_id=instance_id,
+        wiring=wiring,
     )
     (_LOG_DIR / f"self_eval_{today}.json").write_text(
         report.model_dump_json(indent=2), encoding="utf-8"
     )
-    print(
-        f"Self Evaluation: 누적 {len(champion_returns)}거래일 · "
-        f"Sharpe {report.sharpe:.2f} · MDD {report.max_drawdown:.1%} · "
-        f"Shadow {report.n_shadow_bundles}개",
-        flush=True,
-    )
+    # 결선 상태를 **먼저** 찍는다 — 손익 숫자를 먼저 보여주면 사람은 그걸 성적으로 읽는다.
+    print(f"결선 완성도: {wiring.summary()}", flush=True)
+    if wiring.pnl_measurable:
+        print(
+            f"Self Evaluation: 누적 {len(champion_returns)}거래일 · "
+            f"Sharpe {report.sharpe:.2f} · MDD {report.max_drawdown:.1%} · "
+            f"Shadow {report.n_shadow_bundles}개",
+            flush=True,
+        )
+    else:
+        print(
+            f"Self Evaluation: 누적 {len(champion_returns)}거래일 · "
+            f"손익 지표 미측정(결선 미완) · Shadow {report.n_shadow_bundles}개",
+            flush=True,
+        )
 
     for bundle_id in shadow_manager.active_bundles:
         shadow_fills = shadow_manager.fills_for(bundle_id)
@@ -385,6 +425,8 @@ async def main(cfg: InstanceConfig) -> None:
                 broker=broker,
                 shadow_manager=shadow_manager,
                 registry=registry,
+                pipeline=pipeline,
+                gateway=gateway,
                 symbol=symbol,
                 start_equity=start_equity,
                 today=today.isoformat(),

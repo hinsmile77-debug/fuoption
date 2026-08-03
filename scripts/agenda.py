@@ -161,13 +161,27 @@ def collect_self_eval(root: Path, days: int) -> list[str]:
         # 실현 슬리피지 None = "잴 수 없었다"(체결 0건) — 0.00틱으로 찍으면 성과처럼 읽힌다.
         realized = r.get("slippage_realized_ticks")
         realized_text = "미측정" if realized is None else f"{realized:.2f}틱"
-        lines.append(
+        head = (
             f"- {r.get('date', '?')} {r.get('symbol', '?')}: "
-            f"표본 {samples}개 · {fills_text} · 승률 {r.get('win_rate', 0):.0%} · "
-            f"PF {r.get('profit_factor', 0):.2f} · Sharpe {r.get('sharpe', 0):.2f} · "
-            f"MDD {r.get('max_drawdown', 0):.1%} · Shadow {r.get('n_shadow_bundles', 0)}개 · "
+            f"표본 {samples}개 · {fills_text} · Shadow {r.get('n_shadow_bundles', 0)}개 · "
             f"슬리피지(예측/실현) {r.get('slippage_predicted_ticks', 0):.2f}/{realized_text}"
         )
+        # 손익 지표는 **측정 가능할 때만** 보여준다(2026-08-03 고도화 C). 결선이 안 된 날의
+        # `Sharpe 0.00`을 그대로 찍으면 "수익도 손실도 없었다"는 성적처럼 읽히는데, 실제로는
+        # 모델이 하나도 안 붙은 채 파이프라인만 돈 것이다 — 4거래일 연속 그랬다.
+        # `pnl_measurable` 필드가 없는 옛 리포트(08-03 이전)는 판정 근거가 없으므로 역시
+        # 손익을 주장하지 않는다(모르는 것을 좋은 쪽으로 가정하지 않는다).
+        if r.get("pnl_measurable"):
+            lines.append(
+                f"{head} · 승률 {r.get('win_rate', 0):.0%} · "
+                f"PF {r.get('profit_factor', 0):.2f} · Sharpe {r.get('sharpe', 0):.2f} · "
+                f"MDD {r.get('max_drawdown', 0):.1%}"
+            )
+        else:
+            stage = r.get("wiring_stage") or "결선 상태 미기록"
+            lines.append(
+                f"{head}\n  - ⚠ 손익 지표 미측정({stage}) — 승률·PF·Sharpe·MDD는 자리표시자"
+            )
     return lines
 
 
@@ -196,6 +210,28 @@ def collect_promotion_proposals(root: Path) -> list[str]:
     return recommended or ["(사람 검토가 필요한 승격 제안 없음)"]
 
 
+def collect_fix_verifications(root: Path, today: datetime) -> list[str]:
+    """ "고쳤다"고 판정한 수정이 실제로 들었는지 — 매일 실측으로 채점한 결과
+    (`messiah/ops/fix_verification.py`).
+
+    §2의 "라이브 미검증"이 **사람이 판단하는** 항목이라면 이 절은 **수치로 자동 판정되는**
+    항목이다. 자동 판정이 가능한 것을 사람 규율에 맡겨 뒀던 게 2026-07-29~08-03에 같은
+    UI 크래시를 세 번 "고쳤다"고 오판한 원인이었다.
+    """
+    from messiah.ops import fix_verification as fv
+
+    try:
+        verdicts = fv.run(today=today.date(), log_dir=root / "logs")
+    except Exception as exc:  # noqa: BLE001 — 안건 생성 전체를 막지 않는다
+        return [f"- (검증 실패: {exc})"]
+
+    if not verdicts:
+        return ["- (등록된 검증 대기 수정 없음)"]
+    # 재발·기한초과를 맨 위로 — 회의에서 먼저 봐야 할 순서가 곧 목록 순서여야 한다.
+    verdicts.sort(key=lambda v: (not v.needs_attention, v.id))
+    return [f"- **[{v.status}]** `{v.id}` — {v.summary}\n  - {v.detail}" for v in verdicts]
+
+
 def build_agenda(root: Path, log_paths: Path | Sequence[Path], days: int = 1) -> str:
     today = now_kst()
     sections = [
@@ -208,6 +244,9 @@ def build_agenda(root: Path, log_paths: Path | Sequence[Path], days: int = 1) ->
         "",
         "## 2. 라이브 미검증 (DECISION_LOG)",
         *collect_unverified(root / "dev_memory" / "DECISION_LOG.md"),
+        "",
+        "## 2-1. 수정 유효성 자동 검증 (고도화 B — 재발은 최우선 안건)",
+        *collect_fix_verifications(root, today),
         "",
         "## 3. 현 세션 경보 집계 (세션 마커 이후만)",
         *collect_log_alerts(log_paths),

@@ -34,6 +34,7 @@ from messiah.models.metrics import (
     sharpe_ratio,
     win_rate,
 )
+from messiah.models.wiring_completeness import WiringCompleteness
 from messiah.risk.cost_model import CostModel
 
 
@@ -94,6 +95,7 @@ def run_self_evaluation(
     cost_model: CostModel | None = None,
     periods_per_year: float = 252.0,
     instance_id: str | None = None,
+    wiring: WiringCompleteness | None = None,
 ) -> SelfEvalReport:
     """하루치 챔피언 실현수익률(`champion_returns`, 비율 단위 — Position Reconciler 부재로
     호출자가 직접 산출해 넘긴다, 모듈 docstring)로 승률·PF·Sharpe·MDD를 집계하고, 그날의
@@ -105,6 +107,10 @@ def run_self_evaluation(
     남았다(2026-07-29 산출물 실측). 멀티 PC 리포트 병합이 이 필드의 존재 이유라
     (`core/messages.py` 모듈 docstring, Ver 1.1 §7.3) 비어 있으면 나중에 어느 PC 결과인지
     복원할 수 없다.
+
+    `wiring`은 그날 G2가 실제로 어디까지 결선돼 돌았는지다(2026-08-03 추가) — 안 넘기면
+    `pnl_measurable=False`로 남는다. 모르는 것을 좋은 쪽으로 가정하지 않는다
+    (`models/wiring_completeness.py` 모듈 docstring).
     """
     slippage = reconcile_slippage(orders, acks, fills, cost_model=cost_model)
     report = SelfEvalReport(
@@ -122,6 +128,9 @@ def run_self_evaluation(
         n_shadow_bundles=n_shadow_bundles,
         slippage_predicted_ticks=slippage.predicted_ticks,
         slippage_realized_ticks=slippage.realized_ticks,
+        pnl_measurable=wiring.pnl_measurable if wiring else False,
+        wiring_stage=wiring.stage if wiring else None,
+        wiring_summary=wiring.summary() if wiring else None,
     )
     mlog.log(
         "SelfEvalReportGenerated",
@@ -131,5 +140,8 @@ def run_self_evaluation(
         n_return_samples=report.n_return_samples,
         n_fills=report.n_fills,
         sharpe=report.sharpe,
+        # 이 필드가 로그에 있어야 나중에 "그날 Sharpe 0이 성적인지 무운영인지"를 되짚을 수 있다.
+        pnl_measurable=report.pnl_measurable,
+        wiring_stage=report.wiring_stage,
     )
     return report

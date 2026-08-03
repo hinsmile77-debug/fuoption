@@ -24,7 +24,7 @@ from enum import Enum
 from typing import Protocol
 
 from messiah.core.messages import BusMessage
-from messiah.ui.state_cache import StateCache
+from messiah.core.state_cache import StateCache
 
 DEFAULT_STALE_AFTER_SECONDS = 30.0
 

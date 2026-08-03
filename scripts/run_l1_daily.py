@@ -95,6 +95,7 @@ from messiah.core.health import (  # noqa: E402
 from messiah.core.messages import HealthLevel, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import (  # noqa: E402
+    is_ui_already_running,
     launch_command_center,
     watch_command_center_forever,
 )
@@ -104,6 +105,7 @@ from messiah.data.collector import TickCollector  # noqa: E402
 from messiah.data.normalizer import parse_futures_tick  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
+from messiah.ops.status_board import run_status_board_forever  # noqa: E402
 
 # 정규장 마감(연속거래 종료) 시각 — event_calendar.DEFAULT_SESSION과 같은 값을 직접
 # 참조해 단일 소스를 유지한다(두 곳이 따로 하드코딩돼 있다가 어긋나는 사고 방지).
@@ -235,6 +237,7 @@ async def _run_regular_session(
     engine: FeatureEngine,
     bus: MessageBus,
     today_str: str,
+    symbol: str,
 ) -> None:
     """수집 3종 + UI 생존 감시 + 컴포넌트 heartbeat를 동시에 돌린다.
 
@@ -274,6 +277,11 @@ async def _run_regular_session(
         # 억제한다(`strategy/pipeline.py` "한산과 단절"). 문자열이 갈리면 조용히 결선이 끊긴다.
         HealthReporter(bus, COLLECTOR_COMPONENT, probe=collector.health).run_forever(),
         HealthReporter(bus, "l1.feature_engine", probe=engine.health).run_forever(),
+        # 헤드리스 상태판 (2026-08-03 고도화 A) — UI가 하던 구독을 이 프로세스로 옮겨
+        # `logs/status_snapshot.json`에 주기적으로 남긴다. 화면이 죽어도(07-30 32분,
+        # 07-31 3시간) 관측은 계속되고, 15:40에 UI가 종료된 뒤의 장후 리뷰도 가능해진다.
+        # UI 생사까지 같은 스냅샷에 기록한다 — 화면 없이 화면 상태를 안다.
+        run_status_board_forever(bus, symbol=symbol, ui_probe=is_ui_already_running),
     )
 
 
@@ -386,7 +394,9 @@ async def main(cfg: InstanceConfig) -> None:
         print(f"정규장 수집 시작 — {session_stop.isoformat()}까지 ({remaining:.0f}초)", flush=True)
         try:
             await asyncio.wait_for(
-                _run_regular_session(collector, composer, engine, bus, today.strftime("%Y%m%d")),
+                _run_regular_session(
+                    collector, composer, engine, bus, today.strftime("%Y%m%d"), symbol
+                ),
                 timeout=remaining,
             )
         except TimeoutError:

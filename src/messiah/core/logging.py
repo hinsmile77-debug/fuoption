@@ -81,6 +81,15 @@ TAG_LEVELS: dict[str, int] = {
     "ArchiveCompacted": logging.INFO,  # 장중 조각 파일 → 일자 파일 통합 완료
     "ArchiveCompactionFailed": logging.WARNING,  # 통합 실패 — 조각은 그대로 남아 읽기는 계속 가능
     "OutOfSessionNoTrade": logging.INFO,  # 정규장 밖 주문 생략 — 정상 동작(RiskReject와 동급)
+    # 수정 유효성 자동 검증 (고도화 B, `ops/fix_verification.py`). **재발이 ERROR인 것이
+    # 핵심이다** — "고쳤다"고 판정한 수정이 안 들었다는 뜻이고, 2026-07-29~08-03에 그 상태를
+    # 세 번 놓쳤다. 통과는 INFO로 조용히, 기한 초과는 WARNING으로 회의 안건에.
+    "FixVerificationPassed": logging.INFO,
+    "FixVerificationRecurred": logging.ERROR,
+    "FixVerificationOverdue": logging.WARNING,
+    # 헤드리스 상태판 기록 실패 (고도화 A, `ops/status_board.py`) — 관측의 최후 보루가
+    # 안 써지고 있다는 뜻이라 조용히 넘기면 안 된다. 수집 본 임무는 계속되므로 WARNING.
+    "StatusSnapshotWriteFailed": logging.WARNING,
 }
 
 _logger = logging.getLogger("messiah")

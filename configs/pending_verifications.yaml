@@ -1,0 +1,55 @@
+# 수정 유효성 자동 검증 등록부 (고도화 B, 2026-08-03)
+#
+# 여기 적은 항목은 매 거래일 장후에 `logs/daily_integrity_*.json` 이력으로 자동 채점된다
+# (`src/messiah/ops/fix_verification.py`). 목적은 하나다 — **"고쳤다"는 판단을 사람 기억이
+# 아니라 다음 거래일의 실측이 내리게 하는 것**.
+#
+# 이게 없어서 2026-07-29~08-03에 같은 UI 크래시를 세 번 "고쳤다"고 판정하고 세 번 재발시켰다.
+# 매번 판정 기준 자체는 기록돼 있었지만(예: "다음 거래일 native_crashes 0건"), 그걸 다음날
+# 다시 꺼내 확인하는 일을 아무도 강제하지 않았다.
+#
+# 규칙:
+#   - 등록일(registered) **다음** 거래일부터 채점한다. 수정은 그날 장 마감 후에 들어가므로
+#     등록일 리포트는 수정 이전의 세계다.
+#   - 한 번이라도 기준을 위반하면 즉시 `재발` — 그게 이 등록부의 존재 이유다.
+#   - 판정이 `검증 완료`로 굳으면 이 파일에서 지운다. 안 지우면 매일 통과 줄만 쌓여
+#     정작 봐야 할 `재발`이 묻힌다(DECISION_LOG의 "닫히면 태그를 지운다"와 같은 규율).
+#
+# 지표(metric)는 무결성 리포트에 실제로 있는 필드만 쓸 수 있다:
+#   native_crashes · faulthandler_dumps · ui_restarts · restarts
+#   critical_log_lines · breaches · missing_minutes · longest_gap_minutes
+
+verifications:
+  - id: ui-crash-isolation
+    summary: "UI polars 크래시 격리 — 봉 파싱을 자식 프로세스로 분리(P0-1b, 커밋 c790b58)"
+    registered: 2026-08-03
+    # 판정 기준이 "크래시 0건"인 게 핵심이다. 격리가 성공하면 자식이 죽어도 UI는 사는데,
+    # **자식의 죽음도 여전히 네이티브 크래시로 집계된다** — 즉 이 기준은 "영향 격리"가 아니라
+    # "원인 소멸"을 본다. 격리만 성공하고 크래시가 계속되면 `재발`로 뜨는 게 맞다: 화면은
+    # 살았지만 근본 원인은 그대로라는 사실이 매일 드러나야 한다.
+    metric: native_crashes
+    max: 0
+    # 3거래일 — 07-31 수정은 하루(08-03)만에 깨졌고, 07-30 수정은 당일 재발했다. 하루로는
+    # 우연한 조용함과 구분이 안 된다. 이 값 자체는 미검증 초기값이다.
+    consecutive_days: 3
+    deadline: 2026-08-14
+
+  - id: ui-restart-observability
+    summary: "UI 재기동을 무결성 리포트 1급 임계로(P1-1) — 관측 공백이 조용히 지나가지 않는지"
+    registered: 2026-08-03
+    metric: ui_restarts
+    max: 0
+    consecutive_days: 3
+    deadline: 2026-08-14
+
+  - id: crash-forensics-armed
+    summary: "faulthandler 상시 무장(P0-1a) — 크래시가 나도 증거가 남는 상태인지"
+    registered: 2026-08-03
+    # 무장 실패는 `breaches`에 "무장 마커 없음"으로 올라온다(`ops/crash_dumps.py`).
+    # 그 항목이 하나라도 있으면 breaches가 0이 아니게 되므로 여기서 잡힌다 — 다만 이 지표는
+    # 다른 사고에도 반응하는 **넓은 그물**이다. 좁은 지표(무장 여부 단독)가 필요해지면
+    # `METRIC_EXTRACTORS`에 추가할 것.
+    metric: breaches
+    max: 0
+    consecutive_days: 3
+    deadline: 2026-08-14

@@ -197,6 +197,8 @@ class TradingPipeline:
         self._broker = broker
         self._gateway = gateway
         self._bus = bus
+        # 결선 완성도 계측 (2026-08-03 고도화 C) — `models/wiring_completeness.py` 참고.
+        self._decisions_emitted = 0
         self._cost_model = cost_model or CostModel()
         self._risk_engine = risk_engine or RiskEngine()
         self._sizer = sizer or PositionSizer()
@@ -223,6 +225,14 @@ class TradingPipeline:
         # 수집기의 마지막 heartbeat — CB 오탐 억제의 유일한 입력(모듈 docstring "한산과 단절",
         # `risk/circuit_breaker_monitor.py` 동명 절). 이 필드가 None이면 판정 자체를 안 한다.
         self._last_collector_health: Health | None = None
+
+    @property
+    def decisions_emitted(self) -> int:
+        """그날 발행한 `DecisionIntent` 수(NO_TRADE 포함) — 결선 완성도 판정 입력.
+
+        이 값이 0이면 승률·Sharpe 같은 손익 지표는 성적이 아니라 자리표시자다
+        (`models/wiring_completeness.py`)."""
+        return self._decisions_emitted
 
     async def start_day(self) -> None:
         """장 시작 시 1회 호출 — 당일 시작 자본을 현재 계좌 스냅샷으로 고정하고(R2·Kill
@@ -281,6 +291,10 @@ class TradingPipeline:
                 await self._gateway.submit(request)
 
         intent = self._decision_engine.decide(view, kill_active=kill_triggered)
+        # NO_TRADE도 센다 — "판단이 나왔나"와 "거래가 나왔나"는 다른 질문이고, 결선 완성도가
+        # 보려는 건 전자다(`models/wiring_completeness.py`). 2026-08-03에 이 값이 0이었다는
+        # 사실이 "번들이 하나도 안 붙었다"는 진단의 근거였다.
+        self._decisions_emitted += 1
         await self._bus.publish(TOPIC_INTENT, intent)
         if intent.side == Side.NO_TRADE:
             return

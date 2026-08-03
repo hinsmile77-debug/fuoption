@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from messiah.core.messages import DecisionIntent, Side
+from messiah.core.state_cache import StateCache
 from messiah.core.timeutil import now_utc
 from messiah.ui.data_source import (
     DataSourceMode,
@@ -13,7 +14,6 @@ from messiah.ui.data_source import (
     ReplayDataSource,
     compute_badge,
 )
-from messiah.ui.state_cache import StateCache
 
 _SYMBOL = "TEST"
 

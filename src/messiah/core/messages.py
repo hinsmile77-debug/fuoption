@@ -509,6 +509,16 @@ class SelfEvalReport(BusMessage):
     - `n_return_samples`: 승률·PF·Sharpe·MDD 계산에 실제로 들어간 수익률 표본 수.
     - `n_fills`: 진짜 체결 건수. Position Reconciler가 없어 아직 셀 수 없으므로 **`None`**이다
       — 0이 아니라 None인 것이 핵심이다(모르는 것과 없는 것을 구분, 마흐디 L18).
+
+    ## `pnl_measurable`이 False면 손익 지표를 읽지 말 것 (2026-08-03)
+
+    같은 실패 형태의 세 번째다. `n_trades`(07-31)와 `slippage_realized_ticks`(08-03)는 이름과
+    None으로 갈랐는데, **손익 지표 전체**가 아직 남아 있었다 — 4거래일 연속 `sharpe=0.0`이
+    찍혔고 그건 "수익도 손실도 없었다"는 측정 결과처럼 읽혔지만 실제로는 `live 번들 결선: []`,
+    즉 모델이 하나도 안 붙은 채 파이프라인만 돈 것이었다.
+
+    - `pnl_measurable`: 승률·PF·Sharpe·MDD를 **측정값으로 읽어도 되는가**. False면 자리표시자.
+    - `wiring_stage`: 지금 막혀 있는 첫 지점(`models/wiring_completeness.py`) — 다음에 할 일.
     """
 
     date: str  # ISO 날짜(YYYY-MM-DD) — 거래일 단위가 자연 키, 시각이 아님
@@ -524,3 +534,8 @@ class SelfEvalReport(BusMessage):
     # 주문·체결이 0건인 날에도 0.0이 찍혀 성과처럼 읽혔다(`n_fills`와 같은 실패 형태).
     slippage_realized_ticks: float | None
     n_fills: int | None = None
+    # 기본값이 False인 것이 의도다 — 호출자가 결선 상태를 안 넘기면 "측정 가능"이라고
+    # 주장하지 않는다(모르는 것을 좋은 쪽으로 가정하지 않는다).
+    pnl_measurable: bool = False
+    wiring_stage: str | None = None
+    wiring_summary: str | None = None

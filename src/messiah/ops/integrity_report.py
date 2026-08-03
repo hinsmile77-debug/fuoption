@@ -49,6 +49,7 @@ import polars as pl
 
 from messiah.core.messages import BarSession, Horizon
 from messiah.data.archiver import ParquetArchiver
+from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
 _KST_ZONE_NAME = "Asia/Seoul"
 
@@ -111,6 +112,9 @@ class IntegrityReport:
     pre_open_minutes: int
     market_findings: list[str]
     native_crashes: NativeCrashes
+    # 이벤트로그(위)와 짝을 이루는 **파이썬 레벨** 크래시 증거 (2026-08-03 고도화 D).
+    # 둘을 대조해야 "크래시는 났는데 덤프가 없다"(= 원인 규명 불가)가 자동으로 드러난다.
+    crash_forensics: CrashForensics
     breaches: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -451,6 +455,7 @@ def build_report(
     log_paths: Mapping[str, Sequence[Path]],
     thresholds: dict[str, float] | None = None,
     crash_collector=_collect_native_crashes,
+    log_dir: Path | None = None,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
 
@@ -513,6 +518,17 @@ def build_report(
     market_findings = analyze_market_state(flat_minutes, m1)
     breaches.extend(market_findings)
 
+    # 이벤트로그 집계와 로그 속 faulthandler 덤프를 대조한다(2026-08-03 고도화 D). 덤프 자체는
+    # 사고가 아니지만 **"크래시가 났는데 덤프가 없다"는 사고**다 — 그 상태로 5거래일을 보냈다.
+    # 로그 디렉터리는 `log_paths`에서 역추론한다(호출측이 기본 경로를 그대로 쓰는 게 보통).
+    forensics = collect_crash_forensics(
+        day,
+        log_dir=log_dir or _infer_log_dir(log_paths),
+        native_crash_count=crashes.count,
+        native_crashes_available=crashes.available,
+    )
+    breaches.extend(forensics.findings)
+
     return IntegrityReport(
         date=day.isoformat(),
         symbol=symbol,
@@ -532,8 +548,21 @@ def build_report(
         pre_open_minutes=pre_open_minutes,
         market_findings=market_findings,
         native_crashes=crashes,
+        crash_forensics=forensics,
         breaches=breaches,
     )
+
+
+def _infer_log_dir(log_paths: Mapping[str, Sequence[Path]]) -> Path:
+    """포렌식이 볼 로그 디렉터리 — 호출측이 넘긴 로그 경로의 부모를 쓴다.
+
+    `log_paths`에는 UI 로그가 없다(구조화 로그가 아니라서). 그런데 5거래일 크래시가 전부 UI
+    프로세스였으므로 포렌식은 그 파일을 반드시 봐야 한다 — 그래서 파일 목록이 아니라
+    **디렉터리**를 알아내 `ops/crash_dumps.py`가 직접 UI 로그를 찾게 한다."""
+    for paths in log_paths.values():
+        for path in paths:
+            return path.parent
+    return DEFAULT_LOG_DIR
 
 
 def format_summary(report: IntegrityReport) -> str:
@@ -572,6 +601,9 @@ def format_summary(report: IntegrityReport) -> str:
         if crashes.available
         else "  네이티브 크래시: 집계 불가(Windows 전용)"
     )
+    # 덤프가 있으면 죽은 지점의 파이썬 프레임을 바로 보여준다 — 이 줄이 없어서 5거래일 동안
+    # 정황만으로 원인을 추정했다(`ops/crash_dumps.py`).
+    lines.extend(format_dump_lines(report.crash_forensics))
 
     levels = report.log_level_counts
     lines.append(
@@ -655,4 +687,47 @@ def generate_and_write(
     )
     for breach in report.breaches:
         mlog.log("IntegrityThresholdBreached", breach, date=report.date, symbol=symbol)
+
+    _report_fix_verifications(day, log_dir)
     return report
+
+
+def _report_fix_verifications(day: date, log_dir: Path) -> None:
+    """등록된 수정들이 실제로 들었는지 채점한다 (고도화 B, 2026-08-03).
+
+    **오늘 리포트를 쓴 뒤에** 부른다 — 채점은 오늘 것을 포함한 이력 전체를 읽으므로
+    `build_report()` 안에서 하면 자기 자신을 읽어야 하는 순환이 된다
+    (`ops/fix_verification.py` 모듈 docstring).
+
+    채점 실패가 장후 절차를 막지 않는다 — 등록부 오타로 그날 종료가 멈추면 본말전도다.
+    다만 조용히 넘기지는 않는다(L18): 실패 사실을 화면과 로그에 남긴다.
+    """
+    from messiah.core import logging as mlog
+    from messiah.ops import fix_verification as fv
+
+    try:
+        verdicts = fv.run(today=day, log_dir=log_dir)
+    except Exception as exc:  # noqa: BLE001 — 장후 절차를 막지 않는다
+        print(f"수정 유효성 검증 실패(장후 절차는 계속): {exc}", flush=True)
+        return
+
+    print("=== 수정 유효성 검증 ===", flush=True)
+    for line in fv.format_verdicts(verdicts):
+        print(line, flush=True)
+
+    tags = {
+        fv.VerificationStatus.VERIFIED: "FixVerificationPassed",
+        fv.VerificationStatus.RECURRED: "FixVerificationRecurred",
+        fv.VerificationStatus.OVERDUE: "FixVerificationOverdue",
+    }
+    for verdict in verdicts:
+        tag = tags.get(verdict.status)
+        if tag is None:
+            continue  # 검증 대기는 정상 진행 상태 — 매일 로그를 채울 이유가 없다
+        mlog.log(
+            tag,
+            f"{verdict.id}: {verdict.detail}",
+            date=day.isoformat(),
+            fix_id=verdict.id,
+            status=verdict.status,
+        )
