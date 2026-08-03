@@ -64,11 +64,12 @@ import time
 from contextlib import suppress
 from datetime import date
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
 import polars as pl
 
 from messiah.core.messages import BarClosed, BarSession, Horizon
+from messiah.data import bar_paths
 
 # `core/timeutil.py`의 KST는 고정 오프셋 timezone 객체라 polars의 `convert_time_zone()`에
 # 그대로 못 넘긴다(존 이름 문자열을 받는다) — `ui/app.py`가 쓰는 것과 같은 IANA 이름을 쓴다.
@@ -179,20 +180,10 @@ class ParquetArchiver:
         return self._base_dir
 
     def day_sources(self, symbol: str, horizon: Horizon, day: date) -> list[Path]:
-        """그날치를 구성하는 파일들 — **읽기 순서대로** 돌려준다(통합본 먼저, 조각 나중).
-
-        이 순서가 중복 제거의 의미를 결정한다: 조각은 통합 이후에 다시 수집된 것이므로
-        같은 봉이 양쪽에 있으면 조각이 이긴다(`keep="last"`). 장중 재시작으로 통합본이
-        이미 있는 날에 조각이 새로 생기는 경우가 실제로 이 조합이다.
-        """
-        sources: list[Path] = []
-        canonical = self._canonical_path(symbol, horizon, day)
-        if canonical.exists():
-            sources.append(canonical)
-        shard_dir = self._shard_dir(symbol, horizon, day)
-        if shard_dir.is_dir():
-            sources.extend(sorted(shard_dir.glob("*.parquet")))
-        return sources
+        """그날치를 구성하는 파일들 — 실제 규칙은 `data/bar_paths.py`에 있다(2026-08-03에
+        polars 없는 경로 계층으로 분리 — Command Center UI가 polars를 임포트하지 않고도
+        "파일이 바뀌었나"를 판단해야 해서). 계약은 그대로다."""
+        return bar_paths.day_sources(self._base_dir, symbol, horizon, day)
 
     def read_day(self, symbol: str, horizon: Horizon, day: date) -> pl.DataFrame | None:
         """하루치를 하나의 프레임으로 — 통합 전이든 후든 호출측은 차이를 몰라도 된다.
@@ -220,17 +211,8 @@ class ParquetArchiver:
         )
 
     def available_days(self, symbol: str, horizon: Horizon) -> list[date]:
-        """통합본과 조각 디렉터리 양쪽에서 날짜를 모아 오름차순으로."""
-        horizon_dir = self._base_dir / symbol / horizon.value
-        if not horizon_dir.is_dir():
-            return []
-        days = {day for day in (_parse_day(p) for p in horizon_dir.glob("*.parquet")) if day}
-        days |= {
-            day
-            for day in (_parse_day_name(p.name) for p in horizon_dir.iterdir() if p.is_dir())
-            if day
-        }
-        return sorted(days)
+        """통합본과 조각 디렉터리 양쪽에서 날짜를 모아 오름차순으로 (`data/bar_paths.py`)."""
+        return bar_paths.available_days(self._base_dir, symbol, horizon)
 
     # ------------------------------------------------------------ 장후 통합
 
@@ -340,12 +322,10 @@ class ParquetArchiver:
         ]
 
     def _canonical_path(self, symbol: str, horizon: Horizon, day: date) -> Path:
-        return self._base_dir / symbol / horizon.value / f"{day.isoformat()}.parquet"
+        return bar_paths.canonical_path(self._base_dir, symbol, horizon, day)
 
     def _shard_dir(self, symbol: str, horizon: Horizon, day: date) -> Path:
-        """통합본은 `2026-07-30.parquet`(파일), 조각 디렉터리는 `2026-07-30`(디렉터리) —
-        이름이 겹치지 않고 `glob("*.parquet")`에도 디렉터리는 안 걸린다."""
-        return self._base_dir / symbol / horizon.value / day.isoformat()
+        return bar_paths.shard_dir(self._base_dir, symbol, horizon, day)
 
     def _shard_path_for(self, bar: BarClosed) -> Path:
         day = bar.bar_open_kst.date()
@@ -369,31 +349,6 @@ class ParquetArchiver:
         )
 
 
-def _parse_day(path: Path) -> date | None:
-    """`{date}.parquet` 파일명에서 날짜만 — 임시 파일(`*.parquet.{pid}.tmp`)이나 사람이
-    떨궈둔 다른 파일은 stem이 ISO 날짜가 아니므로 자연히 걸러진다."""
-    return _parse_day_name(path.stem)
-
-
-def _parse_day_name(name: str) -> date | None:
-    try:
-        return date.fromisoformat(name)
-    except ValueError:
-        return None
-
-
-def day_signature(paths: Sequence[Path]) -> tuple[tuple[str, int, int], ...]:
-    """읽기 캐시용 지문 — 파일 집합의 (이름, mtime, 크기).
-
-    조각화 이후로는 "하루치"가 파일 하나가 아니라 여러 개다(`day_sources()`) — 캐시가 파일
-    하나의 mtime만 보면 새 시간대 조각이 생겼을 때 갱신을 놓친다. 존재하지 않게 된 파일은
-    자연히 지문에서 빠지므로 통합(조각 삭제)도 변경으로 감지된다.
-    """
-    signature: list[tuple[str, int, int]] = []
-    for path in paths:
-        try:
-            stat = path.stat()
-        except OSError:
-            continue  # 지금 막 사라진 파일(통합 중) — 다음 갱신에 자연히 반영된다
-        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
-    return tuple(signature)
+# 2026-08-03에 `data/bar_paths.py`로 옮겼다 — 기존 임포트 경로
+# (`from messiah.data.archiver import day_signature`)를 깨지 않으려고 여기서 재수출한다.
+day_signature = bar_paths.day_signature

@@ -520,5 +520,7 @@ class SelfEvalReport(BusMessage):
     max_drawdown: float
     n_shadow_bundles: int
     slippage_predicted_ticks: float
-    slippage_realized_ticks: float
+    # 체결이 0건이면 **None**이다 — 0.0("슬리피지가 없었다")과 구분한다. 2026-08-03까지는
+    # 주문·체결이 0건인 날에도 0.0이 찍혀 성과처럼 읽혔다(`n_fills`와 같은 실패 형태).
+    slippage_realized_ticks: float | None
     n_fills: int | None = None

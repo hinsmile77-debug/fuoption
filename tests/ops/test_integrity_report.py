@@ -200,7 +200,7 @@ def test_clean_day_has_no_breaches(tmp_path: Path):
 
 
 def test_the_real_incident_day_trips_every_relevant_threshold(tmp_path: Path):
-    """2026-07-29를 그대로 재현 — 29분 공백 + 6회 재기동 + 네이티브 크래시 2건."""
+    """2026-07-29를 그대로 재현 — 29분 공백 + 6회 기동(= 재기동 5회) + 네이티브 크래시 2건."""
     _write_bars(tmp_path / "bars", list(range(5)) + list(range(34, 40)))
     log = tmp_path / "l1.log"
     _write_log(
@@ -220,7 +220,10 @@ def test_the_real_incident_day_trips_every_relevant_threshold(tmp_path: Path):
     joined = " | ".join(report.breaches)
     assert "결손 29분" in joined
     assert "최장 공백 29분" in joined
-    assert "l1_daily 재기동 6회" in joined
+    # 08시 기동은 예정된 것이므로 재기동은 5회다(2026-08-03 정정 — 그 전엔 기동 횟수를
+    # 그대로 "재기동"이라 불러 정상일에도 "재기동 1회"가 찍혔다).
+    assert "l1_daily 재기동 5회" in joined
+    assert report.starts_by_process == {"l1_daily": 6}
     assert "네이티브 크래시 2건" in joined
 
 
@@ -240,10 +243,58 @@ def test_restarts_are_reported_per_process_not_summed(tmp_path: Path):
 
     report = _report(tmp_path, logs={"l1_daily": [l1], "g2_paper": [g2]})
 
-    assert report.restarts_by_process == {"l1_daily": 3, "g2_paper": 1}
-    assert report.restarts == 3  # 임계 판정용 스칼라는 최댓값
-    assert any("l1_daily 재기동 3회" in b for b in report.breaches)
+    # 기동 3회 = 예정 1 + 재기동 2. g2는 예정대로 한 번만 떴으니 재기동 0회다.
+    assert report.starts_by_process == {"l1_daily": 3, "g2_paper": 1}
+    assert report.restarts_by_process == {"l1_daily": 2, "g2_paper": 0}
+    assert report.restarts == 2  # 임계 판정용 스칼라는 최댓값
+    assert any("l1_daily 재기동 2회" in b for b in report.breaches)
     assert not any("g2_paper" in b for b in report.breaches)
+
+
+def test_ui_restarts_are_a_breach_on_their_own(tmp_path: Path):
+    """2026-08-03 P1-1 — UI가 죽었다 다시 뜬 날이 "깨끗한 날"로 보고되면 안 된다.
+
+    그날 UI는 2번 죽었는데(11:25:18·14:20:18) 이 리포트가 breach를 낸 건 순전히
+    `native_crashes` 덕분이었다. 그건 **Windows 전용 집계**라, 다른 OS이거나 파이썬 레벨로
+    죽었으면 화면이 두 번 사라진 날이 임계 초과 0건으로 지나갔을 것이다. 관측 도구가 관측
+    공백을 못 보는 상태였다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"ts": "2026-07-29T11:25:51+09:00", "level": "INFO", "tag": "CommandCenterUIRestarted"},
+            {"ts": "2026-07-29T14:20:29+09:00", "level": "INFO", "tag": "CommandCenterUIRestarted"},
+        ],
+    )
+
+    # 네이티브 크래시 집계가 **불가능한** 환경을 일부러 만든다 — 그래도 잡혀야 한다.
+    report = _report(
+        tmp_path, logs={"l1_daily": [log]}, crash=lambda _d, **_kw: NativeCrashes(False, 0)
+    )
+
+    assert report.ui_restarts == 2
+    assert any("UI 자동 재기동 2회" in b for b in report.breaches)
+
+
+def test_a_single_scheduled_start_is_not_called_a_restart(tmp_path: Path):
+    """2026-08-03 P1-2 — 08:35 예정 기동 1회짜리 정상일에 "재기동 1회"가 찍히면 안 된다.
+
+    사람이 매일 그 줄을 보고 무시하는 법을 배우면, 진짜 재기동이 났을 때도 똑같이 무시한다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+    summary = format_summary(report)
+
+    assert report.starts_by_process == {"l1_daily": 1}
+    assert report.restarts_by_process == {"l1_daily": 0}
+    assert report.breaches == []
+    assert "l1_daily 기동: 1회 · 재기동 0회" in summary
 
 
 def test_uncountable_crashes_are_not_reported_as_zero(tmp_path: Path):

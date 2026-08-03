@@ -78,6 +78,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.broker.kis import symbol_master, tr_codes  # noqa: E402
 from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
+from messiah.core import crash_forensics  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
@@ -336,6 +337,10 @@ async def _daily_close(
 
 
 async def main(cfg: InstanceConfig) -> None:
+    # 네이티브 크래시 덤프 무장 (2026-08-03) — 이 프로세스도 polars로 Parquet을 읽고 쓴다
+    # (`data/archiver.py`). UI에서 5거래일 연속 터진 access violation이 여기서 나면 지금까지는
+    # 로그에 한 줄도 안 남고 수집이 통째로 사라졌을 것이다(`core/crash_forensics.py`).
+    crash_forensics.enable(tag="l1_daily")
     mlog.setup(cfg.instance_id)
 
     today = now_kst().date()

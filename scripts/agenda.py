@@ -158,13 +158,15 @@ def collect_self_eval(root: Path, days: int) -> list[str]:
         samples = r.get("n_return_samples", r.get("n_trades", 0))
         fills = r.get("n_fills")
         fills_text = "체결 미집계" if fills is None else f"체결 {fills}건"
+        # 실현 슬리피지 None = "잴 수 없었다"(체결 0건) — 0.00틱으로 찍으면 성과처럼 읽힌다.
+        realized = r.get("slippage_realized_ticks")
+        realized_text = "미측정" if realized is None else f"{realized:.2f}틱"
         lines.append(
             f"- {r.get('date', '?')} {r.get('symbol', '?')}: "
             f"표본 {samples}개 · {fills_text} · 승률 {r.get('win_rate', 0):.0%} · "
             f"PF {r.get('profit_factor', 0):.2f} · Sharpe {r.get('sharpe', 0):.2f} · "
             f"MDD {r.get('max_drawdown', 0):.1%} · Shadow {r.get('n_shadow_bundles', 0)}개 · "
-            f"슬리피지(예측/실현) {r.get('slippage_predicted_ticks', 0):.2f}/"
-            f"{r.get('slippage_realized_ticks', 0):.2f}틱"
+            f"슬리피지(예측/실현) {r.get('slippage_predicted_ticks', 0):.2f}/{realized_text}"
         )
     return lines
 

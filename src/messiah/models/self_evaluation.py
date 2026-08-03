@@ -39,8 +39,13 @@ from messiah.risk.cost_model import CostModel
 
 @dataclass(frozen=True)
 class SlippageReconciliation:
+    """`realized_ticks`가 **None이면 "잴 수 없었다"**는 뜻이다(체결이 0건이거나 전부 지정가
+    매칭에 실패). 0.0은 "슬리피지가 없었다"는 전혀 다른 사실이다 — 2026-08-03까지는 둘 다
+    0.0으로 뭉개져서, 주문·체결이 0건인 날의 리포트가 "슬리피지 0틱"이라는 **성과처럼**
+    읽혔다(`core/messages.py`의 `n_fills`가 0이 아니라 None인 것과 같은 이유, 마흐디 L18)."""
+
     predicted_ticks: float
-    realized_ticks: float
+    realized_ticks: float | None
     n_samples: int
 
 
@@ -71,7 +76,7 @@ def reconcile_slippage(
         if order is None or order.limit_price_ticks is None:
             continue
         diffs.append(abs(fill.price_ticks - order.limit_price_ticks))
-    realized = statistics.fmean(diffs) if diffs else 0.0
+    realized = statistics.fmean(diffs) if diffs else None  # 표본 0 = 모름(위 docstring)
     return SlippageReconciliation(
         predicted_ticks=predicted, realized_ticks=realized, n_samples=len(diffs)
     )

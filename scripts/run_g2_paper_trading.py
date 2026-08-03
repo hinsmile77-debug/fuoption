@@ -96,6 +96,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.broker.kis import symbol_master  # noqa: E402
 from messiah.broker.simulator.adapter import SimBroker  # noqa: E402
+from messiah.core import crash_forensics  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
@@ -318,6 +319,8 @@ async def _daily_close(
 
 
 async def main(cfg: InstanceConfig) -> None:
+    # 네이티브 크래시 덤프 무장 — l1_daily와 같은 이유(`core/crash_forensics.py`).
+    crash_forensics.enable(tag="g2_paper")
     mlog.setup(cfg.instance_id)
 
     today = now_kst().date()

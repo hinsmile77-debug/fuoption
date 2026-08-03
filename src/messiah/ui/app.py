@@ -42,17 +42,28 @@ import threading
 from datetime import date
 from pathlib import Path
 
-# numpy를 **직접** 임포트한다 — 이 모듈은 numpy를 직접 쓰지 않지만, plotly와 polars가 둘 다
-# numpy를 **지연 임포트**한다(plotly는 `_plotly_utils.optional_imports.get_module`, polars는
-# 변환 경로에서). Streamlit LIVE 모드는 `st.fragment(run_every=5)`로 렌더 경로를 별도
-# ScriptRunner 스레드에서 돌리는데, 그 스레드 둘이 동시에 numpy의 **최초** 임포트를 밟으면
-# `AttributeError: partially initialized module 'numpy' has no attribute 'ndarray'
-# (most likely due to a circular import)`가 난다 — 2026-07-31 UI 로그에 실제로 3건 기록됐다
-# (12:21:20·12:21:20·12:31:55, 전부 재기동 직후 2초 이내 = 콜드스타트 레이스).
-# 여기서 단일 스레드(모듈 임포트 시점)에 미리 완료시키면 그 경합 자체가 성립하지 않는다.
+# 무거운 임포트보다 **먼저** 네이티브 크래시 덤프를 무장한다(2026-08-03). 이 프로세스는
+# 5거래일 연속 같은 access violation으로 죽었는데 로그에 아무 흔적이 없어 매번 정황으로만
+# 원인을 추정해야 했다 — 임포트 도중의 크래시까지 덮으려면 이 줄이 맨 위여야 한다
+# (`core/crash_forensics.py` 모듈 docstring). 멱등이라 Streamlit의 5초 재실행에 안전하다.
+from messiah.core import crash_forensics
+
+crash_forensics.enable(tag="ui")
+
+# numpy를 **직접** 임포트한다 — 이 모듈은 numpy를 직접 쓰지 않지만, plotly가 numpy를
+# **지연 임포트**한다(`_plotly_utils.optional_imports.get_module`). Streamlit LIVE 모드는
+# `st.fragment(run_every=5)`로 렌더 경로를 별도 ScriptRunner 스레드에서 돌리는데, 그 스레드
+# 둘이 동시에 numpy의 **최초** 임포트를 밟으면 `AttributeError: partially initialized module
+# 'numpy' has no attribute 'ndarray' (most likely due to a circular import)`가 난다 —
+# 2026-07-31 UI 로그에 실제로 3건 기록됐다(12:21:20·12:21:20·12:31:55, 전부 재기동 직후
+# 2초 이내 = 콜드스타트 레이스). 여기서 단일 스레드(모듈 임포트 시점)에 미리 완료시키면
+# 그 경합 자체가 성립하지 않는다.
+#
+# 2026-08-03: 원래 이 주석은 polars도 같은 이유로 지목했는데, 이제 **이 프로세스엔 polars가
+# 아예 없다**(`ui/bar_reader.py` — 봉 파싱을 자식 프로세스로 분리). numpy 선임포트는 plotly
+# 때문에 그대로 필요하다.
 import numpy  # noqa: F401
 import plotly.graph_objects as go
-import polars as pl
 import streamlit as st
 
 from messiah.core.bus import MessageBus
@@ -70,7 +81,9 @@ from messiah.core.messages import (
     RegimeState,
 )
 from messiah.core.timeutil import now_utc
-from messiah.data.archiver import ParquetArchiver, day_signature
+from messiah.data import bar_paths
+from messiah.ui.bar_reader import BarExportError, read_day_series
+from messiah.ui.bar_series import BarSeries
 from messiah.ui.data_source import (
     DataSourceMode,
     FreshnessBadge,
@@ -310,96 +323,110 @@ def _default_redis_url() -> str:
 
 
 def _available_dates(symbol: str, horizon: str, bar_dir: Path) -> list[date]:
-    """아카이버에 묻는다 — 장중에는 조각 디렉터리, 장후에는 통합본 파일로 배치가 다르므로
-    여기서 glob 패턴을 직접 쓰면 당일이 목록에서 빠진다(`data/archiver.py` "조각 쓰기")."""
-    return ParquetArchiver(bar_dir).available_days(symbol, Horizon(horizon))
+    """경로 계층에 묻는다 — 장중에는 조각 디렉터리, 장후에는 통합본 파일로 배치가 다르므로
+    여기서 glob 패턴을 직접 쓰면 당일이 목록에서 빠진다(`data/bar_paths.py` 배치 규칙).
+
+    `data/archiver.py`가 아니라 `data/bar_paths.py`를 쓰는 게 중요하다 — 전자를 임포트하면
+    polars가 이 프로세스에 딸려 올라와 자식 프로세스로 파싱을 미룬 의미가 사라진다."""
+    return bar_paths.available_days(bar_dir, symbol, Horizon(horizon))
 
 
 class _BarFileCache:
-    """봉 Parquet 읽기 캐시 겸 방어층 (2026-07-30 UI 크래시 사고 대응).
+    """봉 읽기 캐시 겸 방어층 — UI 크래시 대응의 누적 결과물 (2026-07-30 ~ 08-03).
 
-    두 가지를 동시에 한다.
+    ## 이 클래스가 지금 하는 일
 
     **① 재읽기 억제**: LIVE 모드는 `st.fragment(run_every=5)`로 5초마다 이 경로를 탄다 —
-    파일이 안 바뀌었으면(mtime·크기 동일) 파싱을 통째로 건너뛴다. 봉은 Horizon당 1분에 한 번
-    바뀌므로 대부분의 재실행은 캐시 히트다.
+    파일이 안 바뀌었으면(mtime·크기 동일, `data/bar_paths.py`의 `day_signature()`) 읽기를
+    통째로 건너뛴다. 봉은 Horizon당 봉 주기에 한 번만 바뀌므로 대부분의 재실행은 캐시
+    히트다. 자식 프로세스를 띄우는 비용(약 0.8초)이 감당 가능한 이유가 바로 이것이다.
 
-    **② 찢어진 읽기 흡수**: 수집기(`data/archiver.py`)는 이제 원자적 교체로 쓰지만, 이 화면은
-    수집기와 별도 프로세스라 "파일이 언제든 통째로 갈릴 수 있다"는 전제는 그대로다. 읽기가
-    실패하면 **직전 성공본을 그대로 쓰고 화면에 그 사실을 표시**한다 — 실패를 조용히 삼키지도
-    (L18), 화면 전체를 죽이지도 않는다. 2026-07-30 08:57에 바로 이 지점에서 UI 프로세스가
-    통째로 죽었다(로그 한 줄 안 남기고).
+    **② 실패를 화면 죽이지 않고 흡수**: 읽기가 실패하면 **직전 성공본을 그대로 쓰고 화면에
+    그 사실을 표시**한다 — 실패를 조용히 삼키지도(L18), 화면 전체를 죽이지도 않는다.
 
-    읽기에 `read_parquet_without_mmap()`을 쓰는 것도 같은 사고 대응이다 — `pl.read_parquet(
-    path)`의 메모리 매핑은 ⓐ 수집기의 원자적 교체를 `OSError(1224)`로 막아 봉을 잃게 만들고
-    ⓑ 매핑된 페이지가 교체로 무효화되면 파이썬 예외가 아니라 access violation으로 프로세스가
-    즉사한다(그게 실제로 일어난 일이다).
+    **③ 스냅샷만 내보낸다**: 캐시가 들고 있는 것도 내보내는 것도 불변 `BarSeries`
+    (`ui/bar_series.py`)다 — 전부 파이썬 기본형이라 소비자가 뭘 하든 네이티브 경로가 없다.
 
-    **③ polars 호출 직렬화 (2026-07-31 추가)**: 위 ①②를 다 넣은 뒤에도 2026-07-31에 **같은
-    fault offset**(`_polars_runtime.pyd` +0x083973c7, 0xc0000005)으로 6번 더 죽었다 — 07-29 3건,
-    07-30 1건과 완전히 동일한 주소다. 즉 남은 크래시는 "찢어진 파일"이 아니다.
+    ## 어떻게 여기까지 왔나 (같은 크래시, 네 번의 대응)
 
-    남은 유력 원인은 **프로세스 내 동시성**이다. 근거: ⓐ 같은 날 UI 로그에 `partially
-    initialized module 'numpy'`(= 두 스레드가 동시에 numpy 최초 임포트를 밟을 때만 나오는
-    형태)가 3건 찍혔다, ⓑ 07-30 조사 기록에 "첫 polars 크래시가 `st.fragment(run_every=5)`
-    도입 커밋 53분 뒤였고 그 이전 날짜엔 polars 크래시 0건"이 남아 있다, ⓒ 07-31 크래시는
-    08:35 기동 후가 아니라 **10:42부터** 시작됐다(Streamlit은 브라우저 세션이 붙어야 스크립트를
-    실행한다 = 사람이 화면을 연 시점).
+    `_polars_runtime.pyd` +0x083973c7, 0xc0000005 — **5거래일 연속 동일한 fault offset**
+    (07-29 2건·07-30 6건·07-31 6건·08-03 2건). 매번 원인을 추정해 고쳤고 매번 재발했다.
 
-    이 클래스는 모듈 전역 싱글턴(`_BAR_CACHE`)이라, 여기 락을 하나 걸면 **모든 ScriptRunner
-    스레드의 Parquet 파싱·프레임 접근이 직렬화된다**. 프레임은 하루치 380행 남짓이고 갱신은
-    Horizon당 1분에 한 번이라 직렬화 비용은 무시할 수준이다.
+        07-30  mmap 무효화가 원인이라 보고 → 원자적 쓰기 + `read_parquet_without_mmap()`
+        07-30  잘린 바이트가 원인이라 보고 → Parquet 꼬리 매직(PAR1) 검증
+        07-31  프로세스 내 동시성이라 보고 → numpy 선임포트 + 프로세스 전역 락 + list 변환
+        08-03  ↑ 락의 **적용 범위**가 절반뿐이었음을 확인 → 스냅샷화(위 ③)
 
-    주의: 이건 **가설에 기반한 완화**다. 위 ⓐⓑⓒ는 정황이고, 네이티브 크래시라 파이썬 레벨
-    스택이 안 남아 인과를 직접 증명하지 못했다. 다음 거래일 크래시 0건이 확인되기 전까지
-    "고쳤다"고 말하면 안 된다 — 07-29·07-30에 두 번 그렇게 판단했다가 같은 오프셋으로 재발했다.
+    08-03의 발견이 중요하다: 07-31의 락은 파싱만 감쌌는데 `load()`가 캐시된 `pl.DataFrame`
+    **객체 자체**를 돌려줘서, 실제 소비(`is_empty()`, `to_list()` ×5)는 전부 락 밖에서 그
+    **공유 객체**를 만지고 있었다. "직렬화했다"고 믿은 구간이 실제로는 절반이었다.
+
+    ## 그리고 추측을 그만뒀다 (2026-08-03 P0-1(b))
+
+    네 번째 가설을 세우는 대신, 크래시가 나도 **화면이 안 죽는 구조**로 바꿨다. 봉 파싱은
+    이제 자식 프로세스에서 일어난다(`ui/bar_reader.py` → `data/bar_export.py`). 자식이
+    access violation으로 죽으면 부모에겐 `BarExportError`일 뿐이고, 그건 이미 있는 위 ②
+    경로로 흡수된다. **이 프로세스엔 polars가 아예 로드되지 않는다.**
+
+    락은 그대로 둔다 — 이제 직렬화할 polars 호출은 없지만, 자식 프로세스를 동시에 여러 개
+    띄우는 걸 막는 값어치가 있다(같은 파일에 대해 스레드 수만큼 0.8초짜리 프로세스가 동시에
+    뜨는 건 낭비다).
+
+    주의: 크래시의 **근본 원인은 여전히 미확정**이다. 위 구조는 원인을 밝힌 게 아니라 영향을
+    가둔 것이다. 원인 규명은 `core/crash_forensics.py`(faulthandler 상시화)가 다음 크래시
+    한 번으로 판정한다 — 그 전까지 "고쳤다"고 말하면 안 된다. 07-30·07-31에 세 번 그렇게
+    판단했다가 같은 오프셋으로 재발했다.
     """
 
     def __init__(self) -> None:
-        self._entries: dict[tuple[str, str, str, str], tuple[tuple, pl.DataFrame]] = {}
+        self._entries: dict[tuple[str, str, str, str], tuple[tuple, BarSeries]] = {}
         self._lock = threading.Lock()
 
     def load(
-        self, archiver: ParquetArchiver, symbol: str, horizon: Horizon, day: date
-    ) -> tuple[pl.DataFrame | None, str | None]:
-        """반환: (프레임, 경고문). 경고문이 None이 아니면 프레임은 최신이 아닐 수 있다.
+        self, bar_dir: Path, symbol: str, horizon: Horizon, day: date
+    ) -> tuple[BarSeries | None, str | None]:
+        """반환: (스냅샷, 경고문). 경고문이 None이 아니면 스냅샷은 최신이 아닐 수 있다.
 
-        하루치가 파일 하나가 아니라 여러 조각일 수 있으므로(`data/archiver.py` "조각 쓰기")
+        하루치가 파일 하나가 아니라 여러 조각일 수 있으므로(`data/bar_paths.py` 배치 규칙)
         캐시 지문도 파일 집합 전체로 잡는다 — 하나만 보면 새 시간대 조각이 생겼을 때 갱신을
         놓친다.
-
-        전 구간을 락으로 감싼다(위 docstring ③) — 캐시 딕셔너리 보호가 아니라 **polars 네이티브
-        호출의 직렬화**가 목적이라 파일 읽기까지 안에 들어가야 한다.
         """
         with self._lock:
-            return self._load_locked(archiver, symbol, horizon, day)
+            return self._load_locked(bar_dir, symbol, horizon, day)
 
     def _load_locked(
-        self, archiver: ParquetArchiver, symbol: str, horizon: Horizon, day: date
-    ) -> tuple[pl.DataFrame | None, str | None]:
-        key = (str(archiver.base_dir), symbol, horizon.value, day.isoformat())
-        sources = archiver.day_sources(symbol, horizon, day)
+        self, bar_dir: Path, symbol: str, horizon: Horizon, day: date
+    ) -> tuple[BarSeries | None, str | None]:
+        key = (str(bar_dir), symbol, horizon.value, day.isoformat())
+        sources = bar_paths.day_sources(bar_dir, symbol, horizon, day)
         if not sources:
             return None, None  # 그날 데이터 없음 — 호출측이 "데이터 없음"으로 다룬다(경고 아님)
 
         cached = self._entries.get(key)
-        signature = day_signature(sources)
+        signature = bar_paths.day_signature(sources)
         if cached is not None and cached[0] == signature:
             return cached[1], None
 
         try:
-            frame = archiver.read_day(symbol, horizon, day)
+            series = self._read(bar_dir, symbol, horizon, day)
+        except BarExportError as exc:
+            # 자식이 죽었거나 멈췄다 — 크래시 종류까지 문구에 담는다(`ui/bar_reader.py`).
+            return self._degraded(cached, str(exc))
         except Exception as exc:  # noqa: BLE001 — 어떤 실패든 화면이 죽으면 안 됨
             return self._degraded(cached, exc.__class__.__name__)
-        if frame is None:
+        if series is None:
             return self._degraded(cached, "읽기 실패")
 
-        frame = frame.with_columns(pl.col("bar_open_kst").dt.convert_time_zone("Asia/Seoul"))
-        self._entries[key] = (signature, frame)
-        return frame, None
+        self._entries[key] = (signature, series)
+        return series, None
 
     @staticmethod
-    def _degraded(cached, reason: str) -> tuple[pl.DataFrame | None, str | None]:
+    def _read(bar_dir: Path, symbol: str, horizon: Horizon, day: date) -> BarSeries | None:
+        """자식 프로세스에 넘기는 지점 — 여기서만 봉 파일의 **내용**을 다룬다."""
+        return read_day_series(bar_dir, symbol, horizon, day)
+
+    @staticmethod
+    def _degraded(cached, reason: str) -> tuple[BarSeries | None, str | None]:
         if cached is None:
             return None, f"봉 파일을 읽지 못했습니다({reason}) — 다음 갱신에 재시도"
         return (
@@ -413,49 +440,45 @@ _BAR_CACHE = _BarFileCache()
 
 def _load_bars_with_status(
     symbol: str, horizon: str, day: date, bar_dir: Path
-) -> tuple[pl.DataFrame | None, str | None]:
-    """`bar_open_kst`는 만들어질 때(`data/normalizer.py`의 `_combine_kst()`) 진짜 KST
-    (+09:00)이지만, Polars가 tz-aware datetime을 Parquet에 쓸 때 항상 `time_zone='UTC'`로
-    정규화해서 저장한다(그래서 이 값을 그대로 읽으면 물리적으로는 UTC 벽시계 값 — 이름과
-    실제 표시가 어긋난다, 2026-07-29 Command Center 스크린샷 점검 중 실측 발견: 09:00 KST
-    개장 봉이 화면엔 00:00으로 찍힘). `dt.convert_time_zone("Asia/Seoul")`로 KST 벽시계로
-    되돌린다 — `pyproject.toml`이 이미 이 Windows tzdata 왕복 문제 때문에
-    `tzdata>=2026.1; sys_platform == 'win32'`를 명시적으로 넣어뒀으므로(2026-07-22) 새 의존성
-    추가가 아니다."""
-    return _BAR_CACHE.load(ParquetArchiver(bar_dir), symbol, Horizon(horizon), day)
+) -> tuple[BarSeries | None, str | None]:
+    """차트용 봉 스냅샷 + 신선도 경고 — 실제 읽기는 `_BarFileCache`가 자식 프로세스로 한다."""
+    return _BAR_CACHE.load(bar_dir, symbol, Horizon(horizon), day)
 
 
-def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> pl.DataFrame | None:
-    """프레임만 필요한 호출자용 얇은 래퍼 — 신선도 경고까지 보려면
+def _load_bars(symbol: str, horizon: str, day: date, bar_dir: Path) -> BarSeries | None:
+    """스냅샷만 필요한 호출자용 얇은 래퍼 — 신선도 경고까지 보려면
     `_load_bars_with_status()`를 쓴다."""
     return _load_bars_with_status(symbol, horizon, day, bar_dir)[0]
 
 
-def _candlestick_figure(bars: pl.DataFrame, tick_size: float) -> go.Figure:
+def _candlestick_figure(bars: BarSeries, tick_size: float) -> go.Figure:
     """polars 객체를 plotly에 **직접 넘기지 않는다**(2026-07-31).
 
     2026-07-31 크래시 6건의 파이썬 레벨 흔적은 전부 이 함수 안이었다
     (`app.py:_candlestick_figure` → `go.Candlestick` → `_plotly_utils.basevalidators.
     is_homogeneous_array` → `np.ndarray` 접근). plotly의 값 검증기는 넘어온 객체가 무엇인지
     모른 채 numpy/배열 프로토콜을 더듬는데, 그 대상이 polars Series면 네이티브 변환 경로를
-    타게 된다. 여기서 미리 순수 파이썬 리스트로 바꿔 넘기면 그 경로 자체가 없어진다.
+    타게 된다.
 
-    비용은 하루치 380행 × 5컬럼의 리스트 변환 — 5초 주기 재렌더에서 무시할 수준이고,
-    애초에 `_BarFileCache`가 파일이 안 바뀌면 재파싱을 건너뛴다.
+    2026-08-03부터는 이 함수가 애초에 polars 객체를 **받을 수 없다** — 입력이 `BarSeries`
+    (전부 파이썬 기본형인 불변 스냅샷)이기 때문이다. 예전엔 여기서 매 렌더마다 `to_list()`로
+    변환했는데, 그 변환이 락 밖에서 공유 프레임을 만지는 바로 그 경로였다
+    (`_BarFileCache` docstring ④). 이제 변환은 캐시 채울 때 락 안에서 한 번만 일어난다.
+
+    여기 남은 일은 **틱 → 가격 환산**뿐이다 — `tick_size`가 사이드바 입력값이라 캐시에
+    구울 수 없어서다(`ui/bar_series.py` "왜 틱을 그대로 담나").
     """
     opens, highs, lows, closes = (
-        [v * tick_size for v in bars[col].to_list()]
-        for col in ("o_ticks", "h_ticks", "l_ticks", "c_ticks")
+        [v * tick_size for v in column]
+        for column in (bars.o_ticks, bars.h_ticks, bars.l_ticks, bars.c_ticks)
     )
-    # tzinfo를 떼어 **naive KST 벽시계**로 넘긴다 — 값은 이미 `_load_bars()`가
-    # `convert_time_zone("Asia/Seoul")`로 KST로 되돌려 놓았고(2026-07-29 UTC 축 버그 대응),
-    # tz-aware인 채로 넘기면 plotly가 다시 자기 기준으로 해석할 여지가 생긴다. 그 버그를
-    # 두 번 겪지 않으려고 여기서 벽시계 값으로 못박는다.
-    x_values = [ts.replace(tzinfo=None) for ts in bars["bar_open_kst"].to_list()]
     fig = go.Figure(
         data=[
             go.Candlestick(
-                x=x_values,
+                # 이미 naive KST 벽시계다(`ui/bar_series.py`) — tz-aware로 넘기면 plotly가
+                # 자기 기준으로 다시 해석할 여지가 생기고, 그 버그는 2026-07-29에 이미 한 번
+                # 겪었다(09:00 개장봉이 00:00으로 찍힘).
+                x=list(bars.x_kst),
                 open=opens,
                 high=highs,
                 low=lows,
@@ -581,7 +604,7 @@ def render_market_view(
     bars, stale_reason = _load_bars_with_status(symbol, horizon, chosen, bar_dir)
     if stale_reason is not None:
         st.warning(stale_reason)  # 조용히 넘어가지 않는다(L18) — 화면이 최신이 아닐 수 있음
-    if bars is None or bars.is_empty():
+    if bars is None or bars.is_empty:
         st.warning("선택한 날짜의 봉 데이터가 비어 있음")
         return
     st.plotly_chart(_candlestick_figure(bars, tick_size), width="stretch")

@@ -55,7 +55,8 @@ def test_reconcile_slippage_ignores_market_orders():
 
     result = reconcile_slippage([order], [ack], [fill])
     assert result.n_samples == 0
-    assert result.realized_ticks == 0.0
+    # 표본 0 = "잴 수 없었다"(None)이지 "슬리피지 0틱"이 아니다 — 2026-08-03 정정.
+    assert result.realized_ticks is None
 
 
 def test_reconcile_slippage_ignores_unmatched_fills():
@@ -70,7 +71,7 @@ def test_reconcile_slippage_ignores_unmatched_fills():
 def test_reconcile_slippage_empty_inputs():
     result = reconcile_slippage([], [], [])
     assert result.n_samples == 0
-    assert result.realized_ticks == 0.0
+    assert result.realized_ticks is None  # 위와 같은 이유 — 0.0으로 뭉개지 않는다
 
 
 # ---------------------------------------------------------------- run_self_evaluation

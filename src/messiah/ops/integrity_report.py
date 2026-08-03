@@ -52,11 +52,19 @@ from messiah.data.archiver import ParquetArchiver
 
 _KST_ZONE_NAME = "Asia/Seoul"
 
-# 정상 운영일의 실측(2026-07-27: 결손 0분·재기동 1회)을 기준으로 한 초기 임계 — 미검증.
+# 정상 운영일의 실측(2026-07-27: 결손 0분·재기동 0회)을 기준으로 한 초기 임계 — 미검증.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "missing_minutes": 5.0,  # 결손 5분 초과면 조사 대상
     "longest_gap_minutes": 3.0,  # 연속 3분 넘게 비면 스톨 의심(워치독 임계 120초와 정합)
-    "restarts": 1.0,  # 예정된 08:35 기동 1회를 넘으면 그날 무슨 일이 있었다는 뜻
+    # 재기동은 **예정된 08:35 기동을 뺀 수**다(2026-08-03 정정 — 그 전엔 기동 횟수를 그대로
+    # "재기동"이라 부르고 임계를 1로 뒀다. 판정 결과는 같지만 리포트에 "l1_daily 재기동 1회"로
+    # 찍혀, 아무 일 없던 날이 매일 사고처럼 보였다). 한 번이라도 다시 떴으면 조사 대상이다.
+    "restarts": 0.0,
+    # Command Center UI 자동 재기동 (2026-08-03 추가). 그 전엔 UI가 죽어도 이 리포트가
+    # 조용했다 — 08-03에 UI가 2번 죽었는데 breach로 잡힌 건 순전히 `native_crashes`
+    # (Windows 전용) 덕분이었다. 즉 **Windows가 아니거나 파이썬 레벨로 죽은 날은 화면이
+    # 두 번 사라져도 "깨끗한 날"로 보고된다**. 관측 도구가 관측 공백을 못 보면 안 된다.
+    "ui_restarts": 0.0,
     "native_crashes": 0.0,  # 네이티브 크래시는 1건도 정상이 아니다
     "critical_log_lines": 0.0,
 }
@@ -87,7 +95,12 @@ class IntegrityReport:
     instance_id: str
     bar_continuity: list[BarContinuity]
     restarts: int  # 프로세스별 최댓값 — 임계 판정용 스칼라
+    # 기동과 재기동을 나눠 담는다(2026-08-03) — `starts`는 그날 프로세스가 뜬 총 횟수,
+    # `restarts`는 거기서 **예정된 08:35 기동 1회를 뺀** 수다. 예전엔 전자를 "재기동"이라
+    # 불러서, 정상일에도 "재기동 1회"가 찍혔다.
+    starts_by_process: dict[str, int]
     restarts_by_process: dict[str, int]
+    ui_restarts: int  # Command Center UI 자동 재기동 횟수 — 관측 공백의 직접 지표
     session_starts_kst: dict[str, list[str]]
     nan_ratio_by_horizon: dict[str, dict[str, float]]
     log_level_counts: dict[str, int]
@@ -450,9 +463,12 @@ def build_report(
 
     per_process = {name: analyze_logs(paths) for name, paths in log_paths.items()}
     logs = analyze_logs([path for paths in log_paths.values() for path in paths])
-    restarts_by_process = {
+    starts_by_process = {
         name: len(result["session_starts"]) for name, result in per_process.items()
     }
+    # 첫 기동은 **예정된 것**이라 재기동이 아니다 — 이 한 줄이 정상일 리포트에서 "재기동 1회"
+    # 라는 헛경고를 없앤다(2026-08-03 정정).
+    restarts_by_process = {name: max(0, count - 1) for name, count in starts_by_process.items()}
     session_starts = {name: result["session_starts"] for name, result in per_process.items()}
 
     # 크래시 집계 창을 "MESSIAH가 실제로 돌던 시간"으로 좁힌다(2026-07-31 — 그날 08:35 기동
@@ -480,6 +496,12 @@ def build_report(
         breaches.append(f"네이티브 크래시 {crashes.count}건")
     if critical_lines > limits["critical_log_lines"]:
         breaches.append(f"CRITICAL 로그 {critical_lines}건")
+    # UI가 죽어서 다시 떴다는 건 그 사이에 **화면이 없었다**는 뜻이다 — 재기동에 성공했어도
+    # 관측 공백은 실재한다(2026-08-03: 11:25:18~11:25:55 37초, 14:20:18~14:20:33 15초).
+    # 그 전엔 이 사실이 Windows 전용 `native_crashes`로만 드러났다(위 임계 주석 참고).
+    ui_restarts = logs["tag_counts"].get("CommandCenterUIRestarted", 0)
+    if ui_restarts > limits["ui_restarts"]:
+        breaches.append(f"Command Center UI 자동 재기동 {ui_restarts}회 — 그 사이 관측 공백")
     # 화면이 통째로 사라진 날은 "관측 공백"이라 그 자체가 임계 초과다 — 2026-07-31엔
     # 12:35~15:35 3시간 무화면이었는데 리포트엔 아무 표시도 안 났다.
     ui_gave_up = logs["tag_counts"].get("CommandCenterUIRestartGaveUp", 0)
@@ -497,7 +519,9 @@ def build_report(
         instance_id=instance_id,
         bar_continuity=continuity,
         restarts=restarts,
+        starts_by_process=starts_by_process,
         restarts_by_process=restarts_by_process,
+        ui_restarts=ui_restarts,
         session_starts_kst=session_starts,
         nan_ratio_by_horizon=logs["nan_ratio_by_horizon"],
         log_level_counts=logs["level_counts"],
@@ -525,8 +549,15 @@ def format_summary(report: IntegrityReport) -> str:
             f"  봉 {continuity.horizon}: {continuity.rows}개 {span} · "
             f"결손 {continuity.missing_minutes}분(최장 {continuity.longest_gap_minutes}분)"
         )
-    for name, count in sorted(report.restarts_by_process.items()):
-        lines.append(f"  {name} 재기동: {count}회 {report.session_starts_kst.get(name, [])}")
+    for name, starts in sorted(report.starts_by_process.items()):
+        # 기동과 재기동을 나눠 적는다 — 예전엔 "재기동 1회"가 정상일에도 찍혀서, 사람이
+        # 매일 그 줄을 무시하는 법을 배우고 있었다(진짜 재기동이 묻힌다).
+        restarts = report.restarts_by_process.get(name, 0)
+        lines.append(
+            f"  {name} 기동: {starts}회 · 재기동 {restarts}회 "
+            f"{report.session_starts_kst.get(name, [])}"
+        )
+    lines.append(f"  Command Center UI 자동 재기동: {report.ui_restarts}회")
 
     if report.nan_ratio_by_horizon:
         parts = [

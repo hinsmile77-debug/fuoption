@@ -122,17 +122,20 @@ def launch_command_center(
         return None
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_file = open(log_path, "a", encoding="utf-8")
+    # `with`로 감싸 **성공 경로에서도** 닫는다(2026-08-03 수정). 예전엔 실패 경로에서만
+    # 닫아서, 재기동할 때마다 이 프로세스에 파일 핸들이 하나씩 남았다 — 08-03에 2개, 크래시가
+    # 잦은 날엔 더. 자식은 `Popen`이 fd를 이미 복제해 갔으므로 부모가 닫아도 자식의 로그
+    # 쓰기에는 영향이 없다(수집 프로세스는 이 파일에 직접 쓰지 않는다).
     try:
-        process = popen(
-            [str(exe), "run", str(app_path), "--server.port", str(port)],
-            cwd=str(project_root),
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-        )
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            process = popen(
+                [str(exe), "run", str(app_path), "--server.port", str(port)],
+                cwd=str(project_root),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
     except OSError as e:
         print(f"[{caller_tag}] Streamlit 기동 실패(본 작업은 계속): {e}", flush=True)
-        log_file.close()
         return None
 
     print(
