@@ -78,6 +78,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.broker.kis import symbol_master, tr_codes  # noqa: E402
 from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
+from messiah.broker.kis.rest_client import KISRestClient  # noqa: E402
+from messiah.broker.kis.token_daemon import TokenDaemon  # noqa: E402
 from messiah.core import crash_forensics  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
@@ -93,6 +95,7 @@ from messiah.core.health import (  # noqa: E402
     HealthStatus,
 )
 from messiah.core.messages import HealthLevel, Horizon  # noqa: E402
+from messiah.core.scheduler import FixedTickScheduler  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import (  # noqa: E402
     is_ui_already_running,
@@ -102,6 +105,8 @@ from messiah.core.ui_launcher import (  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
 from messiah.data.collector import TickCollector  # noqa: E402
+from messiah.data.flow_archiver import InvestorFlowArchiver  # noqa: E402
+from messiah.data.investor_flow_poller import InvestorFlowPoller  # noqa: E402
 from messiah.data.normalizer import parse_futures_ticks  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
@@ -114,6 +119,10 @@ HARD_SHUTDOWN_DEADLINE = (15, 40)  # daily_close()가 이 시각까지 못 끝�
 
 _MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
 _DATA_DIR = Path("data") / "bars"
+_FLOW_DIR = Path("data") / "flow_intraday"
+# 수급 폴링 격자 — 1분봉과 같은 주기. 3업종 순차 조회라 유량(모의투자 1건/초)에
+# 여유가 크고, 이보다 촘촘히 받아도 원천이 "당일 누적"이라 정보가 늘지 않는다.
+_FLOW_POLL_SECONDS = 60.0
 
 
 def _today_at(reference_kst: datetime, hour: int, minute: int) -> datetime:
@@ -231,6 +240,40 @@ def _launch_ui(today_str: str) -> subprocess.Popen | None:
     )
 
 
+def _build_flow_collection(
+    creds: KISCredentials, bus: MessageBus
+) -> tuple[InvestorFlowPoller | None, InvestorFlowArchiver | None]:
+    """수급 폴러 + 아카이버 — 만들다 실패해도 **수집 본 임무를 막지 않는다**.
+
+    수급은 부가 데이터고 봉 수집이 본 임무다(`core/docker_bootstrap.py`류의 "부가 정보
+    실패가 본 기능을 막지 않는다" 원칙). 다만 조용히 꺼지면 몇 달 뒤에야 "그동안 안 모였네"를
+    알게 되므로, 실패도 성공도 기동 로그에 한 줄 남긴다.
+    """
+    try:
+        client = KISRestClient(creds, token_daemon=TokenDaemon(creds))
+        poller = InvestorFlowPoller(
+            rest_client=client,
+            market_code=tr_codes.FID_MRKT_DIV_DERIVATIVES,
+            sector_codes=[
+                tr_codes.FID_INVESTOR_FLOW_FUTURES,
+                tr_codes.FID_INVESTOR_FLOW_CALL_OPTION,
+                tr_codes.FID_INVESTOR_FLOW_PUT_OPTION,
+            ],
+            bus=bus,
+        )
+        archiver = InvestorFlowArchiver(_FLOW_DIR, tr_codes.FID_MRKT_DIV_DERIVATIVES)
+    except Exception as exc:  # noqa: BLE001 — 수급 실패가 봉 수집을 막으면 안 됨
+        print(f"[run_l1_daily] 수급 수집 결선 실패(수집은 계속): {exc}", flush=True)
+        return None, None
+
+    print(
+        f"수급 수집 결선 — {tr_codes.FID_MRKT_DIV_DERIVATIVES} "
+        f"3업종 / {_FLOW_POLL_SECONDS:.0f}초 격자 → {_FLOW_DIR}",
+        flush=True,
+    )
+    return poller, archiver
+
+
 async def _run_regular_session(
     collector: TickCollector,
     composer: MultiHorizonBarComposer,
@@ -238,6 +281,8 @@ async def _run_regular_session(
     bus: MessageBus,
     today_str: str,
     symbol: str,
+    flow_poller: InvestorFlowPoller | None = None,
+    flow_archiver: InvestorFlowArchiver | None = None,
 ) -> None:
     """수집 3종 + UI 생존 감시 + 컴포넌트 heartbeat를 동시에 돌린다.
 
@@ -282,6 +327,21 @@ async def _run_regular_session(
         # 07-31 3시간) 관측은 계속되고, 15:40에 UI가 종료된 뒤의 장후 리뷰도 가능해진다.
         # UI 생사까지 같은 스냅샷에 기록한다 — 화면 없이 화면 상태를 안다.
         run_status_board_forever(bus, symbol=symbol, ui_probe=is_ui_already_running),
+        # 파생 장중 수급 (2026-08-04 결선). 폴러 자체는 2026-07-27부터 있었지만 **어디에도
+        # 결선돼 있지 않았고** `raw.investor_flow.*` 구독자도 없어서, 이 프로젝트는 파생
+        # 수급을 한 건도 갖고 있지 않다. 그리고 KIS 장중 엔드포인트는 당일 누적만 준다 —
+        # 봉과 달리 **나중에 소급해 채울 방법이 없으므로**, 안 받은 날은 영원히 빈다.
+        # 아카이버를 먼저 구독시키고 폴러를 돌린다(반대면 첫 폴링이 버스에서 증발한다).
+        *(
+            []
+            if flow_poller is None or flow_archiver is None
+            else [
+                flow_archiver.run_forever(bus),
+                FixedTickScheduler(
+                    tick_seconds=_FLOW_POLL_SECONDS
+                ).run_forever(flow_poller.poll_once),
+            ]
+        ),
     )
 
 
@@ -382,6 +442,11 @@ async def main(cfg: InstanceConfig) -> None:
     composer = MultiHorizonBarComposer(symbol=symbol, archiver=archiver, bus=bus)
     engine = FeatureEngine(symbol, bus, feature_set=cfg.feature_set)
 
+    # 파생 장중 수급 — 선물/콜/풋 3업종을 1분 격자로 폴링해 적재한다(근거는
+    # `_run_regular_session`의 gather 주석). REST 유량은 `KISRestClient`가 이미 페이싱하고
+    # (모의투자 1건/초) 3업종 순차 조회라 1분 격자에 여유가 크다.
+    flow_poller, flow_archiver = _build_flow_collection(creds, bus)
+
     # 첫 틱이 들어오기 전에 끝내야 한다 — 웜업 구간(09:00 이전)에 부르는 이유가 그것이다.
     await asyncio.to_thread(_load_warmup_artifacts, engine, archiver, symbol, today)
 
@@ -395,7 +460,14 @@ async def main(cfg: InstanceConfig) -> None:
         try:
             await asyncio.wait_for(
                 _run_regular_session(
-                    collector, composer, engine, bus, today.strftime("%Y%m%d"), symbol
+                    collector,
+                    composer,
+                    engine,
+                    bus,
+                    today.strftime("%Y%m%d"),
+                    symbol,
+                    flow_poller,
+                    flow_archiver,
                 ),
                 timeout=remaining,
             )

@@ -64,7 +64,10 @@ TAG_LEVELS: dict[str, int] = {
     "DecisionEmitted": logging.INFO,  # Meta Decision — NO TRADE도 포함해 전부 기록(Ver 2.0 §3.2)
     "SizerZeroQty": logging.INFO,  # Sizer 계산 결과 0계약 — 주문 생성 안 함(정상 동작)
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
-    "InvestorFlowPollError": logging.WARNING,  # REST 폴링 1회 실패 — 다음 틱에 자연 재시도(L22)
+    "InvestorFlowPollError": logging.WARNING,
+    # 수급 스냅샷 적재 실패 — 장중 수급은 **과거 조회가 없어** 놓치면 영원히 못 받는다
+    # (`data/flow_archiver.py`). 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
+    "InvestorFlowArchiveError": logging.WARNING,  # REST 폴링 1회 실패 — 다음 틱에 자연 재시도(L22)
     "OptionChainPollEmpty": logging.WARNING,  # 근월물 체인이 비어있음 — 마스터파일 갱신 필요할 수도
     "OptionChainPollError": logging.WARNING,  # 다리 1개 조회/발행 실패 — 나머지는 계속 시도(L22)
     "OptionsCandidateRejected": logging.INFO,  # 안전규칙 기각 — 정상 동작(§6 하드룰 의도대로 작동)
