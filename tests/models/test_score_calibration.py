@@ -78,3 +78,49 @@ def test_format_lines_include_bins_and_verdict():
 
     assert any("적중" in ln for ln in lines)
     assert any("판정" in ln for ln in lines)
+
+
+# ------------------------- 오탐 방지: 유의성·유용성 (2026-08-04, 자기 오탐 대응)
+
+
+def test_small_sample_gap_is_reported_as_noise_not_edge():
+    """FL 피처 A/B에서 이 도구가 실제로 낸 오탐 — 격차 +4.2%p, 구간당 165건.
+    격차의 표준오차가 5.5%p라 0.76σ, 즉 잡음이다."""
+    # 상위 구간 55%(맞음 11/20), 하위 45%(9/20) — 격차 10%p지만 표본이 20건뿐.
+    low = [(0.01, i < 9) for i in range(20)]
+    high = [(0.50, i < 11) for i in range(20)]
+
+    calib = _calib(low + high, n_bins=2)
+
+    assert calib.edge_gap >= calib.MIN_EDGE_GAP  # 크기는 넘지만
+    assert calib.edge_sigma < calib.MIN_EDGE_SIGMA  # 유의하지 않다
+    assert calib.is_informative is False
+    assert "잡음 범위" in calib.verdict
+
+
+def test_gap_with_top_bin_below_coin_flip_is_not_an_edge():
+    """상위 구간이 50% 미만이면 '하위가 더 나쁠 뿐'이다 — 거래할 우위가 아니다."""
+    low = [(0.01, i < 400) for i in range(1000)]  # 40%
+    high = [(0.50, i < 480) for i in range(1000)]  # 48%
+
+    calib = _calib(low + high, n_bins=2)
+
+    assert calib.edge_gap >= calib.MIN_EDGE_GAP
+    assert calib.edge_sigma >= calib.MIN_EDGE_SIGMA  # 표본은 충분하고 유의하지만
+    assert calib.is_informative is False  # 상위가 동전던지기 이하
+    assert "동전던지기 이하" in calib.verdict
+
+
+def test_large_significant_gap_above_coin_flip_is_informative():
+    low = [(0.01, i < 450) for i in range(1000)]  # 45%
+    high = [(0.50, i < 700) for i in range(1000)]  # 70%
+
+    calib = _calib(low + high, n_bins=2)
+
+    assert calib.is_informative is True
+    assert calib.edge_sigma >= 2.0
+    assert "σ" in calib.verdict
+
+
+def test_edge_sigma_is_infinite_stderr_when_a_bin_is_empty():
+    assert _calib([]).edge_gap_stderr == float("inf")

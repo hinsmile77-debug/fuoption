@@ -36,7 +36,8 @@ from messiah.core.messages import (
     HealthLevel,
     Horizon,
 )
-from messiah.features import px_core, vl_core
+from messiah.data.investor_flow_history import FlowHistory
+from messiah.features import fl_core, px_core, vl_core
 
 # 등록된 **모든** 피처가 계산 가능한 최소 봉 수 이상이어야 한다.
 #
@@ -104,6 +105,7 @@ class FeatureEngine:
         bus: BusLike,
         feature_set: str,
         horizons: Sequence[Horizon] | None = None,
+        flow_history: "FlowHistory | None" = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._symbol = symbol
@@ -132,6 +134,10 @@ class FeatureEngine:
             if Horizon.M1 in self._horizons
             else min(self._horizons, key=lambda h: HORIZON_SECONDS[h], default=Horizon.M1)
         )
+        # 일별 수급 이력 (2026-08-04). None이면 FL 피처를 **아예 안 만든다**(위
+        # `_build_feature_vector` 주석 참고). 주입하면 `feature_set`도 FL 포함 버전으로
+        # 바꿔야 학습·추론이 갈리지 않는다.
+        self._flow = flow_history
         self._monotonic = monotonic
         self._last_publish_at: float | None = None
         self._last_nan_ratio: dict[Horizon, float] = {}
@@ -255,6 +261,13 @@ class FeatureEngine:
                 values[f"{name}_{window}"] = self._safe_call(fn, history, window)
         for name, stateful_fn in vl_core.STATEFUL_FEATURES:
             values[name] = self._safe_call(stateful_fn, history, self._session)
+        # FL은 **수급 이력이 주입됐을 때만** 벡터에 들어간다 — 주입 안 됐는데 NaN으로
+        # 자리만 채우면 `px_ema_cross_60`이 그랬듯 "죽은 채로 학습되는" 피처가 또 생긴다
+        # (2026-08-04). 대신 벡터 모양이 달라지므로 호출측은 `feature_set`을 함께 바꿔야
+        # 하고, 어긋나면 `FeatureSetMismatch`(ERROR)가 잡는다.
+        if self._flow is not None:
+            for name, flow_fn in fl_core.FLOW_FEATURES:
+                values[name] = self._safe_call(flow_fn, history, self._flow)
 
         nan_ratio = sum(1 for v in values.values() if v is None) / len(values)
         # 워밍업 중(예: 30m은 최대 윈도우 60개를 채우는 데만 30시간 = 며칠이 걸림)엔 nan_ratio가

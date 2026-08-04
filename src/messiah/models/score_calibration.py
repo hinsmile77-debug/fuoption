@@ -60,9 +60,16 @@ class ScoreCalibration:
     overall_hit_rate: float
     n: int
 
-    # 상위 구간이 하위 구간보다 이만큼은 나아야 "임계값이 의미 있다"고 본다. 미검증
-    # 초기값 — 표본 2,500건에서 적중률 표준오차가 약 1%p이므로 그 3배쯤을 요구한다.
+    # 판정 기준 세 가지 — **셋을 다 넘어야** 한다 (2026-08-04, 자기 오탐 대응).
+    #
+    # 처음엔 `MIN_EDGE_GAP` 하나만 봤는데, FL 피처 A/B에서 이 도구가 오탐을 냈다:
+    # 격차 +4.2%p로 "방향을 가른다"고 판정했지만 구간당 표본이 165건이라 격차의 표준오차가
+    # 5.5%p였다(0.76 SE — 순수 잡음). 게다가 **상위 구간 적중률이 49.7%로 50% 미만**이었다.
+    # 격차가 있어도 상위 구간이 동전던지기보다 나쁘면 거래할 수 없다 — "덜 나쁜 쪽"은
+    # 우위가 아니다.
     MIN_EDGE_GAP = 0.03
+    MIN_EDGE_SIGMA = 2.0  # 격차가 자기 표준오차의 이 배수는 넘어야 한다
+    MIN_TOP_HIT_RATE = 0.50  # 상위 구간이 동전던지기보다는 나아야 한다
 
     @property
     def top(self) -> ScoreBin | None:
@@ -80,8 +87,30 @@ class ScoreCalibration:
         return self.top.hit_rate - self.bottom.hit_rate
 
     @property
+    def edge_gap_stderr(self) -> float:
+        """격차의 표준오차 — 구간이 작으면 큰 격차도 잡음이다(적중률은 이항비율)."""
+        if not self.top or not self.bottom or self.top.n == 0 or self.bottom.n == 0:
+            return float("inf")
+        var = sum(
+            b.hit_rate * (1.0 - b.hit_rate) / b.n for b in (self.top, self.bottom)
+        )
+        return var**0.5 if var > 0 else 0.0
+
+    @property
+    def edge_sigma(self) -> float:
+        se = self.edge_gap_stderr
+        if se == 0.0:
+            return float("inf") if self.edge_gap > 0 else 0.0
+        return self.edge_gap / se
+
+    @property
     def is_informative(self) -> bool:
-        return self.edge_gap >= self.MIN_EDGE_GAP
+        """셋을 **다** 넘어야 한다 — 크기·유의성·유용성(위 상수 주석의 오탐 사례)."""
+        return (
+            self.edge_gap >= self.MIN_EDGE_GAP
+            and self.edge_sigma >= self.MIN_EDGE_SIGMA
+            and bool(self.top) and self.top.hit_rate > self.MIN_TOP_HIT_RATE
+        )
 
     @property
     def verdict(self) -> str:
@@ -90,8 +119,21 @@ class ScoreCalibration:
         if self.is_informative:
             return (
                 f"|S|가 방향을 가른다 — 상위 구간 {self.top.hit_rate:.1%} vs 하위 "
-                f"{self.bottom.hit_rate:.1%} (격차 {self.edge_gap:+.1%}). 임계값 조정이 의미 있다"
+                f"{self.bottom.hit_rate:.1%} (격차 {self.edge_gap:+.1%}, {self.edge_sigma:.1f}σ). "
+                f"임계값 조정이 의미 있다"
             )
+        if self.top and self.edge_gap >= self.MIN_EDGE_GAP:
+            if self.edge_sigma < self.MIN_EDGE_SIGMA:
+                return (
+                    f"격차 {self.edge_gap:+.1%}는 잡음 범위 — 구간당 표본이 작아 표준오차가 "
+                    f"{self.edge_gap_stderr:.1%}다({self.edge_sigma:.1f}σ). 표본을 늘리기 전엔 "
+                    f"우위가 있다고 말할 수 없다"
+                )
+            if self.top.hit_rate <= self.MIN_TOP_HIT_RATE:
+                return (
+                    f"격차는 {self.edge_gap:+.1%}지만 **상위 구간이 {self.top.hit_rate:.1%}로 "
+                    f"동전던지기 이하**다 — 하위가 더 나쁠 뿐이고 거래할 우위는 없다"
+                )
         return (
             f"|S|가 방향을 못 가른다 — 상위 구간 {self.top.hit_rate:.1%} vs 하위 "
             f"{self.bottom.hit_rate:.1%} (격차 {self.edge_gap:+.1%}). **임계값을 어디에 두든 "

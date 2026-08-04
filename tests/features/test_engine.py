@@ -585,3 +585,58 @@ def test_session_state_still_prefers_m1_when_available():
     engine = FeatureEngine("A05608", FakeBus(), "v2026.07")
 
     assert engine._session_horizon is Horizon.M1  # noqa: SLF001
+
+
+# ------------------------------------------------ FL 결선 (2026-08-04)
+
+
+def _flow_history(n: int = 30):
+    from datetime import date as _date
+
+    from messiah.data.investor_flow_history import FlowHistory, FlowRow
+
+    rows = []
+    for i in range(n):
+        v = 1000 * (1 if i % 3 else -2)
+        rows.append(
+            FlowRow(
+                day=_date(2026, 3, 1) + timedelta(days=i),
+                values={
+                    "frgn_ntby_qty": float(v),
+                    "frgn_ntby_tr_pbmn": float(v * 10),
+                    "prsn_ntby_qty": float(-v),
+                    "prsn_ntby_tr_pbmn": float(-v * 10),
+                    "orgn_ntby_qty": float(v // 2),
+                    "orgn_ntby_tr_pbmn": float(v * 5),
+                },
+            )
+        )
+    return FlowHistory(rows)
+
+
+def test_fl_features_are_absent_without_flow_history():
+    """주입 안 하면 **자리조차 안 만든다** — NaN으로 채우면 `px_ema_cross_60`이 그랬듯
+    죽은 채로 학습되는 피처가 또 생긴다(2026-08-04)."""
+    from messiah.features.fl_core import FLOW_FEATURES
+
+    engine = FeatureEngine("A05608", FakeBus(), "v2026.07", horizons=[Horizon.M5])
+    vector = engine._build_feature_vector(  # noqa: SLF001
+        _bar(0), _rising_bars(60, Horizon.M5)
+    )
+
+    assert not any(name in vector.values for name, _ in FLOW_FEATURES)
+
+
+def test_fl_features_appear_and_have_values_when_flow_history_is_injected():
+    from messiah.features.fl_core import FLOW_FEATURES
+
+    engine = FeatureEngine(
+        "A05608", FakeBus(), "v2026.08-fl", horizons=[Horizon.M5],
+        flow_history=_flow_history(),
+    )
+    bars = _rising_bars(60, Horizon.M5)
+    vector = engine._build_feature_vector(bars[-1], bars)  # noqa: SLF001
+
+    present = [name for name, _ in FLOW_FEATURES if name in vector.values]
+    assert len(present) == len(FLOW_FEATURES)
+    assert any(vector.values[name] is not None for name in present)
