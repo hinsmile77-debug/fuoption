@@ -41,6 +41,56 @@ PRODUCTION_SEARCH_SPACE: dict[str, tuple[str, float, float]] = {
     "lambda_l2": ("log", 1e-8, 10),
 }
 
+# `min_data_in_leaf` 상한을 정할 때 쓰는 나눗수 — "잎 하나에 최소 몇 개"의 상한이
+# 표본 수의 1/50을 넘지 않게 한다. 즉 최소 50개 잎을 만들 여지는 항상 남긴다.
+# 미검증 초기값이며, 근거는 `scale_space_to_samples()` docstring의 실측이다.
+_MIN_LEAF_SAMPLE_DIVISOR = 50
+_MIN_LEAF_FLOOR = 5
+
+
+def scale_space_to_samples(
+    space: Mapping[str, tuple[str, float, float]], n_samples: int
+) -> dict[str, tuple[str, float, float]]:
+    """탐색 공간의 `min_data_in_leaf` 범위를 **실제 표본 수에 맞춰 좁힌다** (2026-08-04 신설).
+
+    ## 왜 필요했나
+
+    `PRODUCTION_SEARCH_SPACE`의 `min_data_in_leaf`는 Ver 1.6 §2.2 원문인 (200, 2000)이다.
+    그 값은 다년치 데이터를 전제한 것인데, 2026-08-04 시점 실제 학습 표본은 15m 기준
+    3,364봉이고 `PurgedKFold` 폴드 안에서는 **약 2,200행**이다. 그 규모에서 탐색이
+    `min_data_in_leaf=1285`를 고르면 잎을 두 개 이상 만들 수가 없다.
+
+    실제로 그렇게 됐다 — 학습된 부스터를 열어보니 **트리 75개가 전부 잎 2개짜리
+    그루터기**였고, 그 결과 Expert 출력이 검증 842건 **전부 동일**했다:
+
+        p_up   0.1861 ~ 0.1861   (min == max)
+        p_flat 0.6537 ~ 0.6537
+        p_down 0.1601 ~ 0.1601
+
+    이게 `|p_up − p_down| ≈ 0.026` 고정 → 집계 |S| ≈ 0 → `SCORE_THRESHOLD=0.20`에서
+    전량 NO_TRADE로 이어진 사슬의 출발점이다. 탐색 예산을 늘리면 오히려 나빠졌던 것도
+    같은 이유다(더 많은 시도가 전부 그루터기라 우연히 더 큰 `min_data_in_leaf`를 고름).
+
+    **모델에 우위가 없어서 안 거래한 게 아니라, 모델이 학습 자체를 못 하고 있었다.**
+
+    계산: `min_data_in_leaf`의 상한을 `n_samples // 50`으로 낮추고(원래 상한보다 클 순 없음),
+         하한이 그 상한을 넘으면 함께 내린다. 다른 키는 건드리지 않는다.
+    해석: 표본이 충분히 커지면(10만 행 이상) 원래 (200, 2000)이 그대로 복원된다 — 이
+         함수는 규모가 작을 때만 개입한다.
+    """
+    scaled = dict(space)
+    entry = scaled.get("min_data_in_leaf")
+    if entry is None or n_samples <= 0:
+        return scaled
+    kind, low, high = entry
+    # **좁히기만 한다** — 호출자가 준 상한을 이 함수가 올리는 일은 없어야 한다(테스트가
+    # 작은 전용 공간을 주는 경우까지 망가진다). 바닥은 표본이 극소일 때 0이 되는 것만 막는다.
+    capped_high = min(int(high), max(_MIN_LEAF_FLOOR, n_samples // _MIN_LEAF_SAMPLE_DIVISOR))
+    capped_low = min(int(low), max(1, capped_high // 4))
+    scaled["min_data_in_leaf"] = (kind, capped_low, capped_high)
+    return scaled
+
+
 _FIXED_PARAMS: dict[str, object] = {
     "objective": "multiclass",
     "num_class": 3,
@@ -81,7 +131,13 @@ def search_hyperparameters(
     반환: 최적 하이퍼파라미터만(고정 파라미터 제외) — `HorizonExpert.train()`의 `params`
          인자에 바로 병합해 쓸 수 있는 형태.
     """
-    space = dict(search_space) if search_space is not None else PRODUCTION_SEARCH_SPACE
+    # 탐색 공간을 **실제 표본 수에 맞춰** 좁힌다 — 안 그러면 작은 데이터에서
+    # `min_data_in_leaf`가 표본의 절반을 넘어 트리가 그루터기가 된다
+    # (`scale_space_to_samples()` docstring의 2026-08-04 실측).
+    space = scale_space_to_samples(
+        dict(search_space) if search_space is not None else PRODUCTION_SEARCH_SPACE,
+        len(y),
+    )
     y_class = np.array([_LABEL_TO_CLASS[int(label)] for label in y])
     folds = list(PurgedKFold(n_splits=n_splits, embargo_bars=embargo_bars).split(event_times))
 

@@ -16,7 +16,12 @@ train/test 분할로 축을 훑고, 살아남은 설정만 `run_g1_walk_forward.
      "모델에 우위가 없다"와 "임계값이 과적합됐다"는 증상이 똑같이 무거래라 이게 없으면
      구분이 안 된다.
   2. **Meta 통과율** — 실제로 몇 %가 게이트를 통과하는가.
-  3. **집계 결과** — 통과한 신호가 NO_TRADE가 아닌 판단으로 이어지는가.
+  3. **판단 결과** — 통과한 신호가 실제로 NO_TRADE가 아닌 판단이 되는가. 여기서
+     `MetaDecisionEngine`을 **그대로 쓴다**. 손으로 `abs(score) > 0` 같은 근사를 두면
+     파이프라인이 실제로 요구하는 것과 달라진다 — 2026-08-04에 정확히 그 실수를 했다:
+     스윕은 "신호 87건"이라 했는데 같은 설정의 G1은 무거래였고, 원인은 엔진의 게이트 두 개
+     (`Regime.UNKNOWN`이면 즉시 NO_TRADE, `|S| < 0.20`이면 우위 부족)를 스윕이 안 봤기
+     때문이다. 어느 게이트가 막았는지도 사유별로 센다.
 
 **성과(P&L)는 재지 않는다.** 단일 분할 수익률은 표본이 하나라 성적으로 읽으면 안 되고,
 그 판단은 G1의 몫이다.
@@ -49,12 +54,14 @@ from messiah.core.messages import (  # noqa: E402
     Horizon,
     Regime,
     RegimeState,
+    Side,
     bar_confirm_time,
 )
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.models.threshold_report import ThresholdReport  # noqa: E402
 from messiah.models.trainer import build_feature_vectors, train_formal_expert  # noqa: E402
+from messiah.strategy.decision.meta_decision import MetaDecisionEngine  # noqa: E402
 from messiah.strategy.futures.aggregator import Aggregator  # noqa: E402
 from messiah.strategy.futures.meta_labeler import (  # noqa: E402
     build_meta_features_from_feature_vector,
@@ -100,6 +107,9 @@ class SweepRow:
     headroom: float
     meta_pass_rate: float
     non_no_trade: int
+    abs_score_p90: float
+    blocked_by: dict[str, int]
+    degenerate: bool
     verdict: str
 
 
@@ -157,6 +167,9 @@ async def _evaluate(
         symbol=_SYMBOL, regime=Regime.UNKNOWN, confidence=0.0, state_duration_bars=0
     )
 
+    engine = MetaDecisionEngine()
+    blocked: dict[str, int] = {}
+    scores: list[float] = []
     cursor = 0
     for fv in fvs:
         view = training.expert.predict(fv)
@@ -181,7 +194,14 @@ async def _evaluate(
                 regime_state = regime_states[cursor][1]
 
         aggregate = aggregator.compute(_SYMBOL, {horizon: view}, regime_state, as_of=fv.valid_until)
-        if aggregate.n_experts > 0 and abs(aggregate.score) > 0:
+        scores.append(aggregate.score)
+        intent = engine.decide(aggregate, kill_active=False)
+        if intent.side is Side.NO_TRADE:
+            # 사유 머리글자(①~⑤)로 어느 게이트가 막았는지 센다 — "무거래"만 알면 원인을
+            # 못 가른다(`meta_decision.py`의 `_no_trade` rationale 규약).
+            reason = intent.rationale[:1] if intent.rationale else "?"
+            blocked[reason] = blocked.get(reason, 0) + 1
+        else:
             non_no_trade += 1
 
     report = ThresholdReport.build(
@@ -202,8 +222,40 @@ async def _evaluate(
         headroom=report.headroom,
         meta_pass_rate=passed / max(1, len(fvs)),
         non_no_trade=non_no_trade,
+        abs_score_p90=(
+            sorted(abs(s) for s in scores)[int(0.9 * (len(scores) - 1))] if scores else 0.0
+        ),
+        blocked_by=blocked,
+        degenerate=report.is_degenerate,
         verdict=report.verdict,
     )
+
+
+def _report_regime_axis(rows: list[SweepRow]) -> None:
+    """regime on/off가 실제로 결과를 바꿨는지 — 안 바꿨으면 그 이유를 말한다.
+
+    **regime은 두 곳에서 작용하고, 크기가 전혀 다르다**(2026-08-04에 이걸 잘못 읽었다):
+
+    1. `Aggregator`의 국면별 가중치 — Expert가 한 Horizon뿐이면 가중평균이 그 하나로
+       정규화되어 **상쇄된다**. 여기만 보면 regime이 무의미해 보인다.
+    2. `MetaDecisionEngine`의 게이트 ② — `Regime.UNKNOWN`은 `_EVENT_LIKE_REGIMES`라
+       **즉시 NO_TRADE**다. 즉 regime 미결선이면 거래가 구조적으로 불가능하다.
+
+    처음엔 1만 보고 "이 축은 측정 불가"라고 적었는데, 판단 엔진을 실제로 태우자
+    regime=off는 검증 표본 **전부**가 게이트 ②에서 막혔다. 근사로 재면 이렇게 틀린다.
+    """
+    if len({r.regime for r in rows}) < 2:
+        return
+    groups: dict[tuple[str, str, str], list[SweepRow]] = {}
+    for r in rows:
+        groups.setdefault((r.horizon, r.budget, r.threshold_mode), []).append(r)
+    comparable = [g for g in groups.values() if len(g) > 1]
+    if comparable and all(len({x.non_no_trade for x in g}) == 1 for g in comparable):
+        print(
+            "\n참고: regime on/off가 모든 설정에서 동일한 결과를 냈다. 단일 Horizon에서는"
+            " 집계 가중치가 상쇄되기 때문인데, 판단 엔진의 게이트 ②(UNKNOWN=즉시 NO_TRADE)"
+            "까지 태웠는데도 같다면 그 게이트를 안 타고 있다는 뜻이므로 배선을 확인할 것."
+        )
 
 
 async def main() -> int:
@@ -273,33 +325,62 @@ async def main() -> int:
                     print(
                         f"    임계 {row.threshold:.3f}  선택도달 {row.selection_reach:.1%}  "
                         f"추론도달 {row.inference_reach:.1%}  헤드룸 {row.headroom:+.4f}  "
-                        f"거래신호 {row.non_no_trade}"
+                        f"거래신호 {row.non_no_trade}  |S|p90={row.abs_score_p90:.3f}  "
+                        f"차단={row.blocked_by}"
                     )
 
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 108)
     print(
         f"{'Horizon':<8}{'예산':<9}{'임계선택':<10}{'Regime':<8}{'임계':<8}"
-        f"{'선택도달':<10}{'추론도달':<10}{'헤드룸':<10}{'거래신호':<8}"
+        f"{'선택도달':<10}{'추론도달':<10}{'헤드룸':<10}{'거래신호':<9}{'비고':<8}"
     )
-    print("-" * 100)
-    for r in sorted(rows, key=lambda x: (-x.non_no_trade, -x.inference_reach)):
+    print("-" * 108)
+    for r in sorted(rows, key=lambda x: (x.degenerate, -x.inference_reach)):
+        note = "게이트무력" if r.degenerate else ""
         print(
             f"{r.horizon:<8}{r.budget:<9}{r.threshold_mode:<10}{r.regime:<8}"
             f"{r.threshold:<8.3f}{r.selection_reach:<10.1%}{r.inference_reach:<10.1%}"
-            f"{r.headroom:<+10.4f}{r.non_no_trade:<8}"
+            f"{r.headroom:<+10.4f}{r.non_no_trade:<9}{note:<8}"
         )
 
     tradable = [r for r in rows if r.non_no_trade > 0]
-    print(f"\n거래 신호가 나온 설정: {len(tradable)}/{len(rows)}")
-    if tradable:
-        best = tradable[0] if len(tradable) == 1 else max(tradable, key=lambda x: x.non_no_trade)
+    healthy = [r for r in tradable if not r.degenerate]
+    print(
+        f"\n거래 신호가 나온 설정: {len(tradable)}/{len(rows)}  "
+        f"(그중 게이트 정상: {len(healthy)})"
+    )
+
+    degenerate = [r for r in tradable if r.degenerate]
+    if degenerate:
         print(
-            f"최다 신호: {best.horizon}/{best.budget}/{best.threshold_mode}/"
-            f"regime={best.regime} — {best.non_no_trade}건"
+            f"\n게이트 무력화 {len(degenerate)}건 — 임계값이 0에 붙어 전부 통과한다. "
+            f"신호 수가 많은 건 성과가 아니라 **거르지 않은 것**이라 후보에서 뺀다:"
+        )
+        for r in degenerate:
+            print(f"  {r.horizon}/{r.threshold_mode}/regime={r.regime} — {r.non_no_trade}건")
+
+    _report_regime_axis(rows)
+
+    # `insample`은 **결함이 확인된 경로**다(임계값을 자기 학습 행 예측으로 고름,
+    # `models/trainer._meta_selection_probabilities`) — 비교 축으로만 두고 권장에서는 뺀다.
+    # 어떤 지표가 우연히 그쪽을 가리켜도 그건 지표의 결함이지 그 경로의 장점이 아니다.
+    candidates = [r for r in healthy if r.threshold_mode == "oof"] or healthy
+    if candidates:
+        # 신호 수로 고르지 않는다 — 그러면 게이트가 가장 헐거운 설정이 항상 이긴다.
+        # 퇴화가 아닌 설정 중 **추론 도달률이 가장 높은** 것이 "임계값이 새 데이터로도
+        # 살아남으면서 선별은 유지한" 설정이다.
+        best = max(candidates, key=lambda r: r.inference_reach)
+        print(
+            f"\n권장(임계값이 가장 잘 옮겨간 설정): {best.horizon}/{best.budget}/"
+            f"{best.threshold_mode}/regime={best.regime}"
+        )
+        print(
+            f"  임계 {best.threshold:.3f} · 선택도달 {best.selection_reach:.1%} → "
+            f"추론도달 {best.inference_reach:.1%} · 신호 {best.non_no_trade}건"
         )
         print("→ 이 설정으로 run_g1_walk_forward.py를 돌릴 것 (성과 판정은 거기서)")
     else:
-        print("→ 어떤 설정에서도 거래 신호가 없다. 임계값 문제가 아니라면 모델 자체의 문제다.")
+        print("→ 게이트가 살아있는 설정이 없다. 임계값 문제가 아니라면 모델 자체의 문제다.")
 
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

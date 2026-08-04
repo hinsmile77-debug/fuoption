@@ -87,3 +87,49 @@ def test_default_search_space_matches_production_space_keys():
     x, y, weight, event_times = _synthetic_dataset()
     best = search_hyperparameters(x, y, weight, event_times, n_splits=3, n_trials=2)
     assert set(best.keys()) == set(PRODUCTION_SEARCH_SPACE.keys())
+
+
+# ------------------------------------------- 표본 수 대비 탐색 공간 (2026-08-04)
+
+
+def test_scale_space_caps_min_data_in_leaf_for_small_datasets():
+    """작은 데이터에서 `min_data_in_leaf`가 표본의 절반을 넘으면 트리가 그루터기가 된다
+    — 2026-08-04 실측: 폴드 ~2,200행에 1285가 뽑혀 트리 75개가 전부 잎 2개였다."""
+    from messiah.models.search import PRODUCTION_SEARCH_SPACE, scale_space_to_samples
+
+    scaled = scale_space_to_samples(PRODUCTION_SEARCH_SPACE, n_samples=2200)
+
+    _, low, high = scaled["min_data_in_leaf"]
+    assert high == 44  # 2200 // 50
+    assert low <= high
+    assert low == 11  # 44 // 4 — 하한도 함께 내려간다
+    assert high * 2 <= 2200  # 최소 두 잎은 반드시 만들 수 있다
+
+
+def test_scale_space_restores_original_range_for_large_datasets():
+    """표본이 충분히 크면 설계 문서 원문(200, 2000)이 그대로 살아난다."""
+    from messiah.models.search import PRODUCTION_SEARCH_SPACE, scale_space_to_samples
+
+    scaled = scale_space_to_samples(PRODUCTION_SEARCH_SPACE, n_samples=200_000)
+
+    assert scaled["min_data_in_leaf"] == PRODUCTION_SEARCH_SPACE["min_data_in_leaf"]
+
+
+def test_scale_space_leaves_other_keys_untouched():
+    from messiah.models.search import PRODUCTION_SEARCH_SPACE, scale_space_to_samples
+
+    scaled = scale_space_to_samples(PRODUCTION_SEARCH_SPACE, n_samples=1000)
+
+    for key in PRODUCTION_SEARCH_SPACE:
+        if key != "min_data_in_leaf":
+            assert scaled[key] == PRODUCTION_SEARCH_SPACE[key]
+
+
+def test_scale_space_never_produces_inverted_or_zero_bounds():
+    from messiah.models.search import PRODUCTION_SEARCH_SPACE, scale_space_to_samples
+
+    for n in (0, 1, 10, 100, 5000):
+        _, low, high = scale_space_to_samples(PRODUCTION_SEARCH_SPACE, n_samples=n)[
+            "min_data_in_leaf"
+        ]
+        assert 1 <= low <= high, f"n={n} -> ({low}, {high})"

@@ -32,6 +32,12 @@ import statistics
 from dataclasses import dataclass
 from typing import Sequence
 
+# 퇴화 판정 — **통과율 하나로만** 본다. 임계값의 명목 크기는 상관없다: 0.100이든 0.000이든
+# 검증 표본이 전부 통과하면 그 게이트는 아무것도 거르지 않는다(2026-08-04 실측: 15m에서
+# 임계 0.100인데 도달률 100%였고, 처음엔 "임계값이 0에 가까울 때만 퇴화"로 좁게 잡아
+# 이걸 놓쳤다). 미검증 초기값.
+_DEGENERATE_REACH_RATE = 0.99
+
 
 @dataclass(frozen=True, slots=True)
 class Distribution:
@@ -89,9 +95,29 @@ class ThresholdReport:
         return self.inference_reach_rate <= 0.0
 
     @property
+    def is_degenerate(self) -> bool:
+        """게이트가 **사실상 꺼진** 상태 — 임계값이 0에 붙고 거의 전부가 통과한다.
+
+        무거래의 반대쪽 실패 모드다. `select_threshold()`는 비용차감 기대수익을 최대화하는데,
+        **거르는 것이 아무 도움이 안 되면 전부 통과시키는 후보가 최댓값을 낸다** — 즉 임계값
+        0.0은 "Meta-Labeler에 변별력이 없다"는 정직한 출력이지 좋은 결과가 아니다.
+
+        2026-08-04 스윕에서 30m/oof가 정확히 이 모양이었다(임계 0.000, 도달률 100%, 신호
+        421/421). 신호 수만 보면 최다였지만 그건 **게이트를 끈 것**이라, 신호 수를 기준으로
+        설정을 고르면 가장 변별력 없는 설정을 고르게 된다.
+        """
+        return self.inference_reach_rate >= _DEGENERATE_REACH_RATE
+
+    @property
     def verdict(self) -> str:
         """사람이 읽는 한 줄 판정 — 리포트가 스스로 결론을 말하게 한다(숫자만 뱉으면
         결국 매번 사람이 해석해야 한다, `ops/integrity_report.py`와 같은 원칙)."""
+        if self.is_degenerate:
+            return (
+                f"게이트 무력화 — 임계 {self.threshold:.3f}에 추론 표본의 "
+                f"{self.inference_reach_rate:.1%}가 통과한다. 임계값의 크기와 무관하게 "
+                f"아무것도 거르지 않는 상태이며, 신호 수가 많은 것은 성과가 아니다"
+            )
         if not self.is_unreachable:
             return (
                 f"도달 가능 — 추론 표본의 {self.inference_reach_rate:.1%}가 임계 "

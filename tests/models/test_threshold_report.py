@@ -84,3 +84,39 @@ def test_build_rejects_empty_inputs():
         _report(0.5, selection=[], inference=[0.1])
     with pytest.raises(ValueError):
         _report(0.5, selection=[0.1], inference=[])
+
+
+# ---------------------------------------------------------------- 퇴화(게이트 무력화)
+
+
+def test_detects_disabled_gate_when_threshold_is_zero_and_everything_passes():
+    """무거래의 반대쪽 실패 모드 — 2026-08-04 스윕의 30m/oof가 이 모양이었다
+    (임계 0.000, 도달 100%, 신호 421/421). 신호 수만 보면 최다지만 게이트가 꺼진 것이다."""
+    report = _report(0.0, selection=[0.1, 0.5, 0.9], inference=[0.05, 0.3, 0.8])
+
+    assert report.is_degenerate is True
+    assert report.is_unreachable is False
+    assert "게이트 무력화" in report.verdict
+
+
+def test_healthy_threshold_is_not_flagged_degenerate():
+    report = _report(0.40, selection=[0.2, 0.5, 0.9], inference=[0.1, 0.45, 0.7])
+
+    assert report.is_degenerate is False
+    assert "도달 가능" in report.verdict
+
+
+def test_low_threshold_with_partial_pass_rate_is_not_degenerate():
+    """임계가 낮아도 전부 통과하는 게 아니면 게이트는 살아 있다."""
+    report = _report(0.005, selection=[0.5], inference=[0.0, 0.0, 0.9])
+
+    assert report.is_degenerate is False
+
+
+def test_nonzero_threshold_that_passes_everything_is_still_degenerate():
+    """임계값의 명목 크기는 상관없다 — 2026-08-04 실측: 15m에서 임계 0.100인데 도달률
+    100%였고, 처음엔 '임계가 0에 가까울 때만 퇴화'로 좁게 잡아 이걸 놓쳤다."""
+    report = _report(0.100, selection=[0.5, 0.6], inference=[0.2, 0.5, 0.9])
+
+    assert report.is_degenerate is True
+    assert "게이트 무력화" in report.verdict
