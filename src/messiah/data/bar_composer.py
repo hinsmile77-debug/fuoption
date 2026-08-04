@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Sequence
 
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, BusLike
@@ -49,6 +50,75 @@ def floor_to_horizon(dt: datetime, horizon_seconds: int) -> datetime:
     epoch = dt.timestamp()
     floored_epoch = (epoch // horizon_seconds) * horizon_seconds
     return datetime.fromtimestamp(floored_epoch, tz=UTC).astimezone(KST)
+
+
+def compose_composite_bar(
+    symbol: str, horizon: Horizon, bucket_start: datetime, bars: Sequence[BarClosed]
+) -> BarClosed:
+    """구성 1분봉들 → 상위 Horizon 합성봉 1개 (순수 함수).
+
+    실시간 경로(`MultiHorizonBarComposer.flush_due_horizon`)와 오프라인 재합성
+    (`compose_offline`, 백필한 1분봉으로 상위 Horizon을 다시 만들 때)이 **같은 규칙을
+    쓰도록** 여기 한 곳에 둔다 — 두 곳에 복사하면 한쪽만 고쳐지는 순간 아카이브 안에서
+    같은 Horizon의 봉이 서로 다른 규칙으로 만들어진다.
+
+    해석:
+      - `quality_ok`는 구성봉이 전부 `quality_ok=True`이고 **개수가 그 Horizon의 분 수와
+        정확히 일치할 때만**(=빠진 분이 없을 때만) True.
+      - `session`은 구성봉 중 하나라도 장전이면 장전(2026-07-31) — 09:00을 걸치는 봉
+        (예: 08:55~09:00 5분봉)은 장전 프린트를 실제로 품고 있으므로 "정규장 봉"이라고
+        말하면 사실과 다르다. `quality_ok`가 구성봉 전부를 요구하는 것과 같은 보수적 방향.
+    실패 조건: `bars`가 비면 ValueError — 가짜 OHLC를 만들지 않는다(호출측이 걸러야 한다).
+    """
+    if not bars:
+        raise ValueError("구성 1분봉이 비어 있음 — 합성봉을 만들 수 없다")
+    expected_minutes = HORIZON_SECONDS[horizon] // 60
+    return BarClosed(
+        symbol=symbol,
+        horizon=horizon,
+        bar_open_kst=bucket_start,
+        o_ticks=bars[0].o_ticks,
+        h_ticks=max(b.h_ticks for b in bars),
+        l_ticks=min(b.l_ticks for b in bars),
+        c_ticks=bars[-1].c_ticks,
+        volume=sum(b.volume for b in bars),
+        quality_ok=len(bars) == expected_minutes and all(b.quality_ok for b in bars),
+        session=(
+            BarSession.PRE_OPEN
+            if any(b.session is BarSession.PRE_OPEN for b in bars)
+            else BarSession.REGULAR
+        ),
+    )
+
+
+def compose_offline(
+    symbol: str, horizon: Horizon, minute_bars: Sequence[BarClosed]
+) -> list[BarClosed]:
+    """이미 완성된 1분봉 목록 → 그 Horizon의 합성봉 목록 (오프라인 재합성).
+
+    실시간 경로와 달리 스케줄러가 없다 — 봉의 `bar_open_kst`를 Horizon 경계로 내림해
+    버킷이 바뀌는 지점에서 확정한다. 백필(`data/backfill.py`)이 1분봉만 받아오므로
+    3/5/10/15/30분봉은 이 함수로 만든다.
+
+    입력: `minute_bars`는 시간순 M1 봉(다른 Horizon이 섞이면 ValueError — 조용히 잘못된
+         합성봉을 만드느니 실패한다).
+    """
+    seconds = HORIZON_SECONDS[horizon]
+    out: list[BarClosed] = []
+    bucket_start: datetime | None = None
+    bucket: list[BarClosed] = []
+    for bar in sorted(minute_bars, key=lambda b: b.bar_open_kst):
+        if bar.horizon is not Horizon.M1:
+            raise ValueError(f"M1 봉만 합성할 수 있다: {bar.horizon}")
+        start = floor_to_horizon(bar.bar_open_kst, seconds)
+        if bucket_start is not None and start != bucket_start:
+            out.append(compose_composite_bar(symbol, horizon, bucket_start, bucket))
+            bucket = []
+        bucket_start = start
+        bucket.append(bar)
+    if bucket and bucket_start is not None:
+        out.append(compose_composite_bar(symbol, horizon, bucket_start, bucket))
+    return out
 
 
 class MultiHorizonBarComposer:
@@ -108,28 +178,10 @@ class MultiHorizonBarComposer:
         if not bars or bucket_start is None:
             return
 
-        expected_minutes = self._targets[horizon] // 60
-        composite = BarClosed(
-            symbol=self._symbol,
-            horizon=horizon,
-            bar_open_kst=bucket_start,
-            o_ticks=bars[0].o_ticks,
-            h_ticks=max(b.h_ticks for b in bars),
-            l_ticks=min(b.l_ticks for b in bars),
-            c_ticks=bars[-1].c_ticks,
-            volume=sum(b.volume for b in bars),
-            quality_ok=len(bars) == expected_minutes and all(b.quality_ok for b in bars),
-            # 구성 1분봉 중 하나라도 장전이면 합성봉도 장전으로 본다(2026-07-31) — 09:00을
-            # 걸치는 봉(예: 08:55~09:00 5분봉)은 장전 프린트를 실제로 품고 있으므로
-            # "정규장 봉"이라고 말하면 사실과 다르다. quality_ok가 구성봉 전부를 요구하는
-            # 것과 같은 보수적 방향.
-            session=(
-                BarSession.PRE_OPEN
-                if any(b.session is BarSession.PRE_OPEN for b in bars)
-                else BarSession.REGULAR
-            ),
+        # 합성 규칙 자체는 `compose_composite_bar()`에 있다 — 오프라인 재합성과 한 곳을 쓴다.
+        await self._archive_and_publish(
+            compose_composite_bar(self._symbol, horizon, bucket_start, bars)
         )
-        await self._archive_and_publish(composite)
 
     async def _archive_and_publish(self, bar: BarClosed) -> None:
         """TickCollector._archive_and_publish_bar()와 동일 원칙 — 적재/발행 실패는 독립

@@ -194,3 +194,52 @@ async def test_run_walk_forward_backtest_feeds_validator_performance_gates():
     # 성능 주장이 아니라 "관문이 실제로 계산 가능한 입력을 받는다"만 확인 — pass/fail 무관.
     for gate in gates:
         assert math.isfinite(gate.value)
+
+
+# ---------------------------------------------------------------- 재생 시계 (2026-08-04)
+
+
+def test_replay_clock_falls_back_to_wall_clock_before_the_first_bar():
+    from messiah.backtest.harness import ReplayClock
+    from messiah.core.timeutil import now_utc
+
+    clock = ReplayClock()
+
+    assert (now_utc() - clock()).total_seconds() < 5
+
+
+def test_replay_clock_reports_the_confirm_time_of_the_bar_being_fed():
+    """`bar_open_kst`가 아니라 확정시각 — 완성봉은 그때부터 소비 가능하다(Ver 1.2 §2.2)."""
+    from messiah.backtest.harness import ReplayClock
+    from messiah.core.messages import bar_confirm_time
+
+    bar = _m1_bars(1, 1)[0]
+    clock = ReplayClock()
+    clock.advance_to(bar)
+
+    assert clock() == bar_confirm_time(bar)
+    assert clock() == bar.bar_open_kst + timedelta(minutes=1)
+
+
+@pytest.mark.asyncio
+async def test_replayed_bars_do_not_look_stale_to_the_pipeline():
+    """이 하니스가 2026-08-04까지 **구조적으로 무거래**였던 원인의 회귀 테스트.
+
+    재생 메시지는 `BusMessage.ts_utc` 기본값(`now_utc()`) 때문에 "지금"으로 스탬프되는데
+    봉은 과거 것이라, 파이프라인이 벽시계로 신선도를 재면 `data_age`가 수십 일이 된다 —
+    KillSwitch R11(임계 30초)이 매 판단마다 발동해 신규 진입이 영영 안 났다.
+    재생 시계를 주입하면 그 값이 봉 간격 수준으로 떨어진다.
+    """
+    from messiah.backtest.harness import ReplayClock
+    from messiah.core.messages import bar_confirm_time
+    from messiah.risk.kill_switch import KillSwitchConfig
+
+    bars = _m1_bars(1, 30)
+    clock = ReplayClock()
+    for bar in bars:
+        clock.advance_to(bar)
+
+    data_age = (clock() - bar_confirm_time(bars[-1])).total_seconds()
+
+    assert data_age == 0
+    assert data_age < KillSwitchConfig().data_disconnect_limit_seconds

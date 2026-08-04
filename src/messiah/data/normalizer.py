@@ -19,11 +19,30 @@ side_hint(틱룰 보조)는 항상 0(불명)으로 채운다. OFI/VWAP/micropric
 MinuteBar가 갖고 있던 필드들은 messiah의 BarClosed에 아예 없다 — 그런 계산은 L1이 아니라
 L2 Feature Engine의 몫이라는 messiah 스키마 설계(core/messages.py)를 따른다.
 
-알려진 한계(마흐디 원본과 동일): 데이터건수(헤더 3번째 필드)가 1보다 크면(여러 체결이 한 WS
-프레임에 묶여 옴) 첫 레코드만 파싱하고 이후 레코드는 조용히 버린다 — mahdi의 _parse_tick/
-_parse_futures_tick도 프레임을 레코드 단위로 분리하지 않는 동일한 한계를 그대로 갖고 있었다
-(2026-07-22 라이브 캡처에서 count=002 프레임 실제 관측, 테스트로 이 동작을 못박아둠).
-프레임을 레코드 단위로 온전히 분리하는 건 별도 개선 대상.
+## 다중 레코드 프레임 (2026-08-04 수정 — 그 전까지 체결의 절반을 버리고 있었다)
+
+데이터건수(헤더 3번째 필드)가 1보다 크면 여러 체결이 한 WS 프레임에 묶여 온다. 2026-08-04
+이전에는 **첫 레코드만 파싱하고 이후 레코드를 조용히 버렸다**(마흐디 원본 main.py의
+_parse_tick/_parse_futures_tick이 가진 한계를 그대로 이식했고, "별도 개선 대상"으로만
+적어 뒀다). 그 영향 규모는 측정된 적이 없었는데, 이날 KIS 공식 분봉
+(`inquire-time-fuopchartprice`)과 우리 아카이브를 대조해 처음 측정했다 — A05608 3거래일:
+
+| 날짜 | 공식 총거래량 | 우리 아카이브 | 종가 불일치 | 고가/저가 불일치 |
+|---|---|---|---|---|
+| 2026-08-03 | 152,618 | 78,080 (51%) | 104/410 | 129 / 126 |
+| 2026-07-31 | 112,521 | 58,942 (52%) | 77/380 | 90 / 93 |
+| 2026-07-29 | 212,238 | 103,700 (49%) | 109/375 | 103 / 115 |
+
+거래량이 절반이라는 건 프레임당 평균 2건이 묶여 온다는 뜻이고, 종가·고저가가 20~29% 어긋난
+것은 그 버려진 레코드가 그 분의 마지막/최고/최저 체결이었던 경우다. 즉 **거래량 계열 피처
+전부와 종가 기반 레이블의 1/4이 틀린 값 위에 있었다**.
+
+`_split_ws_records()`가 헤더의 데이터건수만큼 본문을 균등 분할한다. 레코드 폭을 TR별로
+하드코딩하지 않고 `len(fields) // count`로 유도하는 이유: 폭은 TR마다 다른데(선물 50개 실측)
+옵션(H0IOCNT0)은 자체 실측 캡처가 없어 상수로 박으면 그 자체가 미검증 가정이 된다. KIS
+프레임은 레코드가 고정폭으로 연접되므로 나눠떨어짐 자체가 검증이고, 안 나눠떨어지면(잘린
+프레임) 전체를 1레코드로 보는 종전 동작으로 폴백하면서 `TickFrameSplitFallback`을 남긴다 —
+조용히 넘어가면 이 버그의 재발을 또 못 본다.
 """
 
 from __future__ import annotations
@@ -55,14 +74,40 @@ _OPT_IDX_QTY = 9
 _OPT_MIN_FIELDS = _OPT_IDX_QTY + 1
 
 
-def _strip_ws_envelope(raw: str) -> list[str]:
-    """ "암호화유무|TR_ID|데이터건수|실제데이터" 헤더를 제거하고 "^" 구분 필드로 나눈다.
+def _split_ws_records(raw: str) -> list[list[str]]:
+    """ "암호화유무|TR_ID|데이터건수|실제데이터" 헤더를 읽어 본문을 **레코드별** 필드로 나눈다.
 
-    헤더가 없는 입력(순수 "^" 데이터만)도 raw.split("|", 3)[-1]이 원본을 그대로 통과시키므로
-    안전하다(mahdi 2026-07-06 실측 근거 — main.py:372-375).
+    계산: 헤더의 데이터건수(count)만큼 "^" 필드를 균등 분할한다. 레코드 폭은 상수가 아니라
+         `len(fields) // count`로 유도한다(모듈 docstring "다중 레코드 프레임" 참고).
+    해석: 헤더가 없는 입력(순수 "^" 데이터만)은 `split("|", 3)`이 1조각을 주므로 count=1로
+         읽혀 원본이 그대로 1레코드가 된다(mahdi 2026-07-06 실측 근거 — main.py:372-375).
+    실패 조건: 없다 — count가 숫자가 아니거나 본문이 count로 안 나눠떨어지면(잘린 프레임)
+              전체를 1레코드로 반환한다. 파싱은 앞쪽 인덱스만 읽으므로 이 폴백은 2026-08-04
+              이전과 정확히 같은 결과(첫 레코드)를 낸다 — 다만 조용히 넘어가지 않고
+              `TickFrameSplitFallback`을 남긴다.
     """
-    body = raw.split("|", 3)[-1]
-    return body.split("^")
+    parts = raw.split("|", 3)
+    fields = parts[-1].split("^")
+    if len(parts) < 4:
+        return [fields]
+    try:
+        count = int(parts[2])
+    except ValueError:
+        count = 1
+    if count <= 1:
+        return [fields]
+    if len(fields) % count != 0:
+        mlog.log(
+            "TickFrameSplitFallback",
+            f"데이터건수 {count}건인데 필드 {len(fields)}개가 균등 분할 안 됨 — "
+            f"첫 레코드만 파싱(나머지 유실)",
+            tr_id=parts[1],
+            record_count=count,
+            field_count=len(fields),
+        )
+        return [fields]
+    width = len(fields) // count
+    return [fields[i * width : (i + 1) * width] for i in range(count)]
 
 
 def _price_to_ticks(raw_price: str, tick_size: Decimal) -> int:
@@ -74,29 +119,27 @@ def _combine_kst(hhmmss: str, today: date) -> datetime:
     return datetime.combine(today, tick_time, tzinfo=KST)
 
 
-def parse_futures_tick(
-    raw: str, tick_size: Decimal, *, source: str = "kis", today: date | None = None
+def _record_to_tick(
+    fields: list[str],
+    tick_size: Decimal,
+    *,
+    min_fields: int,
+    idx_symbol: int,
+    idx_hour: int,
+    idx_price: int,
+    idx_qty: int,
+    source: str,
+    today: date,
 ) -> Tick | None:
-    """
-    입력: WS로 수신한 H0IFCNT0 원시 문자열 1건, 종목 1틱의 실제 가격 크기(KISBrokerAdapter와
-         동일한 하드코딩 금지 원칙 — 호출측이 실측값을 주입).
-    계산: 헤더 제거 → "^" 분리 → 영업시간(HHMMSS)을 today(기본 오늘 KST 날짜)와 결합해
-         tz-aware ts_exchange 생성 → 가격을 tick_size로 나눠 정수 price_ticks로 변환
-         (SYSTEM.md R2, float 금지) → Tick 반환.
-    해석: side_hint는 항상 0 — messiah Tick이 bid/ask를 안 들고 있어 틱룰 계산이 불가능.
-    실패 조건: 필드 수 부족·숫자 변환 실패 시 None(해당 틱 무시 — mahdi와 동일 계약, 실시간
-              틱 1건 유실은 로깅 없이 조용히 넘어간다).
-    """
-    fields = _strip_ws_envelope(raw)
-    if len(fields) < _FUT_MIN_FIELDS:
+    """레코드 1건 → Tick. 실패 시 None(해당 레코드만 버리고 같은 프레임의 나머지는 계속)."""
+    if len(fields) < min_fields:
         return None
     try:
-        ts_exchange = _combine_kst(fields[_FUT_IDX_BSOP_HOUR], today or now_kst().date())
         return Tick(
-            symbol=fields[_FUT_IDX_SYMBOL],
-            ts_exchange=ts_exchange,
-            price_ticks=_price_to_ticks(fields[_FUT_IDX_PRICE], tick_size),
-            qty=int(Decimal(fields[_FUT_IDX_QTY])),
+            symbol=fields[idx_symbol],
+            ts_exchange=_combine_kst(fields[idx_hour], today),
+            price_ticks=_price_to_ticks(fields[idx_price], tick_size),
+            qty=int(Decimal(fields[idx_qty])),
             side_hint=0,
             source=source,
         )
@@ -104,27 +147,62 @@ def parse_futures_tick(
         return None
 
 
-def parse_option_tick(
+def parse_futures_ticks(
     raw: str, tick_size: Decimal, *, source: str = "kis", today: date | None = None
-) -> Tick | None:
-    """H0IOCNT0(지수옵션 실시간체결가) 버전 — 필드 배치만 다르고 나머지는 parse_futures_tick과
+) -> list[Tick]:
+    """
+    입력: WS로 수신한 H0IFCNT0 원시 프레임 1건(체결 1건 이상이 묶여 있을 수 있다), 종목 1틱의
+         실제 가격 크기(KISBrokerAdapter와 동일한 하드코딩 금지 원칙 — 호출측이 실측값을 주입).
+    계산: 헤더의 데이터건수만큼 레코드 분할(`_split_ws_records`) → 각 레코드의 영업시간
+         (HHMMSS)을 today(기본 오늘 KST 날짜)와 결합해 tz-aware ts_exchange 생성 → 가격을
+         tick_size로 나눠 정수 price_ticks로 변환(SYSTEM.md R2, float 금지).
+    산출: 프레임에 실린 순서(= 체결 시각 순) 그대로의 Tick 목록. 한 건도 못 읽으면 빈 목록.
+    해석: side_hint는 항상 0 — messiah Tick이 bid/ask를 안 들고 있어 틱룰 계산이 불가능.
+    실패 조건: 없다 — 필드 수 부족·숫자 변환 실패한 레코드는 건너뛰고 나머지는 그대로 낸다
+              (레코드 1건의 파손이 같은 프레임의 성한 체결까지 버리게 두지 않는다).
+    """
+    day = today or now_kst().date()
+    ticks = []
+    for fields in _split_ws_records(raw):
+        tick = _record_to_tick(
+            fields,
+            tick_size,
+            min_fields=_FUT_MIN_FIELDS,
+            idx_symbol=_FUT_IDX_SYMBOL,
+            idx_hour=_FUT_IDX_BSOP_HOUR,
+            idx_price=_FUT_IDX_PRICE,
+            idx_qty=_FUT_IDX_QTY,
+            source=source,
+            today=day,
+        )
+        if tick is not None:
+            ticks.append(tick)
+    return ticks
+
+
+def parse_option_ticks(
+    raw: str, tick_size: Decimal, *, source: str = "kis", today: date | None = None
+) -> list[Tick]:
+    """H0IOCNT0(지수옵션 실시간체결가) 버전 — 필드 배치만 다르고 나머지는 parse_futures_ticks와
     동일 계약. 옵션 인덱스는 마흐디 인용만 반영, messiah 자체 라이브 재검증은 안 됨(모듈
     docstring 참고)."""
-    fields = _strip_ws_envelope(raw)
-    if len(fields) < _OPT_MIN_FIELDS:
-        return None
-    try:
-        ts_exchange = _combine_kst(fields[_OPT_IDX_BSOP_HOUR], today or now_kst().date())
-        return Tick(
-            symbol=fields[_OPT_IDX_SYMBOL],
-            ts_exchange=ts_exchange,
-            price_ticks=_price_to_ticks(fields[_OPT_IDX_PRICE], tick_size),
-            qty=int(Decimal(fields[_OPT_IDX_QTY])),
-            side_hint=0,
+    day = today or now_kst().date()
+    ticks = []
+    for fields in _split_ws_records(raw):
+        tick = _record_to_tick(
+            fields,
+            tick_size,
+            min_fields=_OPT_MIN_FIELDS,
+            idx_symbol=_OPT_IDX_SYMBOL,
+            idx_hour=_OPT_IDX_BSOP_HOUR,
+            idx_price=_OPT_IDX_PRICE,
+            idx_qty=_OPT_IDX_QTY,
             source=source,
+            today=day,
         )
-    except (ValueError, IndexError, InvalidOperation, ArithmeticError):
-        return None
+        if tick is not None:
+            ticks.append(tick)
+    return ticks
 
 
 class MinuteBarAggregator:

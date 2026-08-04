@@ -222,6 +222,75 @@ class KISRestClient:
             params={"FID_COND_MRKT_DIV_CODE": market_div_code, "FID_INPUT_ISCD": symbol},
         )
 
+    def get_futureoption_minute_chart(
+        self,
+        symbol: str,
+        *,
+        date_yyyymmdd: str,
+        hour_hhmmss: str,
+        market_div_code: str = tr_codes.FID_MRKT_DIV_INDEX_FUTURES,
+        hour_cls_code: str = tr_codes.FID_HOUR_CLS_1_MINUTE,
+        include_past: bool = True,
+    ) -> dict:
+        """
+        선물옵션 분봉조회 — 과거 봉 백필의 원천(`data/backfill.py`).
+
+        입력: 종목코드, 커서(조회 기준 날짜 YYYYMMDD + 시각 HHMMSS — 이 시점부터 **과거로**
+             거슬러 최대 102건), FID_COND_MRKT_DIV_CODE(F=지수선물 — 미니/정규 공통,
+             O=지수옵션), 봉 길이(30초/1분), include_past(False면 당일 것만).
+        계산: PATH_FUTUREOPTION_TIME_CHART GET 호출.
+        해석: `output2`가 봉 목록이고 **최신 → 과거 순**이다. `include_past=True`면 날짜
+             경계를 넘어 전 거래일로 이어지므로, 하루치만 필요한 호출측은
+             `stck_bsop_date`로 직접 걸러야 한다(2026-08-04 실측: 08-04 09:07 요청이
+             08-03 14:17까지 이어짐). 페이징 커서 이동은 `data/backfill.py`가 담당한다.
+        실패 조건: 4xx/5xx면 httpx.HTTPStatusError 그대로 전파.
+        """
+        return self._get(
+            f"{self._domain}{tr_codes.PATH_FUTUREOPTION_TIME_CHART}",
+            headers=self._headers(tr_codes.TR_FUTUREOPTION_TIME_CHART),
+            params={
+                "FID_COND_MRKT_DIV_CODE": market_div_code,
+                "FID_INPUT_ISCD": symbol,
+                "FID_HOUR_CLS_CODE": hour_cls_code,
+                "FID_PW_DATA_INCU_YN": "Y" if include_past else "N",
+                "FID_FAKE_TICK_INCU_YN": "N",
+                "FID_INPUT_DATE_1": date_yyyymmdd,
+                "FID_INPUT_HOUR_1": hour_hhmmss,
+            },
+        )
+
+    def get_futureoption_daily_chart(
+        self,
+        symbol: str,
+        *,
+        date_from: str,
+        date_to: str,
+        market_div_code: str = tr_codes.FID_MRKT_DIV_INDEX_FUTURES,
+        period_div_code: str = "D",
+    ) -> dict:
+        """
+        선물옵션기간별시세(일/주/월/년) — 어떤 월물이 언제 상장·거래됐는지 확인하는 용도
+        (백필 전에 "이 종목코드가 실재하는가"를 1회 호출로 판정, `data/backfill.py`).
+
+        입력: 종목코드, 조회 시작/종료일(YYYYMMDD), 기간 구분(D=일/W=주/M=월/Y=년).
+        계산: PATH_FUTUREOPTION_DAILY_CHART GET 호출. 1회 최대 100건(실측).
+        해석: `output2`가 비어 있으면 그 구간에 그 종목의 거래가 없었다는 뜻이다 — 만기가
+             오래 지나 조회 자체가 불가능한 월물(2026-08-04 실측: A05512 이전)도 같은 모양
+             (rt_cd=0 + 빈 output2)으로 오므로 둘을 구분하지 않는다.
+        실패 조건: 4xx/5xx면 httpx.HTTPStatusError 그대로 전파.
+        """
+        return self._get(
+            f"{self._domain}{tr_codes.PATH_FUTUREOPTION_DAILY_CHART}",
+            headers=self._headers(tr_codes.TR_FUTUREOPTION_DAILY_CHART),
+            params={
+                "FID_COND_MRKT_DIV_CODE": market_div_code,
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_DATE_1": date_from,
+                "FID_INPUT_DATE_2": date_to,
+                "FID_PERIOD_DIV_CODE": period_div_code,
+            },
+        )
+
     def get_investor_flow(self, market_code: str, sector_code: str) -> dict:
         """
         시장별 투자자매매동향(시세) — 외국인/개인/기관계 등 순매수 수량·거래대금.

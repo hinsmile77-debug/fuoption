@@ -302,7 +302,7 @@ class TickCollector:
         creds: KISCredentials,
         symbol: str,
         tr_id: str,
-        parse_tick: Callable[..., Tick | None],
+        parse_tick: Callable[..., list[Tick]],
         tick_size: Decimal,
         archiver: ParquetArchiver,
         bus: MessageBus | None = None,
@@ -318,8 +318,9 @@ class TickCollector:
     ) -> None:
         """
         입력: tr_id/parse_tick은 짝을 맞춰 넘긴다 — 선물은
-             (tr_codes.WS_TR_FUTURES_CONTRACT, normalizer.parse_futures_tick), 옵션은
-             (tr_codes.WS_TR_OPTION_CONTRACT, normalizer.parse_option_tick). bus를 생략하면
+             (tr_codes.WS_TR_FUTURES_CONTRACT, normalizer.parse_futures_ticks), 옵션은
+             (tr_codes.WS_TR_OPTION_CONTRACT, normalizer.parse_option_ticks). 파서는 프레임
+             1건에서 **Tick 목록**을 낸다(한 프레임에 체결 여러 건). bus를 생략하면
              Redis 발행 없이 Parquet 적재만 한다(테스트·오프라인 실행에 유용). ws_connect는
              테스트에서 실제 네트워크 없이 가짜 연결을 주입하기 위한 것(기본값
              websockets.connect). reconnect_*_backoff_seconds는 run_forever() 전용 — 테스트가
@@ -444,21 +445,26 @@ class TickCollector:
         if raw is None:
             return  # JSON 제어 메시지(구독응답/PINGPONG) — 정규화 대상 아님
 
-        tick = self._parse_tick(raw, self._tick_size)
-        if tick is None:
+        # 프레임 1건에 체결이 여러 개 묶여 올 수 있다 — 전부 처리한다(2026-08-04까지는 첫
+        # 건만 처리해 거래량의 절반을 버렸다, `data/normalizer.py` 모듈 docstring).
+        ticks = self._parse_tick(raw, self._tick_size)
+        if not ticks:
             return  # 정규화 실패 — normalizer 계약과 동일하게 조용히 무시
 
+        # 프레임 단위로 한 번만 — 스톨 워치독에 필요한 건 "언제 마지막으로 받았나"이지
+        # 체결 건수가 아니다(같은 프레임의 N건은 같은 순간에 도착한 것).
         self._note_tick_received()
 
-        if self._bus is not None:
-            try:
-                await self._bus.publish(f"{TOPIC_TICK}.{tick.symbol}", tick)
-            except Exception as exc:  # noqa: BLE001 — 발행 실패로 수신 루프가 죽으면 안 됨
-                mlog.log("CollectorProcessingError", f"틱 발행 실패: {exc}", symbol=tick.symbol)
+        for tick in ticks:
+            if self._bus is not None:
+                try:
+                    await self._bus.publish(f"{TOPIC_TICK}.{tick.symbol}", tick)
+                except Exception as exc:  # noqa: BLE001 — 발행 실패로 수신 루프가 죽으면 안 됨
+                    mlog.log("CollectorProcessingError", f"틱 발행 실패: {exc}", symbol=tick.symbol)
 
-        bar = self._aggregator.add_tick(tick)
-        if bar is not None:
-            await self._archive_and_publish_bar(bar)
+            bar = self._aggregator.add_tick(tick)
+            if bar is not None:
+                await self._archive_and_publish_bar(bar)
 
     def _note_tick_received(self) -> None:
         """스톨 워치독 갱신 + 연결 후 첫 틱 시각 기록.
@@ -500,13 +506,13 @@ class SymbolFeed:
 
     symbol: str
     tr_id: str
-    parse_tick: Callable[..., Tick | None]
+    parse_tick: Callable[..., list[Tick]]
     tick_size: Decimal
 
 
 def _extract_tr_id(raw: str) -> str | None:
     """ "암호화유무|TR_ID|데이터건수|실제데이터" 헤더에서 TR_ID(2번째 필드)만 뽑는다 —
-    `normalizer._strip_ws_envelope`와 같은 구분자 규약이지만 헤더 자체가 목적이라 별도
+    `normalizer._split_ws_records`와 같은 구분자 규약이지만 헤더 자체가 목적이라 별도
     구현(정규화 모듈에 파싱 대상 외 책임을 얹지 않는다)."""
     parts = raw.split("|", 3)
     return parts[1] if len(parts) >= 2 else None
@@ -555,7 +561,7 @@ class MultiSymbolTickCollector:
         self._ws_connect = ws_connect
         self._reconnect_initial_backoff_seconds = reconnect_initial_backoff_seconds
         self._reconnect_max_backoff_seconds = reconnect_max_backoff_seconds
-        self._parsers_by_tr: dict[str, Callable[..., Tick | None]] = {
+        self._parsers_by_tr: dict[str, Callable[..., list[Tick]]] = {
             feed.tr_id: feed.parse_tick for feed in feeds
         }
         self._tick_sizes_by_symbol: dict[str, Decimal] = {
@@ -650,17 +656,19 @@ class MultiSymbolTickCollector:
         # 같은 경우가 실무상 대부분이지만 다를 수 있어 일단 대표값(첫 feed)으로 파싱한 뒤
         # 실제 심볼로 올바른 tick_size였는지 확인 — 다르면 그 심볼의 tick_size로 재파싱한다.
         provisional = parser(raw, self._feeds[0].tick_size)
-        if provisional is None:
+        if not provisional:
             return
-        correct_tick_size = self._tick_sizes_by_symbol.get(provisional.symbol)
+        # 한 프레임의 레코드는 전부 같은 심볼이다(구독 단위가 심볼×TR) — 대표 1건으로
+        # tick_size를 정하고, 틀렸으면 프레임 전체를 올바른 값으로 한 번만 재파싱한다.
+        correct_tick_size = self._tick_sizes_by_symbol.get(provisional[0].symbol)
         if correct_tick_size is None:
             return  # 모르는 심볼(같은 TR의 다른 계좌 잔여 등) — 조용히 무시
-        tick = (
+        ticks = (
             provisional
             if correct_tick_size == self._feeds[0].tick_size
             else parser(raw, correct_tick_size)
         )
-        if tick is None:
+        if not ticks:
             return
 
         first = not self._watchdog.seen_first_tick
@@ -669,22 +677,23 @@ class MultiSymbolTickCollector:
             mlog.log(
                 "CollectorFirstTick",
                 "연결 후 첫 틱 수신",
-                symbol=tick.symbol,
+                symbol=ticks[0].symbol,
                 received_kst=now_kst().isoformat(),
             )
 
-        if self._bus is not None:
-            try:
-                await self._bus.publish(f"{TOPIC_TICK}.{tick.symbol}", tick)
-            except Exception as exc:  # noqa: BLE001
-                mlog.log("CollectorProcessingError", f"틱 발행 실패: {exc}", symbol=tick.symbol)
+        for tick in ticks:
+            if self._bus is not None:
+                try:
+                    await self._bus.publish(f"{TOPIC_TICK}.{tick.symbol}", tick)
+                except Exception as exc:  # noqa: BLE001
+                    mlog.log("CollectorProcessingError", f"틱 발행 실패: {exc}", symbol=tick.symbol)
 
-        aggregator = self._aggregators.get(tick.symbol)
-        if aggregator is None:
-            return
-        bar = aggregator.add_tick(tick)
-        if bar is not None:
-            await self._archive_and_publish_bar(bar)
+            aggregator = self._aggregators.get(tick.symbol)
+            if aggregator is None:
+                continue
+            bar = aggregator.add_tick(tick)
+            if bar is not None:
+                await self._archive_and_publish_bar(bar)
 
     async def _archive_and_publish_bar(self, bar: BarClosed) -> None:
         try:

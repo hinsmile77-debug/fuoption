@@ -28,7 +28,7 @@ from messiah.data.collector import (
     TickStallError,
     _StallWatchdog,
 )
-from messiah.data.normalizer import parse_futures_tick
+from messiah.data.normalizer import parse_futures_ticks
 
 _TICK_SIZE = Decimal("0.02")
 _SUBSCRIBE_ACK = json.dumps(
@@ -336,7 +336,7 @@ def _collector(tmp_path: Path, conn: _HangingConnection, clock: _FakeClock) -> T
         creds=_creds(),
         symbol="A05608",
         tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
+        parse_tick=parse_futures_ticks,
         tick_size=_TICK_SIZE,
         archiver=ParquetArchiver(tmp_path),
         approval_issuer=_approval_issuer(),
@@ -373,7 +373,7 @@ async def test_stall_disabled_collector_keeps_hanging(tmp_path: Path):
         creds=_creds(),
         symbol="A05608",
         tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
+        parse_tick=parse_futures_ticks,
         tick_size=_TICK_SIZE,
         archiver=ParquetArchiver(tmp_path),
         approval_issuer=_approval_issuer(),
@@ -403,7 +403,7 @@ async def test_run_forever_reconnects_after_a_stall(tmp_path: Path):
         creds=_creds(),
         symbol="A05608",
         tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
+        parse_tick=parse_futures_ticks,
         tick_size=_TICK_SIZE,
         archiver=ParquetArchiver(tmp_path),
         approval_issuer=_approval_issuer(),

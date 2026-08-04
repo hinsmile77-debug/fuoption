@@ -31,7 +31,7 @@ Aggregator의 S는 이미 여러 Horizon을 통합한 값이라 "어느 Horizon 
 ## R4·R6(오버나이트) 결선 — Event Calendar 도입(2026-07-27)
 
 `event_calendar`를 생성자에 주입하면 `handle_futures_view()`가 매 호출마다
-`EventCalendar.minutes_to_close(view.ts_utc)`를 계산해 `RiskEngine.evaluate()`에 넘긴다
+`EventCalendar.minutes_to_close(self._now())`를 계산해 `RiskEngine.evaluate()`에 넘긴다
 — 정규장 중이 아니면(또는 미주입 시) `None`이라 R4/R6 게이트는 조용히 비활성 상태로
 남는다(risk_engine.py 모듈 docstring 참고). 재생/스모크(`run_full_path_smoke.py` 등)처럼
 KRX 세션 개념이 무의미한 경로는 지금까지처럼 `event_calendar`를 안 넘기면 된다.
@@ -213,11 +213,21 @@ class TradingPipeline:
         # 미지정(None)이면 CB 대응 전체가 비활성(기존 동작, 회귀 없음) — 모듈 docstring
         # "거래소 서킷브레이커 자동 대응" 절 참고.
         self._circuit_breaker_monitor = circuit_breaker_monitor
-        # 벽시계 주입점 (2026-07-30). `handle_futures_view()`의 데이터 신선도는 `view.ts_utc`
-        # (그 데이터가 대표하는 시각)에서 오지만, `watch_circuit_breaker_forever()`는 "데이터가
-        # 안 오는 동안"을 재는 순수 벽시계 폴링이라 실제 시각이 필요하다 — 그 경로를 실시간
-        # 대기 없이 테스트하려면 주입이 유일한 방법이다(`core/scheduler.py`·`data/collector.py`의
-        # 스톨 워치독과 같은 주입 원칙).
+        # 벽시계 주입점 (2026-07-30). 데이터 신선도(`data_age`)와 CB 판정의 기준시각은
+        # **전부 이 시계 하나**에서 온다 — `handle_futures_view()`도, 순수 벽시계 폴링인
+        # `watch_circuit_breaker_forever()`도.
+        #
+        # 2026-08-04까지 `handle_futures_view()`만 `view.ts_utc`(메시지 스탬프)를 썼는데,
+        # 그게 백테스트를 구조적으로 무거래로 만들었다: `BusMessage.ts_utc`의 기본값이
+        # `now_utc()`라 **재생 메시지가 지금 시각으로 스탬프**되는데 봉은 과거 것이라
+        # `data_age = 지금 − 과거봉확정시각`이 된다. 실측(2026-07-27 재생): 672,056초(7.8일)
+        # → KillSwitch R11(임계 30초)이 매 판단마다 발동 → 게이트웨이 전면정지 → 신규진입
+        # 0건. `backtest/harness.py`가 만들어진 2026-07-27부터 있던 문제이며, 그동안
+        # "무거래로 수익률 0%"가 데이터가 짧은 탓으로 기록돼 있었다(capability_matrix.md).
+        #
+        # 라이브에서는 두 값이 사실상 같다 — 방금 발행된 메시지의 스탬프와 지금 시각의 차이는
+        # 밀리초다. 그래서 이 변경은 **라이브 동작을 바꾸지 않으면서** 재생 경로를 성립시킨다
+        # (미해결 ②를 `TradingPipeline`에 시계 주입으로 푼 것과 같은 방향의 연장).
         self._now = now
         self._bars: deque[BarClosed] = deque(maxlen=_BAR_HISTORY_LIMIT)
         self._last_bar_confirm_at: datetime | None = None
@@ -255,7 +265,10 @@ class TradingPipeline:
 
         account = await self._broker.account()
         positions = await self._broker.positions()
-        data_age_seconds = self._data_age_seconds(view.ts_utc)
+        # 신선도·CB 판정의 기준시각은 주입된 시계 하나로 통일한다(`__init__`의 `now` 주석
+        # — 2026-08-04 이전엔 여기만 `view.ts_utc`를 써서 재생 경로가 항상 무거래였다).
+        as_of = self._now()
+        data_age_seconds = self._data_age_seconds(as_of)
 
         circuit_breaker_active = False
         kill_switch_data_age_seconds = data_age_seconds
@@ -269,13 +282,13 @@ class TradingPipeline:
         if self._circuit_breaker_monitor is not None and self._last_bar_confirm_at is not None:
             cb_event = self._circuit_breaker_monitor.observe(
                 data_age_seconds,
-                view.ts_utc,
-                collector_healthy=self._collector_healthy(view.ts_utc),
+                as_of,
+                collector_healthy=self._collector_healthy(as_of),
             )
             await self._apply_circuit_breaker_event(cb_event, positions)
             if cb_event.just_resumed:
                 positions = await self._broker.positions()  # 청산 반영된 최신 스냅샷
-            circuit_breaker_active = self._circuit_breaker_monitor.blocks_entry(view.ts_utc)
+            circuit_breaker_active = self._circuit_breaker_monitor.blocks_entry(as_of)
             # KillSwitch R11과의 충돌 회피 — 모듈 docstring 참고.
             if cb_event.phase != CircuitBreakerPhase.NORMAL or cb_event.just_resumed:
                 kill_switch_data_age_seconds = 0.0
@@ -302,10 +315,10 @@ class TradingPipeline:
         # 정규장(09:00~15:35) 밖이면 여기서 멈춘다 — 판단은 다 하고 주문만 안 낸다.
         # `decision.intent`는 이미 발행됐으므로 "그때 시스템이 무엇을 하려 했는지"는 화면·
         # 로그에 그대로 남는다(모듈 docstring "장전 구간" 참고).
-        if not self._in_regular_session(view.ts_utc):
+        if not self._in_regular_session(as_of):
             log(
                 "OutOfSessionNoTrade",
-                f"정규장 밖({to_kst(view.ts_utc):%H:%M}) — 판단은 수행, 주문은 생략",
+                f"정규장 밖({to_kst(as_of):%H:%M}) — 판단은 수행, 주문은 생략",
                 symbol=self._symbol,
                 side=intent.side.value,
             )
@@ -321,7 +334,7 @@ class TradingPipeline:
         net_expected_return_ticks = edge * atr_ticks - cost.total_ticks
 
         minutes_to_close = (
-            self._event_calendar.minutes_to_close(view.ts_utc) if self._event_calendar else None
+            self._event_calendar.minutes_to_close(as_of) if self._event_calendar else None
         )
         risk_decision = self._risk_engine.evaluate(
             intent=intent,
@@ -330,7 +343,7 @@ class TradingPipeline:
             positions=positions,
             daily_start_equity=self._daily_start_equity or account.total_equity,
             data_age_seconds=data_age_seconds,
-            as_of=view.ts_utc,
+            as_of=as_of,
             minutes_to_close=minutes_to_close,
             circuit_breaker_active=circuit_breaker_active,
         )
@@ -353,7 +366,7 @@ class TradingPipeline:
         )
         ack = await self._gateway.submit(order)
         if ack is None:
-            self._risk_engine.record_order_error(view.ts_utc)
+            self._risk_engine.record_order_error(as_of)
 
     def _in_regular_session(self, as_of: datetime) -> bool:
         """`event_calendar` 미주입이면 항상 True — 재생/스모크처럼 KRX 세션 개념이 없는

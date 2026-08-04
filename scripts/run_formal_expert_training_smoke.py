@@ -1,14 +1,21 @@
 """5m Expert 정식(탐색·앙상블·교정) + Meta-Labeler 수동 스모크 — Master Plan Ver 2.0 §9 W17~19.
 
-실제 아카이브가 하루치(A05608 5m 기준 7건)뿐이라 `train_formal_expert()`가 요구하는
-PurgedKFold 기반 탐색·out-of-fold 가상운용을 의미 있게 돌릴 데이터가 없다
-(WalkForwardSplitter가 W12~13에 겪은 것과 같은 한계 — capability_matrix.md 알려진 갭).
+**2026-08-04 갱신 — "데이터 부족 실패가 정상"은 더 이상 사실이 아니다.** 이 docstring은
+작성 시점(2026-07-26) 아카이브가 하루치(5m 7건)라는 전제 위에 있었고, 그래서 1)단계 실패를
+정상으로 설명했다. 지금은 두 가지가 달라졌다: ① 매일 수집이 쌓였고 ② `data/backfill.py`가
+2025-12-12까지 소급해 채운다. 실제로 2026-08-04에 1분봉 2398건으로 돌리자 out-of-fold
+2334건으로 **성공**했다. 즉 1)단계의 성공/실패는 이제 그날 아카이브 상태에 달렸을 뿐이고,
+어느 쪽도 "정상"이나 "이상"이 아니다 — 출력된 봉 수를 보고 판단할 것.
+
+다개월 연속 시계열로 제대로 심사하려면 이 스크립트가 아니라
+`scripts/run_g1_walk_forward.py`를 쓴다(후방조정된 근월물 연속물 + G1 관문).
+
 이 스크립트는 두 단계로 확인한다:
 
-1) 실제 아카이브로 먼저 시도한다 — 데이터 부족으로 실패하는 게 정상이며, 그 사실 자체를
-   정직하게 보고한다(성공해도 이상할 게 없다는 착각을 안 주기 위해).
+1) 실제 아카이브로 먼저 시도한다 — 결과를 그대로 보고한다.
 2) 합성(사인파) 데이터로 전체 파이프라인(탐색→out-of-fold→앙상블→교정→Meta-Labeler)이
    실제로 동작하는지 시연한다 — **실제 시장 데이터가 아니다**, 배관 검증 전용.
+   `--synthetic-bars 0`이면 이 단계를 건너뛴다.
 
 사용: python scripts/run_formal_expert_training_smoke.py --symbol A05608 --horizon 5m
                                                            --start 2026-07-24 --end 2026-07-24
@@ -143,6 +150,9 @@ async def _run_synthetic(args: argparse.Namespace) -> None:
 
 async def main(args: argparse.Namespace) -> None:
     await _try_real_archive(args)
+    if args.synthetic_bars <= 0:
+        print("\n[합성 데이터] --synthetic-bars=0 — 배관 시연 생략")
+        return
     await _run_synthetic(args)
 
 

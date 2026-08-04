@@ -76,10 +76,21 @@ def _view(*, score=0.5, agg_p_up=0.8, agg_p_down=0.1, uncertainty=0.0, dispersio
         model_versions=["v1"],
     )
     kwargs["ts_utc"] = ts if ts is not None else _DEFAULT_VIEW_TS
+    # 파이프라인의 "지금"을 이 뷰의 시각에 맞춘다 — 2026-08-04부터 신선도·세션 판정이
+    # `view.ts_utc`가 아니라 **주입된 시계** 하나로 통일됐다(`strategy/pipeline.py`의
+    # `__init__` 주석). 그 전엔 두 값이 암묵적으로 같다고 가정하고 있었고, 재생 경로에서
+    # 그 가정이 깨져 백테스트가 항상 무거래였다.
+    _NOW["t"] = kwargs["ts_utc"]
     return FuturesView(**kwargs)
 
 
+# 기본 시계 — `_view()`가 매번 그 뷰의 시각으로 갱신한다. 명시적으로 `now=`를 넘기는
+# 테스트(CB 워치독 계열)는 `setdefault`가 건드리지 않는다.
+_NOW = {"t": _DEFAULT_VIEW_TS}
+
+
 async def _make_pipeline(**overrides):
+    overrides.setdefault("now", lambda: _NOW["t"])
     bus = InProcessBus()
     broker = SimBroker(cash=50_000_000)
     await broker.connect()
@@ -523,8 +534,14 @@ async def test_health_from_other_components_is_ignored():
 
 @pytest.mark.asyncio
 async def test_default_clock_is_the_real_wall_clock():
-    """주입을 안 하면 기존 동작 그대로 — 회귀 방지."""
-    bus, broker, gateway, pipeline = await _make_pipeline()
+    """주입을 안 하면 기존 동작 그대로 — 회귀 방지.
+
+    `_make_pipeline()`은 테스트 편의를 위해 시계를 기본 주입하므로(모듈 상단 `_NOW`),
+    여기서는 **프로덕션 기본값**을 보려고 생성자를 직접 부른다."""
+    broker = SimBroker(cash=50_000_000)
+    await broker.connect()
+    pipeline = TradingPipeline(_SYMBOL, broker, OrderGateway(broker), InProcessBus())
+
     assert pipeline._now is not None  # noqa: SLF001
     assert (now_utc() - pipeline._now()).total_seconds() < 5  # noqa: SLF001
 

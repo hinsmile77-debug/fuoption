@@ -64,11 +64,12 @@ import time
 from contextlib import suppress
 from datetime import date
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import polars as pl
 
 from messiah.core.messages import BarClosed, BarSession, Horizon
+from messiah.core.timeutil import to_kst
 from messiah.data import bar_paths
 
 # `core/timeutil.py`의 KST는 고정 오프셋 timezone 객체라 polars의 `convert_time_zone()`에
@@ -171,6 +172,41 @@ class ParquetArchiver:
         )
         self._write_atomic(combined, path)
 
+    def write_day(self, symbol: str, horizon: Horizon, bars: Sequence[BarClosed]) -> int:
+        """하루치를 통합본 1개로 **통째로 교체**한다 — 백필 전용(`data/backfill.py`).
+
+        `append_bar()`와 두 가지가 다르고, 둘 다 백필이라는 용도에서 나온다:
+
+        1. **행 단위가 아니라 하루 단위**다. 백필은 410봉을 한 번에 받아오는데 그걸
+           `append_bar()`로 넣으면 조각 파일을 410번 읽고 쓴다(하루가 갈수록 커지는 그
+           O(n²)를 피하려고 조각화를 도입한 것인데 그 비용을 그대로 되살리는 셈).
+        2. **합치지 않고 덮어쓴다.** 백필의 목적 자체가 "우리가 수집한 값을 거래소 공식
+           값으로 갈아끼우는 것"이라(2026-08-04 — WS 다중 레코드 유실로 거래량이 절반이었다,
+           `data/normalizer.py` 모듈 docstring) 기존 행과 병합하면 안 된다. 조각도 함께
+           지운다 — 안 지우면 `read_day()`가 `keep="last"`로 **조각을 이긴 것으로** 취급해
+           (조각이 통합본보다 나중 소스) 옛 오염 값이 되살아난다.
+
+        반환: 쓴 행 수. `bars`가 비면 아무것도 안 하고 0(빈 파일로 그날을 지우지 않는다 —
+             백필 실패와 "그날 휴장"을 구분할 수 없게 되므로 호출측이 판단하게 둔다).
+        """
+        if not bars:
+            return 0
+        day = to_kst(bars[0].bar_open_kst).date()
+        frame = pl.concat([self._bar_to_frame(bar) for bar in bars], how="diagonal_relaxed")
+        frame = frame.unique(subset=["bar_open_kst", "horizon"], keep="last").sort("bar_open_kst")
+
+        path = self._canonical_path(symbol, horizon, day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(frame, path)
+
+        shard_dir = self._shard_dir(symbol, horizon, day)
+        if shard_dir.is_dir():
+            for shard in shard_dir.glob("*"):
+                shard.unlink(missing_ok=True)
+            with suppress(OSError):
+                shard_dir.rmdir()
+        return frame.height
+
     # ------------------------------------------------------------ 읽기 (조각 + 통합본)
 
     @property
@@ -209,6 +245,19 @@ class ParquetArchiver:
             .unique(subset=["bar_open_kst", "horizon"], keep="last")
             .sort("bar_open_kst")
         )
+
+    def read_day_bars(self, symbol: str, horizon: Horizon, day: date) -> list[BarClosed]:
+        """`read_day()`의 BarClosed 판 — 프레임이 아니라 도메인 객체가 필요한 소비자용
+        (백필의 연속 시계열 구성, 상위 Horizon 오프라인 재합성). 그날 데이터가 없으면 빈 목록.
+
+        이게 없던 동안 호출측이 `_frame_to_bars()`를 직접 불렀는데, 그건 private이라
+        스키마 보정 로직(옛 Parquet의 없는 `session` 컬럼 처리 등)이 바뀔 때 같이 안 따라올
+        위험이 있었다.
+        """
+        frame = self.read_day(symbol, horizon, day)
+        if frame is None or frame.height == 0:
+            return []
+        return self._frame_to_bars(frame, symbol, horizon)
 
     def available_days(self, symbol: str, horizon: Horizon) -> list[date]:
         """통합본과 조각 디렉터리 양쪽에서 날짜를 모아 오름차순으로 (`data/bar_paths.py`)."""

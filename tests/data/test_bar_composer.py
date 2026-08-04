@@ -214,3 +214,96 @@ async def test_publish_failure_is_logged_and_does_not_raise(tmp_path: Path, monk
     assert (
         ParquetArchiver(tmp_path).read_day("A05608", Horizon.M5, date(2026, 7, 23)) is not None
     )  # 적재는 성공
+
+
+# ---------------------------------------------------------------- 오프라인 재합성 (백필용)
+
+
+def test_compose_offline_buckets_by_horizon_boundary():
+    from messiah.data.bar_composer import compose_offline
+
+    bars = [_m1(m, c=100 + m, volume=1) for m in range(10)]  # 09:00~09:09
+
+    out = compose_offline("A05608", Horizon.M5, bars)
+
+    assert [b.bar_open_kst.minute for b in out] == [0, 5]
+    assert [b.volume for b in out] == [5, 5]
+    assert out[0].o_ticks == bars[0].o_ticks
+    assert out[0].c_ticks == bars[4].c_ticks
+    assert out[1].c_ticks == bars[9].c_ticks
+
+
+def test_compose_offline_matches_the_live_path_exactly():
+    """실시간 경로와 오프라인 재합성이 같은 봉을 만들어야 한다 — 아카이브 안에서 같은
+    Horizon이 두 규칙으로 만들어지면 안 된다(그래서 규칙을 한 함수로 모았다)."""
+    import asyncio
+    import tempfile
+
+    from messiah.data.bar_composer import compose_offline
+
+    bars = [_m1(m, c=100 + m, h=110 + m, lo=90 - m, volume=m + 1) for m in range(5)]
+
+    offline = compose_offline("A05608", Horizon.M5, bars)
+
+    async def _live():
+        with tempfile.TemporaryDirectory() as tmp:
+            published: list[BarClosed] = []
+
+            class _Bus:
+                async def publish(self, topic, msg):
+                    published.append(msg)
+
+                async def subscribe(self, topics, handler):
+                    return None
+
+            composer = MultiHorizonBarComposer(
+                "A05608", ParquetArchiver(Path(tmp)), _Bus(), {Horizon.M5: 300}
+            )
+            for bar in bars:
+                await composer.handle_one_minute_bar(bar)
+            await composer.flush_due_horizon(Horizon.M5)
+            return published
+
+    live = asyncio.run(_live())
+
+    assert len(offline) == len(live) == 1
+    for attr in (
+        "bar_open_kst",
+        "o_ticks",
+        "h_ticks",
+        "l_ticks",
+        "c_ticks",
+        "volume",
+        "quality_ok",
+        "session",
+    ):
+        assert getattr(offline[0], attr) == getattr(live[0], attr), attr
+
+
+def test_compose_offline_marks_incomplete_bucket_as_low_quality():
+    from messiah.data.bar_composer import compose_offline
+
+    partial = [_m1(0), _m1(1), _m1(2)]  # 5분봉인데 3분치뿐
+
+    out = compose_offline("A05608", Horizon.M5, partial)
+
+    assert len(out) == 1
+    assert out[0].quality_ok is False
+
+
+def test_compose_offline_rejects_non_m1_input():
+    import pytest
+    from messiah.data.bar_composer import compose_offline
+
+    five = BarClosed(
+        symbol="A05608",
+        horizon=Horizon.M5,
+        bar_open_kst=datetime(2026, 7, 23, 9, 0, tzinfo=KST),
+        o_ticks=1,
+        h_ticks=1,
+        l_ticks=1,
+        c_ticks=1,
+        volume=1,
+    )
+    with pytest.raises(ValueError):
+        compose_offline("A05608", Horizon.M15, [five])

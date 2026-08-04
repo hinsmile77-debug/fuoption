@@ -43,6 +43,38 @@ PATH_FUTUREOPTION_BALANCE = "/uapi/domestic-futureoption/v1/trading/inquire-bala
 PATH_FUTUREOPTION_QUOTE = "/uapi/domestic-futureoption/v1/quotations/inquire-price"
 PATH_FUTUREOPTION_ASKING_PRICE = "/uapi/domestic-futureoption/v1/quotations/inquire-asking-price"
 
+# 선물옵션 차트 — 과거 봉 백필의 유일한 경로 (2026-08-04 신설·실측).
+#
+# 이 두 엔드포인트가 이 프로젝트에 없었기 때문에, 2026-08-03까지 "다개월 시계열은 매일 수집해서
+# 쌓는 수밖에 없다"고 알고 있었고 G1 walk-forward 관문(train 180일+test 30일)의 도달 예정일이
+# 2027-02-20이었다. 실측으로 그게 틀렸음이 확인됐다 — 만기된 월물의 분봉까지 남아 있어
+# 월물 체인을 거슬러 접합하면 2025-12-12까지 소급된다(`data/backfill.py` 모듈 docstring).
+#
+# 2026-08-04 실측(모의투자 앱키 60046651, A05608):
+#   - VPS/REAL 도메인 **둘 다** 200 OK. 미니선물(상품종류 B)도 FID_COND_MRKT_DIV_CODE="F"로 조회됨
+#     (F는 "지수선물"이지 "정규선물"이 아니다 — 미니/정규 공통).
+#   - 분봉: 1회 호출당 **최대 102건**. `FID_PW_DATA_INCU_YN="Y"`면 날짜 경계를 넘어 과거로
+#     이어진다. 2026-08-03 하루치(410봉, 08:45~15:34)를 커서 5회로 결손 없이 완주 확인.
+#   - 일봉: 1회 호출당 **최대 100건**.
+PATH_FUTUREOPTION_TIME_CHART = (
+    "/uapi/domestic-futureoption/v1/quotations/inquire-time-fuopchartprice"
+)
+PATH_FUTUREOPTION_DAILY_CHART = (
+    "/uapi/domestic-futureoption/v1/quotations/inquire-daily-fuopchartprice"
+)
+TR_FUTUREOPTION_TIME_CHART = "FHKIF03020200"  # 선물옵션 분봉조회
+TR_FUTUREOPTION_DAILY_CHART = "FHKIF03020100"  # 선물옵션기간별시세(일/주/월/년)
+
+# FID_HOUR_CLS_CODE (분봉조회 전용) — 30=30초봉, 60=1분봉. 둘 다 2026-08-04 실측 동작 확인.
+FID_HOUR_CLS_30_SECONDS = "30"
+FID_HOUR_CLS_1_MINUTE = "60"
+
+# 분봉조회 1회 응답 상한(실측). 커서를 옮겨가며 페이징할 때 "더 받을 게 남았는가"를 이
+# 값으로 판단하지 않는다 — 실제 판단은 "새로 받은 행이 있는가"로 한다(같은 커서에서
+# 같은 행만 계속 오는 경우가 종료 조건).
+TIME_CHART_MAX_ROWS_PER_CALL = 102
+DAILY_CHART_MAX_ROWS_PER_CALL = 100
+
 # 시장별 투자자매매동향(시세) — "모의 TR_ID/Domain: 모의투자 미지원"이지만 계좌 무관 공개 시세성
 # 데이터라, 시세 WS와 같은 이유로 모의투자 앱키로도 REAL_REST_DOMAIN 호출이 그대로 성공한다
 # (2026-07-06 실측 확인, 200 OK). 그래서 실전/모의 분기 없이 TR ID 하나만 둔다.

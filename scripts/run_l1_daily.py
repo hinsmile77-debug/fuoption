@@ -102,7 +102,7 @@ from messiah.core.ui_launcher import (  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
 from messiah.data.collector import TickCollector  # noqa: E402
-from messiah.data.normalizer import parse_futures_tick  # noqa: E402
+from messiah.data.normalizer import parse_futures_ticks  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 from messiah.ops.status_board import run_status_board_forever  # noqa: E402
@@ -374,7 +374,7 @@ async def main(cfg: InstanceConfig) -> None:
         creds=creds,
         symbol=symbol,
         tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
+        parse_tick=parse_futures_ticks,
         tick_size=tick_size,
         archiver=archiver,
         bus=bus,

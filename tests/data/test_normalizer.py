@@ -2,7 +2,11 @@ from datetime import date
 from decimal import Decimal
 
 from messiah.core.messages import BarClosed, BarSession, Horizon, Tick
-from messiah.data.normalizer import MinuteBarAggregator, parse_futures_tick, parse_option_tick
+from messiah.data.normalizer import (
+    MinuteBarAggregator,
+    parse_futures_ticks,
+    parse_option_ticks,
+)
 
 # 2026-07-22 ws_client.py 실측 세션에서 실제로 캡처한 라이브 WS 프레임(미니선물 A05608,
 # H0IFCNT0) — 최초 2건은 15:29:53/54(같은 분), 3번째는 인위적으로 15:30:10(다음 분)으로 바꿔
@@ -32,8 +36,21 @@ _TICK_SIZE = Decimal("0.02")  # 2026-07-22 미니선물 A05608 실측(호가 5�
 _TODAY = date(2026, 7, 22)
 
 
+def _first_futures_tick(raw, tick_size, **kw):
+    """복수 계약(`parse_futures_ticks`)에서 첫 건만 꺼내는 테스트 헬퍼 — 아래 기존 단건
+    검증들은 프레임에 체결이 1건인 샘플을 쓰므로 의미가 그대로다. 다중 레코드 동작 자체는
+    `test_parse_futures_ticks_*`가 따로 검증한다."""
+    ticks = parse_futures_ticks(raw, tick_size, **kw)
+    return ticks[0] if ticks else None
+
+
+def _first_option_tick(raw, tick_size, **kw):
+    ticks = parse_option_ticks(raw, tick_size, **kw)
+    return ticks[0] if ticks else None
+
+
 def test_parse_futures_tick_matches_real_captured_sample():
-    tick = parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+    tick = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
 
     assert tick is not None
     assert tick.symbol == "A05608"
@@ -47,22 +64,110 @@ def test_parse_futures_tick_matches_real_captured_sample():
     assert tick.source == "kis"
 
 
-def test_parse_futures_tick_handles_bundled_frame_by_reading_first_record():
-    # count=002(여러 체결 묶임)여도 첫 레코드는 정상 파싱된다 — mahdi도 동일 한계
-    # (main.py _parse_futures_tick)를 그대로 가져와 두 번째 이후 레코드는 파싱하지 않는다.
-    tick = parse_futures_tick(_REAL_TICK_3_NEXT_MINUTE, _TICK_SIZE, today=_TODAY)
+def test_parse_futures_ticks_truncated_bundled_frame_falls_back_to_first_record():
+    # 실캡처 샘플은 2번째 레코드가 잘려 있어(`^A0560...`) 균등 분할이 불가능하다 —
+    # 그 경우 종전대로 첫 레코드만 낸다(폴백 계약).
+    ticks = parse_futures_ticks(_REAL_TICK_3_NEXT_MINUTE, _TICK_SIZE, today=_TODAY)
 
-    assert tick is not None
-    assert tick.symbol == "A05608"
-    assert tick.price_ticks == 54032  # 1080.64 / 0.02
+    assert len(ticks) == 1
+    assert ticks[0].symbol == "A05608"
+    assert ticks[0].price_ticks == 54032  # 1080.64 / 0.02
+
+
+def _bundle(*records: str, tr_id: str = "H0IFCNT0") -> str:
+    """count=N 프레임을 실캡처와 같은 규약으로 조립 — 레코드는 고정폭으로 연접된다."""
+    return f"0|{tr_id}|{len(records):03d}|" + "^".join(records)
+
+
+def _fut_record(hhmmss: str, price: str, qty: str) -> str:
+    """실캡처 `_REAL_TICK_1`의 본문(50필드)에서 시각·가격·수량만 바꾼 레코드 1건."""
+    fields = _REAL_TICK_1.split("|", 3)[-1].split("^")
+    assert len(fields) == 50  # 2026-07-22 라이브 캡처 실측 폭
+    fields[1], fields[5], fields[9] = hhmmss, price, qty
+    return "^".join(fields)
+
+
+def test_parse_futures_ticks_returns_every_record_in_bundled_frame():
+    # 2026-08-04 이전에는 첫 건만 읽어 거래량의 절반을 버렸다(모듈 docstring 실측표).
+    raw = _bundle(
+        _fut_record("152953", "1080.30", "3"),
+        _fut_record("152954", "1080.50", "5"),
+        _fut_record("152955", "1080.10", "7"),
+    )
+
+    ticks = parse_futures_ticks(raw, _TICK_SIZE, today=_TODAY)
+
+    assert [t.qty for t in ticks] == [3, 5, 7]
+    assert [t.price_ticks for t in ticks] == [54015, 54025, 54005]
+    assert [t.ts_exchange.second for t in ticks] == [53, 54, 55]
+
+
+def test_parse_futures_ticks_bundled_frame_volume_is_the_sum_not_the_first():
+    """이 버그의 실제 피해 형태 — 봉 거래량과 종가가 함께 틀렸다."""
+    raw = _bundle(
+        _fut_record("152953", "1080.30", "3"),
+        _fut_record("152954", "1090.00", "5"),
+    )
+    agg = MinuteBarAggregator(symbol="A05608")
+    for tick in parse_futures_ticks(raw, _TICK_SIZE, today=_TODAY):
+        agg.add_tick(tick)
+    bar = agg.flush_final()
+
+    assert bar.volume == 8  # 첫 건만 읽던 시절엔 3
+    assert bar.c_ticks == 54500  # 1090.00 — 버려지던 마지막 체결
+    assert bar.h_ticks == 54500
+
+
+def test_parse_futures_ticks_skips_broken_record_but_keeps_the_rest():
+    raw = _bundle(
+        _fut_record("152953", "1080.30", "3"),
+        _fut_record("152954", "NOT_A_NUMBER", "5"),
+        _fut_record("152955", "1080.10", "7"),
+    )
+
+    ticks = parse_futures_ticks(raw, _TICK_SIZE, today=_TODAY)
+
+    assert [t.qty for t in ticks] == [3, 7]
+
+
+def test_parse_option_ticks_returns_every_record_in_bundled_frame():
+    # 옵션 레코드 폭은 실측 캡처가 없다 — 파서가 폭을 하드코딩하지 않고 count로 유도하므로
+    # 임의 폭(10필드)으로도 정확히 나뉜다는 것이 이 테스트의 요지다.
+    rec = lambda hhmmss, price: "^".join(["201W09", hhmmss, price] + ["0"] * 6 + ["2"])  # noqa: E731
+    raw = _bundle(rec("101500", "1.50"), rec("101501", "1.60"), tr_id="H0IOCNT0")
+
+    ticks = parse_option_ticks(raw, Decimal("0.01"), today=_TODAY)
+
+    assert [t.price_ticks for t in ticks] == [150, 160]
+    assert [t.ts_exchange.second for t in ticks] == [0, 1]
+
+
+def test_parse_futures_ticks_uneven_split_logs_fallback(monkeypatch):
+    """조용히 버리지 않는다 — 폴백은 반드시 흔적을 남긴다."""
+    logged = []
+    monkeypatch.setattr(
+        "messiah.data.normalizer.mlog.log",
+        lambda tag, msg, **kw: logged.append((tag, kw)),
+    )
+    # count=003인데 본문은 2레코드분(100필드) — 나눠떨어지지 않는다.
+    raw = "0|H0IFCNT0|003|" + "^".join(
+        [_fut_record("152953", "1080.30", "3"), _fut_record("152954", "1080.50", "5")]
+    )
+
+    ticks = parse_futures_ticks(raw, _TICK_SIZE, today=_TODAY)
+
+    assert len(ticks) == 1
+    assert logged and logged[0][0] == "TickFrameSplitFallback"
+    assert logged[0][1]["record_count"] == 3
+    assert logged[0][1]["field_count"] == 100
 
 
 def test_parse_futures_tick_strips_ws_envelope_header():
     no_header = _REAL_TICK_1.split("|", 3)[-1]
     with_header = _REAL_TICK_1
 
-    a = parse_futures_tick(no_header, _TICK_SIZE, today=_TODAY)
-    b = parse_futures_tick(with_header, _TICK_SIZE, today=_TODAY)
+    a = _first_futures_tick(no_header, _TICK_SIZE, today=_TODAY)
+    b = _first_futures_tick(with_header, _TICK_SIZE, today=_TODAY)
 
     assert (a.symbol, a.ts_exchange, a.price_ticks, a.qty) == (
         b.symbol,
@@ -73,18 +178,18 @@ def test_parse_futures_tick_strips_ws_envelope_header():
 
 
 def test_parse_futures_tick_invalid_format_returns_none():
-    assert parse_futures_tick("garbage", _TICK_SIZE) is None
-    assert parse_futures_tick("1^2^3", _TICK_SIZE) is None
+    assert _first_futures_tick("garbage", _TICK_SIZE) is None
+    assert _first_futures_tick("1^2^3", _TICK_SIZE) is None
 
 
 def test_parse_futures_tick_bad_number_returns_none():
     broken = _REAL_TICK_1.replace("^1080.30^", "^NOT_A_NUMBER^", 1)
-    assert parse_futures_tick(broken, _TICK_SIZE, today=_TODAY) is None
+    assert _first_futures_tick(broken, _TICK_SIZE, today=_TODAY) is None
 
 
 def test_parse_option_tick_valid_h0iocnt0_format():
     raw = "0|H0IOCNT0|001|" + "^".join(["201W09", "101500"] + ["0"] * 8)
-    tick = parse_option_tick(raw, Decimal("0.01"), today=_TODAY)
+    tick = _first_option_tick(raw, Decimal("0.01"), today=_TODAY)
 
     assert tick is not None
     assert tick.symbol == "201W09"
@@ -93,7 +198,7 @@ def test_parse_option_tick_valid_h0iocnt0_format():
 
 
 def test_parse_option_tick_invalid_format_returns_none():
-    assert parse_option_tick("garbage", Decimal("0.01")) is None
+    assert _first_option_tick("garbage", Decimal("0.01")) is None
 
 
 # ---------------------------------------------------------------- MinuteBarAggregator
@@ -105,7 +210,7 @@ def test_parse_option_tick_invalid_format_returns_none():
 def _tick(hhmmss: str, price: str) -> Tick:
     """실캡처 프레임의 시각·가격만 바꿔 재사용 — 필드 배치는 실측 그대로 유지한다."""
     raw = _REAL_TICK_1.replace("^152953^", f"^{hhmmss}^", 1).replace("^1080.30^", f"^{price}^", 1)
-    tick = parse_futures_tick(raw, _TICK_SIZE, today=_TODAY)
+    tick = _first_futures_tick(raw, _TICK_SIZE, today=_TODAY)
     assert tick is not None
     return tick
 
@@ -180,8 +285,8 @@ def test_first_bar_has_no_baseline_so_it_is_never_a_jump():
 
 def test_minute_bar_aggregator_accumulates_within_same_minute_returns_none():
     agg = MinuteBarAggregator(symbol="A05608")
-    t1 = parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
-    t2 = parse_futures_tick(_REAL_TICK_2, _TICK_SIZE, today=_TODAY)
+    t1 = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+    t2 = _first_futures_tick(_REAL_TICK_2, _TICK_SIZE, today=_TODAY)
 
     assert agg.add_tick(t1) is None
     assert agg.add_tick(t2) is None  # 같은 분(15:29) — 아직 봉 미완성
@@ -189,9 +294,9 @@ def test_minute_bar_aggregator_accumulates_within_same_minute_returns_none():
 
 def test_minute_bar_aggregator_flushes_completed_bar_on_minute_rollover():
     agg = MinuteBarAggregator(symbol="A05608")
-    t1 = parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
-    t2 = parse_futures_tick(_REAL_TICK_2, _TICK_SIZE, today=_TODAY)
-    t3 = parse_futures_tick(_REAL_TICK_3_NEXT_MINUTE, _TICK_SIZE, today=_TODAY)
+    t1 = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+    t2 = _first_futures_tick(_REAL_TICK_2, _TICK_SIZE, today=_TODAY)
+    t3 = _first_futures_tick(_REAL_TICK_3_NEXT_MINUTE, _TICK_SIZE, today=_TODAY)
 
     agg.add_tick(t1)
     agg.add_tick(t2)
@@ -209,9 +314,9 @@ def test_minute_bar_aggregator_flushes_completed_bar_on_minute_rollover():
 
 def test_minute_bar_aggregator_quality_ok_when_enough_ticks():
     agg = MinuteBarAggregator(symbol="A05608")
-    agg.add_tick(parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY))
-    agg.add_tick(parse_futures_tick(_REAL_TICK_2, _TICK_SIZE, today=_TODAY))
-    agg.add_tick(parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY))  # 3번째(중복 재사용)
+    agg.add_tick(_first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY))
+    agg.add_tick(_first_futures_tick(_REAL_TICK_2, _TICK_SIZE, today=_TODAY))
+    agg.add_tick(_first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY))  # 3번째(중복 재사용)
 
     bar = agg.flush_final()
 
@@ -221,9 +326,9 @@ def test_minute_bar_aggregator_quality_ok_when_enough_ticks():
 
 def test_minute_bar_aggregator_ohlc_reflects_price_extremes():
     agg = MinuteBarAggregator(symbol="A05608")
-    low = parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)  # 1080.30
+    low = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)  # 1080.30
     high_raw = _REAL_TICK_2.replace("^1080.30^", "^1090.00^", 1)
-    high = parse_futures_tick(high_raw, _TICK_SIZE, today=_TODAY)  # 같은 분(15:29:54)
+    high = _first_futures_tick(high_raw, _TICK_SIZE, today=_TODAY)  # 같은 분(15:29:54)
 
     agg.add_tick(low)
     assert agg.add_tick(high) is None  # 아직 같은 분 — 미완성
@@ -242,7 +347,7 @@ def test_minute_bar_aggregator_keeps_separate_symbols_independent():
     agg_a = MinuteBarAggregator(symbol="A05608")
     agg_b = MinuteBarAggregator(symbol="OTHER")
 
-    t1 = parse_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+    t1 = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
     agg_a.add_tick(t1)
     agg_b.add_tick(t1)
 

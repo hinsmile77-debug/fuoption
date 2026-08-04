@@ -44,14 +44,15 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
 from messiah.broker.simulator.adapter import SimBroker
 from messiah.core.bus import TOPIC_BAR
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import BarClosed, Horizon, bar_confirm_time
+from messiah.core.timeutil import now_utc
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.bar_composer import MultiHorizonBarComposer
 from messiah.execution.order_gateway import OrderGateway
@@ -114,13 +115,54 @@ def _slice_by_date(bars: Sequence[BarClosed], start: date, end: date) -> list[Ba
     return [b for b in bars if start <= b.bar_open_kst.date() < end]
 
 
+class ReplayClock:
+    """재생 중인 "지금" — 방금 투입한 봉의 확정시각을 돌려준다.
+
+    ## 왜 필요한가 (2026-08-04)
+
+    `TradingPipeline`은 데이터 신선도와 세션 판정을 **주입된 시계**로 한다. 그 시계를 안
+    주면 실제 벽시계를 쓰는데, 재생은 과거 봉을 먹이므로 `data_age = 지금 − 과거봉확정시각`이
+    수십 일이 된다 — KillSwitch R11(임계 30초)이 매 판단마다 발동해 게이트웨이를 정지시키고
+    **신규 진입이 영영 안 난다**. 실측(2026-07-27 하루치 재생): data_age 672,056초(7.8일).
+
+    이 하니스가 만들어진 2026-07-27부터 있던 문제이고, 그동안 창별 수익률이 항상 정확히
+    0.0000%였던 것이 "데이터가 짧아 거래가 없었다"로 기록돼 있었다(`docs/capability_matrix.md`).
+    실제로는 **어떤 데이터로도 거래가 날 수 없는 상태**였다.
+
+    첫 봉을 먹이기 전에는 기준이 없으므로 실제 벽시계로 폴백한다 — 그 구간엔 아직 판단
+    자체가 없어서(`FuturesView` 미발행) 값이 쓰이지 않는다.
+    """
+
+    def __init__(self) -> None:
+        self._now: datetime | None = None
+
+    def advance_to(self, bar: BarClosed) -> None:
+        """봉 하나를 투입하기 직전에 호출 — 그 봉이 확정되는 시각으로 시계를 옮긴다.
+
+        `bar_open_kst`가 아니라 `bar_confirm_time()`을 쓰는 이유: 파이프라인이 재는 것은
+        "이 데이터가 언제부터 유효했나"이고, 완성봉은 확정시각에야 소비 가능해진다
+        (Ver 1.2 §2.2 완성봉 규율 — `_last_bar_confirm_at`도 같은 기준).
+        """
+        self._now = bar_confirm_time(bar)
+
+    def __call__(self) -> datetime:
+        return self._now if self._now is not None else now_utc()
+
+
 async def _feed_m1_bars(
-    bars: Sequence[BarClosed], composer: MultiHorizonBarComposer, broker: SimBroker, bus
+    bars: Sequence[BarClosed],
+    composer: MultiHorizonBarComposer,
+    broker: SimBroker,
+    bus,
+    clock: ReplayClock | None = None,
 ) -> None:
-    """M1봉을 순서대로 투입 — 브로커 시계 진행, `bar.1m` 발행, Horizon 경계마다 합성봉
-    flush. `scripts/run_full_path_smoke.py`의 `_feed_bars`와 동일 로직(봉 간격이 항상
-    정확히 1분이라 "N분마다 한 번" 카운팅으로 성립) — 하니스 전용으로 별도 보유."""
+    """M1봉을 순서대로 투입 — 재생 시계 전진, 브로커 시계 진행, `bar.1m` 발행, Horizon
+    경계마다 합성봉 flush. `scripts/run_full_path_smoke.py`의 `_feed_bars`와 동일 로직(봉
+    간격이 항상 정확히 1분이라 "N분마다 한 번" 카운팅으로 성립) — 하니스 전용으로 별도 보유."""
     for i, bar in enumerate(bars):
+        # 시계를 **먼저** 옮긴다 — 이 봉이 유발하는 판단이 이 봉의 시각을 "지금"으로 봐야 한다.
+        if clock is not None:
+            clock.advance_to(bar)
         broker.on_bar(bar)
         await composer.handle_one_minute_bar(bar)
         await bus.publish(f"{TOPIC_BAR}.{Horizon.M1.value}.{bar.symbol}", bar)
@@ -206,7 +248,8 @@ async def run_walk_forward_backtest(
             broker = SimBroker(cash=starting_cash)
             await broker.connect()
             gateway = OrderGateway(broker)
-            pipeline = TradingPipeline(symbol, broker, gateway, bus)
+            replay_clock = ReplayClock()
+            pipeline = TradingPipeline(symbol, broker, gateway, bus, now=replay_clock)
 
             await feature_engine.run_forever()
             await futures_service.run_forever()
@@ -214,7 +257,7 @@ async def run_walk_forward_backtest(
             await pipeline.start_day()
 
             start_equity = (await broker.account()).total_equity
-            await _feed_m1_bars(test_m1_bars, composer, broker, bus)
+            await _feed_m1_bars(test_m1_bars, composer, broker, bus, replay_clock)
             end_equity = (await broker.account()).total_equity
 
         results.append(

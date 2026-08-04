@@ -33,6 +33,13 @@ TAG_LEVELS: dict[str, int] = {
     # 직전 완성봉 종가 대비 시가가 임계 이상 벌어짐 — 스테일 프린트/피드 이상 의심
     # (2026-07-31 09:05봉이 6.1% 점프인데도 quality_ok=True로 통과했다).
     "TickPriceJump": logging.WARNING,
+    # WS 프레임의 데이터건수만큼 본문이 균등 분할되지 않아 첫 레코드만 파싱함 — 나머지 체결
+    # 유실. 2026-08-04 이전엔 이게 **전 프레임의 기본 동작**이었고 거래량 절반이 사라졌다
+    # (data/normalizer.py 모듈 docstring). 다시는 조용히 일어나면 안 되는 일이라 WARNING.
+    "TickFrameSplitFallback": logging.WARNING,
+    # 백필 하루치 페이징이 호출 상한에 걸림 — 더 이른 봉이 남아 있을 수 있다(조용히 잘린
+    # 하루가 학습 데이터에 섞이면 그 결손을 나중에 시장 상태로 오인한다).
+    "BackfillPagingLimit": logging.WARNING,
     "FeatureSetMismatch": logging.ERROR,  # L3: 침묵(DEBUG) 금지 — 무조건 ERROR
     "OrderSubmit": logging.INFO,
     "OrderPendingSet": logging.INFO,

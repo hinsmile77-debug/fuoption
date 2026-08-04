@@ -11,10 +11,10 @@ from messiah.core.messages import Horizon
 from messiah.core.timeutil import now_kst
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.collector import MultiSymbolTickCollector, SymbolFeed, TickCollector
-from messiah.data.normalizer import parse_futures_tick, parse_option_tick
+from messiah.data.normalizer import parse_futures_ticks, parse_option_ticks
 
 # 2026-07-22 ws_client.py 실측 세션에서 실제로 캡처한 라이브 WS 프레임(미니선물 A05608). 시각
-# 필드(HHMMSS)만 실측값이고 날짜는 parse_futures_tick이 today 생략 시 오늘 KST 날짜를 쓰므로,
+# 필드(HHMMSS)만 실측값이고 날짜는 parse_futures_ticks이 today 생략 시 오늘 KST 날짜를 쓰므로,
 # 아카이브 파일 경로도 하드코딩하지 않고 실행 시점의 오늘 날짜로 계산한다(그래야 세션이 자정을
 # 넘겨도 테스트가 안 깨짐).
 _TODAY_STR = now_kst().date().isoformat()
@@ -104,7 +104,7 @@ def _collector(
         creds=_creds(),
         symbol="A05608",
         tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
+        parse_tick=parse_futures_ticks,
         tick_size=_TICK_SIZE,
         archiver=ParquetArchiver(tmp_path),
         bus=bus,
@@ -252,7 +252,7 @@ async def test_run_forever_reconnects_with_backoff_and_resumes_archiving(
         creds=_creds(),
         symbol="A05608",
         tr_id=tr_codes.WS_TR_FUTURES_CONTRACT,
-        parse_tick=parse_futures_tick,
+        parse_tick=parse_futures_ticks,
         tick_size=_TICK_SIZE,
         archiver=ParquetArchiver(tmp_path),
         approval_issuer=_approval_issuer(),
@@ -338,8 +338,8 @@ def _multi_collector(
 ) -> tuple[MultiSymbolTickCollector, FakeConnection]:
     conn = FakeConnection(incoming)
     default_feeds = feeds or [
-        SymbolFeed("A05608", tr_codes.WS_TR_FUTURES_CONTRACT, parse_futures_tick, _TICK_SIZE),
-        SymbolFeed(_OPT_SYMBOL, "H0IOCNT0", parse_option_tick, _OPT_TICK_SIZE),
+        SymbolFeed("A05608", tr_codes.WS_TR_FUTURES_CONTRACT, parse_futures_ticks, _TICK_SIZE),
+        SymbolFeed(_OPT_SYMBOL, "H0IOCNT0", parse_option_ticks, _OPT_TICK_SIZE),
     ]
     collector = MultiSymbolTickCollector(
         creds=_creds(),
@@ -441,7 +441,7 @@ def test_multi_symbol_rejects_more_feeds_than_subscription_limit(tmp_path: Path)
     from messiah.broker.kis.ws_client import KISWebSocketClient
 
     too_many = [
-        SymbolFeed(f"SYM{i}", tr_codes.WS_TR_FUTURES_CONTRACT, parse_futures_tick, _TICK_SIZE)
+        SymbolFeed(f"SYM{i}", tr_codes.WS_TR_FUTURES_CONTRACT, parse_futures_ticks, _TICK_SIZE)
         for i in range(KISWebSocketClient.MAX_SUBSCRIPTIONS + 1)
     ]
     with pytest.raises(ValueError, match="구독 슬롯 한도"):

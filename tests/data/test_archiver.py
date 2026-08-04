@@ -124,3 +124,58 @@ def test_append_bar_separates_different_horizons(tmp_path: Path):
     m5 = archiver.read_day("A05608", Horizon.M5, date(2026, 7, 22))
     assert m1 is not None and m1.row(0, named=True)["c_ticks"] == 101
     assert m5 is not None and m5.row(0, named=True)["c_ticks"] == 205
+
+
+# ---------------------------------------------------------------- write_day (백필 전용)
+
+
+def test_write_day_replaces_the_whole_day_instead_of_merging(tmp_path: Path):
+    """백필의 목적이 '수집값을 거래소 공식값으로 갈아끼우기'라 병합이면 안 된다."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(1, volume=50))  # 오염된 수집분
+    archiver.append_bar(_bar(2, volume=50))
+
+    written = archiver.write_day("A05608", Horizon.M1, [_bar(1, volume=100)])
+
+    assert written == 1
+    frame = archiver.read_day("A05608", Horizon.M1, date(2026, 7, 22))
+    assert frame.height == 1  # 2분봉은 남지 않는다 — 하루를 통째로 교체했다
+    assert frame["volume"].to_list() == [100]
+
+
+def test_write_day_removes_shards_so_stale_rows_cannot_win(tmp_path: Path):
+    """조각을 안 지우면 `read_day()`가 keep="last"로 조각을 이긴 것으로 취급해
+    옛 오염값이 되살아난다(조각이 통합본보다 나중 소스)."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(1, volume=50))
+    day = date(2026, 7, 22)
+    assert (tmp_path / "A05608" / "1m" / day.isoformat()).is_dir()
+
+    archiver.write_day("A05608", Horizon.M1, [_bar(1, volume=100)])
+
+    assert not (tmp_path / "A05608" / "1m" / day.isoformat()).exists()
+    assert archiver.read_day("A05608", Horizon.M1, day)["volume"].to_list() == [100]
+
+
+def test_write_day_with_no_bars_does_nothing(tmp_path: Path):
+    """백필 실패와 '그날 휴장'을 구분할 수 없게 만들면 안 된다 — 빈 파일로 덮지 않는다."""
+    archiver = ParquetArchiver(tmp_path)
+    archiver.append_bar(_bar(1, volume=50))
+
+    assert archiver.write_day("A05608", Horizon.M1, []) == 0
+    assert archiver.read_day("A05608", Horizon.M1, date(2026, 7, 22)).height == 1
+
+
+def test_read_day_bars_round_trips_through_write_day(tmp_path: Path):
+    archiver = ParquetArchiver(tmp_path)
+    archiver.write_day("A05608", Horizon.M1, [_bar(1, c_ticks=111), _bar(2, c_ticks=222)])
+
+    bars = archiver.read_day_bars("A05608", Horizon.M1, date(2026, 7, 22))
+
+    assert [b.c_ticks for b in bars] == [111, 222]
+    assert all(b.symbol == "A05608" and b.horizon is Horizon.M1 for b in bars)
+
+
+def test_read_day_bars_returns_empty_for_missing_day(tmp_path: Path):
+    archiver = ParquetArchiver(tmp_path)
+    assert archiver.read_day_bars("A05608", Horizon.M1, date(2026, 7, 22)) == []
