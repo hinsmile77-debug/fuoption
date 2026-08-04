@@ -81,6 +81,8 @@ from messiah.core.messages import BarClosed, Horizon, Tick
 from messiah.core.timeutil import now_kst
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.normalizer import MinuteBarAggregator
+from messiah.ops import clock_skew
+from messiah.ops.clock_skew import ClockSkewTracker
 
 # websockets 라이브러리 자체 예외(ConnectionClosed 등)는 WebSocketException 계열, 소켓 단의
 # 실패(연결 거부 등)는 OSError(ConnectionError는 그 서브클래스) 계열이다 — mahdi
@@ -343,6 +345,11 @@ class TickCollector:
         self._reconnect_initial_backoff_seconds = reconnect_initial_backoff_seconds
         self._reconnect_max_backoff_seconds = reconnect_max_backoff_seconds
         self._aggregator = MinuteBarAggregator(symbol, horizon)
+        # 거래소 시각 대비 로컬 시계의 어긋남 (2026-08-05) — 재연결로 aggregator를 새로
+        # 만들어도 **이건 유지한다**. 시계는 연결과 무관한 이 PC의 성질이고, 재연결마다
+        # 표본을 버리면 스큐를 다시 30표본 모을 때까지 판정 불가가 된다.
+        self._clock_skew = ClockSkewTracker()
+        self._clock_skew_reported = False
         self._watchdog = _StallWatchdog(
             timeout_seconds=stall_timeout_seconds,
             check_interval_seconds=stall_check_interval_seconds,
@@ -413,12 +420,20 @@ class TickCollector:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, self._reconnect_max_backoff_seconds)
 
-    async def flush_final_bar(self) -> None:
+    async def flush_final_bar(self) -> BarClosed | None:
         """graceful shutdown 시 마지막 미완성 분봉을 강제 flush — 호출측(재연결 래퍼 등)이
-        종료 시퀀스에서 부른다."""
+        종료 시퀀스에서 부른다.
+
+        **발행한 봉을 돌려준다**(2026-08-05) — 호출측이 "이 봉이 구독자에게 도달했는지"를
+        기다릴 수 있어야 하기 때문이다. 종전에는 `_daily_close()`가 이 함수 직후 곧바로
+        `composer.flush_all_final()`을 불렀는데, 버스 발행과 구독자 콜백 사이에 순서 보장이
+        없어 **그날 마지막 1분봉이 상위 Horizon 합성봉에서 통째로 빠졌다**(2026-08-04 실측:
+        15:34봉 137계약이 1분봉엔 있고 3/5/10/15/30분봉 전부에 없음).
+        """
         bar = self._aggregator.flush_final()
         if bar is not None:
             await self._archive_and_publish_bar(bar)
+        return bar
 
     def seconds_since_last_tick(self) -> float | None:
         """None은 "이 연결에서 아직 틱을 못 봤다"(웜업) — "0초 전에 받았다"와 구분된다."""
@@ -454,6 +469,8 @@ class TickCollector:
         # 프레임 단위로 한 번만 — 스톨 워치독에 필요한 건 "언제 마지막으로 받았나"이지
         # 체결 건수가 아니다(같은 프레임의 N건은 같은 순간에 도착한 것).
         self._note_tick_received()
+        # 시계 스큐도 같은 이유로 프레임당 한 표본이다(`ops/clock_skew.py` observe 주석).
+        self._observe_clock_skew(ticks[0])
 
         for tick in ticks:
             if self._bus is not None:
@@ -483,6 +500,43 @@ class TickCollector:
                 symbol=self._symbol,
                 received_kst=now_kst().isoformat(),
             )
+
+    def _observe_clock_skew(self, tick: Tick) -> None:
+        """거래소 시각 대비 로컬 시계 어긋남을 표본에 넣고, 세션당 **한 번** 결과를 남긴다.
+
+        왜 한 번인가: 이 값은 초 단위로 서서히 움직이는 이 PC의 성질이지 매 프레임의 사건이
+        아니다. 매번 로그하면 `FeaturePublish`처럼 하루 수만 줄이 되어 아무도 안 본다 —
+        `nan_ratio=0.0165`가 8거래일 내내 같은 값으로 찍히고도 아무도 안 물어봤던 것과 같은
+        실패 형태다(2026-08-04). 대신 **임계를 넘으면 WARNING**으로 갈라 남긴다.
+
+        하루 중 시계가 점프하면(Windows Time 동기) 롤링 창이 따라가지만 로그는 이미 나갔다.
+        그건 의도한 절충이다 — 그 경우를 잡는 것은 다음 거래일 리포트의 몫이고, 이 로그의
+        목적은 "오늘 이 PC의 시계가 어땠나"를 한 줄로 남기는 것이다.
+        """
+        self._clock_skew.observe(tick.ts_exchange, now_kst())
+        if self._clock_skew_reported or self._clock_skew.seconds is None:
+            return
+        self._clock_skew_reported = True
+        skew = self._clock_skew.seconds
+        exceeded = self._clock_skew.exceeds_threshold
+        mlog.log(
+            "ClockSkewExceeded" if exceeded else "ClockSkewMeasured",
+            f"거래소 시각 − 로컬 시계 = {skew:+.2f}초"
+            + (
+                f" — 임계 {clock_skew.WARN_THRESHOLD_SECONDS:.1f}초 초과, "
+                "완성봉 유예 500ms가 무의미해진다(w32time 동기 확인 필요)"
+                if exceeded
+                else ""
+            ),
+            symbol=self._symbol,
+            skew_seconds=round(skew, 3),
+            samples=self._clock_skew.samples,
+        )
+
+    def clock_skew_seconds(self) -> float | None:
+        """거래소 시각 − 로컬 시계(초). 표본이 부족하면 None — `MultiHorizonBarComposer`가
+        완성봉 경계 판정에 쓴다(`data/bar_composer.py` "왜 스큐를 보는가")."""
+        return self._clock_skew.seconds
 
     async def _archive_and_publish_bar(self, bar: BarClosed) -> None:
         """완성봉 적재/발행은 파싱과 달리 인프라 실패라 침묵하면 안 됨(L22) — 잡아서 로깅하고

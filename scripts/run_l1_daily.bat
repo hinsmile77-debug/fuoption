@@ -32,8 +32,19 @@ REM console AND append it to the log file. Windows PowerShell 5.1's Tee-Object d
 REM UTF-16LE for -FilePath and (unlike PS 7+) has no -Encoding parameter at all (both confirmed
 REM by hand, 2026-07-24) - so tee manually per line via Out-File -Encoding utf8 instead, which
 REM keeps the log consistent with everything else this project writes (UTF-8 JSON log lines).
+REM
+REM The stderr merge (2>&1) is done by cmd /c, NOT by PowerShell (2026-08-05). Reason: in
+REM PS 5.1, redirecting a NATIVE command's stderr inside the pipeline turns each stderr line
+REM into an ErrorRecord, and the FIRST one gets rendered with a "python.exe : " prefix plus a
+REM four-line "At line:1 char:1 / + CategoryInfo ... NativeCommandError" block. The very first
+REM stderr line this process emits is crash_forensics' arming marker, so it was mangled every
+REM single day - which made ops/crash_dumps.py report "no arming marker" and the fix-verification
+REM registry raise a false "recurred" ERROR on 2026-08-04. Worse, a real faulthandler crash dump
+REM would be corrupted the same way. Letting cmd merge the streams keeps them plain text.
+REM Verified by hand 2026-08-05: marker intact, Korean UTF-8 intact, exit code propagated.
+REM -u keeps stdout unbuffered so stdout/stderr interleave in real order through the pipe.
 powershell -NoProfile -Command ^
-    "& '.venv\Scripts\python.exe' 'scripts\run_l1_daily.py' 2>&1 | ForEach-Object { $_ | Out-File -FilePath '%LOGFILE%' -Append -Encoding utf8; $_ }; exit $LASTEXITCODE"
+    "& cmd /c '.venv\Scripts\python.exe -u scripts\run_l1_daily.py 2>&1' | ForEach-Object { $_ | Out-File -FilePath '%LOGFILE%' -Append -Encoding utf8; $_ }; exit $LASTEXITCODE"
 set EXITCODE=%ERRORLEVEL%
 
 if not %EXITCODE%==0 (

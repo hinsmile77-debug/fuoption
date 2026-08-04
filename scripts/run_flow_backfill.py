@@ -34,6 +34,7 @@ from messiah.broker.kis.rest_client import KISRestClient  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data import investor_flow_history as ifh  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 
 DEFAULT_PATH = Path("data") / "flow" / "kospi_daily.parquet"
 
@@ -48,11 +49,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--end", type=_parse_day, default=None, help="기본값 = 어제")
     p.add_argument("--out", default=str(DEFAULT_PATH))
     p.add_argument("--configs", default="configs")
+    session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    session_guard.refuse_if_regular_session("수급 백필", force=args.force_intraday)
     end = args.end or (now_kst().date() - timedelta(days=1))
     if args.start > end:
         print(f"[run_flow_backfill] start({args.start}) > end({end})", file=sys.stderr)

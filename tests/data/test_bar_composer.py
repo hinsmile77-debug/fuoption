@@ -1,4 +1,5 @@
-from datetime import date, datetime
+import asyncio
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from messiah.core.messages import BarClosed, Horizon
@@ -132,21 +133,38 @@ async def test_ignores_bars_for_other_symbols(tmp_path: Path):
 
 
 async def test_multiple_horizons_accumulate_independently(tmp_path: Path):
+    """Horizon마다 버킷 경계가 따로 간다 — M3는 09:33에서 갈리고 M5는 안 갈린다.
+
+    2026-08-05 이후 M3의 첫 버킷은 **스케줄러가 아니라 09:33봉의 도착**이 확정한다
+    (`handle_one_minute_bar`의 봉 도착 기반 롤오버). 그래서 09:34까지 넣고 나면 M3는
+    이미 [09:30,09:33)을 내보냈고, 뒤이은 flush가 [09:33,09:36)을 마저 내보낸다.
+    """
     bus = FakeBus()
     composer = _composer(tmp_path, bus, horizons={Horizon.M3: 180, Horizon.M5: 300})
 
     for minute in range(30, 35):
         await composer.handle_one_minute_bar(_m1(minute))
-    await composer.flush_due_horizon(Horizon.M3)  # 09:30-09:33 구간(3개: 30,31,32) 확정
 
+    # 09:33봉이 들어온 순간 [09:30,09:33)이 자동 확정됐다 — 시계를 전혀 안 보고.
     m3_published = [b for t, b in bus.published if t.startswith("bar.3m.")]
-    assert len(m3_published) == 1
-    assert m3_published[0].bar_open_kst == datetime(2026, 7, 23, 9, 30, tzinfo=KST)
+    assert [b.bar_open_kst for b in m3_published] == [datetime(2026, 7, 23, 9, 30, tzinfo=KST)]
+    assert m3_published[0].volume == 30  # 30·31·32분봉 3개
 
-    await composer.flush_due_horizon(Horizon.M5)  # M5는 아직 안 건드림 — 09:30~09:34(5개) 전부
+    await composer.flush_due_horizon(Horizon.M3)  # 남은 [09:33,09:36) — 33·34분봉 2개
+    m3_published = [b for t, b in bus.published if t.startswith("bar.3m.")]
+    assert [b.bar_open_kst for b in m3_published] == [
+        datetime(2026, 7, 23, 9, 30, tzinfo=KST),
+        datetime(2026, 7, 23, 9, 33, tzinfo=KST),
+    ]
+
+    await composer.flush_due_horizon(Horizon.M5)  # M5는 경계를 안 넘었다 — 09:30~09:34 전부
     m5_published = [b for t, b in bus.published if t.startswith("bar.5m.")]
     assert len(m5_published) == 1
     assert m5_published[0].volume == 50
+
+    # 어느 Horizon으로 집계해도 1분봉 거래량 총합은 보존된다 — 무결성 리포트의
+    # `analyze_horizon_consistency()`가 매일 확인하는 바로 그 항등식.
+    assert sum(b.volume for b in m3_published) == 50 == sum(b.volume for b in m5_published)
 
 
 async def test_archives_composite_bar(tmp_path: Path):
@@ -308,3 +326,170 @@ def test_compose_offline_rejects_non_m1_input():
     )
     with pytest.raises(ValueError):
         compose_offline("A05608", Horizon.M15, [five])
+
+
+# ------------------------------------------------- 시계 스큐 내성 (2026-08-05 일일점검 대응)
+#
+# 2026-08-04 실측: 1분봉 아카이브 거래량 합 84,346 vs 3/5/10/15/30분봉 전부 84,209.
+# 차이 137은 정확히 15:34봉 하나였다 — 상위 Horizon 확정이 **로컬 시계**로만 이루어졌고,
+# 그 시계가 거래소와 어긋나 있었기 때문이다. 아래 셋이 그 경로를 각각 막는다.
+
+
+def _at(minute: int, second: int = 0) -> datetime:
+    return datetime(2026, 7, 23, 9, minute, second, tzinfo=KST)
+
+
+class _FakeClock:
+    """주입용 시계 — `sleep()`이 실제로 자지 않고 그만큼 시각을 앞으로 민다."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+        self.slept: list[float] = []
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += timedelta(seconds=seconds)
+
+
+async def test_scheduler_flush_waits_when_local_clock_runs_ahead_of_the_exchange(tmp_path: Path):
+    """**이 프로젝트가 아직 겪지 않은 방향**의 사고를 미리 막는다.
+
+    2026-08-04엔 거래소가 로컬보다 앞서 있어(+9.7초) 우연히 안전했다. 부호가 뒤집히면
+    스케줄러가 경계+0.5초에 쐈을 때 그 버킷의 마지막 1분봉이 **아직 안 왔고**, 버킷은 한 봉
+    모자란 채 확정된다. 스큐를 알려주면 그만큼 더 기다려야 한다.
+    """
+    bus = FakeBus()
+    clock = _FakeClock(_at(35, 0))  # 로컬 09:35:00 — 스케줄러가 09:35 경계에 쏜 순간
+    composer = MultiHorizonBarComposer(
+        symbol="A05608",
+        archiver=ParquetArchiver(tmp_path),
+        bus=bus,
+        target_horizons={Horizon.M5: 300},
+        clock_skew_seconds=lambda: -3.0,  # 거래소가 로컬보다 3초 뒤 = 로컬이 앞선다
+        now=clock,
+        sleep=clock.sleep,
+    )
+
+    for minute in range(30, 34):  # 09:34봉은 아직 도착 전
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    await composer.flush_due_horizon(Horizon.M5)
+
+    # 거래소 시각으로는 아직 09:34:57이었으므로 기다렸다.
+    assert clock.slept, "로컬이 앞선 상태인데 기다리지 않았다 — 버킷이 잘린다"
+    assert sum(clock.slept) >= 3.0
+
+
+async def test_no_wait_when_the_exchange_runs_ahead(tmp_path: Path):
+    """2026-08-04 실측 방향(거래소가 앞섬)에서는 종전과 완전히 같은 동작이어야 한다 —
+    이 수정이 정상일의 지연을 늘리지 않는다는 확인."""
+    bus = FakeBus()
+    clock = _FakeClock(_at(35, 0))
+    composer = MultiHorizonBarComposer(
+        symbol="A05608",
+        archiver=ParquetArchiver(tmp_path),
+        bus=bus,
+        target_horizons={Horizon.M5: 300},
+        clock_skew_seconds=lambda: 9.7,
+        now=clock,
+        sleep=clock.sleep,
+    )
+
+    for minute in range(30, 35):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_due_horizon(Horizon.M5)
+
+    assert clock.slept == []  # 한 번도 안 잤다
+    assert len(bus.published) == 1
+    assert bus.published[0][1].volume == 50
+
+
+async def test_late_bar_never_creates_a_duplicate_bucket(tmp_path: Path, monkeypatch):
+    """세 번째 겹 — 앞의 둘이 다 뚫려도 **아카이브에 같은 시각의 봉이 두 줄** 생기면 안 된다.
+
+    늦게 온 1분봉을 그냥 받으면 `floor_to_horizon`이 같은 버킷 시작 시각을 돌려주므로,
+    그 봉이 두 번째 버킷을 열고 다음 flush에서 같은 시각의 합성봉이 또 나간다. 버리되
+    조용히는 안 한다(L18) — 유실이 로그에 남아야 다음 점검이 그 크기를 안다.
+    """
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "messiah.data.bar_composer.mlog.log", lambda tag, msg, **f: logged.append((tag, msg))
+    )
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)  # M5만
+
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_due_horizon(Horizon.M5)  # [09:30,09:35)를 4봉으로 확정(스큐 없음)
+
+    await composer.handle_one_minute_bar(_m1(34))  # 뒤늦게 도착
+    await composer.flush_all_final()  # 수정 전이라면 여기서 09:30이 한 번 더 나갔다
+
+    starts = [b.bar_open_kst for _, b in bus.published]
+    assert starts == [_at(30)], f"같은 시각의 합성봉이 두 번 나갔다: {starts}"
+    assert any(tag == "ComposerLateBarDropped" for tag, _ in logged)
+
+
+async def test_bucket_rollover_is_driven_by_bar_arrival_not_the_clock(tmp_path: Path):
+    """첫 번째 겹 — 스케줄러를 한 번도 안 불러도 경계는 정확히 갈린다.
+
+    이 경로가 시계를 전혀 안 보기 때문에, 시계가 얼마나 어긋나 있든 **1분봉 거래량 총합은
+    상위 Horizon에 보존된다**(무결성 리포트 `analyze_horizon_consistency()`의 항등식).
+    """
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)  # M5
+
+    for minute in range(30, 40):  # 09:30~09:39 — 5분 버킷 두 개 분량
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    published = [b for _, b in bus.published]
+    assert [b.bar_open_kst for b in published] == [_at(30)]  # 두 번째는 아직 진행 중
+    await composer.flush_all_final()
+
+    published = [b for _, b in bus.published]
+    assert [b.bar_open_kst for b in published] == [_at(30), _at(35)]
+    assert sum(b.volume for b in published) == 100  # 1분봉 10개 × 10 — 총합 보존
+
+
+# ------------------------------------------------- 종료 시퀀스 경합 (2026-08-04 실측 사고)
+
+
+async def test_wait_for_bar_returns_true_once_the_bar_arrives(tmp_path: Path):
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)
+
+    assert await composer.wait_for_bar(_at(34), timeout_seconds=0.01, poll_seconds=0.005) is False
+
+    await composer.handle_one_minute_bar(_m1(34))
+
+    assert await composer.wait_for_bar(_at(34), timeout_seconds=0.01, poll_seconds=0.005) is True
+    assert composer.last_seen_bar_open == _at(34)
+
+
+async def test_wait_for_bar_gives_the_final_minute_time_to_land(tmp_path: Path):
+    """2026-08-04 사고의 직접 회귀.
+
+    `TickCollector.flush_final_bar()`는 버스에 발행만 하고 돌아온다. 구독자 콜백이 그 사이에
+    실행된다는 보장이 없어, 곧바로 `flush_all_final()`을 부르면 그날 마지막 1분봉이 상위
+    Horizon 전부에서 빠졌다(15:34봉 137계약). 여기서는 그 봉이 **대기 중에** 도착한다.
+    """
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    async def _deliver_late() -> None:
+        await asyncio.sleep(0.02)  # 발행 → 구독자 도달 사이의 지연을 흉내
+        await composer.handle_one_minute_bar(_m1(34))
+
+    delivery = asyncio.create_task(_deliver_late())
+    arrived = await composer.wait_for_bar(_at(34), timeout_seconds=2.0, poll_seconds=0.005)
+    await delivery
+    await composer.flush_all_final()
+
+    assert arrived is True
+    assert len(bus.published) == 1
+    assert bus.published[0][1].volume == 50  # 5봉 전부 — 137계약이 빠지던 자리

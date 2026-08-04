@@ -580,15 +580,27 @@ class SelfEvalReport(BusMessage):
 
     - `pnl_measurable`: 승률·PF·Sharpe·MDD를 **측정값으로 읽어도 되는가**. False면 자리표시자.
     - `wiring_stage`: 지금 막혀 있는 첫 지점(`models/wiring_completeness.py`) — 다음에 할 일.
+
+    ## 자리표시자를 0.0이 아니라 None으로 (2026-08-05)
+
+    `pnl_measurable`을 넣고도 같은 오독이 계속됐다: 2026-07-29~08-04 **5거래일 연속**
+    `win_rate=0.0 profit_factor=0.0 sharpe=0.0 max_drawdown=0.0`이 JSON에 남았고, 그 숫자만
+    보면 "성적이 0"으로 읽힌다. 실제로는 `live 번들 결선: []` — 모델이 하나도 안 붙은 채
+    파이프라인만 돈 것이다.
+
+    `n_fills`(07-31)와 `slippage_realized_ticks`(08-03)에서 이미 두 번 쓴 해법을 여기에도
+    적용한다 — **모르는 것은 None으로 쓴다.** 플래그는 같이 안 읽히면 소용이 없고, None은
+    포맷 문자열에서라도 걸린다. 이 프로젝트에서 같은 실패 형태의 네 번째다.
     """
 
     date: str  # ISO 날짜(YYYY-MM-DD) — 거래일 단위가 자연 키, 시각이 아님
     symbol: str
     n_return_samples: int
-    win_rate: float
-    profit_factor: float
-    sharpe: float
-    max_drawdown: float
+    # 손익 4지표는 `pnl_measurable=False`인 날 **None**이다 — 0.0("본전이었다")과 구분한다.
+    win_rate: float | None
+    profit_factor: float | None
+    sharpe: float | None
+    max_drawdown: float | None
     n_shadow_bundles: int
     slippage_predicted_ticks: float
     # 체결이 0건이면 **None**이다 — 0.0("슬리피지가 없었다")과 구분한다. 2026-08-03까지는

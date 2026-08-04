@@ -466,3 +466,64 @@ async def test_multi_symbol_flush_final_bar_flushes_all_symbols(tmp_path: Path):
     opt_df = _archived(tmp_path, _OPT_SYMBOL)
     assert fut_df.height == 1
     assert opt_df.height == 1
+
+
+# ------------------------------ 시계 스큐 계측 + 종료 시퀀스 배선 (2026-08-05 일일점검 대응)
+
+
+async def test_flush_final_bar_returns_the_bar_it_published(tmp_path: Path):
+    """2026-08-04 사고의 배선 절반 — 종료 시퀀스가 "이 봉이 구독자에게 갔나"를 기다리려면
+    어느 봉이었는지부터 알아야 한다(`scripts/run_l1_daily.py` `_daily_close`)."""
+    collector, _ = _collector(tmp_path, [_SUBSCRIBE_ACK, _REAL_TICK_1])
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    bar = await collector.flush_final_bar()
+
+    assert bar is not None
+    assert bar.horizon is Horizon.M1
+    assert bar.bar_open_kst.strftime("%H:%M") == "15:29"  # _REAL_TICK_1의 152953
+
+
+async def test_flush_final_bar_returns_none_when_there_is_nothing_to_flush(tmp_path: Path):
+    """봉이 없으면 None — 호출측이 "기다릴 대상이 없다"를 구분할 수 있어야 한다."""
+    collector, _ = _collector(tmp_path, [_SUBSCRIBE_ACK])
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    assert await collector.flush_final_bar() is None
+
+
+async def test_clock_skew_is_measured_and_logged_once_per_session(tmp_path: Path, monkeypatch):
+    """2026-08-04엔 거래소 시각이 로컬보다 9.72초 앞서 있었는데 로그에 흔적이 없었다.
+
+    세션당 **한 줄**인 것이 요구사항이다 — 매 프레임 남기면 `FeaturePublish`처럼 하루
+    수만 줄이 되어 아무도 안 본다(`data/collector.py` `_observe_clock_skew` docstring).
+    """
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.data.collector.mlog.log", lambda tag, msg, **f: logged.append((tag, f))
+    )
+    # 표본이 `MIN_SAMPLES`(30)를 넘겨야 추정값이 나온다 — 같은 프레임을 여러 번 흘린다.
+    frames = [_SUBSCRIBE_ACK] + [_REAL_TICK_1, _REAL_TICK_2] * 30
+    collector, _ = _collector(tmp_path, frames)
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    skew_logs = [f for tag, f in logged if tag in ("ClockSkewMeasured", "ClockSkewExceeded")]
+    assert len(skew_logs) == 1, "세션당 한 줄이어야 한다"
+    assert skew_logs[0]["samples"] >= 30
+    assert collector.clock_skew_seconds() is not None
+
+
+async def test_clock_skew_is_none_before_enough_samples(tmp_path: Path):
+    """표본이 부족하면 **0초가 아니라 None** — 합성기가 "모른다"를 알아야 0으로 가정한다."""
+    collector, _ = _collector(tmp_path, [_SUBSCRIBE_ACK, _REAL_TICK_1])
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    assert collector.clock_skew_seconds() is None

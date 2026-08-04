@@ -115,3 +115,69 @@ def test_uncountable_crashes_do_not_trigger_the_no_dump_finding(tmp_path: Path):
     )
 
     assert not any("덤프 0건" in f for f in forensics.findings)
+
+
+# ------------------------------------------- 무장 마커 오탐 (2026-08-04 실측, 08-05 수정)
+
+
+_PS_WRAPPED_LOG = r"""python.exe : [crash_forensics] armed tag=l1_daily target=stderr
+At line:1 char:1
++ & '.venv\Scripts\python.exe' 'scripts\run_l1_daily.py' 2>&1 | ForEach ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([crash_forensic...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+[OK ] config     instance=messiah-dev-01 mode=dev
+"""
+
+
+def test_powershell_prefixed_marker_is_still_recognised(tmp_path: Path):
+    """2026-08-04 실측 회귀 — 무장은 됐는데 "무장 안 됨"으로 판정돼 ERROR 오탐이 났다.
+
+    `.bat`가 stderr를 PowerShell 파이프라인에 태우면 PS 5.1이 네이티브 exe의 **첫 stderr
+    줄**을 NativeCommandError로 감싸 `python.exe : ` 접두사를 붙인다. 마커는 프로세스가
+    내는 첫 stderr 줄이라 정확히 그 자리에 걸렸고, 앵커(`^`) 매치가 깨졌다.
+
+    `.bat` 쪽도 고쳤지만(cmd /c로 병합), 탐지기가 호스트 접두사 하나에 깨지는 것 자체가
+    결함이다 — 검출 수단이 하나뿐이면 그 수단이 못 보는 결함은 안 보인다.
+    """
+    # PowerShell의 `Out-File -Encoding utf8`(5.1)은 BOM을 붙인다 — 실제 파일과 같게 만든다.
+    (tmp_path / "l1_daily_20260804.log").write_text(_PS_WRAPPED_LOG, encoding="utf-8-sig")
+
+    forensics = collect_crash_forensics(
+        date(2026, 8, 4), log_dir=tmp_path, native_crash_count=0, native_crashes_available=True
+    )
+
+    assert forensics.armed == {"l1_daily": True}
+    assert forensics.findings == []
+
+
+def test_structured_log_alone_counts_as_armed(tmp_path: Path):
+    """두 번째 출처 — stderr 마커가 통째로 사라져도 구조화 JSON 로그가 남는다."""
+    (tmp_path / "g2_daily_20260805.log").write_text(
+        '{"ts": "2026-08-05T08:36:08+09:00", "level": "INFO", "tag": "CrashForensicsArmed", '
+        '"msg": "네이티브 크래시 덤프 무장 — 대상 stderr", "process": "g2_paper"}\n',
+        encoding="utf-8",
+    )
+
+    forensics = collect_crash_forensics(
+        date(2026, 8, 5), log_dir=tmp_path, native_crash_count=0, native_crashes_available=True
+    )
+
+    assert forensics.armed == {"g2_paper": True}
+    assert forensics.findings == []
+
+
+def test_a_session_with_neither_source_is_still_reported(tmp_path: Path):
+    """느슨하게 만든 대가로 진짜 무장 누락을 놓치면 안 된다 — 둘 다 없어야 경보."""
+    (tmp_path / "l1_daily_20260805.log").write_text(
+        '{"ts": "2026-08-05T08:35:08+09:00", "level": "INFO", "tag": "SessionStart"}\n',
+        encoding="utf-8",
+    )
+
+    forensics = collect_crash_forensics(
+        date(2026, 8, 5), log_dir=tmp_path, native_crash_count=0, native_crashes_available=True
+    )
+
+    assert forensics.armed == {"l1_daily": False}
+    assert any("무장 마커 없음" in f for f in forensics.findings)

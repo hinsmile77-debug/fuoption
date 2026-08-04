@@ -113,6 +113,11 @@ def run_self_evaluation(
     (`models/wiring_completeness.py` 모듈 docstring).
     """
     slippage = reconcile_slippage(orders, acks, fills, cost_model=cost_model)
+    # 손익 4지표는 **측정 가능한 날에만** 값을 넣는다 (2026-08-05) — 결선 전에는 이 값들이
+    # 전부 0.0으로 나오는데, 그 0은 "본전"이 아니라 "표본이 없음"이다. 5거래일 연속
+    # `sharpe=0.0`이 성적처럼 읽힌 것이 이 변경의 직접 계기다
+    # (`core/messages.py`의 SelfEvalReport docstring).
+    measurable = wiring.pnl_measurable if wiring else False
     report = SelfEvalReport(
         **({"instance_id": instance_id} if instance_id else {}),
         date=date,
@@ -121,14 +126,20 @@ def run_self_evaluation(
         # 체결 건수는 호출자가 그날의 실제 `Fill`을 넘겼을 때만 셀 수 있다 — 안 넘겼으면
         # "0건"이 아니라 "모름"(None)이다(`core/messages.py`의 `SelfEvalReport` docstring).
         n_fills=len(fills) if fills else None,
-        win_rate=win_rate(champion_returns),
-        profit_factor=profit_factor(champion_returns),
-        sharpe=sharpe_ratio(champion_returns, periods_per_year=periods_per_year),
-        max_drawdown=max_drawdown(equity_curve_from_returns(champion_returns)),
+        win_rate=win_rate(champion_returns) if measurable else None,
+        profit_factor=profit_factor(champion_returns) if measurable else None,
+        sharpe=(
+            sharpe_ratio(champion_returns, periods_per_year=periods_per_year)
+            if measurable
+            else None
+        ),
+        max_drawdown=(
+            max_drawdown(equity_curve_from_returns(champion_returns)) if measurable else None
+        ),
         n_shadow_bundles=n_shadow_bundles,
         slippage_predicted_ticks=slippage.predicted_ticks,
         slippage_realized_ticks=slippage.realized_ticks,
-        pnl_measurable=wiring.pnl_measurable if wiring else False,
+        pnl_measurable=measurable,
         wiring_stage=wiring.stage if wiring else None,
         wiring_summary=wiring.summary() if wiring else None,
     )

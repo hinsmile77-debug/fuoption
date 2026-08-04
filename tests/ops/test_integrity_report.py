@@ -18,6 +18,7 @@ from messiah.ops.integrity_report import (
     NativeCrashes,
     analyze_bar_continuity,
     analyze_data_flow_ownership,
+    analyze_horizon_consistency,
     analyze_logs,
     build_report,
     format_summary,
@@ -329,7 +330,11 @@ def test_a_single_scheduled_start_is_not_called_a_restart(tmp_path: Path):
 
 
 def test_uncountable_crashes_are_not_reported_as_zero(tmp_path: Path):
-    """ "못 셌다"와 "0건"을 구분한다 — 이 사고의 유일한 흔적이 그 로그였다(L18)."""
+    """ "못 셌다"와 "0건"을 구분한다 — 이 사고의 유일한 흔적이 그 로그였다(L18).
+
+    이 플랫폼에서 **원래 못 세는 경우**(`supported=False`, 비Windows)는 위반이 아니다 —
+    매일 울리면 늑대소년이 된다. 질의가 실패한 경우는 아래 별도 테스트가 본다.
+    """
     _write_bars(tmp_path / "bars", list(range(30)))
     log = tmp_path / "l1.log"
     _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
@@ -337,12 +342,36 @@ def test_uncountable_crashes_are_not_reported_as_zero(tmp_path: Path):
     report = _report(
         tmp_path,
         logs={"l1_daily": [log]},
-        crash=lambda _d, **_kw: NativeCrashes(False, 0, ["Windows 전용"]),
+        crash=lambda _d, **_kw: NativeCrashes(False, 0, ["Windows 전용"], supported=False),
     )
 
     assert report.native_crashes.available is False
     assert report.breaches == []  # 못 센 것을 위반으로 올리지 않는다
     assert "집계 불가" in format_summary(report)
+
+
+def test_failed_crash_query_on_a_supported_platform_is_a_breach(tmp_path: Path):
+    """2026-08-04 회귀 — **크래시가 0건인 날에만** 집계가 실패했고 그게 조용히 지나갔다.
+
+    `Get-WinEvent`는 창 안에 이벤트가 하나도 없으면 비종료 오류를 내고 exit 1로 끝난다
+    (`-ErrorAction SilentlyContinue`는 출력만 막지 종료 코드는 못 막는다). 그래서 UI 크래시
+    격리 수정이 처음 성공한 날 성공을 증명할 수치가 사라졌고, "3거래일 연속 크래시 0건"을
+    조건으로 건 등록부는 그 상태로 **영원히 판정을 못 채운다**.
+
+    측정 불능은 0건이 아니다 — 지원되는 플랫폼에서 못 셌으면 그 자체가 임계 초과다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-08-04T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(
+        tmp_path,
+        logs={"l1_daily": [log]},
+        crash=lambda _d, **_kw: NativeCrashes(False, 0, ["Get-WinEvent 실패: exit=1"]),
+    )
+
+    assert any("집계 불가" in breach for breach in report.breaches)
+    assert "집계 실패" in format_summary(report)
 
 
 def test_critical_log_lines_are_a_breach(tmp_path: Path):
@@ -658,3 +687,178 @@ def test_tick_rows_reaches_the_verification_registry(tmp_path: Path):
 
     assert METRIC_EXTRACTORS["tick_rows"]({"tick_rows": 1234}) == 1234.0
     assert METRIC_EXTRACTORS["tick_rows"]({}) == 0.0  # 필드 자체가 없는 옛 리포트
+
+
+# ------------------------------- Horizon 총합 항등식 (2026-08-04 실측 유실, 08-05 신설)
+
+
+def _write_composite(
+    bar_dir: Path, horizon: Horizon, buckets: list[tuple[int, int]], *, symbol: str = "A05608"
+) -> None:
+    """(시작 분, 거래량) 목록으로 상위 Horizon 봉을 직접 적재한다."""
+    archiver = ParquetArchiver(bar_dir)
+    for minute, volume in buckets:
+        archiver.append_bar(
+            BarClosed(
+                symbol=symbol,
+                horizon=horizon,
+                bar_open_kst=datetime(2026, 7, 29, 9, 0, tzinfo=KST) + timedelta(minutes=minute),
+                o_ticks=100,
+                h_ticks=105,
+                l_ticks=95,
+                c_ticks=102,
+                volume=volume,
+                quality_ok=True,
+            )
+        )
+
+
+def test_horizon_volume_identity_catches_the_lost_final_minute(tmp_path: Path):
+    """2026-08-04 사고의 직접 회귀 — 그날 리포트는 이 유실을 볼 수단이 아예 없었다.
+
+    실측: 1분봉 합 84,346 vs 3/5/10/15/30분봉 전부 84,209. 차이 137은 정확히 15:34봉
+    하나였고, 원인은 종료 시퀀스에서 그 봉이 합성기에 도달하기 전에 flush가 돈 것이다.
+    그날 리포트는 "1분봉 410개, 결손 0분, CRITICAL/ERROR/WARNING 0"으로 깨끗했다.
+
+    상위 봉은 1분봉의 합이라는 것이 `compose_offline`의 정의이므로 **외부 기준이 필요 없다** —
+    그래서 매일 자동으로 돌 수 있다.
+    """
+    bar_dir = tmp_path / "bars"
+    _write_bars(bar_dir, list(range(10)))  # 1분봉 10개 × 10 = 100
+    _write_composite(bar_dir, Horizon.M5, [(0, 50), (5, 40)])  # 90 — 마지막 1분(10)이 빠졌다
+
+    findings = analyze_horizon_consistency(bar_dir, "A05608", _DAY)
+
+    assert len(findings) == 1
+    assert "5m 거래량 합 90 ≠ 1분봉 합 100" in findings[0]
+    assert "마지막 봉 유실 또는 재합성 누락 의심" in findings[0]
+
+
+def test_horizon_volume_identity_is_quiet_on_a_consistent_day(tmp_path: Path):
+    bar_dir = tmp_path / "bars"
+    _write_bars(bar_dir, list(range(10)))
+    _write_composite(bar_dir, Horizon.M5, [(0, 50), (5, 50)])
+
+    assert analyze_horizon_consistency(bar_dir, "A05608", _DAY) == []
+
+
+def test_an_overwritten_bucket_leaves_no_row_trace_only_a_volume_shortfall(tmp_path: Path):
+    """늦게 온 1분봉이 확정된 버킷을 다시 열면 **행이 늘지 않고 덮어쓰인다**.
+
+    `ParquetArchiver`가 `(bar_open_kst, horizon)`으로 `unique(keep="last")` 하기 때문이다
+    (`data/archiver.py`). 그래서 5분봉 하나가 구성봉 5개짜리에서 1개짜리로 조용히 바뀌고,
+    행 수·봉 연속성·NaN 비율은 전부 정상으로 보인다. **총합만이 유일한 흔적**이라 이
+    검사가 행 수가 아니라 거래량 합을 본다.
+    """
+    bar_dir = tmp_path / "bars"
+    _write_bars(bar_dir, list(range(10)))
+    # 09:00 버킷이 두 번 쓰였다(정상 50 → 늦은 봉 하나짜리 10). 뒤엣것만 남는다.
+    _write_composite(bar_dir, Horizon.M5, [(0, 50), (0, 10), (5, 50)])
+
+    frame = ParquetArchiver(bar_dir).read_day("A05608", Horizon.M5, _DAY)
+    assert frame is not None and frame.height == 2  # 행 수로는 아무 흔적이 없다
+
+    findings = analyze_horizon_consistency(bar_dir, "A05608", _DAY)
+    assert len(findings) == 1
+    assert "5m 거래량 합 60 ≠ 1분봉 합 100" in findings[0]
+
+
+def test_horizon_findings_become_breaches(tmp_path: Path):
+    bar_dir = tmp_path / "bars"
+    _write_bars(bar_dir, list(range(10)))
+    _write_composite(bar_dir, Horizon.M5, [(0, 50), (5, 40)])
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.horizon_findings
+    assert any("1분봉 합" in breach for breach in report.breaches)
+    assert "Horizon 정합" in format_summary(report)
+
+
+# ------------------------------------------------- 시계 스큐 (2026-08-05 신설)
+
+
+def test_clock_skew_is_collected_from_logs_and_breaches_when_large(tmp_path: Path):
+    """2026-08-04 실측값(+9.72초)이 그날 리포트에 아무 흔적도 안 남겼다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {
+                "ts": "2026-07-29T08:45:10+09:00",
+                "level": "ERROR",
+                "tag": "ClockSkewExceeded",
+                "skew_seconds": 9.72,
+            },
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.clock_skew_seconds == 9.72
+    assert any("거래소 시각 − 로컬 시계" in breach for breach in report.breaches)
+    assert "+9.72초" in format_summary(report)
+
+
+def test_small_clock_skew_is_recorded_without_a_breach(tmp_path: Path):
+    """2026-08-05 w32time 복구 후의 정상 상태 — 값은 남기되 경보는 안 한다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {
+                "ts": "2026-07-29T08:45:10+09:00",
+                "level": "INFO",
+                "tag": "ClockSkewMeasured",
+                "skew_seconds": -0.02,
+            },
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.clock_skew_seconds == -0.02
+    assert report.breaches == []
+
+
+def test_unmeasured_clock_skew_is_none_not_zero(tmp_path: Path):
+    """못 잰 것과 0초는 다르다(L18) — 스큐 로그가 없는 날."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.clock_skew_seconds is None
+    assert "미측정" in format_summary(report)
+
+
+def test_session_git_sha_is_recorded_as_a_fact_not_a_breach(tmp_path: Path):
+    """2026-08-04엔 수집 프로세스가 08:35에 뜬 옛 커밋으로 하루를 돌았고, 그 사이 12건이
+    커밋됐다(WS 프레임 절반 유실 수정 포함). 사후 조사에 반드시 필요한 사실이라 기록하되,
+    연구 커밋이 잦은 이 프로젝트에서 매일 울리면 늑대소년이 되므로 판정은 하지 않는다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {
+                "ts": "2026-07-29T08:35:10+09:00",
+                "level": "INFO",
+                "tag": "SessionStart",
+                "git_sha": "d5e6b01",
+            }
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.session_git_shas == ["d5e6b01"]
+    assert report.breaches == []
+    assert "수집 커밋: d5e6b01" in format_summary(report)

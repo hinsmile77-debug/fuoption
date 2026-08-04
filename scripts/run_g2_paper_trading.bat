@@ -33,8 +33,13 @@ if not exist ".venv\Scripts\python.exe" (
 
 REM cmd.exe has no built-in tee, so route through PowerShell to show output live in this
 REM console AND append it to the log file (same pattern as run_l1_daily.bat).
+REM
+REM The stderr merge (2>&1) is done by cmd /c, NOT by PowerShell - see run_l1_daily.bat for
+REM the full reasoning (PS 5.1 wraps a native command's first stderr line in a
+REM NativeCommandError block, which mangled the crash_forensics arming marker every day and
+REM produced a false "recurred" verdict on 2026-08-04).
 powershell -NoProfile -Command ^
-    "& '.venv\Scripts\python.exe' 'scripts\run_g2_paper_trading.py' 2>&1 | ForEach-Object { $_ | Out-File -FilePath '%LOGFILE%' -Append -Encoding utf8; $_ }; exit $LASTEXITCODE"
+    "& cmd /c '.venv\Scripts\python.exe -u scripts\run_g2_paper_trading.py 2>&1' | ForEach-Object { $_ | Out-File -FilePath '%LOGFILE%' -Append -Encoding utf8; $_ }; exit $LASTEXITCODE"
 set EXITCODE=%ERRORLEVEL%
 
 if not %EXITCODE%==0 (

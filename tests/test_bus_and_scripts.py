@@ -194,3 +194,59 @@ def test_collect_log_alerts_scopes_to_last_session_start_per_file(tmp_path: Path
     joined = "\n".join(out)
     assert "AfterRestart" in joined
     assert "BeforeRestart" not in joined  # 재시작 이전 경보는 이번 세션 집계에서 제외(L24)
+
+
+# ---------------------------------------------------------------- 시간 동기 (2026-08-05)
+
+
+def test_check_clock_fails_when_the_offset_is_large():
+    """2026-08-04 회귀 — 이 PC의 시계가 실제보다 14.41초 느린 채로 8거래일을 돌았는데
+    `check_timezone`은 매일 `[OK]`였다(그건 UTC 오프셋이 9시간인지만 봤다).
+
+    SYSTEM.md §4-6은 기동 자가 점검에 "시간 동기"를 요구하고 실패 시 거래를 거부하라고
+    적혀 있다 — 그 요건이 이제 실제로 측정된다.
+    """
+    result = sc.check_clock(offset_reader=lambda: (14.41, ""), service_reader=lambda: True)
+
+    assert result.ok is False
+    assert "기동 거부" in result.detail
+    assert "+14.410s" in result.detail
+
+
+def test_check_clock_warns_but_passes_in_the_grey_zone():
+    """완성봉 유예 500ms보다는 크지만 거래를 막을 정도는 아닌 구간."""
+    result = sc.check_clock(offset_reader=lambda: (3.0, ""), service_reader=lambda: True)
+
+    assert result.ok is True
+    assert "경고" in result.detail
+
+
+def test_check_clock_passes_on_a_synced_clock():
+    """2026-08-05 w32time 복구 후 실측(오프셋 0.0006초)."""
+    result = sc.check_clock(offset_reader=lambda: (-0.0006, ""), service_reader=lambda: True)
+
+    assert result.ok is True
+    assert "경고" not in result.detail
+    assert "w32time=Running" in result.detail
+
+
+def test_check_clock_flags_a_stopped_time_service():
+    """근본 원인이었던 상태 — 서비스가 `Stopped`/`Manual`이라 부팅해도 동기가 안 됐다.
+    오프셋을 못 재도 이건 확실한 결함이므로 반드시 화면에 남는다."""
+    result = sc.check_clock(
+        offset_reader=lambda: (None, "측정 실패(오프라인)"), service_reader=lambda: False
+    )
+
+    assert "w32time=Stopped" in result.detail
+    assert "측정 실패" in result.detail
+
+
+def test_check_clock_does_not_block_startup_when_it_cannot_measure():
+    """오프라인·차단 망에서 수집조차 못 하게 만드는 것은 과하다 — 사실만 남기고 통과."""
+    result = sc.check_clock(
+        offset_reader=lambda: (None, "측정 실패(응답에 오프셋 없음)"),
+        service_reader=lambda: True,
+    )
+
+    assert result.ok is True
+    assert "측정 실패" in result.detail

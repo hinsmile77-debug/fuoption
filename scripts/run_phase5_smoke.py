@@ -255,9 +255,17 @@ async def main(args: argparse.Namespace) -> None:
         champion_returns=champion_returns,
         n_shadow_bundles=len(shadows),
     )
+
+    # 손익 4지표는 `pnl_measurable=False`면 None이다(2026-08-05) — 이 스모크는 결선 상태
+    # (`wiring`)를 안 넘기므로 정상적으로 None이 나온다. 0.0으로 찍어 성적처럼 보이게
+    # 하느니 "미측정"이라고 적는다(`core/messages.py` SelfEvalReport docstring).
+    def _fmt(value: float | None, spec: str) -> str:
+        return "미측정" if value is None else format(value, spec)
+
     print(
-        f"SelfEvalReport: sharpe={report.sharpe:.2f} pf={report.profit_factor:.2f} "
-        f"win_rate={report.win_rate:.0%} mdd={report.max_drawdown:.1%}"
+        f"SelfEvalReport: sharpe={_fmt(report.sharpe, '.2f')} "
+        f"pf={_fmt(report.profit_factor, '.2f')} "
+        f"win_rate={_fmt(report.win_rate, '.0%')} mdd={_fmt(report.max_drawdown, '.1%')}"
     )
     demo_returns = [f.net_return_ticks for f in demo_ledger.fills if f.net_return_ticks is not None]
     for record in shadows:

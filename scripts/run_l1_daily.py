@@ -584,7 +584,20 @@ async def _daily_close(
     rest: _RestCollection | None = None,
     tick_archiver: TickArchiver | None = None,
 ) -> None:
-    await collector.flush_final_bar()
+    # 마지막 1분봉은 **버스를 통해서만** 합성기에 도달한다(아키텍처 불변 원칙 2 — 직접
+    # 함수 호출 금지). 발행과 구독자 콜백 사이에는 순서 보장이 없으므로, 곧바로
+    # `flush_all_final()`을 부르면 그 봉이 상위 Horizon 전부에서 빠진다 — 2026-08-04에
+    # 실제로 그랬다(15:34봉 137계약이 1분봉엔 있고 3/5/10/15/30분봉엔 없음). 경합을
+    # 우회하지 않고 **관측 가능한 대기**로 바꾼다. 실패해도 종료는 계속하되 ERROR로 남긴다.
+    final_bar = await collector.flush_final_bar()
+    if final_bar is not None and not await composer.wait_for_bar(final_bar.bar_open_kst):
+        mlog.log(
+            "DailyCloseBarNotDrained",
+            f"마지막 1분봉({final_bar.bar_open_kst:%H:%M})이 합성기에 도달하지 않음 — "
+            "그 분은 상위 Horizon 합성봉에서 빠진다(1분봉 아카이브에는 남음)",
+            symbol=final_bar.symbol,
+            bar_open_kst=final_bar.bar_open_kst.isoformat(),
+        )
     await composer.flush_all_final()
     # 틱 아카이버도 버퍼링한다(하루 5~10만행이라 매 틱 재작성하면 O(n²)) — 남은 버퍼를
     # 확정하고, **그날 실제로 몇 행이 나갔는지 로그에 남긴다.** 결선만 하고 0행으로 하루가
@@ -609,8 +622,18 @@ async def main(cfg: InstanceConfig) -> None:
     # 네이티브 크래시 덤프 무장 (2026-08-03) — 이 프로세스도 polars로 Parquet을 읽고 쓴다
     # (`data/archiver.py`). UI에서 5거래일 연속 터진 access violation이 여기서 나면 지금까지는
     # 로그에 한 줄도 안 남고 수집이 통째로 사라졌을 것이다(`core/crash_forensics.py`).
-    crash_forensics.enable(tag="l1_daily")
+    forensics_target = crash_forensics.enable(tag="l1_daily")
     mlog.setup(cfg.instance_id)
+    # 무장 사실을 **구조화 로그로도** 남긴다 (2026-08-05) — stderr 마커 하나에만 의존하면
+    # 호스트(PowerShell)가 그 줄에 접두사를 붙이는 것만으로 탐지가 깨진다. 실제로 08-04에
+    # 그렇게 깨져 "수정이 안 들었다"는 ERROR 오탐이 났다(`ops/crash_dumps.py`).
+    mlog.log(
+        "CrashForensicsArmed",
+        f"네이티브 크래시 덤프 무장 — 대상 {forensics_target}",
+        process="l1_daily",
+        target=forensics_target,
+        armed=crash_forensics.is_armed(),
+    )
 
     today = now_kst().date()
     if not EventCalendar.from_file().is_trading_day(today):
@@ -640,7 +663,14 @@ async def main(cfg: InstanceConfig) -> None:
         archiver=archiver,
         bus=bus,
     )
-    composer = MultiHorizonBarComposer(symbol=symbol, archiver=archiver, bus=bus)
+    composer = MultiHorizonBarComposer(
+        symbol=symbol,
+        archiver=archiver,
+        bus=bus,
+        # 상위 Horizon 경계 판정을 로컬 시계가 아니라 **거래소 시각**으로 하기 위한 배선
+        # (2026-08-05) — 수집기가 매 프레임 재는 값을 그대로 본다.
+        clock_skew_seconds=collector.clock_skew_seconds,
+    )
     engine = FeatureEngine(symbol, bus, feature_set=cfg.feature_set)
     # 체결틱 원본 적재 (2026-08-04, F2). 지금까지 이 프로젝트는 틱을 한 번도 저장한 적이
     # 없다 — 받아서 분봉으로 집계하고 버렸다. 그래서 MS(마이크로구조) 30개가 통째로

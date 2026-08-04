@@ -46,7 +46,24 @@ _THREAD_HEADER = re.compile(r"^(?P<which>Current thread|Thread) 0x[0-9a-fA-F]+ \
 _FRAME = re.compile(r'^\s+File "(?P<file>.+)", line (?P<line>\d+) in (?P<func>.+)$')
 
 # `core/crash_forensics.py`가 무장 직후 남기는 ASCII 마커.
-_ARMED_MARKER = re.compile(r"^\[crash_forensics\] armed tag=(?P<tag>\S+) target=(?P<target>.+)$")
+#
+# **줄 처음에 고정(`^`)하지 않는다** (2026-08-05). 종전엔 `^...$` 앵커 매치였는데,
+# `.bat`가 stderr를 PowerShell 파이프라인(`2>&1 | ForEach-Object`)에 태우면 PS 5.1이
+# 네이티브 exe의 stderr **첫 줄**을 NativeCommandError로 감싸 `python.exe : ` 접두사를
+# 붙인다. 마커는 프로세스가 내는 첫 stderr 줄이라 정확히 그 자리에 걸렸다:
+#
+#     python.exe : [crash_forensics] armed tag=l1_daily target=stderr
+#
+# 그래서 2026-08-04에 l1_daily·g2_paper 둘 다 "무장 마커 없음"으로 잡혔고,
+# `crash-forensics-armed` 등록부가 **`재발`(ERROR)** 로 오탐을 냈다 — 무장은 되어 있었다.
+# `.bat` 쪽도 고쳤지만(호스트가 stderr를 안 건드리게), 탐지기가 호스트 접두사 하나에
+# 깨지는 것 자체가 결함이라 여기도 함께 느슨하게 만든다.
+_ARMED_MARKER = re.compile(r"\[crash_forensics\] armed tag=(?P<tag>\S+) target=(?P<target>.+)$")
+
+# 무장 사실의 **두 번째 출처** — 구조화 JSON 로그(`core/logging.py`). stderr 마커가 호스트
+# 포맷팅에 오염돼도 이건 stdout의 JSON 한 줄이라 안 깨진다. 검출 수단이 하나뿐이면 그
+# 수단이 못 보는 결함은 안 보인다(2026-08-04 피처 관문이 `px_macd_h_5`에서 배운 것과 동일).
+_ARMED_JSON = re.compile(r'"tag":\s*"CrashForensicsArmed"')
 
 
 @dataclass
@@ -160,7 +177,10 @@ def collect_crash_forensics(
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8-sig", errors="replace")
-        armed[process] = any(_ARMED_MARKER.match(line.strip()) for line in text.splitlines())
+        # 두 출처 중 하나만 있어도 무장으로 본다 — 둘 다 없어야 진짜 "증거를 안 남기는 세션"이다.
+        armed[process] = bool(_ARMED_JSON.search(text)) or any(
+            _ARMED_MARKER.search(line.strip()) for line in text.splitlines()
+        )
         dumps.extend(parse_dumps(process, text))
 
     for process, is_armed in sorted(armed.items()):

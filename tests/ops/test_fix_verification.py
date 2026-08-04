@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from messiah.ops.fix_verification import (
+    METRIC_EXTRACTORS,
     RegistryError,
     VerificationStatus,
     evaluate,
@@ -247,3 +248,59 @@ def test_run_wires_registry_and_reports_together(tmp_path: Path):
     verdicts = run(today=date(2026, 8, 5), registry_path=registry_path, log_dir=tmp_path)
 
     assert verdicts[0].status == VerificationStatus.RECURRED
+
+
+# ------------------------------------ 좁은 지표 (2026-08-05 — 넓은 그물이 낸 오탐 두 건)
+
+
+def test_crash_forensics_unarmed_counts_only_unarmed_processes():
+    """`breaches`로 채점하던 것을 좁힌 이유 — 무장과 무관한 사고가 이 수정을 "재발"로 만들었다.
+
+    2026-08-04에 두 번 그랬다: ① PowerShell이 마커 줄에 접두사를 붙여 탐지가 깨졌고(ERROR),
+    ② 그걸 고친 뒤엔 체결틱 0행(그날 결선 전이라 정상)이 breaches를 채워 또 ERROR가 났다.
+    두 번 다 무장 자체는 정상이었다.
+    """
+    extract = METRIC_EXTRACTORS["crash_forensics_unarmed"]
+
+    all_armed = {"crash_forensics": {"armed": {"ui": True, "l1_daily": True, "g2_paper": True}}}
+    assert extract(all_armed) == 0.0
+
+    one_missing = {"crash_forensics": {"armed": {"ui": True, "l1_daily": False}}}
+    assert extract(one_missing) == 1.0
+
+    # 무장은 멀쩡한데 다른 사고가 있는 날 — 이제 이 지표는 반응하지 않는다.
+    noisy = {**all_armed, "breaches": ["체결틱 적재 0행", "1분봉 결손 9분"]}
+    assert extract(noisy) == 0.0
+
+
+def test_native_crashes_measurable_separates_zero_from_uncountable():
+    """2026-08-04 회귀 — **크래시가 0건인 날에만** 집계가 실패했다.
+
+    그 상태로는 `native_crashes ≤ 0`을 보는 등록부가 매일 "판정 불가"라 영원히 안 끝난다.
+    이 지표는 "셀 수 있었는가" 자체를 min 기준으로 재서 그 상태를 직접 잡는다.
+    """
+    extract = METRIC_EXTRACTORS["native_crashes_measurable"]
+
+    counted = {"native_crashes": {"supported": True, "available": True, "count": 0}}
+    assert extract(counted) == 1.0
+
+    failed = {"native_crashes": {"supported": True, "available": False, "count": 0}}
+    assert extract(failed) == 0.0
+
+    # 비Windows는 원래 못 센다 — 판정 대상이 아니다(매일 울리면 늑대소년).
+    unsupported = {"native_crashes": {"supported": False, "available": False, "count": 0}}
+    assert extract(unsupported) is None
+
+    # `supported` 키가 없는 옛 리포트(08-04 이전 산출분)도 판정하지 않는다.
+    legacy = {"native_crashes": {"available": True, "count": 2}}
+    assert extract(legacy) is None
+
+
+def test_clock_skew_metric_is_absolute_and_none_when_unmeasured():
+    """부호가 아니라 크기가 판정 대상이다 — 어느 쪽으로 벌어져도 완성봉 경계가 깨진다."""
+    extract = METRIC_EXTRACTORS["clock_skew_abs_seconds"]
+
+    assert extract({"clock_skew_seconds": 9.72}) == 9.72
+    assert extract({"clock_skew_seconds": -3.0}) == 3.0
+    assert extract({"clock_skew_seconds": None}) is None
+    assert extract({}) is None

@@ -1,5 +1,6 @@
 from messiah.core.messages import Fill, OrderAck, OrderKind, OrderRequest, Side
 from messiah.models.self_evaluation import reconcile_slippage, run_self_evaluation
+from messiah.models.wiring_completeness import WiringCompleteness
 from messiah.risk.cost_model import CostModel, CostModelConfig
 
 
@@ -77,28 +78,60 @@ def test_reconcile_slippage_empty_inputs():
 # ---------------------------------------------------------------- run_self_evaluation
 
 
+def _measurable() -> WiringCompleteness:
+    """손익을 측정해도 되는 결선 상태 — 이 값이 있어야 4지표가 숫자로 나온다(2026-08-05)."""
+    return WiringCompleteness(
+        live_bundles=["5m@v1"], n_decisions=5, n_orders=3, fills_countable=True
+    )
+
+
 def test_run_self_evaluation_aggregates_metrics():
     report = run_self_evaluation(
         date="2026-07-27",
         symbol="TEST",
         champion_returns=[0.01, -0.005, 0.02, -0.002],
         n_shadow_bundles=2,
+        wiring=_measurable(),
     )
     assert report.date == "2026-07-27"
     assert report.symbol == "TEST"
     assert report.n_return_samples == 4
-    assert 0.0 <= report.win_rate <= 1.0
+    assert report.win_rate is not None and 0.0 <= report.win_rate <= 1.0
     assert report.n_shadow_bundles == 2
 
 
 def test_run_self_evaluation_with_no_trades_is_degenerate_but_safe():
+    """표본이 없어도 죽지 않는다 — 다만 결선이 됐다고 주장한 경우엔 0.0이 정직한 값이다."""
     report = run_self_evaluation(
-        date="2026-07-27", symbol="TEST", champion_returns=[], n_shadow_bundles=0
+        date="2026-07-27",
+        symbol="TEST",
+        champion_returns=[],
+        n_shadow_bundles=0,
+        wiring=_measurable(),
     )
     assert report.n_return_samples == 0
     assert report.sharpe == 0.0
     assert report.win_rate == 0.0
     assert report.profit_factor == 0.0
+
+
+def test_pnl_metrics_are_none_when_not_measurable():
+    """2026-07-29~08-04 회귀 — 5거래일 연속 `sharpe=0.0`이 JSON에 남았고 "성적 0"으로
+    읽혔다. 실제로는 `live 번들 결선: []`, 모델이 하나도 안 붙은 채 파이프라인만 돈 것이다.
+
+    `pnl_measurable` 플래그를 08-03에 넣고도 오독이 계속됐다 — 플래그는 같이 안 읽히면
+    소용이 없다. `n_fills`·`slippage_realized_ticks`에서 이미 두 번 쓴 해법(모르는 것은
+    None)을 손익 4지표에도 적용한다."""
+    report = run_self_evaluation(
+        date="2026-08-04", symbol="A05608", champion_returns=[0.0] * 5, n_shadow_bundles=0
+    )
+
+    assert report.pnl_measurable is False
+    assert report.n_return_samples == 5  # 표본 수는 사실이므로 그대로 남는다
+    assert report.win_rate is None
+    assert report.profit_factor is None
+    assert report.sharpe is None
+    assert report.max_drawdown is None
 
 
 def test_fill_count_is_none_when_it_was_never_measured():

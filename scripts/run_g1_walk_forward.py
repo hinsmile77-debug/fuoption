@@ -44,6 +44,7 @@ from messiah.core.messages import Horizon  # noqa: E402
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.models.validator import Validator  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 from messiah.strategy.regime.service import RegimeAI  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
@@ -96,11 +97,13 @@ def _parse_args() -> argparse.Namespace:
         "'항상 UNKNOWN(가중치 0.5 고정)'이라는 특정 가정이다.",
     )
     p.add_argument("--out", default=None, help="결과 JSON 저장 경로")
+    session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
 
 async def main() -> int:
     args = _parse_args()
+    session_guard.refuse_if_regular_session("G1 워크포워드", force=args.force_intraday)
     archiver = ParquetArchiver(Path(args.base_dir))
 
     end = args.end

@@ -62,6 +62,7 @@ from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.models.threshold_report import ThresholdReport  # noqa: E402
 from messiah.models.trainer import build_feature_vectors, train_formal_expert  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 from messiah.strategy.decision.meta_decision import MetaDecisionEngine  # noqa: E402
 from messiah.strategy.futures.aggregator import Aggregator  # noqa: E402
 from messiah.strategy.futures.meta_labeler import (  # noqa: E402
@@ -135,6 +136,7 @@ def _parse_args() -> argparse.Namespace:
         help="임계값 후보가 남겨야 할 최소 신호 비율(0이면 하한 없음 — 종전 동작)",
     )
     p.add_argument("--out", default="logs/model_sweep_20260804.json")
+    session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
 
@@ -261,6 +263,7 @@ def _report_regime_axis(rows: list[SweepRow]) -> None:
 
 async def main() -> int:
     args = _parse_args()
+    session_guard.refuse_if_regular_session("모델 스윕", force=args.force_intraday)
     archiver = ParquetArchiver(Path(args.base_dir))
     start = datetime.strptime(args.start, "%Y-%m-%d").date()  # noqa: DTZ007
     end = datetime.strptime(args.end, "%Y-%m-%d").date()  # noqa: DTZ007

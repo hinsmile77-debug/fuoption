@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -63,6 +64,113 @@ def check_timezone() -> CheckResult:
         and k.utcoffset().total_seconds() == 9 * 3600
     )
     return CheckResult("timezone", ok, f"kst={k.isoformat(timespec='seconds')}")
+
+
+# 이 값을 넘으면 기동을 거부한다 (SYSTEM.md §4-6 "시간 동기 실패 시 거래 거부").
+# 2026-08-05 실측: NTP 동기 직후 오프셋 0.0006초. 5초는 그보다 3자릿수 넉넉한 미검증
+# 초기값이고, 이만큼 어긋나면 `EventCalendar.minutes_to_close` 기반 마감 전 청산·세션
+# 게이트가 전부 그만큼 늦게 걸린다.
+CLOCK_OFFSET_FAIL_SECONDS = 5.0
+# 넘으면 경고만 — 완성봉 유예 500ms가 무의미해지기 시작하는 지점
+# (`ops/clock_skew.py` WARN_THRESHOLD_SECONDS와 같은 값).
+CLOCK_OFFSET_WARN_SECONDS = 2.0
+
+
+def _ntp_offset_seconds(runner=subprocess.run) -> tuple[float | None, str]:
+    """`w32tm /stripchart` 1샘플로 로컬 시계와 기준 시각의 차이를 잰다. (오프셋, 설명).
+
+    측정 못 하면 `None`이다 — **0초와 구분한다**(L18). 오프라인이거나 방화벽에 막힌 PC를
+    "시계가 정확하다"고 통과시키면, 이 검사가 있다는 사실 자체가 거짓 안심이 된다.
+
+    출력은 로케일 언어라(한글 Windows면 한국어) 문장은 안 읽고 `+00.0005732s` 형태의
+    **숫자 토큰만** 정규식으로 뽑는다 — `ops/integrity_report.py`가 이벤트로그에서 로케일
+    문자열을 피해 `Properties` 배열을 직접 읽는 것과 같은 이유다.
+    """
+    if sys.platform != "win32":
+        return None, "Windows 전용 측정 — 건너뜀"
+    try:
+        result = runner(
+            [
+                "w32tm",
+                "/stripchart",
+                "/computer:time.windows.com",
+                "/samples:1",
+                "/dataonly",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001 — 못 재는 것과 0초는 다르다
+        return None, f"측정 실패({e.__class__.__name__})"
+
+    matches = re.findall(r"([+-]\d+\.\d+)s", result.stdout or "")
+    if not matches:
+        return None, "측정 실패(응답에 오프셋 없음 — 오프라인/차단 가능)"
+    return float(matches[-1]), ""
+
+
+def _w32time_running(runner=subprocess.run) -> bool | None:
+    """Windows Time 서비스가 돌고 있나. None은 확인 불가(비Windows 등)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        result = runner(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-Service w32time).Status.ToString()",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return "Running" in (result.stdout or "")
+
+
+def check_clock(
+    *, offset_reader=_ntp_offset_seconds, service_reader=_w32time_running
+) -> CheckResult:
+    """시간 동기 — SYSTEM.md §4-6이 기동 자가 점검에 요구하는 항목 (2026-08-05 신설).
+
+    ## 왜 `check_timezone`으로는 부족했나
+
+    그 검사는 **UTC 오프셋이 9시간인지만** 봤다. 2026-08-04 로그를 되짚어 보니 이 PC의
+    시계는 실제 시각보다 **14.41초 느렸고**(외부 기준 `w32tm /stripchart` 실측), 하루
+    4~5초씩 더 느려지고 있었다 — Windows Time 서비스가 `Stopped`/`Manual`이라 부팅해도
+    안 켜졌기 때문이다. 그 14초 동안 `check_timezone`은 8거래일 내내 `[OK]`였다.
+
+    측정 못 한 경우를 통과시키는 이유: 이 검사의 실패는 **거래 거부**다. 오프라인 PC나
+    NTP가 막힌 망에서 수집조차 못 하게 만드는 것은 과하다 — 대신 그 사실을 detail에 남기고,
+    서비스가 멈춰 있으면 그건 측정과 무관하게 확실한 결함이므로 경고한다.
+    """
+    running = service_reader()
+    offset, note = offset_reader()
+
+    parts: list[str] = []
+    if offset is not None:
+        parts.append(f"offset={offset:+.3f}s")
+    else:
+        parts.append(note or "offset=측정 불가")
+    if running is False:
+        parts.append("w32time=Stopped(자동 동기 없음 — 시계가 하루 4~5초씩 밀린다)")
+    elif running is True:
+        parts.append("w32time=Running")
+
+    if offset is not None and abs(offset) > CLOCK_OFFSET_FAIL_SECONDS:
+        parts.append(f"임계 {CLOCK_OFFSET_FAIL_SECONDS:.0f}초 초과 — 기동 거부")
+        return CheckResult("clock", False, " · ".join(parts))
+    if offset is not None and abs(offset) > CLOCK_OFFSET_WARN_SECONDS:
+        parts.append(f"경고: 완성봉 유예 500ms보다 큼(임계 {CLOCK_OFFSET_WARN_SECONDS:.0f}초)")
+    return CheckResult("clock", True, " · ".join(parts))
 
 
 def check_git_state(mode: str) -> CheckResult:
@@ -160,6 +268,7 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     results.append(cfg_result)
     results.append(check_schema())
     results.append(check_timezone())
+    results.append(check_clock())
     if cfg is not None:
         results.append(check_git_state(cfg.mode))
         results.append(check_secrets(cfg))

@@ -47,6 +47,7 @@ from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
 
@@ -105,11 +106,13 @@ def _parse_args() -> argparse.Namespace:
         help="통합본이 이미 있는 날은 건너뛴다(중단 후 재개용). 기본은 전부 덮어쓴다 — "
         "오염된 수집분을 갈아끼우는 것이 이 스크립트의 목적이기 때문.",
     )
+    session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    session_guard.refuse_if_regular_session("백필", force=args.force_intraday)
     today = now_kst().date()
     end = args.end or (today - timedelta(days=1))
 

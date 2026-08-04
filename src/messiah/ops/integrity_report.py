@@ -74,6 +74,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # ≈ 하루 5~10만행, 부하 테스트도 5만행 기준). "적게 쌓였다"가 아니라 **"결선이 끊겼다"**
     # 를 잡는 값이라 일부러 낮게 뒀다 — 거래가 아무리 한산해도 정규장 405분에 1,000틱은 넘는다.
     "min_tick_rows": 1000.0,
+    # 거래소 시각과 로컬 시계의 어긋남 (2026-08-05, `ops/clock_skew.py`). |값|이 이걸 넘으면
+    # 완성봉 규율의 500ms 유예가 의미를 잃는다. 2026-08-04 실측은 9.72초였다.
+    "clock_skew_seconds": 2.0,
 }
 
 
@@ -93,6 +96,10 @@ class NativeCrashes:
     available: bool
     count: int
     details: list[str] = field(default_factory=list)
+    # 이 플랫폼에서 **집계가 원래 가능한가** (2026-08-05 분리). `available`만으로는
+    # "리눅스라 원래 못 센다"와 "Windows인데 질의가 실패했다"가 구분되지 않아, 후자를
+    # breach로 올릴 수가 없었다. 실제로 2026-08-04에 후자가 났는데 조용히 지나갔다.
+    supported: bool = True
 
 
 @dataclass
@@ -114,6 +121,17 @@ class IntegrityReport:
     tag_counts: dict[str, int]
     circuit_breaker_events: dict[str, int]
     data_flow_findings: list[str]
+    # 1분봉 ↔ 상위 Horizon 합성봉의 거래량 총합 항등식 위반 (2026-08-05).
+    # 외부 기준이 필요 없는 **내부 정합성** 검사라 매일 자동으로 돈다
+    # (`analyze_horizon_consistency` docstring — 2026-08-04 유실을 당일 잡았을 검사).
+    horizon_findings: list[str]
+    # 그날 거래소 시각 − 로컬 시계(초). None은 못 쟀다는 뜻 — 0초와 구분한다(L18).
+    clock_skew_seconds: float | None
+    # 그날 프로세스가 실제로 돌던 커밋. 지금 HEAD와 다르면 그 수집분은 **그 시점 코드의
+    # 산물**이라는 사실이 사후 조사에 필요하다 — 2026-08-04가 정확히 그 경우였다(WS 프레임
+    # 절반 유실 수정이 12:22에 들어갔는데 수집 프로세스는 08:35에 뜬 옛 코드로 하루를 돌았다).
+    # 판정(breach)은 하지 않는다: 연구 커밋이 잦은 이 프로젝트에서 매일 울리면 늑대소년이 된다.
+    session_git_shas: list[str]
     flat_price_minutes: int
     pre_open_minutes: int
     market_findings: list[str]
@@ -194,6 +212,58 @@ def _horizon_minutes(horizon: Horizon) -> int:
     return int(horizon.value.rstrip("m"))
 
 
+# ---------------------------------------------------------------- Horizon 총합 항등식
+
+
+def analyze_horizon_consistency(bar_dir: Path, symbol: str, day: date) -> list[str]:
+    """1분봉과 상위 Horizon 합성봉이 **같은 거래량 총합**을 갖는지 — 정의상 성립해야 한다.
+
+    ## 왜 이 검사가 필요했나 (2026-08-04)
+
+    그날 1분봉 합계는 84,346인데 3/5/10/15/30분봉이 전부 84,209였다. 차이 137은 정확히
+    **15:34봉 하나의 거래량**이다 — 종료 시퀀스에서 마지막 1분봉이 버스 구독자(합성기)에
+    도달하기 전에 `flush_all_final()`이 먼저 돌아, 그 분이 상위 Horizon 전부에서 빠졌다.
+
+    그날 무결성 리포트는 "1분봉 410개, 결손 0분, CRITICAL 0 · ERROR 0 · WARNING 0"이었다.
+    **리포트가 보는 축이 1분봉 연속성 하나뿐이라 이 유실을 볼 수단이 아예 없었다.**
+
+    이 검사는 외부 기준이 필요 없다 — 상위 봉은 1분봉의 합이라는 것이 `compose_offline`의
+    정의이므로, 어긋나면 반드시 어딘가 결함이다. 그래서 매일 자동으로 돌 수 있다.
+
+    잡히는 것이 둘 더 있다.
+
+    - 1분봉만 백필로 교체하고 상위 Horizon을 재합성하지 않은 상태(`scripts/run_recompose.py`
+      모듈 docstring의 "1분봉은 거래소 공식값인데 5분봉은 옛 수집값").
+    - 늦게 온 1분봉이 확정된 버킷을 다시 열어 **같은 시각의 합성봉이 덮어쓰인** 상태.
+      `ParquetArchiver`가 `(bar_open_kst, horizon)`으로 `unique(keep="last")` 하므로
+      행 수로는 아무 흔적이 없고(중복 행이 안 남는다), 오직 거래량 총합만 줄어든다.
+      그래서 이 검사가 **행 수가 아니라 총합**을 보는 것이 중요하다.
+
+    1분봉이 없는 날은 판정하지 않는다(빈 목록) — 그건 이 검사가 아니라 봉 연속성의 몫이다.
+    """
+    m1 = _load_day_frame(bar_dir, symbol, Horizon.M1, day)
+    if m1 is None or m1.height == 0:
+        return []
+    m1_volume = int(m1["volume"].sum())
+
+    findings: list[str] = []
+    for horizon in Horizon:
+        if horizon is Horizon.M1:
+            continue
+        frame = _load_day_frame(bar_dir, symbol, horizon, day)
+        if frame is None or frame.height == 0:
+            continue
+        volume = int(frame["volume"].sum())
+        if volume != m1_volume:
+            diff = m1_volume - volume
+            findings.append(
+                f"{horizon.value} 거래량 합 {volume:,} ≠ 1분봉 합 {m1_volume:,} "
+                f"(차이 {diff:+,}) — 상위 Horizon은 1분봉의 합이어야 한다"
+                f"{'; 마지막 봉 유실 또는 재합성 누락 의심' if diff > 0 else ''}"
+            )
+    return findings
+
+
 # ---------------------------------------------------------------- 로그 집계
 
 
@@ -217,6 +287,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     level_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
     session_starts: list[str] = []
+    session_git_shas: list[str] = []
+    clock_skews: list[float] = []
     nan_by_horizon: dict[str, list[float]] = {}
     cb_events: dict[str, int] = {}
 
@@ -228,6 +300,13 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
 
         if tag == "SessionStart":
             session_starts.append(str(record.get("ts", ""))[11:19])
+            sha = record.get("git_sha")
+            if isinstance(sha, str) and sha:
+                session_git_shas.append(sha)
+        elif tag in ("ClockSkewMeasured", "ClockSkewExceeded"):
+            skew = record.get("skew_seconds")
+            if isinstance(skew, (int, float)):
+                clock_skews.append(float(skew))
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -249,6 +328,10 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "level_counts": level_counts,
         "tag_counts": tag_counts,
         "session_starts": session_starts,
+        "session_git_shas": sorted(set(session_git_shas)),
+        # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
+        # 상태가 판정 기준이다(그 시간대의 봉은 이미 그 스큐로 만들어졌다).
+        "clock_skew_seconds": (max(clock_skews, key=abs) if clock_skews else None),
         "nan_ratio_by_horizon": nan_summary,
         "circuit_breaker_events": cb_events,
     }
@@ -409,9 +492,27 @@ def _collect_native_crashes(
 
     좁힌 뒤에도 **못 세는 것과 0건은 계속 구분한다**(`available=False`, L18) — 이 사고의
     유일한 흔적이 이 집계였으므로 "못 셌다"는 사실 자체가 중요하다.
+
+    ## 크래시가 0건인 날에만 집계가 실패했다 (2026-08-05 수정)
+
+    종전 스크립트는 `-ErrorAction SilentlyContinue`를 걸고 파이썬이 `returncode != 0`을
+    실패로 판정했다. 그런데 **`-ErrorAction SilentlyContinue`는 오류 출력만 막고 종료 코드는
+    못 막는다** — 창 안에 `Application Error` 이벤트가 하나도 없으면 `Get-WinEvent`가
+    "일치하는 이벤트 없음"이라는 비종료 오류를 내고 powershell.exe가 1로 끝난다.
+
+    결과는 정확히 거꾸로였다: 크래시가 난 날(07-29·30·31·08-03)은 집계가 성공했고,
+    **크래시가 0건인 첫 날(08-04)이 "집계 실패"로 보고됐다.** UI 크래시 격리 수정이 처음
+    성공한 그 날 성공을 증명할 수치가 사라졌고, "3거래일 연속 `native_crashes` 0건"을
+    조건으로 건 등록부는 그 상태로는 **영원히 판정을 못 채운다**.
+
+    이제 스크립트가 **항상 0으로 끝나고** 첫 줄에 `OK <건수>` 또는 `ERR <예외형>`을 찍는다.
+    "이벤트 없음"은 로케일 문자열이 아니라 `FullyQualifiedErrorId`(`NoMatchingEventsFound*`,
+    번역되지 않는다)로 식별한다 — 한글 Windows에서 메시지 매칭은 안 통한다.
     """
     if sys.platform != "win32":
-        return NativeCrashes(available=False, count=0, details=["Windows 전용 집계 — 건너뜀"])
+        return NativeCrashes(
+            available=False, count=0, details=["Windows 전용 집계 — 건너뜀"], supported=False
+        )
 
     start = datetime.combine(day, datetime.min.time())
     if since is not None and since > start:
@@ -430,16 +531,23 @@ def _collect_native_crashes(
     # 걸러낼 수 있고, **[7] 오프셋**을 남겨야 "같은 주소에서 또 죽었다"를 사후에 대조할 수 있다
     # (07-29·07-30·07-31 UI 크래시 10건이 전부 +0x083973c7 동일이었다).
     script = (
-        "Get-WinEvent -FilterHashtable @{LogName='Application';"
+        "$ErrorActionPreference='Stop'; $events=@(); "
+        "try { $events=@(Get-WinEvent -FilterHashtable @{LogName='Application';"
         "ProviderName='Application Error';"
         f"StartTime='{start:%Y-%m-%d %H:%M:%S}';EndTime='{end:%Y-%m-%d %H:%M:%S}'"
-        "} -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.Properties.Count -ge 8 -and "
+        "} -ErrorAction Stop) } "
+        # 로케일 문자열이 아니라 번역되지 않는 오류 ID로 "이벤트 없음"을 식별한다.
+        "catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $events=@() } "
+        "else { Write-Output ('ERR ' + $_.Exception.GetType().Name); exit 0 } } "
+        "$f=@($events | Where-Object { $_.Properties.Count -ge 8 -and "
         "$_.Properties[0].Value -like 'python.exe*' -and "
         f"$_.Properties[1].Value -like '{python_version_prefix}*'"
-        " } | "
-        "ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss') + ' ' + "
-        "$_.Properties[3].Value + ' ' + $_.Properties[6].Value + ' +0x' + $_.Properties[7].Value }"
+        " }); "
+        "Write-Output ('OK ' + $f.Count); "
+        "$f | ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss') + ' ' + "
+        "$_.Properties[3].Value + ' ' + $_.Properties[6].Value + ' +0x' "
+        "+ $_.Properties[7].Value }; "
+        "exit 0"
     )
     try:
         result = runner(
@@ -453,11 +561,14 @@ def _collect_native_crashes(
     except Exception as exc:  # noqa: BLE001 — 못 세는 것과 0건은 다르다
         return NativeCrashes(available=False, count=0, details=[f"집계 실패: {exc}"])
 
-    if result.returncode != 0:
-        return NativeCrashes(available=False, count=0, details=["Get-WinEvent 실패"])
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    # 종료 코드가 아니라 **센티널 첫 줄**로 판정한다 — 종료 코드는 "이벤트 0건"과
+    # "질의 실패"를 구분하지 못했다(위 docstring).
+    if result.returncode != 0 or not lines or not lines[0].startswith("OK "):
+        reason = lines[0] if lines else f"출력 없음(exit={result.returncode})"
+        return NativeCrashes(available=False, count=0, details=[f"Get-WinEvent 실패: {reason}"])
 
-    details = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    return NativeCrashes(available=True, count=len(details), details=details)
+    return NativeCrashes(available=True, count=int(lines[0][3:].strip()), details=lines[1:])
 
 
 # ---------------------------------------------------------------- 체결틱 적재량
@@ -565,6 +676,27 @@ def build_report(
     market_findings = analyze_market_state(flat_minutes, m1)
     breaches.extend(market_findings)
 
+    # 상위 Horizon은 1분봉의 합이라는 정의상의 항등식 — 외부 기준이 필요 없다.
+    horizon_findings = analyze_horizon_consistency(bar_dir, symbol, day)
+    breaches.extend(horizon_findings)
+
+    # **측정 불능은 0건이 아니다** (2026-08-05). 종전에는 `available=False`가 조용히
+    # 지나가서, 크래시 0건인 날에만 집계가 실패하는 결함이 드러나지 않았고 그 상태로는
+    # "3거래일 연속 크래시 0건" 등록부가 영원히 판정을 못 채웠다.
+    if crashes.supported and not crashes.available:
+        breaches.append(
+            "네이티브 크래시 집계 불가 — 측정 불능은 0건이 아니다"
+            + (f" ({crashes.details[0]})" if crashes.details else "")
+        )
+
+    clock_skew = logs["clock_skew_seconds"]
+    if clock_skew is not None and abs(clock_skew) > limits["clock_skew_seconds"]:
+        breaches.append(
+            f"거래소 시각 − 로컬 시계 {clock_skew:+.2f}초 > 임계 "
+            f"{limits['clock_skew_seconds']:.1f}초 — 완성봉 유예 500ms가 무의미하고, "
+            "부호가 뒤집히면 상위 Horizon 합성봉이 매 버킷 한 봉씩 잘린다(w32time 확인)"
+        )
+
     # 이벤트로그 집계와 로그 속 faulthandler 덤프를 대조한다(2026-08-03 고도화 D). 덤프 자체는
     # 사고가 아니지만 **"크래시가 났는데 덤프가 없다"는 사고**다 — 그 상태로 5거래일을 보냈다.
     # 로그 디렉터리는 `log_paths`에서 역추론한다(호출측이 기본 경로를 그대로 쓰는 게 보통).
@@ -591,6 +723,9 @@ def build_report(
         tag_counts=logs["tag_counts"],
         circuit_breaker_events=logs["circuit_breaker_events"],
         data_flow_findings=data_flow_findings,
+        horizon_findings=horizon_findings,
+        clock_skew_seconds=clock_skew,
+        session_git_shas=logs["session_git_shas"],
         flat_price_minutes=flat_minutes,
         pre_open_minutes=pre_open_minutes,
         market_findings=market_findings,
@@ -643,12 +778,20 @@ def format_summary(report: IntegrityReport) -> str:
         ]
         lines.append("  피처 NaN 비율: " + " · ".join(parts))
 
+    if report.clock_skew_seconds is not None:
+        lines.append(f"  시계 스큐(거래소−로컬): {report.clock_skew_seconds:+.2f}초")
+    else:
+        lines.append("  시계 스큐(거래소−로컬): 미측정")
+
     crashes = report.native_crashes
-    lines.append(
-        f"  네이티브 크래시: {crashes.count}건"
-        if crashes.available
-        else "  네이티브 크래시: 집계 불가(Windows 전용)"
-    )
+    if crashes.available:
+        lines.append(f"  네이티브 크래시: {crashes.count}건")
+    elif not crashes.supported:
+        lines.append("  네이티브 크래시: 집계 불가(Windows 전용)")
+    else:
+        # 이 갈래가 2026-08-04에 조용히 지나간 자리다 — 이제 임계 초과로도 함께 뜬다.
+        reason = crashes.details[0] if crashes.details else ""
+        lines.append(f"  네이티브 크래시: 집계 실패 — {reason}")
     # 덤프가 있으면 죽은 지점의 파이썬 프레임을 바로 보여준다 — 이 줄이 없어서 5거래일 동안
     # 정황만으로 원인을 추정했다(`ops/crash_dumps.py`).
     lines.extend(format_dump_lines(report.crash_forensics))
@@ -669,6 +812,10 @@ def format_summary(report: IntegrityReport) -> str:
         lines.append(f"  ⚠ 시장 상태: {finding}")
     for finding in report.data_flow_findings:
         lines.append(f"  ⚠ 탐지·복구 불일치: {finding}")
+    for finding in report.horizon_findings:
+        lines.append(f"  ⚠ Horizon 정합: {finding}")
+    if report.session_git_shas:
+        lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
 
     if report.breaches:
         lines.append("  ⚠ 임계 초과:")

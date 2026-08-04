@@ -58,6 +58,7 @@ from messiah.models.labeling import (  # noqa: E402
     trailing_realized_volatility,
 )
 from messiah.models.trainer import build_feature_vectors, build_training_data  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 from messiah.risk.cost_model import CostModel  # noqa: E402
 from messiah.strategy.futures.expert import HorizonExpert  # noqa: E402
 from messiah.strategy.options.vol_forecast import (  # noqa: E402
@@ -229,6 +230,7 @@ async def _gate_one_horizon(
 
 async def main() -> int:
     args = _parse_args()
+    session_guard.refuse_if_regular_session("피처 관문", force=args.force_intraday)
     spec = feature_spec.resolve(args.feature_set)
     problems = feature_spec.validate_registry()
     if problems:
@@ -341,6 +343,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min-abs-t", type=float, default=gate.DEFAULT_MIN_ABS_T)
     parser.add_argument("--max-abs-corr", type=float, default=gate.DEFAULT_MAX_ABS_CORR)
     parser.add_argument("--out", default=str(_OUT_PATH))
+    session_guard.add_force_intraday_argument(parser)
     return parser.parse_args()
 
 

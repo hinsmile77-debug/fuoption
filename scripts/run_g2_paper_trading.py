@@ -360,8 +360,16 @@ async def _daily_close(
 
 async def main(cfg: InstanceConfig) -> None:
     # 네이티브 크래시 덤프 무장 — l1_daily와 같은 이유(`core/crash_forensics.py`).
-    crash_forensics.enable(tag="g2_paper")
+    forensics_target = crash_forensics.enable(tag="g2_paper")
     mlog.setup(cfg.instance_id)
+    # stderr 마커와 별개의 두 번째 출처 — 이유는 `run_l1_daily.py`의 같은 자리 주석 참고.
+    mlog.log(
+        "CrashForensicsArmed",
+        f"네이티브 크래시 덤프 무장 — 대상 {forensics_target}",
+        process="g2_paper",
+        target=forensics_target,
+        armed=crash_forensics.is_armed(),
+    )
 
     today = now_kst().date()
     if not EventCalendar.from_file().is_trading_day(today):

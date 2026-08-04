@@ -31,6 +31,7 @@ from messiah.core.messages import HORIZON_SECONDS, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import compose_offline  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
 _TARGETS = [h for h in HORIZON_SECONDS if h is not Horizon.M1]
@@ -52,11 +53,13 @@ def _parse_args() -> argparse.Namespace:
         help="오늘도 재합성한다. 기본은 제외 — 라이브 수집이 조각을 쓰는 중이라 통합본으로 "
         "덮으면 이후 수집분이 read_day()에서 조각으로만 남아 뒤섞인다.",
     )
+    session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    session_guard.refuse_if_regular_session("상위 Horizon 재합성", force=args.force_intraday)
     base = Path(args.base_dir)
     archiver = ParquetArchiver(base)
     today = now_kst().date()

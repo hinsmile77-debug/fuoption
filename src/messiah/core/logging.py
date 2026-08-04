@@ -116,6 +116,22 @@ TAG_LEVELS: dict[str, int] = {
     # 헤드리스 상태판 기록 실패 (고도화 A, `ops/status_board.py`) — 관측의 최후 보루가
     # 안 써지고 있다는 뜻이라 조용히 넘기면 안 된다. 수집 본 임무는 계속되므로 WARNING.
     "StatusSnapshotWriteFailed": logging.WARNING,
+    # 크래시 포렌식 무장 사실의 **두 번째 출처** (2026-08-05). 첫 출처인 stderr 마커는
+    # 호스트(PowerShell)가 첫 줄에 접두사를 붙이면 탐지가 깨진다 — 실제로 08-04에 그렇게
+    # 깨져 "수정이 안 들었다"는 오탐이 ERROR로 찍혔다. 구조화 로그는 그 경로를 안 탄다.
+    "CrashForensicsArmed": logging.INFO,
+    # 거래소 시각과 로컬 시계의 어긋남 (2026-08-05, `ops/clock_skew.py`). 세션당 한 줄이다.
+    # 정상 범위면 INFO, 임계 초과면 ERROR — 완성봉 규율의 500ms 유예가 무의미해지는
+    # 상태이고, 부호가 뒤집히면 상위 Horizon 합성봉이 매 버킷 한 봉씩 잘린다.
+    "ClockSkewMeasured": logging.INFO,
+    "ClockSkewExceeded": logging.ERROR,
+    # 이미 확정한 상위 Horizon 버킷으로 1분봉이 늦게 도착 (`data/bar_composer.py`).
+    # 버리는 쪽이 맞지만(중복 합성봉 방지) 유실이므로 조용히는 안 된다(L18).
+    "ComposerLateBarDropped": logging.WARNING,
+    # 종료 시퀀스에서 마지막 1분봉이 상위 Horizon 구독자에게 도달하지 못함
+    # (`scripts/run_l1_daily.py`). 그 봉은 1분봉 아카이브에만 남고 합성봉에서 빠진다 —
+    # 2026-08-04에 조용히 일어났던 바로 그 사고라 ERROR다.
+    "DailyCloseBarNotDrained": logging.ERROR,
 }
 
 _logger = logging.getLogger("messiah")
