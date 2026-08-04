@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date, datetime
 from decimal import Decimal
@@ -53,6 +54,7 @@ from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
+_LOG_DIR = Path("logs")
 
 # 이 비율을 밑돌면 수집 경로를 의심한다. 2026-07-28~30 실측으로 WS 다중 레코드 유실 상태의
 # 비율은 **0.49~0.52**였다 — 0.95는 그 사고를 확실히 잡으면서, 장전 프린트 처리 차이 같은
@@ -119,6 +121,7 @@ def main() -> int:
     print(f"대조 구간: {start} ~ {end} ({len(targets)}일)\n")
 
     suspicious: list[tuple[str, date, float]] = []
+    results: list[tuple[str, date, float | None, int, int, int]] = []
     for symbol, day in targets:
         frame = archiver.read_day(symbol, Horizon.M1, day)
         if frame is None or frame.height == 0:
@@ -148,8 +151,34 @@ def main() -> int:
             f"  {symbol} {day}  비율 {ratio:.3f}  "
             f"(공통 {common}분 · 아카이브 {mine_sum:,} / 공식 {theirs_sum:,})  {mark}"
         )
+        results.append((symbol, day, ratio, common, mine_sum, theirs_sum))
         if ratio < WARN_RATIO:
             suspicious.append((symbol, day, ratio))
+
+    # 결과를 파일로 남긴다 (2026-08-05, 고도화 1) — 무결성 리포트가 이걸 읽어 **외부 대조**를
+    # 1급 축으로 갖는다. REST 호출을 종료 절차에 넣지 않는다는 판단은 그대로지만, 그렇다고
+    # "안 돌린 날"이 조용히 지나가서는 안 된다. 파일이 없으면 리포트가 `unmeasured`로 남긴다.
+    for symbol, day, ratio, common, mine_sum, theirs_sum in results:
+        out_path = _LOG_DIR / f"volume_check_{day.strftime('%Y%m%d')}.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(
+                {
+                    "date": day.isoformat(),
+                    "symbol": symbol,
+                    "ratio": ratio,
+                    "common_minutes": common,
+                    "archived_volume": mine_sum,
+                    "official_volume": theirs_sum,
+                    "warn_ratio": WARN_RATIO,
+                    "ok": ratio is not None and ratio >= WARN_RATIO,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"  → {out_path}")
 
     if suspicious:
         print(f"\n의심 {len(suspicious)}일 — 그 날짜는 수집 당시 코드로 파싱된 값이다.")

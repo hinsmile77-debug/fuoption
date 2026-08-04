@@ -30,8 +30,10 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Callable, Mapping, Sequence
 
@@ -79,6 +81,65 @@ _NAN_RATIO_HALT_THRESHOLD = 0.20  # Ver 1.1 §2-2: 20% 초과 시 해당 Horizon
 # "최근 20봉만 고정, 그 앞은 움직임"인 실제 형태를 못 잡는다(그날 nan_ratio가 0.0165에서
 # 0.3306으로 뛴 구간이 정확히 이 형태였다).
 _DEGENERATE_WINDOW = 20
+
+
+# 이 개수 미만의 표본으로는 "상수다"라고 말하지 않는다 — 장 초반 몇 봉은 우연히 같은 값이
+# 나올 수 있고, 워밍업 구간의 NaN도 아직 안 풀린 상태다. 30봉이면 1m 기준 30분치다.
+_MIN_SAMPLES_FOR_HEALTH = 30
+
+
+@dataclass
+class _FeatureStat:
+    """피처 1개의 세션 누적 통계 — 상수·항상NaN을 **운영 경로에서** 잡기 위한 최소 상태.
+
+    ## 왜 nan_ratio로는 부족했나 (2026-08-04 피처 관문이 처음 발견)
+
+    `px_macd_h_5`가 프로덕션에서 **항상 정확히 0**이었다(`window=5` → `5//3=1` →
+    `_ema_series(x,1)`이 항등 → 히스토그램 상수 0). `px_ema_cross_60`은 NaN이라
+    `nan_ratio`에 흔적이 남았지만, **이건 값을 내므로 무결성 리포트에 아무 흔적도 없었다.**
+    관문(연구 경로)을 처음 돌렸을 때 "IC 정의 불가 — 값이 상수"로 비로소 드러났다.
+
+    검출 수단이 하나뿐이면 그 수단이 못 보는 결함은 안 보인다. 그래서 운영 경로에도
+    같은 검출력을 둔다 — 비용은 피처당 float 4개다.
+    """
+
+    n: int = 0
+    n_nan: int = 0
+    lo: float = math.inf
+    hi: float = -math.inf
+
+    def observe(self, value: float | None) -> None:
+        self.n += 1
+        if value is None or math.isnan(value):
+            self.n_nan += 1
+            return
+        self.lo = min(self.lo, value)
+        self.hi = max(self.hi, value)
+
+    @property
+    def always_nan(self) -> bool:
+        return self.n >= _MIN_SAMPLES_FOR_HEALTH and self.n_nan == self.n
+
+    @property
+    def constant(self) -> bool:
+        """값을 내는데 **한 번도 안 변한** 피처. 항상 NaN인 것과는 다른 사건이다."""
+        if self.n < _MIN_SAMPLES_FOR_HEALTH or self.n_nan == self.n:
+            return False
+        return self.lo == self.hi
+
+
+@dataclass(frozen=True)
+class FeatureHealth:
+    """한 Horizon의 세션 누적 피처 건강도 — 리포트가 읽는 형태."""
+
+    horizon: str
+    samples: int
+    always_nan: list[str]
+    constant: list[str]
+
+    @property
+    def degenerate_count(self) -> int:
+        return len(self.always_nan) + len(self.constant)
 
 
 def _is_price_degenerate(history: Sequence[BarClosed]) -> bool:
@@ -160,6 +221,10 @@ class FeatureEngine:
         self._monotonic = monotonic
         self._last_publish_at: float | None = None
         self._last_nan_ratio: dict[Horizon, float] = {}
+        # 피처별 세션 누적 통계 (2026-08-05, 고도화 3) — `_FeatureStat` 주석 참고.
+        self._feature_stats: dict[Horizon, dict[str, _FeatureStat]] = {
+            h: {} for h in self._horizons
+        }
 
     def _assert_sidecars_match_spec(self) -> None:
         missing = feature_spec.missing_sidecars(self._spec, self._sidecars)
@@ -186,6 +251,60 @@ class FeatureEngine:
         if self._last_publish_at is None:
             return None
         return self._monotonic() - self._last_publish_at
+
+    def feature_health(self) -> list[FeatureHealth]:
+        """세션 동안 **한 번도 값이 안 변한** 피처와 **항상 NaN이던** 피처를 Horizon별로.
+
+        `nan_ratio`가 못 보는 것을 본다. 2026-08-04 관문이 처음 찾아낸 `px_macd_h_5`는
+        프로덕션에서 항상 정확히 0이었는데 **값을 내므로 nan_ratio에 아무 흔적이 없었다** —
+        무결성 리포트는 8거래일 내내 그 피처가 죽어 있다는 걸 말할 수단이 없었다.
+
+        표본이 `_MIN_SAMPLES_FOR_HEALTH` 미만인 Horizon은 판정하지 않는다(빈 목록) — 장
+        초반 몇 봉이 우연히 같은 값인 것과 진짜 상수를 구분할 수 없기 때문이다. 30m처럼
+        하루에 15봉밖에 안 나오는 Horizon은 그래서 대부분의 날 판정되지 않는데, 그게 맞다:
+        표본이 없는 것을 "정상"이라고 말하지 않는다.
+        """
+        out: list[FeatureHealth] = []
+        for horizon in self._horizons:
+            stats = self._feature_stats.get(horizon) or {}
+            if not stats:
+                continue
+            samples = max((s.n for s in stats.values()), default=0)
+            out.append(
+                FeatureHealth(
+                    horizon=horizon.value,
+                    samples=samples,
+                    always_nan=sorted(n for n, s in stats.items() if s.always_nan),
+                    constant=sorted(n for n, s in stats.items() if s.constant),
+                )
+            )
+        return out
+
+    def log_feature_health(self) -> list[FeatureHealth]:
+        """장 마감 시 한 번 부른다 — 판정 결과를 로그로 남기고 그대로 돌려준다.
+
+        정상(퇴화 0건)일 때도 남긴다. "오늘 몇 개를 검사했고 몇 개가 죽어 있었나"가 매일
+        기록돼야 `0건`이 **측정된 0**이라는 뜻이 되기 때문이다 — 로그가 없는 날은 검사를
+        안 한 날과 구분되지 않는다(L18).
+        """
+        healths = self.feature_health()
+        for health in healths:
+            degenerate = health.degenerate_count
+            mlog.log(
+                "FeatureHealthDegenerate" if degenerate else "FeatureHealthSummary",
+                (
+                    f"{health.horizon} 피처 {degenerate}개가 세션 내내 죽어 있었다 — "
+                    f"항상NaN {health.always_nan} · 상수 {health.constant}"
+                    if degenerate
+                    else f"{health.horizon} 피처 퇴화 0건 ({health.samples}표본)"
+                ),
+                symbol=self._symbol,
+                horizon=health.horizon,
+                samples=health.samples,
+                always_nan=health.always_nan,
+                constant=health.constant,
+            )
+        return healths
 
     def last_nan_ratios(self) -> dict[str, float]:
         return {horizon.value: ratio for horizon, ratio in self._last_nan_ratio.items()}
@@ -303,6 +422,11 @@ class FeatureEngine:
                 sidecar = self._sidecars[category.sidecar]  # 생성 시점에 존재를 보장했다
                 for name, sidecar_fn in category.sidecar_features:
                     values[name] = self._safe_call(sidecar_fn, history, sidecar)
+
+        # 세션 누적 통계 — 상수·항상NaN 피처를 운영 경로에서 잡는다(고도화 3, `_FeatureStat`).
+        stats = self._feature_stats.setdefault(bar.horizon, {})
+        for name, value in values.items():
+            stats.setdefault(name, _FeatureStat()).observe(value)
 
         nan_ratio = sum(1 for v in values.values() if v is None) / len(values)
         # 워밍업 중(예: 30m은 최대 윈도우 60개를 채우는 데만 30시간 = 며칠이 걸림)엔 nan_ratio가

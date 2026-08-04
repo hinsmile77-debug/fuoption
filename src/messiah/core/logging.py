@@ -113,6 +113,8 @@ TAG_LEVELS: dict[str, int] = {
     "FixVerificationPassed": logging.INFO,
     "FixVerificationRecurred": logging.ERROR,
     "FixVerificationOverdue": logging.WARNING,
+    # 연속 판정 불가 — 수정이 안 든 게 아니라 **계측이 고장 났다**는 뜻이라 재발과 같은 급.
+    "FixVerificationStalled": logging.ERROR,
     # 헤드리스 상태판 기록 실패 (고도화 A, `ops/status_board.py`) — 관측의 최후 보루가
     # 안 써지고 있다는 뜻이라 조용히 넘기면 안 된다. 수집 본 임무는 계속되므로 WARNING.
     "StatusSnapshotWriteFailed": logging.WARNING,
@@ -132,6 +134,16 @@ TAG_LEVELS: dict[str, int] = {
     # (`scripts/run_l1_daily.py`). 그 봉은 1분봉 아카이브에만 남고 합성봉에서 빠진다 —
     # 2026-08-04에 조용히 일어났던 바로 그 사고라 ERROR다.
     "DailyCloseBarNotDrained": logging.ERROR,
+    # 피처 건강도 (2026-08-05 고도화 3, `features/engine.py`). 퇴화 0건도 매일 남긴다 —
+    # 로그가 없는 날은 "검사했는데 0건"과 "검사를 안 함"이 구분되지 않는다(L18).
+    "FeatureHealthSummary": logging.INFO,
+    # 세션 내내 상수이거나 항상 NaN인 피처가 있다 — 모델에 죽은 입력이 들어가고 있다는 뜻.
+    # 2026-08-04에 `px_macd_h_5`가 이 상태였는데 값을 내므로 nan_ratio에 흔적이 없었다.
+    "FeatureHealthDegenerate": logging.WARNING,
+    # 호스트 위생 점검 (2026-08-05 고도화 5, `ops/host_health.py`) — 디스크·전원·시간동기.
+    "HostHealthDegraded": logging.WARNING,
+    # 변동성 축 일일 채점 (2026-08-05 고도화 4, `models/vol_scorecard.py`).
+    "VolAxisScorecard": logging.INFO,
 }
 
 _logger = logging.getLogger("messiah")

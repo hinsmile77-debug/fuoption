@@ -5,8 +5,14 @@ from messiah.core.timeutil import KST
 from messiah.data.investor_flow_history import FlowHistory, FlowRow
 from messiah.features import fl_core
 
-_FIELDS = ("frgn_ntby_qty", "frgn_ntby_tr_pbmn", "prsn_ntby_qty",
-           "prsn_ntby_tr_pbmn", "orgn_ntby_qty", "orgn_ntby_tr_pbmn")
+_FIELDS = (
+    "frgn_ntby_qty",
+    "frgn_ntby_tr_pbmn",
+    "prsn_ntby_qty",
+    "prsn_ntby_tr_pbmn",
+    "orgn_ntby_qty",
+    "orgn_ntby_tr_pbmn",
+)
 
 
 def _flow(series: list[tuple[str, int, int]]) -> FlowHistory:
@@ -29,10 +35,15 @@ def _flow(series: list[tuple[str, int, int]]) -> FlowHistory:
 def _bars_on(day: date, n: int = 3) -> list[BarClosed]:
     return [
         BarClosed(
-            symbol="X", horizon=Horizon.M5,
+            symbol="X",
+            horizon=Horizon.M5,
             bar_open_kst=datetime(day.year, day.month, day.day, 9, 0, tzinfo=KST)
             + timedelta(minutes=5 * i),
-            o_ticks=100, h_ticks=105, l_ticks=95, c_ticks=100 + i, volume=10,
+            o_ticks=100,
+            h_ticks=105,
+            l_ticks=95,
+            c_ticks=100 + i,
+            volume=10,
         )
         for i in range(n)
     ]
@@ -76,8 +87,7 @@ def test_zscore_is_none_without_enough_history():
 
 
 def test_zscore_positive_when_last_day_is_above_recent_mean():
-    flow = _flow([(f"202606{i + 1:02d}", 100, 0) for i in range(10)]
-                 + [("20260611", 5000, 0)])
+    flow = _flow([(f"202606{i + 1:02d}", 100, 0) for i in range(10)] + [("20260611", 5000, 0)])
 
     z = fl_core.fl_frgn_ntby_z(_bars_on(date(2026, 6, 12)), flow)
 
@@ -88,8 +98,9 @@ def test_zscore_positive_when_last_day_is_above_recent_mean():
 
 
 def test_streak_counts_consecutive_same_sign_days_with_sign():
-    flow = _flow([("20260601", -100, 0), ("20260602", 100, 0),
-                  ("20260603", 200, 0), ("20260604", 300, 0)])
+    flow = _flow(
+        [("20260601", -100, 0), ("20260602", 100, 0), ("20260603", 200, 0), ("20260604", 300, 0)]
+    )
 
     assert fl_core.fl_frgn_streak(_bars_on(date(2026, 6, 5)), flow) == 3.0
 

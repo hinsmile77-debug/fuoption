@@ -62,6 +62,9 @@ class VerificationStatus:
     PENDING = "검증 대기"
     RECURRED = "재발"
     OVERDUE = "기한 초과"
+    # 연속으로 못 잰 상태 (2026-08-05 고도화 2) — "진행 중"이 아니라 **계측 고장**이다.
+    # 2026-08-04에 크래시 집계가 0건인 날에만 실패해 등록부가 영원히 0/3이었다.
+    STALLED = "판정 불가 정체"
 
 
 def _bar_1m(report: dict[str, Any]) -> dict[str, Any] | None:
@@ -144,6 +147,17 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # 크래시를 **셀 수 있었는가** (1=쟀다, 0=못 쟀다). min 기준으로 쓴다.
     # 이 플랫폼에서 원래 못 세는 경우(`supported=False`)는 판정 대상이 아니므로 None.
     "native_crashes_measurable": _native_crashes_measurable,
+    # 세션 내내 죽어 있던 피처 수 (2026-08-05 고도화 3). 0이어야 한다 — 값을 내지만
+    # 안 변하는 피처는 `nan_ratio`에 흔적이 없어 8거래일 내내 안 보였다(`px_macd_h_5`).
+    "degenerate_feature_count": lambda r: float(
+        sum(
+            len(entry.get("always_nan") or []) + len(entry.get("constant") or [])
+            for entry in (r.get("degenerate_features") or {}).values()
+        )
+    ),
+    # 그날 못 잰 축의 수 (2026-08-05 고도화 2). **이 지표가 이 등록부의 메타 지표다** —
+    # 다른 항목들이 "판정 불가"로 정체되는 근본 원인이 여기 모여 있다.
+    "unmeasured_count": lambda r: float(len(r.get("unmeasured") or [])),
 }
 
 
@@ -187,7 +201,11 @@ class VerificationVerdict:
     @property
     def needs_attention(self) -> bool:
         """사람이 반드시 봐야 하는 판정 — 재발과 기한 초과."""
-        return self.status in (VerificationStatus.RECURRED, VerificationStatus.OVERDUE)
+        return self.status in (
+            VerificationStatus.RECURRED,
+            VerificationStatus.OVERDUE,
+            VerificationStatus.STALLED,
+        )
 
 
 class RegistryError(ValueError):
@@ -321,6 +339,24 @@ def _verdict_for(
             f"기한 {item.deadline.isoformat()} 경과 — "
             f"아직 {clean}/{item.consecutive_days}일 {note}",
         )
+    # **판정 불가가 쌓이는 것도 사고다** (2026-08-05 고도화 2).
+    #
+    # 종전에는 못 잰 날을 그냥 건너뛰었다. 통과로도 위반으로도 안 세는 것 자체는 맞지만,
+    # 그 결과 **매일 판정 불가인 항목이 영원히 "검증 대기"로 조용히 남는다**. 2026-08-04가
+    # 정확히 그 상태였다: `Get-WinEvent`가 크래시 0건인 날에만 실패해서 `ui-crash-isolation`은
+    # 며칠이 지나도 0/3이었고, 아무도 그게 "진행 중"이 아니라 "고장"이라는 걸 몰랐다.
+    #
+    # 연속으로 이만큼 못 재면 그 자체를 사람이 봐야 할 상태로 올린다.
+    if len(unjudged) >= item.consecutive_days and clean == 0:
+        return VerificationVerdict(
+            item.id,
+            item.summary,
+            VerificationStatus.STALLED,
+            clean,
+            item.consecutive_days,
+            f"{len(unjudged)}거래일 연속 판정 불가 — 계측이 고장 났을 수 있다 "
+            f"(진행 중이 아니라 정체다) {note}",
+        )
     return VerificationVerdict(
         item.id,
         item.summary,
@@ -338,6 +374,7 @@ def format_verdicts(verdicts: list[VerificationVerdict]) -> list[str]:
         VerificationStatus.VERIFIED: "✅",
         VerificationStatus.PENDING: "⏳",
         VerificationStatus.RECURRED: "❌",
+        VerificationStatus.STALLED: "🚫",
         VerificationStatus.OVERDUE: "⚠",
     }
     return [

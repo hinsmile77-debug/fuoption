@@ -137,8 +137,7 @@ async def main() -> int:
     for info in rolls:
         where = f"{info.matched_minute} 기준" if info.matched_minute else "겹침 없음 — 조정 0"
         print(
-            f"  {info.outgoing} → {info.incoming}  {info.day}  "
-            f"{info.offset_ticks:+d}틱  ({where})"
+            f"  {info.outgoing} → {info.incoming}  {info.day}  {info.offset_ticks:+d}틱  ({where})"
         )
     unmatched = [r for r in rolls if r.matched_minute is None]
     if unmatched:

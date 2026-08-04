@@ -304,3 +304,54 @@ def test_clock_skew_metric_is_absolute_and_none_when_unmeasured():
     assert extract({"clock_skew_seconds": -3.0}) == 3.0
     assert extract({"clock_skew_seconds": None}) is None
     assert extract({}) is None
+
+
+# -------------------------------- 판정 불가 정체 (2026-08-05 고도화 2)
+
+
+def test_repeated_unjudged_days_become_stalled_not_pending(tmp_path: Path):
+    """2026-08-04 회귀 — 못 잰 날을 그냥 건너뛰면 **영원히 "검증 대기"로 조용히 남는다**.
+
+    그날 `Get-WinEvent`가 크래시 0건인 날에만 실패해서 `ui-crash-isolation`은 며칠이
+    지나도 0/3이었고, 아무도 그게 "진행 중"이 아니라 **"계측 고장"**이라는 걸 몰랐다.
+
+    통과로도 위반으로도 안 세는 것 자체는 여전히 맞다(L18). 다만 그 상태가 쌓이는 것은
+    그 자체로 사람이 봐야 할 사건이다.
+    """
+    registry = _registry(tmp_path, metric="native_crashes", max=0, consecutive_days=3)
+    # 사흘 연속 집계 불가 — `_native_crashes`가 None을 돌려준다.
+    reports = {
+        date(2026, 8, 4 + i): {"native_crashes": {"available": False, "count": 0}} for i in range(3)
+    }
+
+    [verdict] = evaluate(registry, reports, today=date(2026, 8, 7))
+
+    assert verdict.status == VerificationStatus.STALLED
+    assert verdict.needs_attention is True
+    assert "계측이 고장" in verdict.detail
+
+
+def test_one_unjudged_day_is_still_just_pending(tmp_path: Path):
+    """하루 못 잰 것은 정상이다 — 오탐을 만들면 이 신호도 무시당한다."""
+    registry = _registry(tmp_path, metric="native_crashes", max=0, consecutive_days=3)
+    reports = {date(2026, 8, 4): {"native_crashes": {"available": False, "count": 0}}}
+
+    [verdict] = evaluate(registry, reports, today=date(2026, 8, 5))
+
+    assert verdict.status == VerificationStatus.PENDING
+
+
+def test_progress_beats_stalled(tmp_path: Path):
+    """한 번이라도 실제로 통과한 적이 있으면 정체가 아니라 진행 중이다."""
+    registry = _registry(tmp_path, metric="native_crashes", max=0, consecutive_days=3)
+    reports = {
+        date(2026, 8, 4): {"native_crashes": {"available": True, "count": 0}},
+        date(2026, 8, 5): {"native_crashes": {"available": False, "count": 0}},
+        date(2026, 8, 6): {"native_crashes": {"available": False, "count": 0}},
+        date(2026, 8, 7): {"native_crashes": {"available": False, "count": 0}},
+    }
+
+    [verdict] = evaluate(registry, reports, today=date(2026, 8, 8))
+
+    assert verdict.status == VerificationStatus.PENDING
+    assert verdict.clean_days == 1

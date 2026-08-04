@@ -350,8 +350,7 @@ async def main() -> int:
     tradable = [r for r in rows if r.non_no_trade > 0]
     healthy = [r for r in tradable if not r.degenerate]
     print(
-        f"\n거래 신호가 나온 설정: {len(tradable)}/{len(rows)}  "
-        f"(그중 게이트 정상: {len(healthy)})"
+        f"\n거래 신호가 나온 설정: {len(tradable)}/{len(rows)}  (그중 게이트 정상: {len(healthy)})"
     )
 
     degenerate = [r for r in tradable if r.degenerate]

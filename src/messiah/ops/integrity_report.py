@@ -132,6 +132,21 @@ class IntegrityReport:
     # 절반 유실 수정이 12:22에 들어갔는데 수집 프로세스는 08:35에 뜬 옛 코드로 하루를 돌았다).
     # 판정(breach)은 하지 않는다: 연구 커밋이 잦은 이 프로젝트에서 매일 울리면 늑대소년이 된다.
     session_git_shas: list[str]
+    # 세션 내내 상수이거나 항상 NaN이던 피처 (2026-08-05 고도화 3, `features/engine.py`).
+    # `nan_ratio`가 못 보는 것을 본다 — `px_macd_h_5`는 값을 내므로 흔적이 없었다.
+    degenerate_features: dict[str, dict[str, list[str]]]
+    # 거래소 공식 분봉 대비 아카이브 거래량 비율 (2026-08-05 고도화 1).
+    # `scripts/verify_archive_volume.py`가 남긴 파일을 읽는다 — 안 돌린 날은 None이고,
+    # 그 사실은 `unmeasured`에 들어간다.
+    volume_check: dict[str, Any] | None
+    # 변동성 축 채점 (2026-08-05 고도화 4, `scripts/run_vol_scorecard.py`).
+    vol_axis: dict[str, Any]
+    # 호스트 위생 (2026-08-05 고도화 5, `ops/host_health.py`).
+    host_health: dict[str, Any]
+    # **못 잰 것 전부** (2026-08-05 고도화 2). 종전에는 항목마다 흩어져 있었고 대부분
+    # 조용히 지나갔다 — 2026-08-04에 크래시 집계가 정확히 그렇게 사라졌다. 측정 불능이
+    # 한자리에 모여야 "오늘 무엇을 모르는가"를 사람이 한 번에 본다.
+    unmeasured: list[str]
     flat_price_minutes: int
     pre_open_minutes: int
     market_findings: list[str]
@@ -289,6 +304,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     session_starts: list[str] = []
     session_git_shas: list[str] = []
     clock_skews: list[float] = []
+    degenerate: dict[str, dict[str, list[str]]] = {}
     nan_by_horizon: dict[str, list[float]] = {}
     cb_events: dict[str, int] = {}
 
@@ -307,6 +323,12 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             skew = record.get("skew_seconds")
             if isinstance(skew, (int, float)):
                 clock_skews.append(float(skew))
+        elif tag in ("FeatureHealthSummary", "FeatureHealthDegenerate"):
+            horizon = str(record.get("horizon", "?"))
+            degenerate[horizon] = {
+                "always_nan": list(record.get("always_nan") or []),
+                "constant": list(record.get("constant") or []),
+            }
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -332,6 +354,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
         # 상태가 판정 기준이다(그 시간대의 봉은 이미 그 스큐로 만들어졌다).
         "clock_skew_seconds": (max(clock_skews, key=abs) if clock_skews else None),
+        "degenerate_features": degenerate,
         "nan_ratio_by_horizon": nan_summary,
         "circuit_breaker_events": cb_events,
     }
@@ -595,6 +618,37 @@ def count_tick_rows(tick_dir: Path | None, symbol: str, day: date) -> int:
 # ---------------------------------------------------------------- 조립
 
 
+def load_volume_check(day: date, log_dir: Path) -> dict[str, Any] | None:
+    """`scripts/verify_archive_volume.py`가 남긴 외부 대조 결과 — 없으면 None(미측정).
+
+    이 파일이 리포트의 **외부 대조 축**이다(2026-08-05 고도화 1). REST 호출을 장후 종료
+    절차(15:35~15:40)에 넣지 않는다는 판단은 유지하되, 그렇다고 "그날 외부 대조를 아예
+    안 했다"가 조용히 지나가서는 안 된다 — 없으면 `unmeasured`로 올라간다.
+
+    2026-08-04가 이 축이 없어서 생긴 사고다: 리포트는 "결손 0분"으로 깨끗했는데 아카이브
+    거래량은 공식값의 55%였다. 내부 정합성(Horizon 항등식)은 수집값끼리의 일치라 절반
+    유실이 양쪽에 똑같이 반영돼 통과한다 — 외부 기준이 있어야만 잡힌다.
+    """
+    return load_json_artifact(day, log_dir, "volume_check")
+
+
+def load_json_artifact(day: date, log_dir: Path, prefix: str) -> dict[str, Any] | None:
+    """`logs/{prefix}_YYYYMMDD.json`을 읽는다 — 없거나 깨졌으면 None(= 미측정).
+
+    장후에 사람이 따로 돌리는 도구들의 산출물을 리포트가 **1급 축**으로 삼는 통로다
+    (2026-08-05 고도화 1·4). 이 파일들은 REST 호출이나 무거운 재계산을 요구해 15:35~15:40
+    종료 예산에 넣을 수 없지만, 그렇다고 "안 돌린 날"이 조용히 지나가서도 안 된다 —
+    없으면 `unmeasured`에 올라간다.
+    """
+    path = log_dir / f"{prefix}_{day.strftime('%Y%m%d')}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def build_report(
     *,
     day: date,
@@ -606,6 +660,7 @@ def build_report(
     crash_collector=_collect_native_crashes,
     log_dir: Path | None = None,
     tick_dir: Path | None = None,
+    host_collector=None,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
 
@@ -689,6 +744,38 @@ def build_report(
             + (f" ({crashes.details[0]})" if crashes.details else "")
         )
 
+    # 장후 도구들의 산출물이 있는 곳. UI 로그까지 포함하는 디렉터리라 `_infer_log_dir()`가
+    # 호출측이 넘긴 로그 경로에서 역추론한다(`_infer_log_dir` docstring).
+    resolved_log_dir = log_dir or _infer_log_dir(log_paths)
+    vol_axis = load_json_artifact(day, resolved_log_dir, "vol_scorecard") or {}
+
+    # ---- 고도화 3: 세션 내내 죽어 있던 피처 ----
+    degenerate_features = logs["degenerate_features"]
+    for horizon, entry in sorted(degenerate_features.items()):
+        dead = list(entry.get("always_nan") or []) + list(entry.get("constant") or [])
+        if dead:
+            breaches.append(
+                f"{horizon} 피처 {len(dead)}개가 세션 내내 죽어 있었다({', '.join(dead[:5])}"
+                f"{' 외' if len(dead) > 5 else ''}) — 모델에 죽은 입력이 들어간다"
+            )
+
+    # ---- 고도화 1: 외부 대조 ----
+    volume_check = load_volume_check(day, resolved_log_dir)
+    if volume_check is not None and not volume_check.get("ok"):
+        ratio = volume_check.get("ratio")
+        breaches.append(
+            f"공식 분봉 대비 아카이브 거래량 비율 "
+            f"{'측정 불가' if ratio is None else f'{ratio:.3f}'} < "
+            f"{volume_check.get('warn_ratio', 0.95)} — 수집 당시 파서를 의심할 것"
+        )
+
+    # ---- 고도화 5: 호스트 위생 ----
+    from messiah.ops import host_health as host_health_module
+
+    host = (host_collector or host_health_module.collect)()
+    for finding in host.degraded:
+        breaches.append(f"호스트 위생: {finding}")
+
     clock_skew = logs["clock_skew_seconds"]
     if clock_skew is not None and abs(clock_skew) > limits["clock_skew_seconds"]:
         breaches.append(
@@ -702,11 +789,29 @@ def build_report(
     # 로그 디렉터리는 `log_paths`에서 역추론한다(호출측이 기본 경로를 그대로 쓰는 게 보통).
     forensics = collect_crash_forensics(
         day,
-        log_dir=log_dir or _infer_log_dir(log_paths),
+        log_dir=resolved_log_dir,
         native_crash_count=crashes.count,
         native_crashes_available=crashes.available,
     )
     breaches.extend(forensics.findings)
+
+    # ---- 고도화 2: 못 잰 것을 한자리에 ----
+    #
+    # 2026-08-04에 크래시 집계가 정확히 이 형태로 사라졌다 — `available=False`가 리포트
+    # 어딘가에 조용히 남았을 뿐이고, 그 결과 등록부가 매일 "판정 불가"라 영원히 안 끝났다.
+    # "오늘 무엇을 모르는가"가 한 줄로 보여야 사람이 그걸 조치 대상으로 인식한다.
+    unmeasured: list[str] = []
+    if crashes.supported and not crashes.available:
+        unmeasured.append("네이티브 크래시 집계")
+    if clock_skew is None:
+        unmeasured.append("시계 스큐(수집 세션의 ClockSkew 로그 없음)")
+    if volume_check is None:
+        unmeasured.append("공식 분봉 대비 거래량 대조(verify_archive_volume.py 미실행)")
+    if not (vol_axis.get("horizons") if vol_axis else None):
+        unmeasured.append("변동성 축 채점(run_vol_scorecard.py 미실행)")
+    if not degenerate_features:
+        unmeasured.append("피처 건강도(장 마감 FeatureHealth 로그 없음)")
+    unmeasured.extend(f"호스트 위생 — {item}" for item in host.unmeasured)
 
     return IntegrityReport(
         date=day.isoformat(),
@@ -726,6 +831,11 @@ def build_report(
         horizon_findings=horizon_findings,
         clock_skew_seconds=clock_skew,
         session_git_shas=logs["session_git_shas"],
+        degenerate_features=degenerate_features,
+        volume_check=volume_check,
+        vol_axis=vol_axis,
+        host_health=host.to_dict(),
+        unmeasured=unmeasured,
         flat_price_minutes=flat_minutes,
         pre_open_minutes=pre_open_minutes,
         market_findings=market_findings,
@@ -816,6 +926,32 @@ def format_summary(report: IntegrityReport) -> str:
         lines.append(f"  ⚠ Horizon 정합: {finding}")
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
+
+    if report.volume_check is not None:
+        ratio = report.volume_check.get("ratio")
+        lines.append(
+            "  공식 분봉 대비 거래량: "
+            + ("측정 불가" if ratio is None else f"{ratio:.3f}")
+            + (" ✅" if report.volume_check.get("ok") else " ⚠")
+        )
+    for horizon, entry in sorted((report.vol_axis.get("horizons") or {}).items()):
+        beats = entry.get("beats_baseline") or []
+        baseline_ic = entry.get("baseline_ic")
+        lines.append(
+            f"  변동성 축 {horizon}: 표본 {entry.get('samples')} · 기준선 IC "
+            + ("미측정" if baseline_ic is None else f"{baseline_ic:+.3f}")
+            + f" · 기준선 초과 {len(beats)}개"
+            + (f" {beats}" if beats else "")
+        )
+    host = report.host_health.get("checks") or []
+    if host:
+        lines.append("  호스트: " + " · ".join(f"{c['name']}={c['detail']}" for c in host))
+
+    # **못 잰 것을 임계 초과 바로 앞에 둔다** — 사람이 "깨끗한 날"이라고 읽기 전에
+    # "무엇을 모르는 날인지"를 먼저 보게 하는 것이 이 블록의 목적이다(고도화 2).
+    if report.unmeasured:
+        lines.append("  ❓ 미측정:")
+        lines.extend(f"    - {item}" for item in report.unmeasured)
 
     if report.breaches:
         lines.append("  ⚠ 임계 초과:")
@@ -915,6 +1051,7 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
         fv.VerificationStatus.VERIFIED: "FixVerificationPassed",
         fv.VerificationStatus.RECURRED: "FixVerificationRecurred",
         fv.VerificationStatus.OVERDUE: "FixVerificationOverdue",
+        fv.VerificationStatus.STALLED: "FixVerificationStalled",
     }
     for verdict in verdicts:
         tag = tags.get(verdict.status)

@@ -85,6 +85,10 @@ def _ntp_offset_seconds(runner=subprocess.run) -> tuple[float | None, str]:
     출력은 로케일 언어라(한글 Windows면 한국어) 문장은 안 읽고 `+00.0005732s` 형태의
     **숫자 토큰만** 정규식으로 뽑는다 — `ops/integrity_report.py`가 이벤트로그에서 로케일
     문자열을 피해 `Properties` 배열을 직접 읽는 것과 같은 이유다.
+
+    **표본을 3개 뽑는 이유**: 첫 표본이 자주 `0x800705B4`(타임아웃)로 실패한다(2026-08-05
+    실측 — 같은 명령을 연달아 돌려도 됐다 안 됐다 한다). 1개만 뽑으면 시계가 멀쩡한 날에도
+    "측정 실패"가 되고, 그러면 이 검사가 있으나 마나가 된다. 하나라도 성공하면 그 값을 쓴다.
     """
     if sys.platform != "win32":
         return None, "Windows 전용 측정 — 건너뜀"
@@ -94,7 +98,7 @@ def _ntp_offset_seconds(runner=subprocess.run) -> tuple[float | None, str]:
                 "w32tm",
                 "/stripchart",
                 "/computer:time.windows.com",
-                "/samples:1",
+                "/samples:3",
                 "/dataonly",
             ],
             capture_output=True,
@@ -171,6 +175,31 @@ def check_clock(
     if offset is not None and abs(offset) > CLOCK_OFFSET_WARN_SECONDS:
         parts.append(f"경고: 완성봉 유예 500ms보다 큼(임계 {CLOCK_OFFSET_WARN_SECONDS:.0f}초)")
     return CheckResult("clock", True, " · ".join(parts))
+
+
+def check_host(*, collector=None) -> CheckResult:
+    """호스트 기초 위생 — 디스크 여유·전원 계획·Docker (2026-08-05 신설, 고도화 5).
+
+    ## 왜 자가 점검이 애플리케이션 바깥까지 보나
+
+    2026-08-04에 로컬 시계가 14.41초 밀린 채 8거래일을 돌았는데, 원인은 코드가 아니라
+    **Windows Time 서비스가 꺼져 있었던 것**이었다. 그때까지 이 스크립트는 설정·스키마·
+    시크릿·번들·Redis만 봤다 — 프로세스 바깥은 점검 범위에 아예 없었다.
+
+    복제 배포(SYSTEM.md §4-6)에서 특히 중요하다: 인스턴스 차이는 `configs/instance.yaml`
+    하나뿐이라는 것이 원칙인데 **호스트 상태는 그 파일에 안 적힌다**.
+
+    **기동은 막지 않는다.** 시간 동기만 `check_clock`이 거부하고(그건 봉 경계와 청산
+    타이밍을 직접 어긋나게 한다), 나머지는 경고다 — 임계가 전부 미검증 초기값이고,
+    디스크가 좀 부족하다고 그날 수집을 통째로 포기하는 것은 본말전도다.
+    """
+    from messiah.ops import host_health
+
+    health = (collector or host_health.collect)()
+    parts = [f"{c.name}={c.detail}" for c in health.checks]
+    if health.degraded:
+        parts.append(f"경고: {' · '.join(health.degraded)}")
+    return CheckResult("host", True, " · ".join(parts))
 
 
 def check_git_state(mode: str) -> CheckResult:
@@ -269,6 +298,7 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     results.append(check_schema())
     results.append(check_timezone())
     results.append(check_clock())
+    results.append(check_host())
     if cfg is not None:
         results.append(check_git_state(cfg.mode))
         results.append(check_secrets(cfg))

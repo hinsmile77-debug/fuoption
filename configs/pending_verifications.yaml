@@ -135,3 +135,34 @@ verifications:
     min: 1
     consecutive_days: 3
     deadline: 2026-08-14
+
+  # ------------------------------------------------------ 고도화 5종 (2026-08-05)
+
+  - id: daily-axes-measured
+    summary: "리포트 대조축 5종이 매일 실제로 측정되는지(고도화 1·2·4) — 미측정이 0인지"
+    registered: 2026-08-05
+    # **이 등록부의 메타 항목이다.** 다른 항목이 "판정 불가"로 정체되는 근본 원인이 전부
+    # 여기 모인다 — 2026-08-04에 크래시 집계가 조용히 사라져 `ui-crash-isolation`이 영원히
+    # 0/3이었던 것이 그 사례다.
+    #
+    # 이 값이 0이 되려면 장후에 두 도구를 돌려야 한다:
+    #   python scripts/verify_archive_volume.py --date <오늘>
+    #   python scripts/run_vol_scorecard.py     --date <오늘>
+    # 그리고 수집 세션이 ClockSkew·FeatureHealth 로그를 남겨야 한다(자동).
+    metric: unmeasured_count
+    max: 0
+    consecutive_days: 3
+    deadline: 2026-08-19
+
+  - id: no-degenerate-features
+    summary: "세션 내내 죽어 있는 피처가 없는지(고도화 3) — nan_ratio가 못 보는 축"
+    registered: 2026-08-05
+    # `px_macd_h_5`는 **값을 내므로** nan_ratio에 흔적이 없었고 8거래일 내내 죽어 있었다.
+    # 관문(연구 경로)을 처음 돌렸을 때 비로소 "IC 정의 불가 — 값이 상수"로 드러났다.
+    #
+    # 첫 며칠은 0이 아닐 가능성이 높다(웜스타트가 못 채운 긴 창 피처가 잡힌다). 그게
+    # 오탐이면 임계가 아니라 **웜스타트가 고쳐져야 할 것**이라는 뜻이므로 그대로 둔다.
+    metric: degenerate_feature_count
+    max: 0
+    consecutive_days: 3
+    deadline: 2026-08-19

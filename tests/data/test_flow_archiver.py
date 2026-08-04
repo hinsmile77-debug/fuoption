@@ -97,8 +97,10 @@ async def test_day_rollover_starts_a_new_file_without_carrying_rows(tmp_path):
 async def test_ignores_snapshots_from_other_markets(tmp_path):
     arch = InvestorFlowArchiver(tmp_path, _MARKET)
     other = InvestorFlowSnapshot(
-        market_code="OTHER", sector_code="F001",
-        ts_utc=datetime(2026, 8, 4, 9, 0, tzinfo=KST), raw={"output": [{"a": "1"}]},
+        market_code="OTHER",
+        sector_code="F001",
+        ts_utc=datetime(2026, 8, 4, 9, 0, tzinfo=KST),
+        raw={"output": [{"a": "1"}]},
     )
 
     await arch.handle_snapshot(other)
@@ -130,8 +132,10 @@ async def test_empty_output_produces_a_row_with_only_the_key_columns(tmp_path):
     """응답이 비어도 '그 시각에 폴링했다'는 사실은 남는다."""
     arch = InvestorFlowArchiver(tmp_path, _MARKET)
     empty = InvestorFlowSnapshot(
-        market_code=_MARKET, sector_code="F001",
-        ts_utc=datetime(2026, 8, 4, 9, 0, tzinfo=KST), raw={},
+        market_code=_MARKET,
+        sector_code="F001",
+        ts_utc=datetime(2026, 8, 4, 9, 0, tzinfo=KST),
+        raw={},
     )
 
     await arch.handle_snapshot(empty)

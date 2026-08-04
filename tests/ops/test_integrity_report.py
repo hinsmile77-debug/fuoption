@@ -862,3 +862,175 @@ def test_session_git_sha_is_recorded_as_a_fact_not_a_breach(tmp_path: Path):
     assert report.session_git_shas == ["d5e6b01"]
     assert report.breaches == []
     assert "수집 커밋: d5e6b01" in format_summary(report)
+
+
+# ================================ 고도화 1·2·3·4·5 (2026-08-05)
+
+
+def _clean_log(tmp_path: Path) -> Path:
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+    return log
+
+
+def _healthy_host():
+    from messiah.ops.host_health import HostCheck, HostHealth
+
+    return lambda: HostHealth(checks=[HostCheck("disk", True, True, "여유 500GB")])
+
+
+def _report2(tmp_path: Path, *, logs, crash=_no_crashes, host=None, tick_rows: int = 5000):
+    """고도화 축들을 함께 검증하는 판형 — 호스트 점검은 기본으로 **주입**한다.
+
+    실제 `host_health.collect()`를 부르면 테스트가 그 PC의 디스크·전원 상태를 타서
+    다른 기계에서 다르게 깨진다.
+    """
+    return build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths=logs,
+        crash_collector=crash,
+        tick_dir=_write_ticks(tmp_path, tick_rows),
+        log_dir=tmp_path,
+        host_collector=host or _healthy_host(),
+    )
+
+
+# ---------------------------------------------------------------- 고도화 1: 외부 대조
+
+
+def test_volume_check_artifact_becomes_a_first_class_axis(tmp_path: Path):
+    """2026-08-04 사고의 대응 — 리포트는 "결손 0분"으로 깨끗했는데 아카이브 거래량은
+    공식값의 55%였다. 내부 정합성(Horizon 항등식)은 수집값끼리의 일치라 절반 유실이
+    양쪽에 똑같이 반영돼 통과한다. 외부 기준이 있어야만 잡힌다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    (tmp_path / "volume_check_20260729.json").write_text(
+        json.dumps({"date": "2026-07-29", "ratio": 0.551, "warn_ratio": 0.95, "ok": False}),
+        encoding="utf-8",
+    )
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    assert report.volume_check is not None
+    assert any("거래량 비율" in breach for breach in report.breaches)
+    assert "공식 분봉 대비 거래량" in format_summary(report)
+
+
+def test_a_passing_volume_check_is_recorded_without_a_breach(tmp_path: Path):
+    _write_bars(tmp_path / "bars", list(range(30)))
+    (tmp_path / "volume_check_20260729.json").write_text(
+        json.dumps({"ratio": 1.0, "warn_ratio": 0.95, "ok": True}), encoding="utf-8"
+    )
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    assert report.breaches == []
+    assert "공식 분봉 대비 거래량 대조" not in " ".join(report.unmeasured)
+
+
+# ---------------------------------------------------------------- 고도화 2: 미측정 승격
+
+
+def test_everything_unmeasured_is_collected_in_one_place(tmp_path: Path):
+    """2026-08-04에 크래시 집계가 조용히 사라진 것이 이 축의 계기다.
+
+    "오늘 무엇을 모르는가"가 한 줄로 안 보이면 사람은 리포트를 "깨끗한 날"로 읽는다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    joined = " ".join(report.unmeasured)
+    assert "시계 스큐" in joined
+    assert "거래량 대조" in joined
+    assert "변동성 축" in joined
+    assert "피처 건강도" in joined
+    assert "❓ 미측정:" in format_summary(report)
+
+
+def test_measured_axes_drop_out_of_unmeasured(tmp_path: Path):
+    """반대 방향 — 실제로 잰 축은 목록에서 빠져야 한다(안 그러면 매일 다 뜬다)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"level": "INFO", "tag": "ClockSkewMeasured", "skew_seconds": -0.01},
+            {
+                "level": "INFO",
+                "tag": "FeatureHealthSummary",
+                "horizon": "1m",
+                "always_nan": [],
+                "constant": [],
+            },
+        ],
+    )
+    (tmp_path / "volume_check_20260729.json").write_text(
+        json.dumps({"ratio": 1.0, "ok": True}), encoding="utf-8"
+    )
+    (tmp_path / "vol_scorecard_20260729.json").write_text(
+        json.dumps(
+            {"horizons": {"5m": {"baseline_ic": 0.4, "beats_baseline": [], "samples": 900}}}
+        ),
+        encoding="utf-8",
+    )
+
+    report = _report2(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.unmeasured == []
+    assert report.breaches == []
+    assert "변동성 축 5m" in format_summary(report)
+
+
+# ---------------------------------------------------------------- 고도화 3: 죽은 피처
+
+
+def test_degenerate_features_become_a_breach(tmp_path: Path):
+    """`px_macd_h_5`는 **값을 내므로** nan_ratio에 흔적이 없었다 — 8거래일 내내 죽어 있었고
+    무결성 리포트는 그걸 말할 수단이 아예 없었다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {
+                "level": "WARNING",
+                "tag": "FeatureHealthDegenerate",
+                "horizon": "5m",
+                "always_nan": ["px_ema_cross_60"],
+                "constant": ["px_macd_h_5"],
+            },
+        ],
+    )
+
+    report = _report2(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.degenerate_features["5m"]["constant"] == ["px_macd_h_5"]
+    assert any("죽어 있었다" in breach for breach in report.breaches)
+
+
+# ---------------------------------------------------------------- 고도화 5: 호스트 위생
+
+
+def test_degraded_host_is_a_breach_but_unmeasured_host_is_not(tmp_path: Path):
+    """디스크가 찼다는 것은 판정이고, 전원 계획을 못 읽었다는 것은 미판정이다 —
+    둘을 합치면 오탐이 늘거나(후자를 실패로) 사고를 놓친다(전자를 무시로)."""
+    from messiah.ops.host_health import HostCheck, HostHealth
+
+    _write_bars(tmp_path / "bars", list(range(30)))
+    host = lambda: HostHealth(  # noqa: E731
+        checks=[
+            HostCheck("disk", True, False, "여유 0.2GB (최소 5GB)"),
+            HostCheck("power", False, True, "측정 실패(형식 불일치)"),
+        ]
+    )
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]}, host=host)
+
+    assert any("호스트 위생: disk" in breach for breach in report.breaches)
+    assert any("power" in item for item in report.unmeasured)
+    assert not any("power" in breach for breach in report.breaches)

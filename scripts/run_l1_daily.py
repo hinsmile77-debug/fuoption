@@ -583,6 +583,7 @@ async def _daily_close(
     bus: MessageBus,
     rest: _RestCollection | None = None,
     tick_archiver: TickArchiver | None = None,
+    engine: FeatureEngine | None = None,
 ) -> None:
     # 마지막 1분봉은 **버스를 통해서만** 합성기에 도달한다(아키텍처 불변 원칙 2 — 직접
     # 함수 호출 금지). 발행과 구독자 콜백 사이에는 순서 보장이 없으므로, 곧바로
@@ -599,6 +600,10 @@ async def _daily_close(
             bar_open_kst=final_bar.bar_open_kst.isoformat(),
         )
     await composer.flush_all_final()
+    # 세션 내내 죽어 있던 피처를 남긴다 (2026-08-05 고도화 3) — `nan_ratio`가 못 보는
+    # 것을 본다. 퇴화 0건인 날도 남겨야 "검사했는데 0건"과 "검사를 안 함"이 갈린다.
+    if engine is not None:
+        engine.log_feature_health()
     # 틱 아카이버도 버퍼링한다(하루 5~10만행이라 매 틱 재작성하면 O(n²)) — 남은 버퍼를
     # 확정하고, **그날 실제로 몇 행이 나갔는지 로그에 남긴다.** 결선만 하고 0행으로 하루가
     # 끝나는 것이 이 프로젝트의 반복 실패 모드였다(수급 폴러 7개월, 옵션체인 수개월).
@@ -719,7 +724,7 @@ async def main(cfg: InstanceConfig) -> None:
     shutdown_budget = max((hard_deadline - now_kst()).total_seconds(), 30.0)
     try:
         await asyncio.wait_for(
-            _daily_close(collector, composer, bus, rest, tick_archiver),
+            _daily_close(collector, composer, bus, rest, tick_archiver, engine),
             timeout=shutdown_budget,
         )
     except TimeoutError:
