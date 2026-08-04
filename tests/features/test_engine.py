@@ -544,7 +544,14 @@ def test_every_registered_feature_is_computable_within_history_capacity():
     2026-08-04 실측으로 두 개가 그 상태였다: `px_ema_cross_60`은 slow EMA가 3*W=180봉,
     `px_macd_h_60`은 2*W+시그널로 139봉을 요구하는데 용량은 130이었다. 매일 무결성
     리포트에 `nan_ratio=0.0165`(=2/121)가 찍히고 있었지만 "정상 수준"으로 읽혔다.
+
+    2026-08-04(F0-4)에 **스펙 구동으로 바꿨다** — 종전에는 PX/VL 두 모듈을 손으로 나열해서,
+    MS·OP·RG·EV가 붙으면 그 카테고리는 이 검사에서 통째로 빠진 채 같은 사고를 반복할
+    수 있었다. 이제 `spec.CATEGORIES`에 등록된 **전 카테고리**가 자동으로 검사된다
+    (봉 창만 검사한다 — 사이드카 계열은 봉 예산이 아니라 일별 이력 길이가 제약이라
+    성격이 다르고, 그 카테고리의 자체 테스트가 본다).
     """
+    from messiah.features import spec as feature_spec
     from messiah.features.engine import _MAX_HISTORY
     from messiah.features.px_core import SessionState
 
@@ -554,13 +561,14 @@ def test_every_registered_feature_is_computable_within_history_capacity():
         session.on_bar(bar)
 
     unusable: list[str] = []
-    for name, fn, windows in list(PX_WINDOWED_FEATURES) + list(VL_WINDOWED_FEATURES):
-        for window in windows:
-            if fn(bars, window) is None:
-                unusable.append(f"{name}_{window}")
-    for name, fn in list(PX_STATEFUL_FEATURES) + list(VL_STATEFUL_FEATURES):
-        if fn(bars, session) is None:
-            unusable.append(name)
+    for category in feature_spec.CATEGORIES.values():
+        for name, fn, windows in category.windowed:
+            for window in windows:
+                if fn(bars, window) is None:
+                    unusable.append(f"{name}_{window}")
+        for name, fn in category.stateful:
+            if fn(bars, session) is None:
+                unusable.append(name)
 
     assert not unusable, (
         f"용량 {_MAX_HISTORY}봉으로 계산 불가능한 피처: {unusable} — "
@@ -631,8 +639,11 @@ def test_fl_features_appear_and_have_values_when_flow_history_is_injected():
     from messiah.features.fl_core import FLOW_FEATURES
 
     engine = FeatureEngine(
-        "A05608", FakeBus(), "v2026.08-fl", horizons=[Horizon.M5],
-        flow_history=_flow_history(),
+        "A05608",
+        FakeBus(),
+        "v2026.08-fl",
+        horizons=[Horizon.M5],
+        sidecars={"flow": _flow_history()},
     )
     bars = _rising_bars(60, Horizon.M5)
     vector = engine._build_feature_vector(bars[-1], bars)  # noqa: SLF001
@@ -640,3 +651,58 @@ def test_fl_features_appear_and_have_values_when_flow_history_is_injected():
     present = [name for name, _ in FLOW_FEATURES if name in vector.values]
     assert len(present) == len(FLOW_FEATURES)
     assert any(vector.values[name] is not None for name in present)
+
+
+# ---------------------------------------- 스펙·사이드카 정합 (2026-08-04, F0-1)
+
+
+def test_engine_refuses_to_start_when_a_required_sidecar_is_missing():
+    """2026-08-04 사고의 구조적 차단 — FL을 요구하는 feature_set인데 수급 이력을 안 넘기면
+    종전에는 FL 9개가 조용히 사라진 벡터가 `v2026.08-fl` 이름을 달고 나갔다. 실제로
+    `FeatureEngine` 생성처 7곳 전부가 그 상태였고, 아무도 몇 달간 몰랐다."""
+    import pytest
+
+    with pytest.raises(ValueError, match="flow"):
+        FeatureEngine("A05608", FakeBus(), "v2026.08-fl", horizons=[Horizon.M5])
+
+
+def test_engine_refuses_a_sidecar_the_feature_set_does_not_use():
+    """반대 방향의 같은 사고 — 주입한 쪽은 FL이 나온다고 믿는데 스펙이 PX+VL이라 조용히
+    무시된다. "붙였는데 왜 성능이 그대로지"로 몇 주를 쓰는 경로다."""
+    import pytest
+
+    with pytest.raises(ValueError, match="flow"):
+        FeatureEngine(
+            "A05608",
+            FakeBus(),
+            "v2026.07",
+            horizons=[Horizon.M5],
+            sidecars={"flow": _flow_history()},
+        )
+
+
+async def test_published_vector_keys_match_the_declared_spec_exactly():
+    """`feature_set` 이름이 주장하는 모양과 실제 벡터가 같은가 — 학습 열 순서
+    (`models/trainer.build_training_data`가 쓰는 `sorted(values)`)가 이 스펙과 어긋나면
+    train/serve 불일치가 이름만 같은 채로 통과한다."""
+    from messiah.features import spec as feature_spec
+
+    bus = FakeBus()
+    engine = FeatureEngine(
+        "A05608",
+        bus,
+        "v2026.08-fl",
+        horizons=[Horizon.M5],
+        sidecars={"flow": _flow_history()},
+    )
+
+    await engine.handle_bar(_bar(0))
+
+    _, vector = bus.published[0]
+    assert sorted(vector.values) == list(feature_spec.resolve("v2026.08-fl").feature_names)
+
+
+def test_feature_set_registry_is_internally_consistent():
+    from messiah.features import spec as feature_spec
+
+    assert feature_spec.validate_registry() == []

@@ -14,9 +14,9 @@ PX/VL은 봉만 보면 계산된다. FL은 **봉 밖의 상태**(일별 투자�
 
 ## 미래 참조
 
-`FlowHistory.flow_as_of()`/`recent()`가 **요청일보다 엄격히 이전**만 준다(그 모듈 docstring).
-이 파일의 계산기는 그 계약을 그대로 믿고 쓰며, 직접 날짜를 자르지 않는다 — 자르는 곳이
-둘이면 한쪽만 고쳐지는 사고가 난다.
+`FlowHistory.as_of()`/`recent()`가 **요청일보다 엄격히 이전**만 준다 —
+`features/sidecar.DailySidecar` 계약이다. 이 파일의 계산기는 그 계약을 그대로 믿고 쓰며,
+직접 날짜를 자르지 않는다 — 자르는 곳이 둘이면 한쪽만 고쳐지는 사고가 난다.
 
 ## 정규화
 
@@ -159,7 +159,7 @@ def fl_frgn_orgn_agree(bars: Bars, flow: FlowHistory) -> float | None:
     day = _as_of_day(bars)
     if day is None:
         return None
-    row = flow.flow_as_of(day)
+    row = flow.as_of(day)
     if row is None:
         return None
     frgn, orgn = row.values.get("frgn_ntby_qty"), row.values.get("orgn_ntby_qty")

@@ -95,6 +95,14 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     "longest_gap_minutes": lambda r: (
         None if _bar_1m(r) is None else float(_bar_1m(r)["longest_gap_minutes"])  # type: ignore[index]
     ),
+    # **"존재하는가"를 재는 지표** (2026-08-04, F2). 다른 항목이 전부 "나쁜 일이 몇 번
+    # 일어났나"(max 기준)인 반면 이건 "좋은 일이 일어나긴 했나"(min 기준)를 잰다.
+    #
+    # 선행 프로젝트 마흐디가 2026-08-03에 배운 것이다: 그날 예측 13개 중 12개가 자동으로
+    # 확인됐는데 **그 어떤 가설도 `find_gamma_flip()`이 전 이력에서 한 번도 값을 낸 적이
+    # 없다는 사실을 잡지 못했다** — 아무도 "계산되는가"를 예측치로 적지 않았기 때문이다.
+    # 넉 달간 앙상블 멤버 하나가 죽어 있었고, 넉 달 동안 "개선"해 온 대상이 애초에 없었다.
+    "tick_rows": lambda r: float(r.get("tick_rows", 0)),
 }
 
 

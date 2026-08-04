@@ -68,7 +68,10 @@ Aligned = tuple[BarClosed, FeatureVector, TripleBarrierLabel]
 
 
 async def build_feature_vectors(
-    bars: Sequence[BarClosed], *, feature_set: str
+    bars: Sequence[BarClosed],
+    *,
+    feature_set: str,
+    sidecars: Mapping[str, object] | None = None,
 ) -> list[FeatureVector]:
     """
     계산: `bars`(단일 심볼·단일 Horizon, 오래된 것 → 최신 순)를 실제 운영과 동일한
@@ -76,6 +79,9 @@ async def build_feature_vectors(
          재생 아님) FeatureVector를 얻는다. FeatureEngine이 내부적으로 발행하는
          `feat.{h}.{symbol}`을 InProcessBus로 가로채 수집하므로, 반환값은 `bars`와 정확히
          1:1(개수·순서 동일) — 별도 정렬 없이 `zip(bars, feature_vectors)` 가능.
+    입력: `sidecars`는 `feature_set`이 요구하는 봉 밖 상태(`features/sidecar.build()`로
+         조립). PX+VL만 쓰는 이름이면 생략 — 요구/주입이 어긋나면 엔진이 **생성 시점에**
+         거부하므로 여기서 따로 검사하지 않는다(검사가 두 곳이면 한쪽만 고쳐진다).
     """
     if not bars:
         return []
@@ -89,7 +95,9 @@ async def build_feature_vectors(
         collected.append(vector)
 
     await bus.subscribe([f"{TOPIC_FEAT}.{horizon.value}.{symbol}"], _collect)
-    engine = FeatureEngine(symbol, bus, feature_set=feature_set, horizons=[horizon])
+    engine = FeatureEngine(
+        symbol, bus, feature_set=feature_set, horizons=[horizon], sidecars=sidecars
+    )
     for bar in bars:
         await engine.handle_bar(bar)
     return collected
@@ -137,6 +145,7 @@ async def train_prototype_expert(
     *,
     feature_set: str,
     model_version: str,
+    sidecars: Mapping[str, object] | None = None,
     cost_model: CostModel | None = None,
     qty: int = 1,
     atr_window: int = DEFAULT_ATR_WINDOW,
@@ -154,7 +163,7 @@ async def train_prototype_expert(
         raise ValueError("bars가 비어 있음")
     horizon = bars[0].horizon
 
-    feature_vectors = await build_feature_vectors(bars, feature_set=feature_set)
+    feature_vectors = await build_feature_vectors(bars, feature_set=feature_set, sidecars=sidecars)
     feature_names, x, y, sample_weight = build_training_data(
         bars,
         feature_vectors,
@@ -263,6 +272,7 @@ async def train_formal_expert(
     *,
     feature_set: str,
     model_version: str,
+    sidecars: Mapping[str, object] | None = None,
     cost_model: CostModel | None = None,
     qty: int = 1,
     atr_window: int = DEFAULT_ATR_WINDOW,
@@ -297,7 +307,7 @@ async def train_formal_expert(
     cost_model = cost_model or CostModel()
     horizon = bars[0].horizon
 
-    feature_vectors = await build_feature_vectors(bars, feature_set=feature_set)
+    feature_vectors = await build_feature_vectors(bars, feature_set=feature_set, sidecars=sidecars)
     cost_ticks = cost_model.estimate_round_trip_from_bars(bars, qty=qty).total_ticks
     labels = label_and_weight(bars, atr_window=atr_window, cost_ticks=cost_ticks)
     aligned = _align(bars, feature_vectors, labels)

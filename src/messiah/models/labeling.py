@@ -46,6 +46,7 @@ t_start·t_end를 합친 시각 집합(동시성이 바뀔 수 있는 지점은 
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -244,3 +245,96 @@ def label_and_weight(
     )
     weights = compute_uniqueness(labels)
     return [replace(label, weight=w) for label, w in zip(labels, weights)]
+
+
+# ---------------------------------------------------------------- 변동성 타깃 (2026-08-04)
+
+
+def forward_realized_volatility(
+    bars: Sequence[BarClosed], *, horizon_bars: int
+) -> list[float | None]:
+    """bars[i] 시점에서 본 **다음 `horizon_bars`봉의 실현변동성** — 방향이 아닌 예측 대상.
+
+    ## 왜 이 함수가 생겼나
+
+    2026-08-04 피처 관문 실측: 137개 피처 중 **부호 있는 방향 정보를 담은 것은 단 하나도
+    통과하지 못했다**(방향성 39개 × 3 Horizon = 117 판정 중 0). 통과한 것은 전부 무부호
+    크기(`vl_atr`·`vl_rv`·`px_bb_width` …)나 시각이었고, |IC| 중앙값 격차가 3배였다.
+
+    즉 지금 입력이 담고 있는 정보는 "어디로 가는가"가 아니라 **"얼마나 움직이는가"**다.
+    이 함수는 그 관측을 검정 가능한 형태로 만든다 — 같은 피처를 변동성 타깃에 태워
+    IC가 실제로 커지는지 재기 위한 것이다(Ver 1.3 §9의 변동성 예측 축과 같은 방향).
+
+    ## 계산
+
+        RV_i = sqrt( Σ_{k=1..N} r_{i+k}² ),   r_t = log(c_t / c_{t-1})
+
+    창의 첫 수익률 `r_{i+1} = log(c_{i+1}/c_i)`는 bars[i] **이후**의 움직임이다 — 예측
+    대상이므로 그게 맞다. 피처는 bars[i]까지만 보므로 미래 참조가 아니다.
+
+    **연율화하지 않는다.** 관문이 쓰는 것은 순위상관(Spearman)이고 연율화는 단조 변환이라
+    순위를 바꾸지 않는다 — 상수를 곱해 봐야 IC가 그대로다. 학습 타깃으로 쓸 때 스케일이
+    필요하면 그때 호출측이 곱한다.
+
+    반환: `bars`와 같은 길이. 창을 못 채우는 **마지막 `horizon_bars`개는 None**(꼬리 트림),
+         종가가 0 이하라 로그를 못 취하는 구간도 None.
+    """
+    if horizon_bars < 1:
+        raise ValueError(f"horizon_bars는 1 이상이어야 한다: {horizon_bars}")
+
+    out: list[float | None] = []
+    for i in range(len(bars)):
+        end = i + horizon_bars
+        if end >= len(bars):
+            out.append(None)  # 창을 못 채운다 — 0이 아니라 "모른다"
+            continue
+        total = 0.0
+        ok = True
+        for k in range(i, end):
+            prev_close, next_close = bars[k].c_ticks, bars[k + 1].c_ticks
+            if prev_close <= 0 or next_close <= 0:
+                ok = False
+                break
+            total += math.log(next_close / prev_close) ** 2
+        out.append(math.sqrt(total) if ok else None)
+    return out
+
+
+def trailing_realized_volatility(
+    bars: Sequence[BarClosed], *, horizon_bars: int
+) -> list[float | None]:
+    """bars[i] 시점에 **이미 알고 있는** 직전 `horizon_bars`봉의 실현변동성.
+
+    `forward_realized_volatility()`의 거울상이다 — 그건 예측 **대상**이고 이건 예측의
+    **기준선**이다. 변동성 군집(volatility clustering)이 금융 시계열의 가장 강건한 정형화된
+    사실이라, "다음 N봉 변동성"의 상당 부분은 "직전 N봉 변동성" 하나로 설명된다.
+
+    피처 관문이 이걸 필요로 하는 이유(2026-08-04): 변동성 축에서 137개 중 78개가 IC 0.4~0.67로
+    통과했는데, 그 값이 **피처의 정보인지 지속성 그 자체인지** 구분이 안 된다. 이 값을
+    통제변수로 넣고 부분상관을 재야 "기준선을 넘는 증분"이 보인다.
+
+    계산: `sqrt( Σ_{k=i-N+1..i} r_k² )`, `r_k = log(c_k / c_{k-1})`.
+         창의 마지막 수익률이 `log(c_i / c_{i-1})`이라 **bars[i]까지의 정보만** 쓴다 —
+         미래 참조가 아니다.
+
+    반환: `bars`와 같은 길이. 창을 못 채우는 **처음 `horizon_bars`개는 None**.
+    """
+    if horizon_bars < 1:
+        raise ValueError(f"horizon_bars는 1 이상이어야 한다: {horizon_bars}")
+
+    out: list[float | None] = []
+    for i in range(len(bars)):
+        start = i - horizon_bars
+        if start < 0:
+            out.append(None)
+            continue
+        total = 0.0
+        ok = True
+        for k in range(start, i):
+            prev_close, next_close = bars[k].c_ticks, bars[k + 1].c_ticks
+            if prev_close <= 0 or next_close <= 0:
+                ok = False
+                break
+            total += math.log(next_close / prev_close) ** 2
+        out.append(math.sqrt(total) if ok else None)
+    return out

@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta
 
+import pytest
+
 from messiah.core.messages import BarClosed, Horizon
 from messiah.core.timeutil import KST
+from messiah.models import labeling
 from messiah.models.labeling import (
     TripleBarrierLabel,
     compute_uniqueness,
@@ -193,3 +196,72 @@ def test_label_and_weight_fills_uniqueness_onto_real_generated_labels():
     assert len(labeled) > 1
     assert all(0.0 < lbl.weight <= 1.0 for lbl in labeled)
     assert any(lbl.weight < 1.0 for lbl in labeled)  # 겹치는 진입이 있으니 전부 1.0일 수 없음
+
+
+# ------------------------------------------ 변동성 타깃 (2026-08-04, 예측 대상 전환 실측용)
+
+
+def _closes(values: list[float]) -> list[BarClosed]:
+    return [
+        BarClosed(
+            symbol="A05608",
+            horizon=Horizon.M5,
+            bar_open_kst=datetime(2026, 8, 5, 9, 0, tzinfo=KST) + timedelta(minutes=5 * i),
+            o_ticks=int(c),
+            h_ticks=int(c),
+            l_ticks=int(c),
+            c_ticks=int(c),
+            volume=10,
+        )
+        for i, c in enumerate(values)
+    ]
+
+
+def test_forward_realized_volatility_matches_the_hand_computed_value():
+    """N=2, 종가 100→110→121이면 두 로그수익률이 각각 log(1.1)로 같다.
+    RV_0 = sqrt(2 * log(1.1)^2) = log(1.1) * sqrt(2)."""
+    import math
+
+    bars = _closes([100, 110, 121, 121])
+
+    out = labeling.forward_realized_volatility(bars, horizon_bars=2)
+
+    assert out[0] == pytest.approx(math.log(1.1) * math.sqrt(2))
+
+
+def test_forward_realized_volatility_looks_forward_only():
+    """bars[i]의 값은 i **이후**의 움직임만 담아야 한다 — 과거 변동은 안 섞인다."""
+    bars = _closes([100, 200, 300, 300, 300])  # 앞은 격렬, 뒤는 정지
+
+    out = labeling.forward_realized_volatility(bars, horizon_bars=2)
+
+    assert out[0] > 0  # 100→200→300을 본다
+    assert out[2] == pytest.approx(0.0)  # 300→300→300 — 앞의 격변이 안 섞였다
+
+
+def test_forward_realized_volatility_trims_the_tail_as_none_not_zero():
+    """창을 못 채우는 꼬리는 0이 아니라 None이다 — 0으로 채우면 "변동이 없었다"는 없는
+    사실을 주장하게 되고, 관문이 그걸 실제 관측으로 센다."""
+    bars = _closes([100, 101, 102, 103, 104])
+
+    out = labeling.forward_realized_volatility(bars, horizon_bars=3)
+
+    assert len(out) == 5
+    assert out[:2] == [pytest.approx(out[0]), pytest.approx(out[1])]
+    assert out[2:] == [None, None, None]
+
+
+def test_forward_realized_volatility_window_matches_the_direction_barrier():
+    """방향 레이블과 **같은 봉 수**를 봐야 두 축의 IC를 견줄 수 있다 — 관문 스크립트가
+    `BARRIER_PARAMS[horizon].time_barrier_bars`를 그대로 넘기는 이유."""
+    bars = _closes([100 + i for i in range(20)])
+    n = labeling.BARRIER_PARAMS[Horizon.M5].time_barrier_bars
+
+    out = labeling.forward_realized_volatility(bars, horizon_bars=n)
+
+    assert sum(1 for v in out if v is None) == n  # 꼬리 트림이 정확히 N봉
+
+
+def test_forward_realized_volatility_rejects_a_nonsensical_window():
+    with pytest.raises(ValueError, match="horizon_bars"):
+        labeling.forward_realized_volatility(_closes([100, 101]), horizon_bars=0)

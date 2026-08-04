@@ -51,7 +51,11 @@ class InstanceConfig(BaseModel):
     universe: list[str] = Field(default_factory=lambda: list(universe_vocab.DEFAULT_UNIVERSE))
     model_bundle: str = "none"  # 릴리스 번들 ID (예: messiah-2026.08)
     redis_url: str = "redis://localhost:6379/0"
-    feature_set: str = "v2026.07"  # FeatureVector.feature_set 기본값 (Ver 1.4 §5.2, W6~8)
+    # FeatureVector.feature_set (Ver 1.4 §5.2). 이 이름 하나가 벡터 모양 하나를 정한다 —
+    # 해석은 `features/spec.py`의 `FEATURE_SETS`. 검증기를 붙인 이유는 `universe`와 같다:
+    # 오타(`v2026.08-f1`)가 조용히 기저 벡터(PX+VL)로 떨어지면 "FL을 켰는데 왜 그대로지"로
+    # 몇 주를 쓴다. 기동 시점에 깨지는 편이 낫다.
+    feature_set: str = "v2026.07"
     # 미니선물(A05608) 2026-07-22 실측값(호가 5단계 간격 역산) — 다른 상품/근월물에 그대로
     # 일반화하지 말 것(capability_matrix.md "알려진 갭" 참고, 상품별 실측 전까지는 이 값만 사용).
     futures_tick_size: str = "0.02"
@@ -60,6 +64,21 @@ class InstanceConfig(BaseModel):
     @classmethod
     def _known_tokens_only(cls, v: list[str]) -> list[str]:
         return universe_vocab.validate(v)
+
+    @field_validator("feature_set")
+    @classmethod
+    def _registered_feature_set_only(cls, v: str) -> str:
+        # 지연 임포트 — `features/spec.py`는 계산기 모듈(→ polars)을 끌어오는데, 설정 모듈은
+        # UI·스크립트가 가볍게 임포트하는 자리라 그 비용을 모듈 로드 시점에 지우지 않는다.
+        from messiah.features import spec as feature_spec
+
+        if v not in feature_spec.FEATURE_SETS:
+            known = ", ".join(feature_spec.registered_names())
+            raise ValueError(
+                f"미등록 feature_set '{v}' — features/spec.py의 FEATURE_SETS에 등록된 이름만 "
+                f"쓸 수 있다(현재: {known})"
+            )
+        return v
 
 
 def resolve_secret(ref: str) -> str:

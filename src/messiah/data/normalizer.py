@@ -56,14 +56,29 @@ from messiah.core.event_calendar import DEFAULT_SESSION
 from messiah.core.messages import BarClosed, BarSession, Horizon, Tick
 from messiah.core.timeutil import KST, now_kst, to_kst
 
-# H0IFCNT0(지수선물 실시간체결가) 필드 인덱스 — "^" 구분, 0-based. 실제 메시지는 50개 필드를
-# 갖지만(2026-07-22 라이브 캡처로 확인 — 매도/매수호가 등 idx34~37까지 포함) 이 파서는 symbol/
-# 시각/가격/거래량만 읽으므로(messiah Tick에 bid/ask 필드 자체가 없음), 필요한 만큼만
-# (idx9까지) 최소 길이로 검증한다.
+# H0IFCNT0(지수선물 실시간체결가) 필드 인덱스 — "^" 구분, 0-based. 실제 메시지는 50개 필드다
+# (2026-07-22 라이브 캡처로 확인).
+#
+# 2026-08-04(F2)부터 호가 4개(idx34~37)도 읽는다. 그 전까지는 symbol/시각/가격/거래량 4개만
+# 읽고 **나머지 46필드를 버렸는데**, 그 결과 MS(마이크로구조) 카테고리 30개가 "호가 데이터가
+# 없다"는 이유로 통째로 미착수였다 — 데이터가 없던 게 아니라 파서가 안 읽었을 뿐이다.
+# idx34~37은 2026-07-22 캡처에서 실제 데이터와 교차검증된 위치다(모듈 docstring).
+#
+# **여기 이름 붙인 것 외의 필드는 해석하지 않는다.** 미결제약정·이론가·총잔량·체결강도로
+# 보이는 필드가 더 있지만 위치를 실측으로 확정한 적이 없고, 추정으로 스키마를 정하는 것이
+# 정확히 마흐디 L16 사고(단위 미확인 스키마로 5일치 유실)의 형태다. 대신 프레임 전체를
+# `Tick.raw_fields`에 실어 `data/tick_archiver.py`가 통째로 보존한다 — 실측이 끝나면 그때
+# 소급해서 쓸 수 있다(틱은 봉과 달리 과거 조회 경로가 없어 안 받아두면 영원히 없다).
 _FUT_IDX_SYMBOL = 0
 _FUT_IDX_BSOP_HOUR = 1
 _FUT_IDX_PRICE = 5
 _FUT_IDX_QTY = 9
+_FUT_IDX_ASKP1 = 34
+_FUT_IDX_BIDP1 = 35
+_FUT_IDX_ASKP_RSQN1 = 36
+_FUT_IDX_BIDP_RSQN1 = 37
+# 최소 길이는 여전히 idx9까지다 — 호가는 **있으면 읽고 없으면 넘어간다**. idx37까지로 올리면
+# 호가가 없는 짧은 프레임에서 가격·수량이 멀쩡한데도 체결 자체를 통째로 버리게 된다.
 _FUT_MIN_FIELDS = _FUT_IDX_QTY + 1
 
 # H0IOCNT0(지수옵션 실시간체결가) 필드 인덱스 — 선물과 필드 순서가 다르다(가격이 idx2).
@@ -119,6 +134,53 @@ def _combine_kst(hhmmss: str, today: date) -> datetime:
     return datetime.combine(today, tick_time, tzinfo=KST)
 
 
+def _optional_ticks(fields: list[str], index: int, tick_size: Decimal) -> int | None:
+    """호가 1개를 정수 틱으로 — 못 읽으면 None(그 필드만 없는 것이지 레코드가 깨진 게 아니다).
+
+    0은 **None으로 본다**. KIS는 호가가 없는 순간(장 시작 전, 일방 호가 소진)에 0을 채워
+    보내는데, 그걸 "가격이 0틱"으로 읽으면 스프레드·미드가 통째로 망가진다.
+    """
+    try:
+        value = _price_to_ticks(fields[index], tick_size)
+    except (ValueError, IndexError, InvalidOperation, ArithmeticError):
+        return None
+    return value if value > 0 else None
+
+
+def _optional_int(fields: list[str], index: int) -> int | None:
+    """잔량 1개 — 못 읽으면 None. 여기서는 0을 **그대로 0으로 둔다**(가격과 달리 잔량 0은
+    "최우선호가에 물량이 없다"는 실제 상태이고, 흔하지는 않지만 의미가 있다)."""
+    try:
+        return int(Decimal(fields[index]))
+    except (ValueError, IndexError, InvalidOperation, ArithmeticError):
+        return None
+
+
+def _quote_rule_side(price_ticks: int, bid: int | None, ask: int | None) -> int:
+    """체결의 주도 방향 — quote rule(체결가 vs 미드): 미드 위면 매수주도(+1), 아래면 -1.
+
+    **알려진 근사**: Lee-Ready(1991)는 체결 **직전**의 호가와 비교하고 5초 지연을 권한다.
+    여기 쓸 수 있는 것은 같은 프레임에 실려 온 **동시 스냅샷**이라 체결 후 갱신된 호가일 수
+    있다 — 그러면 방향이 반대로 잡히는 체결이 일부 생긴다.
+
+    그래도 0(불명)으로 두는 것보다 낫다는 판단이다: 부호가 섞여도 집계량(`ms_vol_delta`·
+    `ms_tick_rule`)은 편향이 아니라 잡음으로 나타나고, 편향 방향이 한쪽으로 쏠린다면 그건
+    실측으로 재는 대상이지 지금 추측할 것이 아니다. 이 한계는 `Docs/capability_matrix.md`의
+    알려진 갭에 기록한다 — MS 피처를 실제로 학습에 넣기 전(F6)에 재검토한다.
+
+    미드와 정확히 같으면 0 — 틱룰(직전 체결가 대비) 폴백은 여기서 안 한다. 그건 레코드 하나가
+    아니라 시계열이 필요해 파서(무상태)의 범위를 벗어나고, MS 계산기가 봉 단위로 하면 된다.
+    """
+    if bid is None or ask is None or ask <= bid:
+        return 0  # 호가가 없거나 역전(크로스) — 판정 근거가 없다
+    mid = (bid + ask) / 2.0
+    if price_ticks > mid:
+        return 1
+    if price_ticks < mid:
+        return -1
+    return 0
+
+
 def _record_to_tick(
     fields: list[str],
     tick_size: Decimal,
@@ -130,18 +192,38 @@ def _record_to_tick(
     idx_qty: int,
     source: str,
     today: date,
+    quote_indices: tuple[int, int, int, int] | None = None,
 ) -> Tick | None:
-    """레코드 1건 → Tick. 실패 시 None(해당 레코드만 버리고 같은 프레임의 나머지는 계속)."""
+    """레코드 1건 → Tick. 실패 시 None(해당 레코드만 버리고 같은 프레임의 나머지는 계속).
+
+    `quote_indices`는 (매도호가1, 매수호가1, 매도잔량1, 매수잔량1)의 필드 위치 — 주면 호가를
+    함께 읽고 `side_hint`를 quote rule로 채운다. 호가 필드가 짧거나 못 읽히면 호가만 None으로
+    두고 체결 자체는 그대로 낸다(가격·수량은 멀쩡하다).
+    """
     if len(fields) < min_fields:
         return None
     try:
+        price_ticks = _price_to_ticks(fields[idx_price], tick_size)
+        ask1 = bid1 = ask_qty1 = bid_qty1 = None
+        if quote_indices is not None and len(fields) > max(quote_indices):
+            idx_ask, idx_bid, idx_ask_qty, idx_bid_qty = quote_indices
+            ask1 = _optional_ticks(fields, idx_ask, tick_size)
+            bid1 = _optional_ticks(fields, idx_bid, tick_size)
+            ask_qty1 = _optional_int(fields, idx_ask_qty)
+            bid_qty1 = _optional_int(fields, idx_bid_qty)
         return Tick(
             symbol=fields[idx_symbol],
             ts_exchange=_combine_kst(fields[idx_hour], today),
-            price_ticks=_price_to_ticks(fields[idx_price], tick_size),
+            price_ticks=price_ticks,
             qty=int(Decimal(fields[idx_qty])),
-            side_hint=0,
+            side_hint=_quote_rule_side(price_ticks, bid1, ask1),
             source=source,
+            bid1_ticks=bid1,
+            ask1_ticks=ask1,
+            bid_qty1=bid_qty1,
+            ask_qty1=ask_qty1,
+            # 프레임 전체를 그대로 — 해석은 나중에, 보존은 지금(모듈 상단 인덱스 주석).
+            raw_fields=tuple(fields),
         )
     except (ValueError, IndexError, InvalidOperation, ArithmeticError):
         return None
@@ -157,7 +239,8 @@ def parse_futures_ticks(
          (HHMMSS)을 today(기본 오늘 KST 날짜)와 결합해 tz-aware ts_exchange 생성 → 가격을
          tick_size로 나눠 정수 price_ticks로 변환(SYSTEM.md R2, float 금지).
     산출: 프레임에 실린 순서(= 체결 시각 순) 그대로의 Tick 목록. 한 건도 못 읽으면 빈 목록.
-    해석: side_hint는 항상 0 — messiah Tick이 bid/ask를 안 들고 있어 틱룰 계산이 불가능.
+    해석: 2026-08-04(F2)부터 L1 호가(idx34~37)도 함께 읽고 `side_hint`를 quote rule로 채운다
+         (`_quote_rule_side()`의 알려진 근사 참고). 프레임 전체는 `raw_fields`에 보존한다.
     실패 조건: 없다 — 필드 수 부족·숫자 변환 실패한 레코드는 건너뛰고 나머지는 그대로 낸다
               (레코드 1건의 파손이 같은 프레임의 성한 체결까지 버리게 두지 않는다).
     """
@@ -174,6 +257,12 @@ def parse_futures_ticks(
             idx_qty=_FUT_IDX_QTY,
             source=source,
             today=day,
+            quote_indices=(
+                _FUT_IDX_ASKP1,
+                _FUT_IDX_BIDP1,
+                _FUT_IDX_ASKP_RSQN1,
+                _FUT_IDX_BIDP_RSQN1,
+            ),
         )
         if tick is not None:
             ticks.append(tick)

@@ -177,7 +177,37 @@ def test_missing_log_file_is_not_an_error(tmp_path: Path):
 # ---------------------------------------------------------------- 임계 판정
 
 
-def _report(tmp_path: Path, *, logs: dict[str, list[Path]], crash=_no_crashes):
+def _write_ticks(tmp_path: Path, rows: int) -> Path:
+    """체결틱 조각 하나를 직접 써 넣는다 (2026-08-04, F2).
+
+    `TickArchiver`를 거치지 않는 이유는 이 테스트의 관심사가 적재 로직이 아니라 **리포트가
+    그 결과를 읽는가**이기 때문이다(적재 로직은 `tests/data/test_tick_archiver.py`가 본다).
+    """
+    import polars as pl
+
+    tick_dir = tmp_path / "ticks" / "A05608" / _DAY.isoformat()
+    tick_dir.mkdir(parents=True, exist_ok=True)
+    base = datetime(_DAY.year, _DAY.month, _DAY.day, 9, 0, tzinfo=KST)
+    pl.DataFrame(
+        {
+            "ts_kst": [base + timedelta(seconds=i) for i in range(rows)],
+            "symbol": ["A05608"] * rows,
+            "price_ticks": [54015] * rows,
+            "qty": [1] * rows,
+        }
+    ).write_parquet(tick_dir / "09.parquet")
+    return tmp_path / "ticks"
+
+
+def _report(
+    tmp_path: Path,
+    *,
+    logs: dict[str, list[Path]],
+    crash=_no_crashes,
+    tick_rows: int = 5000,
+):
+    """`tick_rows` 기본값이 0이 아닌 이유: **정상 운영일에는 틱이 쌓인다.** 0으로 두면
+    "깨끗한 날"이라는 픽스처가 실제로는 수집이 끊긴 날을 모델링하게 된다."""
     return build_report(
         day=_DAY,
         symbol="A05608",
@@ -185,6 +215,7 @@ def _report(tmp_path: Path, *, logs: dict[str, list[Path]], crash=_no_crashes):
         bar_dir=tmp_path / "bars",
         log_paths=logs,
         crash_collector=crash,
+        tick_dir=_write_ticks(tmp_path, tick_rows),
     )
 
 
@@ -581,3 +612,49 @@ def test_ownership_findings_become_breaches_in_the_report(tmp_path: Path):
     assert report.data_flow_findings
     assert any("아무도 손대지 않음" in b for b in report.breaches)
     assert "탐지·복구 불일치" in format_summary(report)
+
+
+# ------------------------------------------------ 체결틱 적재량 (2026-08-04, F2)
+
+
+def test_a_day_with_no_ticks_is_a_breach_even_when_bars_are_clean(tmp_path: Path):
+    """봉과 틱은 **수집 경로가 다르다** — 결선이 조용히 끊겨도 봉 지표는 전부 정상으로
+    보인다. 그리고 틱은 백필 경로가 없어 그 하루가 영구히 빈다.
+
+    이 프로젝트는 폴러를 만들고 결선을 안 붙여 데이터를 잃은 전례가 셋 있다
+    (InvestorFlowPoller 7개월 · OptionChainPoller 수개월 · FL 피처 모델 미도달).
+    """
+    log = tmp_path / "l1.log"
+    log.write_text(
+        '{"level": "INFO", "tag": "SessionStart", "ts": "2026-07-30T08:35:00+09:00"}\n',
+        encoding="utf-8",
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]}, tick_rows=0)
+
+    assert any("체결틱 적재" in b for b in report.breaches)
+    assert report.tick_rows == 0
+
+
+def test_tick_rows_are_counted_as_rows_not_files(tmp_path: Path):
+    """파일 개수로 대신하면 "파일은 있는데 0행"을 못 잡는다 — 그게 이 지표가 막으려는
+    상황이다."""
+    log = tmp_path / "l1.log"
+    log.write_text(
+        '{"level": "INFO", "tag": "SessionStart", "ts": "2026-07-30T08:35:00+09:00"}\n',
+        encoding="utf-8",
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]}, tick_rows=4321)
+
+    assert report.tick_rows == 4321
+    assert not any("체결틱 적재" in b for b in report.breaches)
+
+
+def test_tick_rows_reaches_the_verification_registry(tmp_path: Path):
+    """`fix_verification`이 실제로 이 필드를 읽을 수 있어야 등록부 항목이 작동한다 —
+    지표를 리포트에만 추가하고 추출기를 빠뜨리면 등록부가 조용히 아무것도 안 본다."""
+    from messiah.ops.fix_verification import METRIC_EXTRACTORS
+
+    assert METRIC_EXTRACTORS["tick_rows"]({"tick_rows": 1234}) == 1234.0
+    assert METRIC_EXTRACTORS["tick_rows"]({}) == 0.0  # 필드 자체가 없는 옛 리포트

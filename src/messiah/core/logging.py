@@ -44,6 +44,11 @@ TAG_LEVELS: dict[str, int] = {
     # (`data/investor_flow_history.py`).
     "InvestorFlowPagingLimit": logging.WARNING,
     "FeatureSetMismatch": logging.ERROR,  # L3: 침묵(DEBUG) 금지 — 무조건 ERROR
+    # 미등록 feature_set이 기저 카테고리(PX+VL)로 해석됨 (`features/spec.py`). 테스트·스모크가
+    # 임의 라벨을 쓰므로 예외가 아니라 로그지만, 조용히 넘어가면 운영 설정의 오타가 "FL을
+    # 켰는데 왜 그대로지"로 몇 주를 먹는다 — 폴백에는 배지를 단다(L18/R10). 운영 설정 경로는
+    # `core/config.py`의 검증기가 기동 시점에 먼저 거부하므로 여기까지 오지 않는다.
+    "FeatureSetUnregistered": logging.WARNING,
     "OrderSubmit": logging.INFO,
     "OrderPendingSet": logging.INFO,
     "FillMatched": logging.INFO,
@@ -68,6 +73,10 @@ TAG_LEVELS: dict[str, int] = {
     # 수급 스냅샷 적재 실패 — 장중 수급은 **과거 조회가 없어** 놓치면 영원히 못 받는다
     # (`data/flow_archiver.py`). 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
     "InvestorFlowArchiveError": logging.WARNING,  # REST 폴링 1회 실패 — 다음 틱에 자연 재시도(L22)
+    # 체결틱 조각 적재 실패 (`data/tick_archiver.py`). 틱은 **백필 경로가 아예 없어** 이
+    # 버퍼는 그대로 유실된다 — 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
+    "TickArchiveError": logging.WARNING,
+    "TickArchiveSummary": logging.INFO,  # 장후 적재 요약 — 결선만 하고 0행인 상태를 매일 드러낸다
     "OptionChainPollEmpty": logging.WARNING,  # 근월물 체인이 비어있음 — 마스터파일 갱신 필요할 수도
     "OptionChainPollError": logging.WARNING,  # 다리 1개 조회/발행 실패 — 나머지는 계속 시도(L22)
     # 기준가 없어 사이클 스킵 — 전량 폴링 폴백을 **일부러 안 하는** 정상 동작이지만(전량은

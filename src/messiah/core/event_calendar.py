@@ -66,6 +66,33 @@ _WEEKLY_MONDAY_WEEKDAY = 0
 _WEEKLY_THURSDAY_WEEKDAY = 3
 _MONTHLY_EXPIRY_WEEKDAY = 3  # 정규월물(선물/먼스리옵션) 만기 = 해당월 두 번째 목요일(표준 관례)
 
+# 동시만기(쿼드러플 위칭) 달 — 3·6·9·12월 정규월물 만기일.
+_QUADRUPLE_WITCHING_MONTHS = frozenset({3, 6, 9, 12})
+
+
+def monthly_expiry(year: int, month: int, calendar: "EventCalendar | None" = None) -> date:
+    """그 달 정규월물 만기일 — 둘째 주 목요일, 휴장이면 직전 거래일.
+
+    calendar를 주면 휴장일 보정을 하고, 생략하면 순수 요일 규칙만 쓴다(달력 없이도 계산이
+    성립해야 테스트가 실제 휴장일 파일에 의존하지 않는다).
+
+    **2026-08-04에 `data/backfill.py`에서 여기로 옮겼다.** 그 전에는 만기 규칙이 두 벌
+    있었다 — backfill의 이 함수(휴장일 보정 있음, 2026-08-04에 A05601~A05607 7개 월물의
+    실제 마지막 거래일과 전부 일치 확인)와 아래 `is_expiry_day()`의 인라인 판정
+    (`8 <= d.day <= 14`, 휴장일 보정 없음). 같은 재료를 두 곳에서 다르게 손질하면 주방이
+    오염된다(Ver 1.4 §0). EV Feature가 세 번째 사본을 만들기 전에 정본을 하나로 합쳤다.
+    `backfill.monthly_expiry`는 이 함수를 재수출한다(기존 임포트 경로 유지).
+    """
+    first = date(year, month, 1)
+    # 1일이 목요일이면 그날이 첫째 주 목요일 → 둘째는 +7일.
+    offset = (_MONTHLY_EXPIRY_WEEKDAY - first.weekday()) % 7
+    expiry = first + timedelta(days=offset + 7)
+    if calendar is None:
+        return expiry
+    while not calendar.is_trading_day(expiry):
+        expiry -= timedelta(days=1)
+    return expiry
+
 
 class EventCalendar:
     """휴장일 인식 + 세션 판정. 순수 계산(주입된 휴장일 집합 + 세션 시각) — 네트워크
@@ -148,4 +175,111 @@ class EventCalendar:
             return False
         if d.weekday() in (_WEEKLY_MONDAY_WEEKDAY, _WEEKLY_THURSDAY_WEEKDAY):
             return True
-        return d.weekday() == _MONTHLY_EXPIRY_WEEKDAY and 8 <= d.day <= 14
+        return self.is_monthly_expiry(d)
+
+    # -------------------------------------------------- 만기·거래일 계산 (2026-08-04, F1)
+    #
+    # EV Feature(`features/ev_core.py`)가 쓰는 질의들. 계산 자체는 순수하고 휴장일 집합에만
+    # 의존하므로 여기가 정본이다 — 피처 모듈이 만기 규칙 사본을 들면 그게 세 번째 사본이
+    # 되고, 셋 중 하나가 틀렸을 때 어느 것이 맞는지 알 방법이 없어진다.
+
+    def monthly_expiry(self, year: int, month: int) -> date:
+        """그 달 정규월물 만기일(휴장일 보정 포함) — 모듈 수준 `monthly_expiry()` 참고."""
+        return monthly_expiry(year, month, self)
+
+    def is_monthly_expiry(self, d: date) -> bool:
+        """정규월물(미니선물·먼스리옵션 공통) 만기일인가.
+
+        종전 `is_expiry_day()`는 `8 <= d.day <= 14`로 판정했는데, 그 범위는 **휴장 보정을
+        모른다** — 둘째 목요일이 휴장이면 실제 만기는 그 앞 거래일(수요일 등)로 당겨지고
+        그날은 이 범위 검사를 통과하지 못한다. 정본 규칙으로 판정한다.
+        """
+        return d == self.monthly_expiry(d.year, d.month)
+
+    def is_quadruple_witching(self, d: date) -> bool:
+        """동시만기(3·6·9·12월 정규월물 만기) — 선물·옵션이 한날 만기라 수급이 특히 크게 튄다."""
+        return d.month in _QUADRUPLE_WITCHING_MONTHS and self.is_monthly_expiry(d)
+
+    def next_monthly_expiry(self, d: date) -> date:
+        """`d` **이상**인 첫 정규월물 만기일 — d가 만기일이면 d 자신."""
+        this_month = self.monthly_expiry(d.year, d.month)
+        if d <= this_month:
+            return this_month
+        year, month = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+        return self.monthly_expiry(year, month)
+
+    def has_thursday_weekly(self, d: date) -> bool:
+        """그 주에 목위클리(L/M)가 상장되는가 — **먼슬리 만기 주에는 상장되지 않는다**.
+
+        선행 프로젝트 마흐디의 **실측**이다(2026-07-10, `mahdi/data/symbol_master.py`
+        `PRODUCT_TYPE_WEEKLY_THU_OPTION_CALL` 주석 + `dashboard/panels/
+        expiry_liquidity_panel.py` `_is_monthly_expiry_week()`): KRX는 먼슬리 만기 주의
+        목요일에 위클리(목)을 별도 상장하지 않고 먼슬리가 그 역할을 대신한다. 마흐디는 이
+        사실을 몰라 한동안 대시보드의 위클리(목) 행이 비는 것을 데이터 누락으로 오인했다.
+
+        판정은 마흐디 패널과 같은 기준(ISO 주 일치)을 쓴다. 먼슬리 만기가 휴장으로 당겨져
+        수요일이 되는 경우에도 **그 주 전체**가 먼슬리 만기 주이므로 같은 판정이 맞는다.
+        """
+        return d.isocalendar()[:2] != self.monthly_expiry(d.year, d.month).isocalendar()[:2]
+
+    def next_weekly_expiry(self, d: date, *, max_scan_days: int = 28) -> date | None:
+        """`d` 이상인 첫 위클리 만기 후보 — 월위클리(월)·목위클리(목) 중 **먼저 오는 쪽**.
+
+        목요일 후보는 `has_thursday_weekly()`로 걸러낸다(먼슬리 만기 주 제외) — 마흐디
+        2026-07-10 실측. 이걸 빼면 먼슬리 만기일에 "오늘 위클리도 만기"라고 주장하게 되고,
+        `ev_dte_opt_w`가 그날 0을 낸다(2026-08-04 발견 — 마흐디 조사 중 확인된 실제 결함).
+
+        **남은 근사 — 휴장 보정**: 만기 요일이 휴장이면 `monthly_expiry()`와 **같은 관례**로
+        직전 거래일로 당긴다. 그 관례는 KRX 실측으로 검증된 유일한 것이고(2026-08-04,
+        A05601~A05607 7개 월물의 실제 마지막 거래일과 전부 일치), 위클리에 다른 관례를
+        새로 만드는 것보다 검증된 쪽에 맞추는 편이 근거가 있다. **다만 위클리 자체를 실측한
+        것은 아니다.**
+
+        권위 있는 출처는 따로 있다 — `get_quote()` 응답의 `futs_last_tr_date`(그 종목의 실제
+        최종거래일)이고 마흐디가 그걸 쓴다(`mahdi/main.py`). MESSIAH도
+        `OptionQuoteSnapshot.raw`에 그 필드를 보존하므로, 옵션체인이 쌓이면 **요일 규칙
+        자체를 실측으로 대체**할 수 있다(NEXT_TODO).
+
+        `max_scan_days` 안에 못 찾으면 None(휴장일 데이터가 없는 연도로 넘어갔거나 연속
+        휴장이 비정상적으로 긴 경우) — 조용히 틀린 날짜를 내는 것보다 낫다. 창이 28일인
+        이유는 먼슬리 만기 주를 통째로 건너뛰는 경우가 생겨서다.
+        """
+        for offset in range(max_scan_days):
+            cur = d + timedelta(days=offset)
+            if cur.weekday() == _WEEKLY_THURSDAY_WEEKDAY:
+                if not self.has_thursday_weekly(cur):
+                    continue  # 먼슬리 만기 주 — 목위클리 상장 없음(마흐디 2026-07-10 실측)
+            elif cur.weekday() != _WEEKLY_MONDAY_WEEKDAY:
+                continue
+
+            expiry = cur
+            while not self.is_trading_day(expiry):
+                expiry -= timedelta(days=1)  # 먼슬리와 같은 관례 — 직전 거래일로 당긴다
+            if expiry >= d:
+                return expiry
+            # 당겨진 만기가 이미 지났다 — 그 위클리는 끝났으므로 다음 후보로 넘어간다.
+        return None
+
+    def trading_days_until(self, start: date, end: date) -> int:
+        """`start`(배타) ~ `end`(포함) 사이의 거래일 수 — D-day 계산의 정의.
+
+        `end <= start`면 0이다. 즉 **만기 당일의 D-day는 0**이고, 만기 전날(거래일)이면 1이다.
+        휴장일을 빼고 세므로 캘린더 일수와 다르다 — "잔여 거래일"이 Ver 1.4의 정의다.
+        """
+        if end <= start:
+            return 0
+        count = 0
+        cur = start + timedelta(days=1)
+        while cur <= end:
+            if self.is_trading_day(cur):
+                count += 1
+            cur += timedelta(days=1)
+        return count
+
+    def calendar_gap_to_next_trading_day(self, d: date) -> int:
+        """`d`부터 다음 거래일까지의 캘린더 간격(일). 평일 연속이면 1, 금→월이면 3."""
+        return (self.next_trading_day(d) - d).days
+
+    def calendar_gap_from_previous_trading_day(self, d: date) -> int:
+        """직전 거래일부터 `d`까지의 캘린더 간격(일). 평일 연속이면 1, 금→월이면 3."""
+        return (d - self.previous_trading_day(d)).days

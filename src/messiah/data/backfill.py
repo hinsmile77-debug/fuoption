@@ -55,6 +55,7 @@ from typing import Callable, Iterable, Protocol, Sequence
 
 from messiah.core import logging as mlog
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
+from messiah.core.event_calendar import monthly_expiry as _monthly_expiry
 from messiah.core.messages import BarClosed, BarSession, Horizon
 from messiah.core.timeutil import KST, to_kst
 
@@ -62,10 +63,6 @@ from messiah.core.timeutil import KST, to_kst
 # 8개 월물 전부 확인(마스터파일의 상장 6개 + 만기물 직접 조회 2개 이상).
 # 연도가 1자리라 10년마다 순환한다 — 백필 구간이 10년을 넘을 일이 없으므로 그대로 쓴다.
 _CONTRACT_PREFIX = "A05"
-
-# 만기 규칙 — 둘째 주 목요일(weekday 3). `core/event_calendar.py`의 `is_expiry_day()`가 쓰는
-# "8 <= day <= 14" 판정과 같은 규칙을 날짜 산출 방향으로 쓴 것.
-_EXPIRY_WEEKDAY = 3
 
 # 분봉 커서를 되돌릴 때의 하한 — 08:45보다 이른 봉은 존재하지 않는다(실측). 08:00까지만
 # 시도하고 멈춘다(무한 루프 방지).
@@ -106,21 +103,11 @@ def contract_code(year: int, month: int) -> str:
     return f"{_CONTRACT_PREFIX}{year % 10}{month:02d}"
 
 
-def monthly_expiry(year: int, month: int, calendar: EventCalendar | None = None) -> date:
-    """그 달 정규월물 만기일 — 둘째 주 목요일, 휴장이면 직전 거래일.
-
-    calendar를 주면 휴장일 보정을 하고, 생략하면 순수 요일 규칙만 쓴다(달력 없이도 계산이
-    성립해야 테스트가 실제 휴장일 파일에 의존하지 않는다).
-    """
-    first = date(year, month, 1)
-    # 1일이 목요일이면 그날이 첫째 주 목요일 → 둘째는 +7일.
-    offset = (_EXPIRY_WEEKDAY - first.weekday()) % 7
-    expiry = first + timedelta(days=offset + 7)
-    if calendar is None:
-        return expiry
-    while not calendar.is_trading_day(expiry):
-        expiry -= timedelta(days=1)
-    return expiry
+# 만기 규칙의 정본은 `core/event_calendar.py`다 — 2026-08-04에 옮겼다. 그 전에는 여기와
+# `EventCalendar.is_expiry_day()`에 서로 다른 판정이 두 벌 있었고(이쪽만 휴장일 보정이
+# 있었다), EV Feature가 세 번째 사본을 만들 참이었다. 기존 임포트 경로
+# (`from messiah.data.backfill import monthly_expiry`)를 안 깨려고 여기서 재수출한다.
+monthly_expiry = _monthly_expiry
 
 
 def front_month_code_for_day(day: date, calendar: EventCalendar | None = None) -> str:

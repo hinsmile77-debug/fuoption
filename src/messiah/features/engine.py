@@ -1,11 +1,20 @@
 """Realtime Feature Engine 골격 — Master Plan Ver 2.0 §9 W6~8 (Ver 1.1 §2-2), VL 결선 W22~23.
 
-`bar.{horizon}.{symbol}`을 구독해 Horizon별 롤링 윈도우를 갱신하고, `px_core`(PX 30개) +
-`vl_core`(VL, W22~23 확장분) 계산기를 전부 돌려 `FeatureVector`를 조립·발행한다
-(`feat.{horizon}.{symbol}`). MS/FL/OP/RG는 이번 스코프에 없음(각 모듈 docstring·
-capability_matrix.md 참고) — 계산기 레지스트리(`WINDOWED_FEATURES`/`STATEFUL_FEATURES`)에
-추가하기만 하면 이 엔진이 자동으로 같이 계산·발행하도록 설계했다(신규 카테고리 추가 시
-`_build_feature_vector`에 루프 두 줄만 늘어남, 그 외 엔진 코드 변경 불필요).
+`bar.{horizon}.{symbol}`을 구독해 Horizon별 롤링 윈도우를 갱신하고, **`feature_set`이 지정한
+카테고리의** 계산기를 전부 돌려 `FeatureVector`를 조립·발행한다(`feat.{horizon}.{symbol}`).
+
+## 어느 피처를 계산할지는 이 파일이 정하지 않는다 (2026-08-04, F0-1)
+
+`features/spec.py`가 `feature_set` 이름 하나를 카테고리 목록으로, 카테고리를 정확한 피처
+이름 목록으로 푼다. 이 엔진은 그 스펙을 따라 돌 뿐이다.
+
+그 전에는 여기 `if self._flow is not None`이 있어 **주입 여부가 벡터 모양을 바꿨다**.
+카테고리가 MS·OP·RG·EV까지 늘면 그 분기는 2^5 조합이 되고, 어느 조합인지 `feature_set`
+문자열로는 알 수 없다. 게다가 실제로 `FeatureEngine` 생성처 7곳 전부가 `flow_history`를
+안 넘기고 있었다 — FL 9개는 코드가 있는데 **모델에 한 번도 도달한 적이 없었다**. 이제
+스펙이 요구하는 사이드카가 없으면 **생성 시점에 거부**한다.
+
+신규 카테고리는 `spec.CATEGORIES`에 한 줄 추가하면 되고, 이 파일은 안 고친다.
 
 완성봉 규율(Ver 1.2 §2.2): 발행은 `handle_bar()`가 완성봉을 받은 시점에만 한다 — 이 엔진
 자체는 미완성 봉을 절대 보지 않는다(L1이 완성된 봉만 발행하므로).
@@ -36,8 +45,8 @@ from messiah.core.messages import (
     HealthLevel,
     Horizon,
 )
-from messiah.data.investor_flow_history import FlowHistory
-from messiah.features import fl_core, px_core, vl_core
+from messiah.features import px_core
+from messiah.features import spec as feature_spec
 
 # 등록된 **모든** 피처가 계산 가능한 최소 봉 수 이상이어야 한다.
 #
@@ -105,12 +114,26 @@ class FeatureEngine:
         bus: BusLike,
         feature_set: str,
         horizons: Sequence[Horizon] | None = None,
-        flow_history: "FlowHistory | None" = None,
+        sidecars: Mapping[str, object] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        """
+        입력: `feature_set`은 `features/spec.py`가 아는 이름이어야 한다 — 미등록 이름은 기저
+             카테고리(PX+VL)로 해석되고 `FeatureSetUnregistered`가 남는다(운영 설정은
+             `core/config.py` 검증기가 기동 시점에 먼저 거부한다).
+             `sidecars`는 카테고리가 요구하는 봉 밖 상태(`features/sidecar.DailySidecar`) —
+             FL이면 `{"flow": FlowHistory(...)}`.
+        실패 조건: 스펙이 요구하는 사이드카가 빠졌거나, 스펙이 안 쓰는 사이드카를 넣었으면
+                  **여기서** ValueError. 둘 다 "붙인 줄 알았는데 안 붙었다"의 서로 다른
+                  얼굴이고, 런타임에는 `nan_ratio`로만 흐릿하게 드러난다(2026-08-04에
+                  FL이 정확히 그렇게 7곳 전부에서 빠져 있었다).
+        """
         self._symbol = symbol
         self._bus = bus
         self._feature_set = feature_set
+        self._spec = feature_spec.resolve(feature_set)
+        self._sidecars: dict[str, object] = dict(sidecars or {})
+        self._assert_sidecars_match_spec()
         self._horizons = list(horizons) if horizons is not None else list(Horizon)
         self._history: dict[Horizon, deque[BarClosed]] = {
             h: deque(maxlen=_MAX_HISTORY) for h in self._horizons
@@ -134,13 +157,30 @@ class FeatureEngine:
             if Horizon.M1 in self._horizons
             else min(self._horizons, key=lambda h: HORIZON_SECONDS[h], default=Horizon.M1)
         )
-        # 일별 수급 이력 (2026-08-04). None이면 FL 피처를 **아예 안 만든다**(위
-        # `_build_feature_vector` 주석 참고). 주입하면 `feature_set`도 FL 포함 버전으로
-        # 바꿔야 학습·추론이 갈리지 않는다.
-        self._flow = flow_history
         self._monotonic = monotonic
         self._last_publish_at: float | None = None
         self._last_nan_ratio: dict[Horizon, float] = {}
+
+    def _assert_sidecars_match_spec(self) -> None:
+        missing = feature_spec.missing_sidecars(self._spec, self._sidecars)
+        if missing:
+            raise ValueError(
+                f"feature_set '{self._feature_set}'은 사이드카 {list(missing)}를 요구하는데 "
+                f"주입되지 않았다 — 그대로 두면 해당 카테고리가 통째로 사라진 벡터가 "
+                f"'{self._feature_set}' 이름을 달고 나간다"
+            )
+        unexpected = feature_spec.unexpected_sidecars(self._spec, self._sidecars)
+        if unexpected:
+            raise ValueError(
+                f"feature_set '{self._feature_set}'이 안 쓰는 사이드카 {list(unexpected)}가 "
+                f"주입됐다 — 주입한 쪽은 그 피처가 나온다고 믿고 있다(feature_set을 해당 "
+                f"카테고리 포함 버전으로 바꿀 것: {list(feature_spec.registered_names())})"
+            )
+
+    @property
+    def spec(self) -> feature_spec.FeatureSpec:
+        """이 엔진이 계산하는 피처의 정본 — 호출측이 열 순서·개수를 확인할 때 쓴다."""
+        return self._spec
 
     def seconds_since_last_publish(self) -> float | None:
         if self._last_publish_at is None:
@@ -250,24 +290,19 @@ class FeatureEngine:
         await self._publish(vector)
 
     def _build_feature_vector(self, bar: BarClosed, history: list[BarClosed]) -> FeatureVector:
+        # 계산할 카테고리는 `feature_set`이 정한다 — 여기서 분기하지 않는다(모듈 docstring).
+        # 사이드카 유무로 모양이 갈리던 종전 구조와 달리, 같은 이름은 항상 같은 모양이다.
         values: dict[str, float | None] = {}
-        for name, fn, windows in px_core.WINDOWED_FEATURES:
-            for window in windows:
-                values[f"{name}_{window}"] = self._safe_call(fn, history, window)
-        for name, stateful_fn in px_core.STATEFUL_FEATURES:
-            values[name] = self._safe_call(stateful_fn, history, self._session)
-        for name, fn, windows in vl_core.WINDOWED_FEATURES:
-            for window in windows:
-                values[f"{name}_{window}"] = self._safe_call(fn, history, window)
-        for name, stateful_fn in vl_core.STATEFUL_FEATURES:
-            values[name] = self._safe_call(stateful_fn, history, self._session)
-        # FL은 **수급 이력이 주입됐을 때만** 벡터에 들어간다 — 주입 안 됐는데 NaN으로
-        # 자리만 채우면 `px_ema_cross_60`이 그랬듯 "죽은 채로 학습되는" 피처가 또 생긴다
-        # (2026-08-04). 대신 벡터 모양이 달라지므로 호출측은 `feature_set`을 함께 바꿔야
-        # 하고, 어긋나면 `FeatureSetMismatch`(ERROR)가 잡는다.
-        if self._flow is not None:
-            for name, flow_fn in fl_core.FLOW_FEATURES:
-                values[name] = self._safe_call(flow_fn, history, self._flow)
+        for category in self._spec.category_specs:
+            for name, fn, windows in category.windowed:
+                for window in windows:
+                    values[f"{name}_{window}"] = self._safe_call(fn, history, window)
+            for name, stateful_fn in category.stateful:
+                values[name] = self._safe_call(stateful_fn, history, self._session)
+            if category.sidecar is not None:
+                sidecar = self._sidecars[category.sidecar]  # 생성 시점에 존재를 보장했다
+                for name, sidecar_fn in category.sidecar_features:
+                    values[name] = self._safe_call(sidecar_fn, history, sidecar)
 
         nan_ratio = sum(1 for v in values.values() if v is None) / len(values)
         # 워밍업 중(예: 30m은 최대 윈도우 60개를 채우는 데만 30시간 = 며칠이 걸림)엔 nan_ratio가

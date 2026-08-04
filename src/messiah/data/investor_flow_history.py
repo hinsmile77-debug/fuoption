@@ -13,7 +13,7 @@
 ## 미래 참조 금지 — 이 모듈이 지키는 가장 중요한 계약
 
 그날의 순매수는 **장이 끝나야 확정된다.** 그래서 D일 봉의 피처로 D일 수급을 쓰면 그건
-미래를 보는 것이다(그날 외국인이 얼마나 샀는지를 아침에 알 수 없다). `flow_as_of()`는
+미래를 보는 것이다(그날 외국인이 얼마나 샀는지를 아침에 알 수 없다). `as_of()`는
 **요청한 날짜보다 엄격히 이전** 거래일의 값만 돌려준다.
 
 이 규율이 없으면 백테스트 성과가 극적으로 좋아지고, 그게 곧 버그의 증상이 된다.
@@ -165,8 +165,13 @@ def read(path: Path) -> list[FlowRow]:
 class FlowHistory:
     """날짜 → 그날 **이전** 마지막 수급. 미래 참조를 구조적으로 막는다(모듈 docstring).
 
-    `flow_as_of(d)`는 **d보다 엄격히 이전** 거래일의 값을 준다 — 그날의 순매수는 장이
-    끝나야 확정되므로 d일 봉의 피처로 d일 수급을 쓰면 미래를 보는 것이다.
+    `as_of(d)`는 **d보다 엄격히 이전** 거래일의 값을 준다 — 그날의 순매수는 장이 끝나야
+    확정되므로 d일 봉의 피처로 d일 수급을 쓰면 미래를 보는 것이다.
+
+    `features/sidecar.DailySidecar`의 첫 구현체다(2026-08-04). 메서드 이름이
+    `flow_as_of` → `as_of`로 바뀐 것은 그 계약을 OP·RG 사이드카가 그대로 물려받게 하려는
+    것이다 — 카테고리마다 이름이 다르면 "엄격히 이전만 본다"는 규율을 각자 다시 발명하게
+    되고, 그중 하나가 안 지키면 그 카테고리만 미래를 보게 된다.
     """
 
     def __init__(self, rows: Sequence[FlowRow]) -> None:
@@ -180,7 +185,7 @@ class FlowHistory:
     def days(self) -> list[date]:
         return list(self._days)
 
-    def flow_as_of(self, day: date) -> FlowRow | None:
+    def as_of(self, day: date) -> FlowRow | None:
         """`day`보다 엄격히 이전인 마지막 행. 없으면 None(이력 시작 전)."""
         lo, hi = 0, len(self._days)
         while lo < hi:  # bisect_left — day 이상인 첫 위치

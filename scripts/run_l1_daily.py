@@ -121,6 +121,7 @@ from messiah.data.last_price import LastPriceTracker  # noqa: E402
 from messiah.data.normalizer import parse_futures_ticks  # noqa: E402
 from messiah.data.option_chain_archiver import OptionChainArchiver  # noqa: E402
 from messiah.data.option_chain_poller import OptionChainPoller  # noqa: E402
+from messiah.data.tick_archiver import TickArchiver  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 from messiah.ops.status_board import run_status_board_forever  # noqa: E402
@@ -134,6 +135,9 @@ _MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
 _DATA_DIR = Path("data") / "bars"
 _FLOW_DIR = Path("data") / "flow_intraday"
 _OPTION_CHAIN_DIR = Path("data") / "option_chain"
+# 체결틱 원본 (2026-08-04 신설, F2) — MS(마이크로구조) 카테고리의 유일한 원천이고 **백필
+# 경로가 없다**(KIS 분봉 API는 OHLCV만 준다). 안 받은 날은 영원히 빈다.
+_TICK_DIR = Path("data") / "ticks"
 # 수급 폴링 격자 — 1분봉과 같은 주기. 3업종 순차 조회라 유량(모의투자 1건/초)에
 # 여유가 크고, 이보다 촘촘히 받아도 원천이 "당일 누적"이라 정보가 늘지 않는다.
 _FLOW_POLL_SECONDS = 60.0
@@ -428,6 +432,7 @@ async def _run_regular_session(
     today_str: str,
     symbol: str,
     rest: _RestCollection | None = None,
+    tick_archiver: TickArchiver | None = None,
 ) -> None:
     """수집 3종 + UI 생존 감시 + 컴포넌트 heartbeat를 동시에 돌린다.
 
@@ -454,6 +459,11 @@ async def _run_regular_session(
         ).publish_once()
 
     await asyncio.gather(
+        # **틱 아카이버가 수집기보다 먼저다** (2026-08-04, F2). `asyncio.gather`는 인자
+        # 순서대로 태스크를 시작하므로, 구독이 먼저 걸려야 첫 틱이 버스에서 증발하지 않는다.
+        # 파생 수급에서 이 순서를 틀려 7개월을 날린 전례가 있고, 틱은 그보다 나쁘다 —
+        # 봉은 KIS 분봉 API로 소급이 되지만 **체결 단위 과거 조회는 아예 없다**.
+        *([tick_archiver.run_forever(bus)] if tick_archiver is not None else []),
         collector.run_forever(),
         composer.run_forever(),
         engine.run_forever(),
@@ -572,9 +582,21 @@ async def _daily_close(
     composer: MultiHorizonBarComposer,
     bus: MessageBus,
     rest: _RestCollection | None = None,
+    tick_archiver: TickArchiver | None = None,
 ) -> None:
     await collector.flush_final_bar()
     await composer.flush_all_final()
+    # 틱 아카이버도 버퍼링한다(하루 5~10만행이라 매 틱 재작성하면 O(n²)) — 남은 버퍼를
+    # 확정하고, **그날 실제로 몇 행이 나갔는지 로그에 남긴다.** 결선만 하고 0행으로 하루가
+    # 끝나는 것이 이 프로젝트의 반복 실패 모드였다(수급 폴러 7개월, 옵션체인 수개월).
+    if tick_archiver is not None:
+        tick_archiver.close()
+        mlog.log(
+            "TickArchiveSummary",
+            f"체결틱 적재 {tick_archiver.written}행 → {_TICK_DIR}",
+            symbol=tick_archiver.symbol,
+            rows=tick_archiver.written,
+        )
     # 옵션체인 아카이버는 사이클 단위로 버퍼링한다(하루 3,276행이라 스냅샷마다 전체 재작성
     # 하면 O(n²)) — 마지막 미완 사이클이 버퍼에 남아 있으므로 여기서 확정한다. 이 한 줄이
     # 없으면 매일 장 마감 직전 사이클이 조용히 사라진다.
@@ -620,6 +642,15 @@ async def main(cfg: InstanceConfig) -> None:
     )
     composer = MultiHorizonBarComposer(symbol=symbol, archiver=archiver, bus=bus)
     engine = FeatureEngine(symbol, bus, feature_set=cfg.feature_set)
+    # 체결틱 원본 적재 (2026-08-04, F2). 지금까지 이 프로젝트는 틱을 한 번도 저장한 적이
+    # 없다 — 받아서 분봉으로 집계하고 버렸다. 그래서 MS(마이크로구조) 30개가 통째로
+    # 미착수였는데, 정작 호가는 매 틱 프레임(idx34~37)에 실려 오고 있었다.
+    # 봉과 달리 **소급이 불가능**하므로 오늘 안 켜면 오늘치는 영원히 없다.
+    tick_archiver = TickArchiver(_TICK_DIR, symbol)
+    print(
+        f"체결틱 원본 적재 결선 — {symbol} → {_TICK_DIR} (버퍼 {tick_archiver.buffered}행 시작)",
+        flush=True,
+    )
 
     # REST 폴링 3종 — 파생 장중 수급(1분 격자) + 옵션체인 시리즈별(주기·위상 분리).
     # 근거는 `_option_chain_plan()` 위 주석과 `_RestCollection` docstring. 클라이언트를
@@ -646,6 +677,7 @@ async def main(cfg: InstanceConfig) -> None:
                     today.strftime("%Y%m%d"),
                     symbol,
                     rest,
+                    tick_archiver,
                 ),
                 timeout=remaining,
             )
@@ -657,7 +689,8 @@ async def main(cfg: InstanceConfig) -> None:
     shutdown_budget = max((hard_deadline - now_kst()).total_seconds(), 30.0)
     try:
         await asyncio.wait_for(
-            _daily_close(collector, composer, bus, rest), timeout=shutdown_budget
+            _daily_close(collector, composer, bus, rest, tick_archiver),
+            timeout=shutdown_budget,
         )
     except TimeoutError:
         mlog.log(

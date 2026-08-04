@@ -19,7 +19,8 @@ px_range_pos_d/px_round_dist)은 윈도우가 없다(px_round_dist만 예외적�
 - `px_vwap_dev`의 VWAP은 완성봉에 체결가중평균이 없어(BarClosed엔 O/H/L/C/volume만 있음)
   전형가(OHLC3=(H+L+C)/3)를 거래량 가중한 표준 근사를 쓴다
 - `px_macd_h`는 고정 12/26/9 대신 window 파라미터로 일반화(단기=W, 장기=2W, 시그널=EMA(macd
-  시계열, max(W//3,1)))
+  시계열, max(W//3, 2))). 하한이 1이 아니라 2인 이유는 `_MIN_SIGNAL_PERIOD` 주석 참고 —
+  1이면 EMA가 항등이 되어 이 피처가 **항상 정확히 0**이 된다(2026-08-04 실측 발견)
 - `px_ema_cross`/`px_breakout`은 "경과 바 수"·"되돌림 정도" 서브 지표는 이번 스코프에서 뺌
   (부호/강도 스칼라 하나만) — 상태 누적이 필요해 순수 함수 범위를 벗어남
 """
@@ -388,9 +389,24 @@ def px_bb_width(bars: Bars, window: int) -> float | None:
     return 4 * statistics.pstdev(closes) / mean
 
 
+# 시그널 EMA의 최소 기간. **1이면 안 된다** — `_ema_series(x, 1)`은 k=2/(1+1)=1이라 EMA가
+# 입력 그대로가 되고(항등), 그러면 히스토그램 `macd[-1] - signal[-1]`이 **항상 정확히 0**이다.
+#
+# 2026-08-04 발견(F0-3 피처 관문 첫 실행). `window=5`는 `5//3=1`이라 이 경로에 걸려
+# `px_macd_h_5`가 프로덕션에서 **모든 봉에서 0.0**이었다 — `px_ema_cross_60`(2026-08-04)과
+# 같은 종류의 사고인데, 그건 NaN이라 `nan_ratio`에 흔적이 남았고 이건 **값을 내므로 무결성
+# 리포트에 아무 흔적도 안 남았다**. 관문이 "IC 정의 불가 — 값이 상수"로 잡아 처음 드러났다.
+# 검출 수단이 하나뿐이면 그 수단이 못 보는 결함은 영원히 안 보인다.
+_MIN_SIGNAL_PERIOD = 2
+
+
 def px_macd_h(bars: Bars, window: int) -> float | None:
-    """MACD 히스토그램(ATR 정규화) — 단기=W, 장기=2W, 시그널=EMA(macd 시계열, max(W//3,1))
-    (고정 12/26/9 대신 window로 일반화, 모듈 docstring 참고)."""
+    """MACD 히스토그램(ATR 정규화) — 단기=W, 장기=2W, 시그널=EMA(macd 시계열,
+    max(W//3, 2)) (고정 12/26/9 대신 window로 일반화, 모듈 docstring 참고).
+
+    시그널 기간 하한이 1이 아니라 2인 이유는 `_MIN_SIGNAL_PERIOD` 주석 참고 — 1이면 이
+    피처가 상수 0이 된다.
+    """
     closes = _closes(bars)
     fast = _ema_series(closes, window)
     slow = _ema_series(closes, 2 * window)
@@ -398,7 +414,7 @@ def px_macd_h(bars: Bars, window: int) -> float | None:
         return None
     n = min(len(fast), len(slow))
     macd_series = [f - s for f, s in zip(fast[-n:], slow[-n:])]
-    signal_period = max(window // 3, 1)
+    signal_period = max(window // 3, _MIN_SIGNAL_PERIOD)
     signal = _ema_series(macd_series, signal_period)
     if not signal:
         return None

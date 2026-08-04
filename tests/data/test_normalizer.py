@@ -60,8 +60,93 @@ def test_parse_futures_tick_matches_real_captured_sample():
     assert tick.ts_exchange.utcoffset().total_seconds() == 9 * 3600  # KST
     assert tick.price_ticks == 54015  # 1080.30 / 0.02
     assert tick.qty == 1
-    assert tick.side_hint == 0
     assert tick.source == "kis"
+
+
+# ---------------------------------------------- L1 호가·side_hint (2026-08-04, F2)
+
+
+def test_parse_futures_tick_reads_the_l1_quote_that_was_being_discarded():
+    """2026-08-04까지 이 파서는 50필드 중 4개만 읽고 46개를 버렸다 — 그중 idx34~37이
+    매도호가1/매수호가1/잔량이고(2026-07-22 캡처로 교차검증된 위치), 그걸 안 읽는다는 이유로
+    MS 카테고리 30개가 통째로 "데이터 없음"이었다. **데이터가 없던 게 아니라 스키마가
+    좁았다.** 값은 실캡처 프레임에서 손으로 읽은 것이다."""
+    tick = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert tick.ask1_ticks == 54015  # 1080.30 / 0.02
+    assert tick.bid1_ticks == 54002  # 1080.04 / 0.02
+    assert tick.ask_qty1 == 1
+    assert tick.bid_qty1 == 1
+    assert tick.mid_ticks == 54008.5
+    assert tick.ask1_ticks - tick.bid1_ticks == 13  # 스프레드 0.26pt = 13틱
+
+
+def test_side_hint_is_buy_when_the_trade_prints_at_the_ask():
+    """실캡처 프레임은 체결가(1080.30)가 정확히 최우선매도호가라 매수주도다 — 종전에는
+    이 판정 근거(bid/ask)가 Tick에 없어 `side_hint`가 항상 0이었다."""
+    tick = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert tick.side_hint == 1
+
+
+def test_side_hint_is_sell_when_the_trade_prints_at_the_bid():
+    fields = _REAL_TICK_1.split("|", 3)[-1].split("^")
+    fields[5] = fields[35]  # 체결가를 최우선매수호가로
+    tick = _first_futures_tick(_bundle("^".join(fields)), _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert tick.side_hint == -1
+
+
+def test_side_hint_is_unknown_at_the_mid():
+    fields = _REAL_TICK_1.split("|", 3)[-1].split("^")
+    fields[5] = "1080.16"  # (1080.30 + 1080.04)/2 = 1080.17 → 54008.5틱 미드, 54008틱 체결
+    fields[34], fields[35] = "1080.20", "1080.12"  # 미드 = 54008틱 정확히
+    tick = _first_futures_tick(_bundle("^".join(fields)), _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert tick.mid_ticks == 54008.0
+    assert tick.price_ticks == 54008
+    assert tick.side_hint == 0
+
+
+def test_zero_quotes_are_read_as_missing_not_as_a_price_of_zero():
+    """KIS는 호가가 없는 순간(장 시작 전, 일방 호가 소진)에 0을 채워 보낸다. 그걸 "0틱"으로
+    읽으면 스프레드·미드가 통째로 망가진다 — 없는 것은 None이어야 한다."""
+    fields = _REAL_TICK_1.split("|", 3)[-1].split("^")
+    fields[34] = fields[35] = "0.00"
+    tick = _first_futures_tick(_bundle("^".join(fields)), _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert tick.ask1_ticks is None
+    assert tick.bid1_ticks is None
+    assert tick.mid_ticks is None
+    assert tick.side_hint == 0
+    assert tick.price_ticks == 54015  # 체결 자체는 멀쩡하다 — 버리지 않는다
+
+
+def test_a_short_frame_without_quotes_still_yields_the_trade():
+    """최소 길이를 호가 위치까지 올리면 가격·수량이 멀쩡한 체결을 통째로 버리게 된다."""
+    fields = _REAL_TICK_1.split("|", 3)[-1].split("^")[:20]  # idx34~37 없음
+    tick = _first_futures_tick(_bundle("^".join(fields)), _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert tick.price_ticks == 54015
+    assert tick.ask1_ticks is None
+    assert tick.side_hint == 0
+
+
+def test_raw_fields_preserve_the_whole_frame_verbatim():
+    """필드 의미를 실측으로 확정하기 전에는 이름을 안 붙이되(R8/L16), **보존은 지금 한다** —
+    틱은 봉과 달리 과거 조회 경로가 없어 안 받아둔 필드는 영원히 없다."""
+    tick = _first_futures_tick(_REAL_TICK_1, _TICK_SIZE, today=_TODAY)
+
+    assert tick is not None
+    assert len(tick.raw_fields) == 50  # 2026-07-22 라이브 캡처 실측 폭
+    assert tick.raw_fields[0] == "A05608"
+    assert tick.raw_fields[18] == "76672"  # 미결제약정으로 보이나 미확정 — 문자열 원본 그대로
 
 
 def test_parse_futures_ticks_truncated_bundled_frame_falls_back_to_first_record():

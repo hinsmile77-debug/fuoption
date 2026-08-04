@@ -103,27 +103,27 @@ def test_looks_unsupported_detects_all_zero_response():
 # ---------------------------------------------------------------- 미래 참조 금지
 
 
-def test_flow_as_of_returns_strictly_earlier_day():
+def test_as_of_returns_strictly_earlier_day():
     """**이 파일에서 가장 중요한 테스트** — 그날 순매수는 장이 끝나야 확정된다.
     D일 봉의 피처로 D일 수급을 쓰면 미래를 보는 것이고, 백테스트 성과가 거짓으로 좋아진다."""
     hist = FlowHistory(_rows(["20260731", "20260803", "20260804"]))
 
-    assert hist.flow_as_of(date(2026, 8, 4)).day == date(2026, 8, 3)
-    assert hist.flow_as_of(date(2026, 8, 3)).day == date(2026, 7, 31)
+    assert hist.as_of(date(2026, 8, 4)).day == date(2026, 8, 3)
+    assert hist.as_of(date(2026, 8, 3)).day == date(2026, 7, 31)
 
 
-def test_flow_as_of_returns_none_before_history_starts():
+def test_as_of_returns_none_before_history_starts():
     hist = FlowHistory(_rows(["20260803"]))
 
-    assert hist.flow_as_of(date(2026, 8, 3)) is None
-    assert hist.flow_as_of(date(2020, 1, 1)) is None
+    assert hist.as_of(date(2026, 8, 3)) is None
+    assert hist.as_of(date(2020, 1, 1)) is None
 
 
-def test_flow_as_of_skips_gaps_to_the_last_available_day():
+def test_as_of_skips_gaps_to_the_last_available_day():
     """휴장·결손으로 며칠 비어도 그 이전 마지막 값을 쓴다(가짜 0을 만들지 않는다)."""
     hist = FlowHistory(_rows(["20260717", "20260803"]))
 
-    assert hist.flow_as_of(date(2026, 7, 31)).day == date(2026, 7, 17)
+    assert hist.as_of(date(2026, 7, 31)).day == date(2026, 7, 17)
 
 
 def test_recent_returns_only_days_before_the_asked_date():

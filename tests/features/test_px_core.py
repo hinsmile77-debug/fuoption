@@ -167,6 +167,24 @@ def test_px_macd_h_positive_for_accelerating_uptrend():
     assert px.px_macd_h(bars, 12) > 0
 
 
+def test_px_macd_h_is_not_identically_zero_at_the_smallest_registered_window():
+    """2026-08-04 회귀(F0-3 관문 첫 실행에서 발견) — `window=5`는 `5//3=1`이고
+    `_ema_series(x, 1)`은 k=1이라 EMA가 항등이 된다. 그래서 히스토그램
+    `macd[-1] - signal[-1]`이 **모든 봉에서 정확히 0**이었고, 값이 나오므로 `nan_ratio`에
+    아무 흔적도 안 남아 무결성 리포트로는 영원히 안 보였다.
+
+    `px_ema_cross_60`(NaN이라 흔적이 남았던 사고)과 같은 종류인데 검출 수단이 달랐다 —
+    그래서 관문이 필요했다. W_STD의 최솟값 5는 실제 등록된 윈도우다.
+    """
+    bars = _flat_bars([100 + i**1.3 for i in range(60)])
+
+    values = [px.px_macd_h(bars[: i + 1], 5) for i in range(20, 60)]
+    computed = [v for v in values if v is not None]
+
+    assert computed, "window=5에서 값이 하나도 안 나온다"
+    assert any(v != 0.0 for v in computed), "px_macd_h_5가 여전히 항상 0이다"
+
+
 def test_px_breakout_detects_new_high():
     bars = _flat_bars([100, 101, 99, 100, 101] + [150])
     assert px.px_breakout(bars, 5) > 0

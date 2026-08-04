@@ -96,19 +96,61 @@ class BusMessage(BaseModel):
 
 
 class Tick(BusMessage):
-    """정규화된 체결 틱 (md.tick.*)."""
+    """정규화된 체결 틱 (md.tick.*).
+
+    ## L1 호가가 여기 있는 이유 (2026-08-04, F2)
+
+    2026-08-04까지 이 메시지는 symbol/시각/가격/수량 4개만 들고 있었고, 그래서 MS(마이크로
+    구조) 카테고리 30개가 통째로 "데이터 없음"으로 미착수였다. 그런데 **호가는 이미 매 틱
+    도착하고 있었다** — H0IFCNT0 프레임은 50필드고 그중 idx34~37이 매도호가1/매수호가1/
+    잔량/잔량인데(2026-07-22 라이브 캡처 교차검증), 파서가 4개만 읽고 나머지를 버렸다.
+    데이터가 없던 게 아니라 스키마가 좁았던 것이다.
+
+    `side_hint`도 그래서 항상 0이었다(틱룰을 계산할 bid/ask가 없었으므로). 이제 채운다 —
+    아래 필드 주석 참고.
+
+    ## `raw_fields`에 프레임 전체를 담는다
+
+    idx34~37 말고도 미결제약정·이론가·총잔량·체결강도로 보이는 필드가 더 있지만, **필드
+    위치를 실측으로 확정하기 전에는 이름을 붙이지 않는다**(R8/L16 — 단위를 확인 안 하고
+    스키마부터 정해 5일치 데이터가 조용히 잘린 마흐디 사고). 대신 프레임 전체를 문자열
+    그대로 실어 나르고 `data/tick_archiver.py`가 통째로 남긴다 — 그러면 다음 주에 실측으로
+    매핑을 확정할 때 **소급해서 쓸 수 있는 데이터가 이미 쌓여 있다**.
+
+    틱은 봉과 달리 과거 조회 경로가 없다. 안 받아둔 필드는 영원히 없다.
+    """
 
     symbol: str
     ts_exchange: datetime
     price_ticks: int  # 정수 틱 단위 (SYSTEM.md R2)
     qty: int
-    side_hint: int = 0  # +1 매수 체결 / -1 매도 체결 / 0 불명 (틱룰 보조)
+    # +1 매수주도 / -1 매도주도 / 0 불명. 아래 호가가 있으면 quote rule(체결가 vs 미드)로
+    # 채운다 — `data/normalizer._quote_rule_side()`의 한계(동시 스냅샷 근사)도 거기 명시.
+    side_hint: int = 0
     source: str = "kis"  # 데이터 출처 명기 (레슨런 L26 — 임시 소스 추적)
+
+    # L1 호가 (H0IFCNT0 idx34~37, 2026-07-22 실측 교차검증). 정수 틱 — 가격이므로 R2 적용.
+    # None은 "이 피드가 호가를 안 실어 온다"(옵션 체결 프레임 등)이지 "잔량 0"이 아니다.
+    bid1_ticks: int | None = None
+    ask1_ticks: int | None = None
+    bid_qty1: int | None = None
+    ask_qty1: int | None = None
+
+    # 원시 프레임의 전 필드(문자열 그대로). 해석하지 않는다 — 위 docstring 참고.
+    raw_fields: tuple[str, ...] = ()
 
     @field_validator("ts_exchange")
     @classmethod
     def _aware(cls, v: datetime) -> datetime:
         return ensure_aware(v)
+
+    @property
+    def mid_ticks(self) -> float | None:
+        """미드 가격 — 호가가 둘 다 있을 때만. MS 피처(`ms_spread`/`ms_microprice` 등)와
+        `side_hint` 판정이 공유하는 유일한 정의(두 곳에서 따로 계산하면 갈린다)."""
+        if self.bid1_ticks is None or self.ask1_ticks is None:
+            return None
+        return (self.bid1_ticks + self.ask1_ticks) / 2.0
 
 
 class BarSession(str, Enum):

@@ -48,6 +48,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import polars as pl
 
 from messiah.core.messages import BarSession, Horizon
+from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
 from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
@@ -68,6 +69,11 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "ui_restarts": 0.0,
     "native_crashes": 0.0,  # 네이티브 크래시는 1건도 정상이 아니다
     "critical_log_lines": 0.0,
+    # 체결틱 최소 적재량 (2026-08-04, F2). **하한 임계**라 다른 항목과 방향이 반대다 —
+    # 이 값을 밑돌면 breach다. 1,000행은 실측 기준 매우 느슨하다(2026-07-23 실측 초당 3틱
+    # ≈ 하루 5~10만행, 부하 테스트도 5만행 기준). "적게 쌓였다"가 아니라 **"결선이 끊겼다"**
+    # 를 잡는 값이라 일부러 낮게 뒀다 — 거래가 아무리 한산해도 정규장 405분에 1,000틱은 넘는다.
+    "min_tick_rows": 1000.0,
 }
 
 
@@ -115,6 +121,17 @@ class IntegrityReport:
     # 이벤트로그(위)와 짝을 이루는 **파이썬 레벨** 크래시 증거 (2026-08-03 고도화 D).
     # 둘을 대조해야 "크래시는 났는데 덤프가 없다"(= 원인 규명 불가)가 자동으로 드러난다.
     crash_forensics: CrashForensics
+    # 그날 실제로 디스크에 적재된 체결틱 행 수 (2026-08-04, F2).
+    #
+    # **"좋아지는가"가 아니라 "존재하는가"를 재는 자리다.** 선행 프로젝트 마흐디가 2026-08-03에
+    # 배운 것을 그대로 가져왔다 — 그날 예측 13개 중 12개가 자동 대조로 확인됐지만, 그 어떤
+    # 가설도 `find_gamma_flip()`이 **전 이력에서 한 번도 값을 낸 적이 없다**는 사실을 잡지
+    # 못했다. 아무도 "감마플립이 계산되는가"를 예측치로 적지 않았기 때문이다. 그 결과 앙상블
+    # 멤버 하나가 넉 달간 죽어 있었고, 넉 달 동안 "개선"해 온 대상이 애초에 없었다.
+    #
+    # 틱 수집이 정확히 같은 위험에 있다: 백필 경로가 없어 안 쌓인 날은 영원히 없는데, 결선이
+    # 조용히 안 붙어도 봉 수집은 멀쩡하므로 다른 지표는 전부 정상으로 보인다.
+    tick_rows: int
     breaches: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -443,6 +460,27 @@ def _collect_native_crashes(
     return NativeCrashes(available=True, count=len(details), details=details)
 
 
+# ---------------------------------------------------------------- 체결틱 적재량
+
+
+def count_tick_rows(tick_dir: Path | None, symbol: str, day: date) -> int:
+    """그날 적재된 체결틱 행 수 — 조각 파일을 세지 않고 **실제 행**을 센다.
+
+    파일 개수로 대신하면 "파일은 있는데 0행"을 못 잡는다. 그게 이 지표가 막으려는 상황이다
+    (`IntegrityReport.tick_rows` 주석 — 마흐디의 감마플립 넉 달 사고와 같은 형태).
+
+    실패해도 0을 돌려주고 리포트를 막지 않는다 — 관측 수단이 운영을 멈추면 안 된다. 다만
+    0은 **"안 쌓였다"와 구분되지 않으므로** 임계 판정이 그 자체로 breach를 낸다.
+    """
+    if tick_dir is None:
+        tick_dir = DEFAULT_TICK_DIR
+    try:
+        frame = tick_archiver.read_day(tick_dir, symbol, day)
+    except Exception:  # noqa: BLE001 — 관측이 운영을 막지 않는다
+        return 0
+    return 0 if frame is None else int(frame.height)
+
+
 # ---------------------------------------------------------------- 조립
 
 
@@ -456,6 +494,7 @@ def build_report(
     thresholds: dict[str, float] | None = None,
     crash_collector=_collect_native_crashes,
     log_dir: Path | None = None,
+    tick_dir: Path | None = None,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
 
@@ -484,8 +523,16 @@ def build_report(
     restarts = max(restarts_by_process.values(), default=0)
     critical_lines = logs["level_counts"].get("CRITICAL", 0)
     flat_minutes, pre_open_minutes = _bar_shape_metrics(bar_dir, symbol, day)
+    tick_rows = count_tick_rows(tick_dir, symbol, day)
 
     breaches: list[str] = []
+    # 봉이 정상인 날에도 틱만 조용히 안 쌓일 수 있다 — 수집 경로가 다르기 때문이다. 그리고
+    # 틱은 백필이 없어 그 하루가 영구히 빈다(`IntegrityReport.tick_rows` 주석).
+    if tick_rows < limits["min_tick_rows"]:
+        breaches.append(
+            f"체결틱 적재 {tick_rows}행 < 최소 {limits['min_tick_rows']:.0f}행 — "
+            "결선 확인 필요(틱은 백필 경로가 없어 오늘치는 소급 불가)"
+        )
     if m1 is not None and m1.missing_minutes > limits["missing_minutes"]:
         breaches.append(
             f"1분봉 결손 {m1.missing_minutes}분 > 임계 {limits['missing_minutes']:.0f}분"
@@ -549,6 +596,7 @@ def build_report(
         market_findings=market_findings,
         native_crashes=crashes,
         crash_forensics=forensics,
+        tick_rows=tick_rows,
         breaches=breaches,
     )
 
@@ -634,6 +682,7 @@ def format_summary(report: IntegrityReport) -> str:
 
 DEFAULT_LOG_DIR = Path("logs")
 DEFAULT_BAR_DIR = Path("data") / "bars"
+DEFAULT_TICK_DIR = Path("data") / "ticks"  # `scripts/run_l1_daily.py`의 `_TICK_DIR`와 같은 값
 
 
 def log_paths_for(day: date, log_dir: Path = DEFAULT_LOG_DIR) -> dict[str, list[Path]]:
