@@ -7,6 +7,7 @@ import random
 from datetime import date, datetime, timedelta
 
 import pytest
+
 from messiah.backtest.harness import (
     WindowResult,
     _slice_by_date,

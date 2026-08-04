@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from messiah.core.messages import BundleStatus, Horizon
 from messiah.models.registry import (
     ModelRegistry,

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+
 from messiah.core.messages import Horizon
 from messiah.ui.bar_reader import (
     BarExportError,

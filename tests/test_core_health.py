@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import pytest
+
 from messiah.core.health import (
     HealthReporter,
     HealthStatus,

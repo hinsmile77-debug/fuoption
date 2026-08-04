@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 import pytest
+
 from messiah.core.messages import DecisionIntent, OrderKind, Side
 from messiah.risk.sizer import PositionSizer, SizerConfig
 

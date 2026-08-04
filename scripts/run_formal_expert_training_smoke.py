@@ -37,6 +37,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np  # noqa: E402
+
 from messiah.core.messages import BarClosed, Horizon  # noqa: E402
 from messiah.core.timeutil import KST  # noqa: E402
 from messiah.models.trainer import build_feature_vectors, train_formal_expert  # noqa: E402

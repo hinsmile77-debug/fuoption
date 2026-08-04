@@ -3,6 +3,7 @@ import random
 from datetime import datetime, timedelta
 
 import pytest
+
 from messiah.core.messages import BarClosed, Horizon
 from messiah.core.timeutil import KST
 from messiah.features import px_core as px

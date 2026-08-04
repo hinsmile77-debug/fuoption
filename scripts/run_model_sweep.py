@@ -49,6 +49,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np  # noqa: E402
+
 from messiah.backtest.harness import aggregate_to_horizon  # noqa: E402
 from messiah.core.messages import (  # noqa: E402
     Horizon,

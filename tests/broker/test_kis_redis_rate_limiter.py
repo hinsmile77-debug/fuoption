@@ -2,6 +2,7 @@ import threading
 import time
 
 import pytest
+
 from messiah.broker.kis.redis_rate_limiter import RedisRateLimiter
 
 redis = pytest.importorskip("redis")

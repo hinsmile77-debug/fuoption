@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.messages import BarSession, Horizon
 from messiah.data import backfill

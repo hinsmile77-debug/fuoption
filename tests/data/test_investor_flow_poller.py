@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from messiah.core.messages import InvestorFlowSnapshot
 from messiah.core.scheduler import FixedTickScheduler
 from messiah.data.investor_flow_poller import InvestorFlowPoller

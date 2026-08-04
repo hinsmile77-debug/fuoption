@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+
 from messiah.ops.fix_verification import (
     RegistryError,
     VerificationStatus,

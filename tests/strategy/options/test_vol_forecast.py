@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 
 import pytest
+
 from messiah.strategy.options.vol_forecast import HARRVModel, fit_har_rv
 
 _TRUE_BETA0 = 0.02

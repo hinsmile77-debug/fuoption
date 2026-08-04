@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import pytest
+
 from messiah.strategy.options.vol_metrics import (
     IVHistory,
     iv_rv_spread,

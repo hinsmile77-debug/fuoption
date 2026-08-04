@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from messiah.models.calibration import ConformalCalibrator, ProbabilityCalibrator
 
 # ---------------------------------------------------------------- ProbabilityCalibrator

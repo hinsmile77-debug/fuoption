@@ -6,6 +6,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
+
 from messiah.strategy.options import matrix
 from messiah.strategy.options.config import OptionsConfig
 from messiah.strategy.options.evaluator import (

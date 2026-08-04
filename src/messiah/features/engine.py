@@ -38,11 +38,25 @@ from messiah.core.messages import (
 )
 from messiah.features import px_core, vl_core
 
-# px_hurst(W_SLOW_HURST 최대 120) · px_accel(W_STD 최대 60이면 2*60+1=121 필요)를 전부
-# 커버하는 넉넉한 여유(130개 완성봉, 1분봉 기준 하루 정규장 405분 내에서도 충분히 작음).
+# 등록된 **모든** 피처가 계산 가능한 최소 봉 수 이상이어야 한다.
+#
+# 2026-08-04까지 이 값은 130이었고, 근거로 "px_hurst(최대 120)·px_accel(2*60+1=121)를 전부
+# 커버한다"고 적혀 있었다. 그런데 그 계산에서 두 피처가 빠져 있었다:
+#
+#     px_ema_cross_60 : slow EMA가 3*W = **180봉** 필요  → 130으로는 영원히 계산 불가
+#     px_macd_h_60    : 2*W=120 + 시그널 EMA(W//3=20)   → **139봉** 필요
+#
+# 그래서 이 둘은 **프로덕션에서도 항상 NaN**이었다. 증거는 매일 찍히던 무결성 리포트의
+# `nan_ratio` 중앙값 0.0165다 — 121개 피처 중 정확히 2개(2/121 = 0.01653). 값이 매일 똑같이
+# 나오는데도 "정상 수준"으로 읽혀 아무도 그 2개가 무엇인지 묻지 않았다.
+#
+# 이제 200으로 올린다(최대 요구 180 + 여유). 상수 하나로 두면 같은 사고가 재발하므로,
+# `tests/features/test_engine.py`가 **등록된 전 피처 × 전 윈도우**를 실제로 계산해 이 용량
+# 안에서 값이 나오는지 검사한다 — 새 피처가 더 긴 윈도우를 요구하면 그 테스트가 먼저 깨진다.
+#
 # 이 값은 두 가지로 쓰인다: ① 롤링 히스토리 보관 개수(deque maxlen) ② 아래 FeatureNaN 경고의
 # "워밍업 완료" 판정 기준(len(history)가 maxlen에 도달했다는 건 최소 이만큼의 봉을 봤다는 뜻).
-_MAX_HISTORY = 130
+_MAX_HISTORY = 200
 
 _NAN_RATIO_HALT_THRESHOLD = 0.20  # Ver 1.1 §2-2: 20% 초과 시 해당 Horizon 신호 정지
 
@@ -100,6 +114,24 @@ class FeatureEngine:
             h: deque(maxlen=_MAX_HISTORY) for h in self._horizons
         }
         self._session = px_core.SessionState()
+        # `SessionState`를 갱신할 Horizon — M1을 구독하면 M1, 아니면 **구독 중 가장 촘촘한**
+        # Horizon (2026-08-04).
+        #
+        # 그 전에는 M1으로만 갱신했다. 라이브는 M1을 구독하니 문제가 없었지만, 학습 경로
+        # (`models/trainer.build_feature_vectors()`)는 학습 Horizon 하나짜리 엔진을 만들고
+        # 그 Horizon 봉만 흘린다 — M1이 한 번도 안 들어와 `SessionState`가 영영 비었고,
+        # `px_gap_open`/`px_open_ret`/`px_range_pos_d` 3개가 **학습에서만 항상 NaN**이었다.
+        # 추론에서는 값이 나오므로 train/serve 불일치이기도 했다(모델은 그 3개를 안 쓰도록
+        # 배우고, 실전에서는 값이 들어온다).
+        #
+        # 굵은 봉으로 갱신해도 이 3개는 정확하다: 세션 시가는 그날 첫 봉의 시가이고,
+        # 세션 고/저는 구성 분봉의 max/min이라 어느 Horizon으로 집계해도 같은 값이 나온다.
+        # M1을 우선하는 이유는 장중 갱신이 가장 촘촘해서지 결과가 달라서가 아니다.
+        self._session_horizon = (
+            Horizon.M1
+            if Horizon.M1 in self._horizons
+            else min(self._horizons, key=lambda h: HORIZON_SECONDS[h], default=Horizon.M1)
+        )
         self._monotonic = monotonic
         self._last_publish_at: float | None = None
         self._last_nan_ratio: dict[Horizon, float] = {}
@@ -182,7 +214,7 @@ class FeatureEngine:
             history.clear()
             history.extend(accepted)  # deque(maxlen)이 알아서 오래된 것부터 버린다
 
-        for bar in self._history.get(Horizon.M1, ()):
+        for bar in self._history.get(self._session_horizon, ()):
             self._session.on_bar(bar)
 
         return {horizon: len(history) for horizon, history in self._history.items()}
@@ -196,7 +228,7 @@ class FeatureEngine:
         """
         if bar.symbol != self._symbol or bar.horizon not in self._history:
             return
-        if bar.horizon == Horizon.M1:
+        if bar.horizon == self._session_horizon:
             self._session.on_bar(bar)
 
         history = self._history[bar.horizon]

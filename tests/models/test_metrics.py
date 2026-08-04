@@ -1,4 +1,5 @@
 import pytest
+
 from messiah.models.metrics import (
     equity_curve_from_returns,
     max_drawdown,

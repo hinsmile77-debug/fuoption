@@ -13,6 +13,7 @@ import sys
 import textwrap
 
 import pytest
+
 from messiah.core import crash_forensics
 
 

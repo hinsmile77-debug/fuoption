@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pytest
+
 from messiah.core.messages import FeatureVector, Horizon, Regime, RegimeState
 from messiah.core.timeutil import KST
 from messiah.simulator.inprocess_bus import InProcessBus

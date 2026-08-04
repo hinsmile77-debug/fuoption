@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from messiah.core.messages import BarClosed, FeatureVector, Horizon
 from messiah.core.timeutil import KST
 from messiah.models.labeling import TripleBarrierLabel

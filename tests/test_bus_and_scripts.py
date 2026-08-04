@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import agenda as agenda_mod  # noqa: E402  (scripts/)
 import self_check as sc  # noqa: E402
+
 from messiah.core.bus import STREAM_TOPICS, decode, encode, registered_types
 from messiah.core.messages import (
     DecisionIntent,

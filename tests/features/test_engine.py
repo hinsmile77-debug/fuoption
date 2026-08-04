@@ -497,3 +497,91 @@ async def test_health_is_ok_once_warm_started_features_are_dense():
     await engine.handle_bar(_bar_on(24, 0))
 
     assert engine.health().level is HealthLevel.OK
+
+
+# ------------------------------- 히스토리 용량 vs 피처 요구량 (2026-08-04)
+
+
+def _rising_bars(n: int, horizon: Horizon = Horizon.M1) -> list[BarClosed]:
+    """전 계산기가 값을 낼 수 있는 봉 — 세 가지를 일부러 만족시킨다.
+
+    ① 변동이 있을 것: 완전 평탄하면 표준편차 계열이 **정의 불가**(퇴화)라 용량과 무관하게
+       None이 된다.
+    ② 어느 5봉 창에도 상승·하락이 **둘 다** 있을 것: 반음양 계열(`vl_semi_ratio_5`)은 한쪽
+       변동만 있으면 분모가 0이다. 매 봉 부호를 뒤집어 보장한다.
+    ③ **하루를 넘길 것**: `px_gap_open`은 전일 종가가 있어야 값이 나온다(`SessionState`의
+       일자 롤오버). 라이브도 같은 조건에서 값을 낸다 — 웜스타트가 전일 꼬리를 채우고
+       그날 첫 봉이 롤오버를 일으킨다(`FeatureEngine.warm_start` docstring). 용량 안에
+       경계가 확실히 들어오도록 여기서는 하루를 짧게 잡는다(값의 성질은 무관).
+    """
+    import math
+
+    out = []
+    day_minutes = 100
+    for i in range(n):
+        c = round(10000 + 300 * math.sin(i / 7) + (i % 13) * 3 + (20 if i % 2 else -20))
+        day = 2 + i // day_minutes
+        minute = i % day_minutes
+        out.append(
+            BarClosed(
+                symbol="A05608",
+                horizon=horizon,
+                bar_open_kst=datetime(2026, 3, day, 9, 0, tzinfo=KST) + timedelta(minutes=minute),
+                o_ticks=c,
+                h_ticks=c + 12,
+                l_ticks=c - 12,
+                c_ticks=c,
+                volume=100 + i,
+            )
+        )
+    return out
+
+
+def test_every_registered_feature_is_computable_within_history_capacity():
+    """**이 파일에서 가장 중요한 테스트** — 용량이 부족하면 그 피처는 프로덕션에서 영원히
+    NaN이고, 아무도 모른다.
+
+    2026-08-04 실측으로 두 개가 그 상태였다: `px_ema_cross_60`은 slow EMA가 3*W=180봉,
+    `px_macd_h_60`은 2*W+시그널로 139봉을 요구하는데 용량은 130이었다. 매일 무결성
+    리포트에 `nan_ratio=0.0165`(=2/121)가 찍히고 있었지만 "정상 수준"으로 읽혔다.
+    """
+    from messiah.features.engine import _MAX_HISTORY
+    from messiah.features.px_core import SessionState
+
+    bars = _rising_bars(_MAX_HISTORY)
+    session = SessionState()
+    for bar in bars:
+        session.on_bar(bar)
+
+    unusable: list[str] = []
+    for name, fn, windows in list(PX_WINDOWED_FEATURES) + list(VL_WINDOWED_FEATURES):
+        for window in windows:
+            if fn(bars, window) is None:
+                unusable.append(f"{name}_{window}")
+    for name, fn in list(PX_STATEFUL_FEATURES) + list(VL_STATEFUL_FEATURES):
+        if fn(bars, session) is None:
+            unusable.append(name)
+
+    assert not unusable, (
+        f"용량 {_MAX_HISTORY}봉으로 계산 불가능한 피처: {unusable} — "
+        f"_MAX_HISTORY를 올리거나 해당 피처의 윈도우를 줄일 것"
+    )
+
+
+def test_session_state_is_fed_when_m1_is_not_subscribed():
+    """학습 경로(`build_feature_vectors`)는 학습 Horizon 하나만 구독한다 — 그때도 세션
+    상태형 피처가 값을 내야 한다. 2026-08-04 이전에는 M1으로만 갱신해
+    `px_gap_open`/`px_open_ret`/`px_range_pos_d`가 **학습에서만** 항상 NaN이었다."""
+    engine = FeatureEngine("A05608", FakeBus(), "v2026.07", horizons=[Horizon.M15])
+
+    engine.warm_start({Horizon.M15: _rising_bars(60, Horizon.M15)})
+
+    assert engine._session.session_open_ticks is not None  # noqa: SLF001
+    assert engine._session.session_high_ticks is not None  # noqa: SLF001
+
+
+def test_session_state_still_prefers_m1_when_available():
+    """라이브 동작 불변 — M1을 구독하면 여전히 M1으로만 갱신한다(장중 갱신이 가장 촘촘)."""
+    engine = FeatureEngine("A05608", FakeBus(), "v2026.07")
+
+    assert engine._session_horizon is Horizon.M1  # noqa: SLF001

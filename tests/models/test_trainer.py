@@ -2,6 +2,7 @@ import math
 from datetime import datetime, timedelta
 
 import pytest
+
 from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon
 from messiah.core.timeutil import KST
 from messiah.models.labeling import label_and_weight

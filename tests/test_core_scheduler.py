@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 
 import pytest
+
 from messiah.core.scheduler import FixedTickScheduler
 from messiah.core.timeutil import UTC
 

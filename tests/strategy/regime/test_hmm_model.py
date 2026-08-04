@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from hmmlearn.hmm import GaussianHMM
+
 from messiah.core.messages import BarClosed, Horizon
 from messiah.core.timeutil import KST
 from messiah.strategy.regime.hmm_model import (

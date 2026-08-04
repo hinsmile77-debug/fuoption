@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 
 import pytest
+
 from messiah.core.ui_launcher import (
     DEFAULT_PORT,
     launch_command_center,

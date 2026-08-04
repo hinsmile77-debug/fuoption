@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+
 from messiah.broker.kis import symbol_master as sm
 
 # 실제 마스터파일과 같은 필드 배치(9개, pipe 구분, cp949)의 축소판. 근월물 정렬 회귀 테스트를 위해

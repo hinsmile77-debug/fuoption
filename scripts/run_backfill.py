@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import httpx  # noqa: E402
 import redis  # noqa: E402
+
 from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
 from messiah.broker.kis.redis_rate_limiter import RedisRateLimiter  # noqa: E402
 from messiah.broker.kis.redis_token_cache import RedisTokenDaemon  # noqa: E402

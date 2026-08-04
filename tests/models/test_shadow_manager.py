@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import numpy as np
+
 from messiah.core.bus import TOPIC_SHADOW_FILL
 from messiah.core.messages import BarClosed, ExpertView, FeatureVector, Horizon, Side
 from messiah.core.timeutil import KST

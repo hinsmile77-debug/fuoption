@@ -293,6 +293,7 @@ def test_compose_offline_marks_incomplete_bucket_as_low_quality():
 
 def test_compose_offline_rejects_non_m1_input():
     import pytest
+
     from messiah.data.bar_composer import compose_offline
 
     five = BarClosed(

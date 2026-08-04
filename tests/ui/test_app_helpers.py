@@ -10,6 +10,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+
 from messiah.core.messages import BarClosed, Horizon
 from messiah.data.archiver import ParquetArchiver
 from messiah.ui import app as app_module
