@@ -40,7 +40,7 @@ bars(단일 심볼·단일 Horizon 완성봉)
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -56,6 +56,7 @@ from messiah.risk.cost_model import CostModel
 from messiah.simulator.inprocess_bus import InProcessBus
 from messiah.strategy.futures.expert import DEFAULT_ENSEMBLE_SIZE, HorizonExpert
 from messiah.strategy.futures.meta_labeler import (
+    DEFAULT_MIN_SUPPORT_FRACTION,
     META_FEATURE_NAMES,
     MetaLabeler,
     OutOfFoldRecord,
@@ -250,6 +251,11 @@ class ExpertTrainingResult:
     best_params: dict[str, object]
     n_oof_records: int
     n_meta_signals: int
+    # 임계값 선택에 **실제로 쓴** 확률(out-of-fold)과, 같은 행을 최종 모델로 예측한
+    # in-sample 확률. 둘을 나란히 두는 이유는 `models/threshold_report.py`가 그 격차로
+    # "임계값 과적합"과 "모델에 우위 없음"을 구분하기 때문이다 — 두 증상이 똑같이 무거래다.
+    threshold_selection_probabilities: list[float] = field(default_factory=list)
+    threshold_insample_probabilities: list[float] = field(default_factory=list)
 
 
 async def train_formal_expert(
@@ -262,6 +268,8 @@ async def train_formal_expert(
     atr_window: int = DEFAULT_ATR_WINDOW,
     n_splits: int = 5,
     embargo_bars: int = 0,
+    meta_threshold_splits: int = 5,
+    meta_min_support_fraction: float = DEFAULT_MIN_SUPPORT_FRACTION,
     n_search_trials: int = 20,
     search_space: Mapping[str, tuple[str, float, float]] | None = None,
     search_num_boost_round: int = 100,
@@ -276,6 +284,13 @@ async def train_formal_expert(
          불가 — n_splits 대비 데이터가 너무 적어 유효 폴드가 하나도 안 나온 경우)이면
          ValueError. 정식 경로는 이 단계들이 실제로 작동했다는 보장이 핵심이라(칸닝 방지)
          조용히 빈 Meta-Labeler를 만들지 않는다.
+
+    `meta_threshold_splits`: Meta-Labeler 임계값을 고를 때 쓸 통과확률을 **out-of-fold**로
+         만들 폴드 수(2026-08-04 신설, 근거는 `_meta_selection_probabilities()`). 2 미만이면
+         종전대로 in-sample 확률을 쓴다 — 그 경로는 임계값이 실제 추론에서 도달 불가능해질
+         수 있으므로 재현·비교 목적으로만 쓸 것.
+    `meta_min_support_fraction`: 임계값 후보가 남겨야 할 최소 신호 비율
+         (`meta_labeler.DEFAULT_MIN_SUPPORT_FRACTION`) — 표본 몇 개짜리 극단 임계값을 막는다.
     """
     if not bars:
         raise ValueError("bars가 비어 있음")
@@ -352,11 +367,21 @@ async def train_formal_expert(
     meta_labeler = MetaLabeler.train(
         horizon=horizon, x=meta_x, y=meta_y, num_boost_round=meta_num_boost_round
     )
-    meta_probs = [
+    selection_probs = _meta_selection_probabilities(
+        horizon=horizon,
+        meta_x=meta_x,
+        meta_y=meta_y,
+        num_boost_round=meta_num_boost_round,
+        n_splits=meta_threshold_splits,
+        fitted=meta_labeler,
+    )
+    threshold = select_threshold(
+        selection_probs, list(meta_returns), min_support_fraction=meta_min_support_fraction
+    )
+    meta_labeler = meta_labeler.with_threshold(threshold)
+    inference_probs = [
         meta_labeler.predict_pass_probability(dict(zip(META_FEATURE_NAMES, row))) for row in meta_x
     ]
-    threshold = select_threshold(meta_probs, list(meta_returns))
-    meta_labeler = meta_labeler.with_threshold(threshold)
 
     return ExpertTrainingResult(
         expert=expert,
@@ -364,7 +389,76 @@ async def train_formal_expert(
         best_params=best_params,
         n_oof_records=len(oof_records),
         n_meta_signals=len(meta_y),
+        threshold_selection_probabilities=selection_probs,
+        threshold_insample_probabilities=inference_probs,
     )
+
+
+def _meta_selection_probabilities(
+    *,
+    horizon: Horizon,
+    meta_x: np.ndarray,
+    meta_y: np.ndarray,
+    num_boost_round: int,
+    n_splits: int,
+    fitted: MetaLabeler,
+) -> list[float]:
+    """임계값 선택에 쓸 통과확률 — **out-of-fold**로 만든다 (2026-08-04 수정).
+
+    ## 왜 바꿨나
+
+    그 전에는 방금 학습한 Meta-Labeler로 **자기 학습 행(`meta_x`)을 그대로 예측**해 그
+    확률로 임계값을 골랐다. Expert 쪽은 `PurgedKFold`로 look-ahead를 막았지만 **메타 모델
+    자신의 예측은 in-sample**이었던 것이다. LightGBM은 학습 행을 잘 맞히므로 확률이 0/1
+    쪽으로 밀리고, 그 위에서 고른 임계값은 새 데이터에서 아무도 못 넘는 높이가 된다.
+
+    2026-08-04 실측이 정확히 그 모양이었다 — 선택된 임계 0.6000, 검증 구간 통과확률
+    **최대치 0.5422**, 통과 0/1006건. 판단은 매번 나오는데 거래는 영원히 0건이었다
+    (`models/threshold_report.py` 모듈 docstring).
+
+    ## 어떻게
+
+    메타 학습 데이터를 `n_splits`로 나눠 각 폴드를 나머지로 학습한 모델로 예측한다.
+    여기서 `PurgedKFold`가 아니라 단순 연속 분할을 쓰는 이유: 메타 행은 이미 out-of-fold
+    Expert 예측에서 나온 것이라 배리어 겹침에 의한 누수는 상위 단계에서 이미 제거됐고,
+    이 단계가 막으려는 것은 **자기 자신을 예측하는 것** 하나다.
+
+    실패 조건: 없다 — `n_splits < 2`이거나 표본이 폴드 수보다 적으면 종전처럼 in-sample
+              확률로 폴백한다(임계값 선택이 아예 불가능해지는 것보다 낫고, 그 경우
+              `ExpertTrainingResult`의 두 확률 목록이 같아져 진단에서 바로 드러난다).
+    """
+    n = len(meta_y)
+    if n_splits < 2 or n < n_splits * 2:
+        return [
+            fitted.predict_pass_probability(dict(zip(META_FEATURE_NAMES, row))) for row in meta_x
+        ]
+
+    probs = [0.0] * n
+    bounds = [round(i * n / n_splits) for i in range(n_splits + 1)]
+    for i in range(n_splits):
+        lo, hi = bounds[i], bounds[i + 1]
+        if lo >= hi:
+            continue
+        train_rows = np.concatenate([meta_x[:lo], meta_x[hi:]])
+        train_labels = np.concatenate([meta_y[:lo], meta_y[hi:]])
+        if len(train_labels) == 0 or len(set(train_labels.tolist())) < 2:
+            # 한쪽 클래스만 남은 폴드 — 학습이 성립하지 않는다. 그 구간은 전체 모델로 채운다.
+            for idx in range(lo, hi):
+                probs[idx] = fitted.predict_pass_probability(
+                    dict(zip(META_FEATURE_NAMES, meta_x[idx]))
+                )
+            continue
+        fold_model = MetaLabeler.train(
+            horizon=horizon,
+            x=train_rows,
+            y=train_labels,
+            num_boost_round=num_boost_round,
+        )
+        for idx in range(lo, hi):
+            probs[idx] = fold_model.predict_pass_probability(
+                dict(zip(META_FEATURE_NAMES, meta_x[idx]))
+            )
+    return probs
 
 
 def _rows_from_aligned(

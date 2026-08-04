@@ -324,3 +324,90 @@ async def test_train_prototype_expert_is_horizon_generic(horizon):
     vectors = await build_feature_vectors(bars, feature_set=_FEATURE_SET)
     view = expert.predict(vectors[-1])
     assert view.horizon == horizon
+
+
+# ------------------------------------------------ 임계값 선택 (2026-08-04, out-of-fold)
+
+
+async def _formal(bars, **overrides):
+    kwargs = dict(
+        feature_set=_FEATURE_SET,
+        model_version="threshold-v1",
+        atr_window=3,
+        n_splits=3,
+        n_search_trials=2,
+        search_space=_SMALL_SEARCH_SPACE,
+        search_num_boost_round=10,
+        final_num_boost_round=10,
+        n_members=2,
+        meta_num_boost_round=10,
+    )
+    kwargs.update(overrides)
+    return await train_formal_expert(bars, **kwargs)
+
+
+async def test_threshold_is_selected_on_out_of_fold_probabilities_not_in_sample():
+    """임계값은 **자기 학습 행을 예측한 확률**로 고르면 안 된다 — 그러면 새 데이터에서
+    아무도 못 넘는 높이가 된다(2026-08-04 실측: 임계 0.60, 검증 최대 0.5422, 통과 0건)."""
+    result = await _formal(_bars(120), meta_threshold_splits=3)
+
+    assert len(result.threshold_selection_probabilities) == result.n_meta_signals
+    assert len(result.threshold_insample_probabilities) == result.n_meta_signals
+    # out-of-fold와 in-sample이 같은 값이면 폴백 경로를 탄 것 — 이 표본 크기에선 안 된다.
+    assert result.threshold_selection_probabilities != result.threshold_insample_probabilities
+
+
+async def test_threshold_selection_falls_back_to_in_sample_when_splits_disabled():
+    """비교·재현용 폴백 경로 — 두 확률 목록이 같아져 진단에서 바로 드러난다."""
+    result = await _formal(_bars(120), meta_threshold_splits=1)
+
+    assert result.threshold_selection_probabilities == result.threshold_insample_probabilities
+
+
+async def test_selected_threshold_is_reachable_by_the_probabilities_it_was_chosen_from():
+    """`select_threshold()`의 계약 — 아무도 안 남는 임계값은 후보에서 제외한다."""
+    result = await _formal(_bars(120), meta_threshold_splits=3)
+
+    reached = [
+        p for p in result.threshold_selection_probabilities if p >= result.meta_labeler.threshold
+    ]
+    assert reached, "선택된 임계값에 도달하는 표본이 선택 근거 안에 하나도 없다"
+
+
+async def test_threshold_report_can_be_built_from_the_training_result():
+    """진단 도구가 학습 산출물만으로 성립해야 한다 — 별도 재현 코드를 요구하면 안 쓰인다."""
+    from messiah.models.threshold_report import ThresholdReport
+
+    result = await _formal(_bars(120), meta_threshold_splits=3)
+
+    report = ThresholdReport.build(
+        threshold=result.meta_labeler.threshold,
+        selection_probabilities=result.threshold_selection_probabilities,
+        inference_probabilities=result.threshold_insample_probabilities,
+    )
+
+    assert report.threshold == result.meta_labeler.threshold
+    assert report.selection.n == result.n_meta_signals
+    assert isinstance(report.verdict, str) and report.verdict
+
+
+async def test_support_floor_keeps_the_threshold_reachable_at_inference():
+    """이 세션의 핵심 회귀 — 지지도 하한이 없으면 임계값이 표본 몇 개의 극단으로 잡히고,
+    새 데이터에서 아무도 못 넘어 **영원히 무거래**가 된다(2026-08-04 실측: 임계 0.550,
+    검증 도달 0%, 거래 0건 → 하한 도입 후 임계 0.200, 도달 8.9%, 신호 15건)."""
+    bars = _bars(160)
+
+    floored = await _formal(bars, meta_threshold_splits=3, meta_min_support_fraction=0.20)
+
+    probs = floored.threshold_selection_probabilities
+    reached = sum(1 for p in probs if p >= floored.meta_labeler.threshold)
+    assert reached >= len(probs) * 0.20 - 1, "선택된 임계값의 지지도가 하한에 못 미친다"
+
+
+async def test_support_floor_can_be_disabled_for_comparison():
+    """종전 동작 재현 경로 — 끄면 하한이 안 걸린다(스윕의 비교 축)."""
+    bars = _bars(160)
+
+    loose = await _formal(bars, meta_threshold_splits=3, meta_min_support_fraction=0.0)
+
+    assert 0.0 <= loose.meta_labeler.threshold <= 1.0

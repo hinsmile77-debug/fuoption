@@ -28,11 +28,12 @@ Digital Twin(W9~11)·Expert(W14~19)·Cost Model(W14~16)·Validator(W14~16)가 �
   하나 = 한 기간으로 근사한다(진짜 일별 세분화를 원하면 `test_days=1`로 좁히면 됨,
   `periods_per_year`를 `365/test_days`로 스스로 맞춰 호출할 것 — 이 모듈은 그 값을
   강제하지 않는다).
-- **Regime AI 미포함**: `RegimeRuntime`을 배선하지 않아 `intel.regime`이 발행되지 않고,
-  `FuturesAIService`는 항상 `Regime.UNKNOWN`으로 집계한다(Aggregator의 가중치 매트릭스가
-  UNKNOWN 행을 어떻게 다루는지에 좌우됨 — `strategy/futures/aggregator.py` 참고). Regime까지
-  엮은 백테스트는 향후 확장 대상(이 모듈은 "성과 관문을 실제로 실행 가능하게 한다"가
-  1차 목표라 스코프를 좁혔다).
+- **Regime AI**: `regime_ai=`를 주면 `RegimeRuntime`(30m 완성봉 구독)이 배선되어
+  `intel.regime`이 실제로 발행된다(2026-08-04 신설). **미주입이면 종전대로**
+  `FuturesAIService`가 항상 `Regime.UNKNOWN`으로 집계하는데, 그 경우 가중치표가 전 Horizon
+  0.5 고정이라 국면별 가중(TREND 계열 최대 1.5)이 통째로 죽는다
+  (`strategy/futures/aggregator.py`의 `REGIME_WEIGHTS`). 즉 미주입은 "중립"이 아니라
+  **한 가지 특정 가정**이므로, 성과를 비교할 때 이 축을 고정했는지 확인할 것.
 - **Deflated Sharpe 미제출**: 여전히 미구현(`models/metrics.py` 모듈 docstring 알려진 갭) —
   이 하니스도 3종(Sharpe·MDD·창별 일관성)까지만 `Validator`에 넘긴다.
 - **실제 시장 데이터 아님**: 실제 아카이브가 하루치뿐이라(기존 갭) 다개월 walk-forward를
@@ -61,8 +62,11 @@ from messiah.models.cv import WalkForwardSplitter
 from messiah.models.labeling import triple_barrier_labels
 from messiah.models.trainer import train_formal_expert
 from messiah.simulator.inprocess_bus import InProcessBus
+from messiah.strategy.futures.meta_labeler import DEFAULT_MIN_SUPPORT_FRACTION
 from messiah.strategy.futures.service import FuturesAIService
 from messiah.strategy.pipeline import TradingPipeline
+from messiah.strategy.regime.runtime import RegimeRuntime
+from messiah.strategy.regime.service import RegimeAI
 
 
 @dataclass(frozen=True)
@@ -191,7 +195,10 @@ async def run_walk_forward_backtest(
     final_num_boost_round: int = 30,
     n_members: int = 3,
     meta_num_boost_round: int = 20,
+    meta_threshold_splits: int = 5,
+    meta_min_support_fraction: float = DEFAULT_MIN_SUPPORT_FRACTION,
     starting_cash: int = 50_000_000,
+    regime_ai: "RegimeAI | None" = None,
 ) -> list[WindowResult]:
     """전체 M1봉 이력을 Walk-Forward 창으로 굴리며 창마다 재학습+검증재생한다.
 
@@ -232,6 +239,8 @@ async def run_walk_forward_backtest(
             final_num_boost_round=final_num_boost_round,
             n_members=n_members,
             meta_num_boost_round=meta_num_boost_round,
+            meta_threshold_splits=meta_threshold_splits,
+            meta_min_support_fraction=meta_min_support_fraction,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,6 +259,12 @@ async def run_walk_forward_backtest(
             gateway = OrderGateway(broker)
             replay_clock = ReplayClock()
             pipeline = TradingPipeline(symbol, broker, gateway, bus, now=replay_clock)
+            # Regime 결선 (2026-08-04). 미주입이면 `intel.regime`이 아예 발행되지 않아
+            # `FuturesAIService`가 항상 `Regime.UNKNOWN`으로 집계한다 — 그 경우 가중치표는
+            # 전 Horizon 0.5 고정이라 국면별 가중(0.5~1.5)이 통째로 죽는다.
+            # `RegimeRuntime`은 30m 완성봉을 구독하므로 composer가 흘려주는 것으로 충분하다.
+            if regime_ai is not None:
+                await RegimeRuntime(symbol, regime_ai, bus).run_forever()
 
             await feature_engine.run_forever()
             await futures_service.run_forever()

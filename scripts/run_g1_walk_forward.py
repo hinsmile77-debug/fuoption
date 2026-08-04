@@ -35,6 +35,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.backtest.harness import (  # noqa: E402
+    aggregate_to_horizon,
     equity_curve_from_windows,
     run_walk_forward_backtest,
     window_returns_from_windows,
@@ -43,6 +44,7 @@ from messiah.core.messages import Horizon  # noqa: E402
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.models.validator import Validator  # noqa: E402
+from messiah.strategy.regime.service import RegimeAI  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
 
@@ -74,6 +76,25 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--final-num-boost-round", type=int, default=30)
     p.add_argument("--n-members", type=int, default=3)
     p.add_argument("--meta-num-boost-round", type=int, default=20)
+    p.add_argument(
+        "--meta-threshold-splits",
+        type=int,
+        default=5,
+        help="임계값 선택용 통과확률을 out-of-fold로 만들 폴드 수(1이면 종전 in-sample)",
+    )
+    p.add_argument(
+        "--meta-min-support",
+        type=float,
+        default=0.05,
+        help="임계값 후보가 남겨야 할 최소 신호 비율 — 표본 몇 개짜리 극단 임계값 방지",
+    )
+    p.add_argument(
+        "--regime",
+        default="off",
+        choices=["off", "on"],
+        help="on이면 RegimeAI를 학습해 RegimeRuntime을 결선한다. off는 중립이 아니라 "
+        "'항상 UNKNOWN(가중치 0.5 고정)'이라는 특정 가정이다.",
+    )
     p.add_argument("--out", default=None, help="결과 JSON 저장 경로")
     return p.parse_args()
 
@@ -137,6 +158,17 @@ async def main() -> int:
         )
         return 3
 
+    regime_ai = None
+    if args.regime == "on":
+        # 구동 Horizon(30m) 봉으로 학습한다. **첫 창의 학습 구간만** 쓰는 게 이상적이지만
+        # 그러면 창마다 RegimeAI를 다시 학습해야 해 런타임이 배로 든다 — 지금은 전 구간으로
+        # 한 번 학습하고 그 사실을 여기 남긴다. 국면 판정에 검증 구간 정보가 새어 들어가는
+        # 약한 look-ahead이며, 성과를 주장할 때 반드시 함께 언급해야 하는 한계다.
+        regime_bars = aggregate_to_horizon(bars, Horizon.M30)
+        print(f"\nRegimeAI 학습 — 30m {len(regime_bars)}봉 (알려진 한계: 전 구간 학습)")
+        regime_ai = RegimeAI.fit(regime_bars)
+        print(f"  상태 수 {regime_ai.n_states} · 명명 {regime_ai.labels}")
+
     print("\n백테스트 시작 (창마다 재학습 — 수 분 걸린다)")
     results = await run_walk_forward_backtest(
         bars,
@@ -151,7 +183,10 @@ async def main() -> int:
         final_num_boost_round=args.final_num_boost_round,
         n_members=args.n_members,
         meta_num_boost_round=args.meta_num_boost_round,
+        meta_threshold_splits=args.meta_threshold_splits,
+        meta_min_support_fraction=args.meta_min_support,
         starting_cash=args.cash,
+        regime_ai=regime_ai,
     )
     if not results:
         print("창이 0개 — train/test 일수를 데이터 규모에 맞게 줄일 것", file=sys.stderr)

@@ -162,19 +162,39 @@ def build_meta_training_data(
     return x, np.array(y_values, dtype=int), np.array(net_returns, dtype=float)
 
 
+DEFAULT_MIN_SUPPORT_FRACTION = 0.05
+"""임계값 후보가 남겨야 하는 최소 신호 비율 (2026-08-04 신설).
+
+이 하한이 없던 동안 `select_threshold()`는 **신호 1건만 남는 임계값도 후보로 인정**했다.
+그 1건이 우연히 수익이었으면 평균 net_return이 최대가 되어 그 극단값이 선택된다 — 근거가
+표본 1개인 임계값이다. 2026-08-04 실측: 선택된 임계값에 도달하는 학습 표본이 **0.5%**뿐이었고
+(약 3건), 검증 구간에선 당연히 0%였다(`models/threshold_report.py`).
+
+5%는 미검증 초기값이다 — "표본 몇 개면 평균을 믿을 만한가"에 정답이 없어, 신호가 수백 건인
+현재 규모에서 최소 십수 건은 남게 하는 값으로 잡았다. 실측이 쌓이면 재조정 대상.
+"""
+
+
 def select_threshold(
     pass_probabilities: Sequence[float],
     net_returns: Sequence[float],
     *,
     candidates: Sequence[float] | None = None,
+    min_support_fraction: float = DEFAULT_MIN_SUPPORT_FRACTION,
 ) -> float:
     """
     입력: `pass_probabilities`(신호별 MetaLabeler 통과확률)와 `net_returns`(그 신호를
-         따랐을 때 비용차감 후 손익, 같은 순서로 대응).
+         따랐을 때 비용차감 후 손익, 같은 순서로 대응). `min_support_fraction`은 후보
+         임계값이 남겨야 할 최소 신호 비율(위 상수 참고, 0이면 하한 없음 — 종전 동작).
     계산: 후보 임계값(기본 0.0~1.0, 0.05 간격 — 21개)마다 "그 임계값 이상만 통과"했을 때
          남는 신호들의 평균 net_return을 구해, 최댓값을 내는 임계값을 고른다(Ver 1.6 §5.2
          "비용 차감 후 기대수익 최대화" — 정확도 최대화가 아니다). 동률이면 더 큰(보수적인)
-         임계값을 남긴다. 어떤 신호도 안 남는 임계값은 후보에서 제외한다.
+         임계값을 남긴다.
+    해석: **지지도(support) 하한을 못 채우는 후보는 제외한다** — 표본 몇 개의 우연을
+         "기대수익"이라 부르지 않기 위함이다. 하한을 채우는 후보가 하나도 없으면(신호 자체가
+         적은 경우) 하한을 무시하고 가장 많은 신호를 남기는 후보로 폴백한다 — 임계값 선택이
+         아예 불가능해지는 것보다 낫고, 그 상황은 `models/threshold_report.py`의 선택도달률로
+         드러난다.
     """
     if len(pass_probabilities) != len(net_returns):
         raise ValueError("pass_probabilities와 net_returns 길이가 다르다")
@@ -182,17 +202,24 @@ def select_threshold(
         raise ValueError("빈 입력으로는 임계값을 선택할 수 없다")
 
     grid = candidates if candidates is not None else [i / 20 for i in range(21)]
-    best_threshold = grid[0]
+    min_support = max(1, int(len(pass_probabilities) * min_support_fraction))
+
+    best_threshold: float | None = None
     best_score = float("-inf")
+    fallback_threshold, fallback_support = grid[0], -1
     for threshold in grid:
         selected = [r for p, r in zip(pass_probabilities, net_returns) if p >= threshold]
         if not selected:
+            continue
+        if len(selected) > fallback_support:
+            fallback_threshold, fallback_support = threshold, len(selected)
+        if len(selected) < min_support:
             continue
         score = statistics.fmean(selected)
         if score >= best_score:
             best_score = score
             best_threshold = threshold
-    return best_threshold
+    return best_threshold if best_threshold is not None else fallback_threshold
 
 
 @dataclass(frozen=True)

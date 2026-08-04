@@ -220,3 +220,43 @@ def test_meta_labeler_save_load_round_trip(tmp_path: Path):
     assert reloaded.horizon == Horizon.M5
     assert reloaded.feature_names == labeler.feature_names
     assert reloaded.predict_pass_probability(features) == pytest.approx(before, abs=1e-9)
+
+
+# -------------------------------------------- 임계값 지지도 하한 (2026-08-04)
+
+
+def test_select_threshold_rejects_candidates_with_too_little_support():
+    """표본 몇 개의 우연을 '기대수익'이라 부르지 않는다.
+
+    0.95 이상은 1건뿐인데 그게 가장 수익이 크다 — 지지도 하한이 없으면 그 극단값이
+    선택되고, 새 데이터에서는 아무도 그 높이에 못 닿는다(2026-08-04 실측: 선택 임계에
+    도달하는 학습 표본 0.5%, 검증 0%)."""
+    probs = [i / 100 for i in range(100)]
+    returns = [1.0] * 99 + [500.0]  # 마지막(0.99) 하나만 압도적
+
+    lax = select_threshold(probs, returns, min_support_fraction=0.0)
+    strict = select_threshold(probs, returns, min_support_fraction=0.20)
+
+    assert lax > strict  # 하한이 없으면 극단값을 고른다
+    reached = sum(1 for p in probs if p >= strict)
+    assert reached >= 20  # 하한을 두면 최소 20%가 남는다
+
+
+def test_select_threshold_support_floor_scales_with_sample_size():
+    probs = [i / 100 for i in range(100)]
+    returns = [1.0] * 100
+
+    chosen = select_threshold(probs, returns, min_support_fraction=0.30)
+
+    assert sum(1 for p in probs if p >= chosen) >= 30
+
+
+def test_select_threshold_falls_back_when_no_candidate_meets_support():
+    """어떤 후보도 하한을 못 채우면 선택 불가로 죽지 않고 가장 많이 남기는 쪽으로 폴백한다."""
+    probs = [0.1, 0.95]
+    returns = [1.0, 2.0]
+
+    # 후보가 둘 다 1건씩만 남기는데 하한은 2건 — 전부 탈락 → 폴백
+    chosen = select_threshold(probs, returns, candidates=[0.9, 0.95], min_support_fraction=1.0)
+
+    assert chosen == pytest.approx(0.9)
