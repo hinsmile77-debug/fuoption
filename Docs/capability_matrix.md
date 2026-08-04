@@ -243,11 +243,15 @@ runtime) 전체 통과를 먼저 확인하도록 명시했다. hmmlearn 쪽 릴�
 
 - **15m/30m Expert는 여전히 Ver 1.5 §3.5~3.6이 배정한 후보 구성의 절반 이하만 받는다**:
   15m은 FL(수급) 30%·OP 10%·RG 10%(합 50%), 30m은 FL 20%·OP 20%·RG 20%(합 60%)가
-  배정돼 있는데, 셋 다 아직 데이터 자체가 없다 — FL(외국인/기관 순매수 누적)은 KIS
-  투자자매매동향 REST 폴링 루프가 여전히 미구현(W3~5/W6~8부터 이어진 기존 갭), OP(옵션
-  체인 그릭스·IV)는 옵션 체인 수집기 자체가 없음(K200_OPT WS 동시구독 문제와 별개로 REST
-  폴링도 미구현), RG(베이시스·시장폭·VIX·USDKRW 등)는 현물지수·매크로 데이터 소스 자체가
-  연동돼 있지 않다. 지금 15m/30m Expert가 실제로 쓸 수 있는 건 PX+VL(두 Horizon 모두
+  배정돼 있는데, **데이터 수집은 2026-08-04에 셋 중 둘이 시작됐다**(피처는 아직 없다 —
+  수집과 피처는 별개 단계다):
+  - FL(외국인/기관 순매수) — 2026-08-04 결선, 08-05 기동분부터 적재.
+  - OP(옵션 체인 그릭스·IV) — 2026-08-04 결선. `get_quote(O)` 실측으로 **IV·델타·감마·
+    미결제약정이 응답에 그대로 들어 있음**을 확인했다(`op_gex`에 필요한 감마×OI가 한 호출로
+    나온다). 다만 KIS Greeks를 그대로 쓸지 BS로 재계산할지는 별도 판단이라 `raw` 보존만 한다.
+  - RG(베이시스·시장폭·VIX·USDKRW) — 여전히 소스 없음. **단, KOSPI200 현물지수는 이제
+    옵션체인 응답(`output3`)에 매 폴링 실려 온다** — `rg_basis` 계열의 입력 하나가 부수적으로
+    확보됐다(현물지수 전용 소스 연동 전까지의 임시 경로). 지금 15m/30m Expert가 실제로 쓸 수 있는 건 PX+VL(두 Horizon 모두
   Ver 1.5 배정 20%+15%=35%에 해당하는 카테고리)뿐 — Ver 1.5 §5 선정 절차(IC 스크리닝→
   상관 클러스터링→안정성 선택)도 이 축소된 후보군에서만 의미가 있다. FL/OP/RG는 각각
   전용 Collector/Normalizer/Archiver급 작업이 필요해 이번 2주 스코프에 넣지 않았다 —
@@ -322,8 +326,11 @@ runtime) 전체 통과를 먼저 확인하도록 명시했다. hmmlearn 쪽 릴�
   옵션 체인 구독 롤링(아래 항목)을 구현할 때 이 제약을 그대로 따라야 함.
 - **ATM±N 옵션 체인 구독 롤링 미구현**: mahdi의 RollingSubscriptionManager(스팟 추종 옵션 체인
   WS 구독 롤링)를 이식하지 않음 — TickCollector는 생성 시 주어진 심볼 1개만 구독한다.
-- **REST 폴링 루프(투자자매매동향·옵션체인 그릭스) 미구현**: FixedTickScheduler를 아직 아무
-  실제 폴러에도 물려보지 않음 — 옵션 체인 구독 롤링과 함께 별도 작업으로 남김.
+- ~~**REST 폴링 루프(투자자매매동향·옵션체인 그릭스) 미구현**~~ — 2026-08-04 완료. 수급 3업종
+  (60초)·옵션체인 3시리즈(먼쓰리 300초 / 위클리 각 600초, 위상 0/100/200초)를 `run_l1_daily.py`
+  에 결선. `KISRestClient`를 **하나만 만들어 공유**한다(폴러별 페이서 분리는 마흐디 2026-07-08
+  500 폭주로 203분치를 날린 전례가 있어 봉인). 총수요 0.330건/초(용량의 33%)·백오프 내성
+  3.03배 — 기동 로그가 이 값을 매일 찍는다.
 - **Event Calendar(KRX 휴장일 인식) 미구현**: L1 DATA 다이어그램(Master Plan §9)의 구성요소
   중 하나지만 Collector/Normalizer/Archiver의 정확성과 독립적인 별개 관심사라 이번엔 다루지
   않음.
@@ -399,9 +406,14 @@ runtime) 전체 통과를 먼저 확인하도록 명시했다. hmmlearn 쪽 릴�
   배리어 폭이 "×ATR(주기)"라고만 하고 ATR 계산 윈도우 크기는 명시하지 않는다 — Wilder
   관례값 14를 기본으로 뒀으나(`atr_window` 파라미터로 언제든 override 가능), 실제 실효값은
   Ver 1.5 §5 Feature 선정 절차와 함께 재검토 대상.
-- **run_l1_daily.py는 선물(K200_MINI_FUT) 1개만 수집**: `universe`에는 K200_OPT도 있지만,
-  같은 계좌로 WS 연결을 2개 열면 서로 끊기는 문제가 이미 실측으로 확인됨(위 "L1 Data" 갭
-  참고) — 옵션까지 같이 수집하려면 연결 하나에 다중 subscribe()로 묶는 재설계가 먼저 필요.
+- ~~**run_l1_daily.py는 선물(K200_MINI_FUT) 1개만 수집**~~ — 2026-08-04 옵션체인 결선으로 해소.
+  **이 항목의 진단 자체가 틀렸었다**: "옵션을 같이 수집하려면 WS 다중연결을 먼저 풀어야
+  한다"고 적혀 있었는데, 옵션 **체인 시세**는 `OptionChainPoller`가 REST로 받으므로 WS 연결을
+  하나도 열지 않는다. WS 제약은 옵션 **틱(체결)** 구독에만 걸리는 별개 과제다. 실제 제약은
+  REST 유량이었다 — 근월 체인 전량이 1,356다리(먼쓰리 780·월위클리 242·목위클리 334)라
+  1건/초에서 **1회 폴링에 22.6분**이고, ATM±10 창(42다리)으로 푼다. 이 오진 때문에 착수가
+  미뤄져 있었다.
+  남은 것: 옵션 **틱**의 실시간 WS 구독(단일 연결·다중 subscribe 재설계) — 아래 항목 그대로.
 - **WS 재연결이 짧은 시간 안에 반복되는 패턴 재관측(2026-07-24, 원인 미확정)**: 2026-07-23
   세션에선 "동시 WS 연결 2개"가 반복 단절의 원인으로 추정됐는데(위 갭 항목), 2026-07-24
   run_l1_daily.py 실측 중에는 **연결이 딱 1개뿐**인데도 20초 사이에 5회 연속 단절(전부
@@ -588,7 +600,9 @@ Black-76(선물 기준, 현물지수 피드가 없어 선택) 프라이서로 �
 
 | 기능 | 구현 | 모의 실측 | 실전 실측 | 비고 |
 |---|---|---|---|---|
-| data.option_chain_poller.OptionChainPoller | ✅ | — | — | `InvestorFlowPoller`와 동일 패턴 — `IndexDerivativesMaster.nearest_expiry_chain()`으로 체인을 얻고 다리별로 `get_asking_price()` 순차 조회, `raw.option_chain.{underlying}`에 발행. 필드는 미해석(`OptionQuoteSnapshot.raw` 그대로 보존 — InvestorFlowSnapshot과 동일 원칙). 단위 테스트 5건(체인 순회·빈 체인 로깅·다리 실패 격리·발행 실패 로깅·스케줄러 연동). **라이브 미검증**(REST field mapping이 없어 이번엔 배관만). |
+| data.option_chain_poller.OptionChainPoller | ✅ | ✅ 2026-08-04 | — | **2026-08-04 재작성 + 실계좌 검증 + run_l1_daily 결선.** 인스턴스 하나가 시리즈 하나를 맡아 ATM±N 창만 조회한다(전량은 1,356다리=22.6분이라 성립 불가 — 기준가를 못 구하면 **전량 폴백 없이** 사이클을 건너뛴다). 원천을 `get_asking_price()`→`get_quote()`로 교체: 실호출 대조 결과 전자는 5단계 호가만, 후자는 IV·델타·감마·**미결제약정**·이론가·잔존일수 + KOSPI200 현물(output3)을 준다 — 현 스코프 OP Feature(`op_iv_chg`/`op_pcr_vol`/`op_pcr_oi`/`op_gex`/`op_skew_rr25`)는 전부 후자 쪽이고 호가를 쓰는 것은 하나도 없다. 필드는 여전히 미해석(`raw` 보존). 단위 테스트 15건. **실계좌 end-to-end 실측**: 기준가(미니선물 998.08) → ATM±1 6다리 선택 → 실호출 6건(델타 콜 0.42~0.52 / 풋 −0.49로 ATM 정확히 중심) → 버스 → 아카이버 → parquet 6행×12컬럼, `_RateLimiter`가 1초 간격 페이싱하는 것까지 타임스탬프로 확인. |
+| data.option_chain_archiver.OptionChainArchiver | ✅ | ✅ 2026-08-04 | — | 신규 — `raw.option_chain.*` 구독 → `data/option_chain/{series}/{date}.parquet`. output1/2/3을 전부 보존(`idx2_`/`idx3_` 접두어로 충돌 회피). **수급 아카이버와 달리 사이클 단위로 flush**한다 — 하루 3,276행이라 스냅샷마다 전체 재작성하면 `data/archiver.py`가 겪은 O(n²)를 반복한다. 단위 테스트 12건(시리즈별 파일·3블록 보존·중복 덮어쓰기·flush 임계·close() 잔여 flush·날짜 전환 시 이전 날 확정·적재 실패 격리·KST 되읽기). |
+| data.last_price.LastPriceTracker | ✅ | ✅ 2026-08-04 | — | 신규 — `md.tick.{symbol}` 구독해 최신가를 **지수 포인트**로 보관, `OptionChainPoller`의 ATM 기준가 공급원. 틱↔포인트 환산을 한 곳에 모은다. 오래된 값(기본 180초)은 None을 돌려줘 폴러가 사이클을 건너뛰게 한다(WS 단절 후 옛 창을 계속 조회하는 것 방지). 베이시스 실측: 미니선물 998.08 vs KOSPI200 현물 1000.03 = −1.95pt = 행사가 0.8칸이라 ATM±10 창에서 무해. 단위 테스트 7건. |
 | core.messages.OptionQuoteSnapshot / GreeksProfile | ✅ | — | — | 전자는 원시 시세호가 passthrough(가격도 미해석 — bid/ask 필드명 unverified), 후자는 `surface.py`가 계산한 Greeks 전용 값 객체(단위 docstring에 명시, L16 백신). |
 | strategy.options.surface (Black76 프라이서·IV 역산·스마일 피팅) | ✅ | — | — | `math.erf` 기반 정규분포, Newton-Raphson+이분법 IV 역산, `numpy.polyfit` 2차 스마일(SVI 단순화, 문서화됨), `find_strike_for_delta()`(25Δ 탐색). Greeks는 델타/감마/베가 해석식 + theta는 유한차분(자기 자신과의 정합성 우선, 손으로 옮긴 공식의 부호실수 리스크 회피). 단위 테스트 31건 — 특히 델타/감마/베가를 프라이서 자체의 유한차분과 교차검증(손으로 옮긴 해석식이 프라이서와 내적으로 일치함을 보장), put-call parity, IV round-trip. |
 | strategy.options.vol_metrics (IVHistory·Skew·Term Structure·실현변동성·IV-RV) | ✅ | — | — | 전부 순수 함수 + `IVHistory`(deque 롤링, DB 의존 없음). 단위 테스트 9건, 전부 손계산 known-value. |

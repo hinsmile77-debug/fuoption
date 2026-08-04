@@ -178,24 +178,43 @@ class InvestorFlowSnapshot(BusMessage):
 
 
 class OptionQuoteSnapshot(BusMessage):
-    """옵션체인 1개 다리(leg)의 REST 시세호가 스냅샷 (raw.option_chain.{underlying},
-    2026-07-28 신설, `data/option_chain_poller.py`) — `KISRestClient.get_asking_price()`
-    (이미 실측된 TR, `tests/broker/test_kis_rest_client.py`) 응답을 감싼다.
+    """옵션체인 1개 다리(leg)의 REST 시세 스냅샷 (raw.option_chain.{underlying},
+    2026-07-28 신설, `data/option_chain_poller.py`).
 
-    **가격·Greeks 필드가 여기 없다 — 둘 다 의도적**: `InvestorFlowSnapshot` 모듈 docstring과
-    동일 원칙("필드 미해석 — 의도적") — 이 세션엔 `get_asking_price()` 응답의 실제 JSON 키
-    (매도/매수 호가가 몇 번째 필드인지)를 확정할 근거(docs/efriend 엑셀 또는 실계좌 실측
-    캡처)가 없다. bid/ask를 잘못된 키로 파싱해 잘못된 값을 태우는 것이, 아예 안 태우고
-    `raw`로 보존하는 것보다 위험하다(마흐디 L16 — 필드 단위를 확인 없이 스키마부터 정한
-    사고). Greeks/IV도 KIS 원시 필드를 신뢰하지 않는다 — `strategy/options/surface.py`가
-    (실측 완료된) bid/ask를 확정 파싱하게 되면 그 값으로 Black-Scholes IV·Greeks를 직접
-    계산한다(Ver 1.3 §9 "IV Surface 피팅은 이론이 확립된 영역, ML 불필요") — 그러면 단위가
-    처음부터 이 프로젝트가 정의한 값이라 L16류 사고 자체가 성립하지 않는다. `raw`는 응답
-    전체를 그대로 보존한다(L16 처방 "원시값 로깅" — 실측 캡처가 생기면
-    `normalizer.parse_option_quote()` 유형 함수를 추가해 정규화할 자리, FL Feature 갭과
-    동일 패턴)."""
+    ## 원천을 `get_asking_price()` → `get_quote()`로 바꿨다 (2026-08-04 실측)
+
+    처음엔 `get_asking_price()`(시세호가)를 감쌌는데, 실계좌로 옵션 종목을 실제 호출해 응답
+    전문을 뜬 결과 **두 TR이 주는 것이 완전히 달랐다**:
+
+        get_asking_price(O) → output1 시세 8필드 + output2 **5단계 호가 35필드**
+                              (futs_askp1~5 / futs_bidp1~5 / askp_rsqn1~5 / ...)
+        get_quote(O)        → output1 **29필드**: futs_prpr(현재가) · acml_vol(거래량)
+                              · hts_otst_stpl_qty(**미결제약정**) · delta_val · gama
+                              · theta · vega · rho · hts_ints_vltl(**내재변동성**)
+                              · hts_thpr(이론가) · acpr(행사가) · hts_rmnn_dynu(잔존일수)
+                              · futs_last_tr_date(최종거래일)
+                              output2 KOSPI 종합지수 · output3 **KOSPI200 현물지수**
+
+    Ver 1.5 §3.5~3.6이 배정한 OP Feature를 하나씩 대조하면 **전부 `get_quote` 쪽**이다 —
+    `op_iv_chg`(IV) · `op_pcr_vol`(거래량) · `op_pcr_oi`(OI) · `op_gex`(감마×OI) ·
+    `op_skew_rr25`(델타+IV). **호가(bid/ask)를 쓰는 OP Feature는 현재 스코프에 하나도 없다.**
+    호가가 필요해지는 건 Options AI의 집행 품질·유동성 선발(% 스프레드, Cao-Wei)이고 그건
+    한참 뒤다. 그래서 지금은 `get_quote` 하나만 부른다 — 다리당 2회 호출은 유량 예산을
+    두 배로 먹는데(`data/option_chain_poller.py` 예산 계산) 그 절반이 몇 달간 소비처가 없다.
+
+    ## 그래도 필드는 해석하지 않는다 — `raw` 전체 보존
+
+    `InvestorFlowSnapshot`과 동일 원칙이다. 키 이름이 자기설명적이어도 **단위·부호 규약을
+    실측으로 확정하기 전엔 파싱하지 않는다**(마흐디 L16 — 필드 단위를 확인 없이 스키마부터
+    정한 사고). 특히 KIS가 주는 Greeks/IV를 그대로 신뢰할지는 별도 판단이다: `strategy/
+    options/surface.py`가 Black-Scholes로 직접 계산하는 편이 단위가 처음부터 이 프로젝트
+    것이라 안전하다(Ver 1.3 §9). **다만 미결제약정(OI)은 계산으로 못 만든다 — API가 유일
+    출처다.** `raw`에 응답 전체를 담아 두면 그때 가서 어느 쪽을 택하든 데이터가 남아 있다.
+    `output3`의 KOSPI200 현물지수도 그래서 통째로 보존한다(RG 카테고리가 아직 현물지수
+    소스를 못 구했는데, 이 응답이 매 폴링마다 그걸 실어 나른다)."""
 
     underlying: str  # 예: "KOSPI200"
+    series: str  # "regular"(먼쓰리) | "weekly_mon" | "weekly_thu" — core/universe.py 어휘
     option_type: str  # "C" | "P"
     strike: float
     expiry: str  # symbol_master.OptionLeg.month_label 원문(예: "콜 202608") — 정형 파싱은 소비측 몫

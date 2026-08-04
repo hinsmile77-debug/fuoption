@@ -1,14 +1,19 @@
-"""옵션체인 시세호가(OP) REST 폴러 (신규, Ver 2.0 §9 W27~29) — InvestorFlowPoller
-(`tests/data/test_investor_flow_poller.py`)와 동일 패턴으로 검증."""
+"""옵션체인 REST 폴러 — 시리즈 1개 · ATM±N · get_quote (2026-08-04 재작성).
+
+재작성 전에는 `get_asking_price()`로 근월 체인 **전량**을 돌았다. 실측으로 두 가지가
+바뀌었다: (1) 전량은 1,356다리=22.6분이라 성립하지 않고, (2) OP Feature가 필요로 하는
+IV/Greeks/OI는 `get_asking_price`가 아니라 `get_quote`에 있다.
+"""
 
 from __future__ import annotations
 
 import pytest
 
+from messiah.broker.kis import tr_codes
 from messiah.broker.kis.symbol_master import OptionLeg
 from messiah.core.messages import OptionQuoteSnapshot
 from messiah.core.scheduler import FixedTickScheduler
-from messiah.data.option_chain_poller import OptionChainPoller
+from messiah.data.option_chain_poller import OptionChainPoller, select_atm_window
 
 
 class FakeBus:
@@ -23,182 +28,268 @@ class FakeBus:
 
 
 class FakeMaster:
-    """`chain`은 전 시리즈 공통 체인, `chains`는 시리즈별 체인(확정 유니버스 3종 검증용)."""
-
-    def __init__(
-        self,
-        chain: list[OptionLeg] | None = None,
-        chains: dict[str, list[OptionLeg]] | None = None,
-    ) -> None:
-        self._chain = chain or []
-        self._chains = chains
+    def __init__(self, chain: list[OptionLeg]) -> None:
+        self._chain = chain
         self.calls: list[tuple[str, str]] = []
 
     def nearest_expiry_chain(self, underlying: str, *, series: str = "regular") -> list[OptionLeg]:
         self.calls.append((underlying, series))
-        if self._chains is not None:
-            return self._chains.get(series, [])
         return self._chain
 
 
 class FakeRestClient:
-    def __init__(self, responses: dict[str, dict] | None = None, fail_for: set[str] | None = None):
-        self._responses = responses or {}
+    def __init__(self, fail_for: set[str] | None = None) -> None:
         self._fail_for = fail_for or set()
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, str]] = []
 
-    def get_asking_price(self, symbol: str) -> dict:
-        self.calls.append(symbol)
+    def get_quote(self, symbol: str, market_div_code: str = "O") -> dict:
+        self.calls.append((symbol, market_div_code))
         if symbol in self._fail_for:
-            raise RuntimeError(f"KIS 4xx: {symbol}")
-        return self._responses.get(symbol, {"rt_cd": "0", "symbol": symbol})
+            raise RuntimeError(f"KIS 500: {symbol}")
+        return {"rt_cd": "0", "output1": {"futs_prpr": "1.23"}}
 
 
-_CALL_LEG = OptionLeg(option_type="C", strike=350.0, symbol="201S06375", month_label="콜 202608")
-_PUT_LEG = OptionLeg(option_type="P", strike=350.0, symbol="201S16375", month_label="풋 202608")
+def _chain(strikes, series_prefix="B01608"):
+    """행사가마다 콜/풋 한 쌍. 실제 마스터처럼 순서를 섞어 둔다 — 선택기가 정렬에
+    의존하지 않는지 보려고."""
+    legs = []
+    for strike in strikes:
+        for opt in ("P", "C"):
+            legs.append(
+                OptionLeg(
+                    option_type=opt,
+                    strike=float(strike),
+                    symbol=f"{series_prefix}{opt}{int(strike * 10)}",
+                    month_label=f"{opt} 202608 {strike}",
+                )
+            )
+    return legs
 
 
-async def test_poll_once_queries_every_leg_and_publishes_raw():
-    master = FakeMaster([_CALL_LEG, _PUT_LEG])
-    rest_client = FakeRestClient({"201S06375": {"a": 1}, "201S16375": {"b": 2}})
+# ------------------------------------------------------------ ATM 창 선택기
+
+
+def test_selects_atm_and_n_strikes_each_side():
+    chain = _chain([100.0, 102.5, 105.0, 107.5, 110.0, 112.5, 115.0])
+
+    picked = select_atm_window(chain, spot=107.6, strike_window=1)
+
+    assert sorted({leg.strike for leg in picked}) == [105.0, 107.5, 110.0]
+    assert len(picked) == 6  # 3행사가 × 콜/풋
+
+
+def test_window_is_clipped_at_the_edges_of_the_listed_range():
+    """창이 상장 범위를 벗어나면 잘린다 — 격자를 생성하지 않고 상장 목록에서 고르기 때문."""
+    chain = _chain([100.0, 102.5, 105.0])
+
+    picked = select_atm_window(chain, spot=100.0, strike_window=5)
+
+    assert sorted({leg.strike for leg in picked}) == [100.0, 102.5, 105.0]
+
+
+def test_atm_is_the_nearest_listed_strike_not_a_generated_grid_point():
+    """상장 행사가가 균일 간격이 아니어도 동작해야 한다(마흐디식 round(spot/interval)는
+    간격 균일 + 그 행사가가 상장돼 있음을 가정한다)."""
+    chain = _chain([100.0, 130.0, 131.0])
+
+    picked = select_atm_window(chain, spot=129.0, strike_window=0)
+
+    assert {leg.strike for leg in picked} == {130.0}
+
+
+def test_result_is_ordered_by_strike_then_option_type():
+    chain = _chain([110.0, 100.0, 105.0])
+
+    picked = select_atm_window(chain, spot=105.0, strike_window=5)
+
+    assert [(leg.strike, leg.option_type) for leg in picked] == [
+        (100.0, "C"),
+        (100.0, "P"),
+        (105.0, "C"),
+        (105.0, "P"),
+        (110.0, "C"),
+        (110.0, "P"),
+    ]
+
+
+def test_empty_chain_selects_nothing():
+    assert select_atm_window([], spot=100.0, strike_window=3) == []
+
+
+# ------------------------------------------------------------ 폴링
+
+
+async def test_poll_once_queries_only_the_atm_window_with_get_quote():
+    chain = _chain([100.0, 102.5, 105.0, 107.5, 110.0])
+    master = FakeMaster(chain)
+    rest = FakeRestClient()
     bus = FakeBus()
-    poller = OptionChainPoller(rest_client, master, bus, series=["regular"])
+    poller = OptionChainPoller(
+        rest, master, bus, series="weekly_mon", reference_price=lambda: 105.0, strike_window=1
+    )
 
     await poller.poll_once()
 
-    assert master.calls == [("KOSPI200", "regular")]
-    assert rest_client.calls == ["201S06375", "201S16375"]
-    assert len(bus.published) == 2
-    topics = [t for t, _ in bus.published]
-    assert topics == ["raw.option_chain.KOSPI200", "raw.option_chain.KOSPI200"]
-    snapshots = [m for _, m in bus.published]
-    assert all(isinstance(s, OptionQuoteSnapshot) for s in snapshots)
-    assert snapshots[0].symbol == "201S06375"
-    assert snapshots[0].option_type == "C"
-    assert snapshots[0].strike == 350.0
-    assert snapshots[0].expiry == "콜 202608"
-    assert snapshots[0].raw == {"a": 1}
-    assert snapshots[1].symbol == "201S16375"
-    assert snapshots[1].raw == {"b": 2}
+    assert master.calls == [("KOSPI200", "weekly_mon")]
+    assert len(rest.calls) == 6  # 3행사가 × 2 — 전량(10)이 아니다
+    assert {code for _, code in rest.calls} == {tr_codes.FID_MRKT_DIV_INDEX_OPTION}
+    assert len(bus.published) == 6
+    topics = {t for t, _ in bus.published}
+    assert topics == {"raw.option_chain.KOSPI200"}
 
 
-async def test_poll_once_skips_quietly_but_logs_when_chain_empty(monkeypatch):
-    logged: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        "messiah.data.option_chain_poller.mlog.log",
-        lambda tag, msg, **f: logged.append((tag, msg)),
+async def test_published_snapshot_carries_series_and_raw_response():
+    master = FakeMaster(_chain([100.0]))
+    bus = FakeBus()
+    poller = OptionChainPoller(
+        FakeRestClient(),
+        master,
+        bus,
+        series="weekly_thu",
+        reference_price=lambda: 100.0,
+        strike_window=1,
     )
-    master = FakeMaster([])
-    rest_client = FakeRestClient()
-    poller = OptionChainPoller(rest_client, master, FakeBus(), series=["regular"])
 
     await poller.poll_once()
 
-    assert rest_client.calls == []
-    assert any(tag == "OptionChainPollEmpty" for tag, _ in logged)
+    snap = bus.published[0][1]
+    assert isinstance(snap, OptionQuoteSnapshot)
+    assert snap.series == "weekly_thu"
+    assert snap.strike == 100.0
+    assert snap.raw == {"rt_cd": "0", "output1": {"futs_prpr": "1.23"}}
 
 
-async def test_poll_once_continues_after_one_leg_fails(monkeypatch):
-    logged: list[tuple[str, str]] = []
+async def test_missing_reference_price_skips_the_cycle_without_falling_back(monkeypatch):
+    """**전량 폴백 금지** — 전량은 1,356다리(22.6분)라 폴백이 곧 폭주다."""
+    logged: list[str] = []
     monkeypatch.setattr(
-        "messiah.data.option_chain_poller.mlog.log",
-        lambda tag, msg, **f: logged.append((tag, msg)),
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
     )
-    master = FakeMaster([_CALL_LEG, _PUT_LEG])
-    rest_client = FakeRestClient({"201S16375": {"b": 2}}, fail_for={"201S06375"})
-    bus = FakeBus()
-    poller = OptionChainPoller(rest_client, master, bus, series=["regular"])
+    master = FakeMaster(_chain([100.0, 102.5, 105.0]))
+    rest = FakeRestClient()
+    poller = OptionChainPoller(
+        rest, master, FakeBus(), series="regular", reference_price=lambda: None
+    )
 
-    await poller.poll_once()  # 예외를 밖으로 전파하지 않아야 함
+    await poller.poll_once()
 
-    assert rest_client.calls == ["201S06375", "201S16375"]  # 콜 실패해도 풋은 계속 시도
-    assert len(bus.published) == 1  # 풋만 발행됨
-    assert bus.published[0][1].symbol == "201S16375"
-    assert any(tag == "OptionChainPollError" for tag, _ in logged)
+    assert rest.calls == []
+    assert master.calls == []  # 체인 조회조차 안 한다
+    assert "OptionChainSkipped" in logged
 
 
-async def test_poll_once_logs_but_does_not_raise_on_publish_failure(monkeypatch):
-    logged: list[tuple[str, str]] = []
+async def test_non_positive_reference_price_also_skips(monkeypatch):
+    monkeypatch.setattr("messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: None)
+    rest = FakeRestClient()
+    poller = OptionChainPoller(
+        rest, FakeMaster(_chain([100.0])), FakeBus(), series="regular", reference_price=lambda: 0.0
+    )
+
+    await poller.poll_once()
+
+    assert rest.calls == []
+
+
+async def test_empty_chain_logs_and_stops(monkeypatch):
+    logged: list[str] = []
     monkeypatch.setattr(
-        "messiah.data.option_chain_poller.mlog.log",
-        lambda tag, msg, **f: logged.append((tag, msg)),
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    rest = FakeRestClient()
+    poller = OptionChainPoller(
+        rest, FakeMaster([]), FakeBus(), series="weekly_mon", reference_price=lambda: 100.0
+    )
+
+    await poller.poll_once()
+
+    assert rest.calls == []
+    assert "OptionChainPollEmpty" in logged
+
+
+async def test_one_leg_failure_does_not_stop_the_rest(monkeypatch):
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    chain = _chain([100.0])
+    failing = chain[0].symbol  # 풋
+    master = FakeMaster(chain)
+    rest = FakeRestClient(fail_for={failing})
+    bus = FakeBus()
+    poller = OptionChainPoller(
+        rest, master, bus, series="regular", reference_price=lambda: 100.0, strike_window=1
+    )
+
+    await poller.poll_once()
+
+    assert len(rest.calls) == 2  # 둘 다 시도
+    assert len(bus.published) == 1  # 성공한 것만 발행
+    assert "OptionChainPollError" in logged
+
+
+async def test_publish_failure_is_logged_but_not_raised(monkeypatch):
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
     )
 
     class FailingBus(FakeBus):
         async def publish(self, topic: str, msg: object) -> None:
             raise ConnectionError("Redis 다운")
 
-    master = FakeMaster([_CALL_LEG])
-    rest_client = FakeRestClient({"201S06375": {"a": 1}})
-    poller = OptionChainPoller(rest_client, master, FailingBus(), series=["regular"])
-
-    await poller.poll_once()  # 발행 실패에도 예외 전파 없이 조용히 로깅만
-
-    assert any(tag == "OptionChainPollError" for tag, _ in logged)
-
-
-# ------------------------------------------- 확정 유니버스 3종 (2026-08-04)
-
-
-async def test_default_series_covers_the_confirmed_option_universe():
-    """기본값이 먼쓰리·월위클리·목위클리 셋을 다 돈다 — 종전엔 'regular' 하나뿐이라
-    위클리 둘은 설정에 있어도 조회 자체가 안 됐다."""
-    master = FakeMaster(chains={"regular": [_CALL_LEG], "weekly_mon": [], "weekly_thu": []})
-    poller = OptionChainPoller(FakeRestClient(), master, FakeBus())
-
-    await poller.poll_once()
-
-    assert [s for _, s in master.calls] == ["regular", "weekly_mon", "weekly_thu"]
-
-
-async def test_every_series_chain_is_polled(monkeypatch):
-    monkeypatch.setattr("messiah.data.option_chain_poller.mlog.log", lambda *a, **k: None)
-    weekly_leg = OptionLeg(option_type="C", strike=355.0, symbol="2AFS0355", month_label="C 2608W1")
-    master = FakeMaster(
-        chains={"regular": [_CALL_LEG], "weekly_mon": [weekly_leg], "weekly_thu": [_PUT_LEG]}
+    poller = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster(_chain([100.0])),
+        FailingBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=1,
     )
-    rest_client = FakeRestClient()
-    bus = FakeBus()
-    poller = OptionChainPoller(rest_client, master, bus)
 
-    await poller.poll_once()
+    await poller.poll_once()  # 예외 전파 없이 로깅만
 
-    assert rest_client.calls == ["201S06375", "2AFS0355", "201S16375"]
-    assert len(bus.published) == 3
+    assert "OptionChainPollError" in logged
 
 
-async def test_empty_weekly_chain_does_not_stop_the_other_series(monkeypatch):
-    """위클리는 만기 주간에 따라 실제로 빌 수 있다 — 그게 먼쓰리 수집까지 멈추면 안 된다."""
-    logged: list[str] = []
-    monkeypatch.setattr(
-        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+# ------------------------------------------------------------ 예산 · 구성
+
+
+def test_legs_per_cycle_reports_the_rate_budget_input():
+    """기동 로그가 유량 예산을 찍으려면 폴러가 자기 비용을 말할 수 있어야 한다."""
+    poller = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster([]),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=10,
     )
-    master = FakeMaster(
-        chains={"regular": [], "weekly_mon": [], "weekly_thu": [_CALL_LEG, _PUT_LEG]}
-    )
-    rest_client = FakeRestClient()
-    poller = OptionChainPoller(rest_client, master, FakeBus())
 
-    await poller.poll_once()
-
-    assert rest_client.calls == ["201S06375", "201S16375"]  # 마지막 시리즈까지 도달
-    assert logged.count("OptionChainPollEmpty") == 2
+    assert poller.legs_per_cycle == 42  # (2*10+1)*2 — 계획서의 예산 계산과 같은 값
 
 
-async def test_empty_series_list_is_rejected():
-    """조회할 시리즈가 없는 폴러는 조용히 아무것도 안 하는 대신 생성 시점에 거부한다."""
+def test_zero_strike_window_is_rejected():
+    """ATM 1행사가(2다리)는 GAMMA_FLIP_MIN_LEGS=6에도 못 미친다."""
     with pytest.raises(ValueError):
-        OptionChainPoller(FakeRestClient(), FakeMaster([]), FakeBus(), series=[])
+        OptionChainPoller(
+            FakeRestClient(),
+            FakeMaster([]),
+            FakeBus(),
+            series="regular",
+            reference_price=lambda: 100.0,
+            strike_window=0,
+        )
 
 
-async def test_scheduler_drives_poller_poll_once_repeatedly():
-    master = FakeMaster([_CALL_LEG])
-    rest_client = FakeRestClient({"201S06375": {"a": 1}})
+async def test_scheduler_drives_poll_once_repeatedly():
+    master = FakeMaster(_chain([100.0]))
+    rest = FakeRestClient()
     bus = FakeBus()
-    poller = OptionChainPoller(rest_client, master, bus, series=["regular"])
-    scheduler = FixedTickScheduler(tick_seconds=0.05)
+    poller = OptionChainPoller(
+        rest, master, bus, series="regular", reference_price=lambda: 100.0, strike_window=1
+    )
 
-    await scheduler.run_forever(poller.poll_once, max_iterations=3)
+    await FixedTickScheduler(tick_seconds=0.05).run_forever(poller.poll_once, max_iterations=3)
 
-    assert rest_client.calls == ["201S06375"] * 3
-    assert len(bus.published) == 3
+    assert len(rest.calls) == 6  # 2다리 × 3회
+    assert len(bus.published) == 6
