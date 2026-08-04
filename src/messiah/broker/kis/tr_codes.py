@@ -81,6 +81,38 @@ DAILY_CHART_MAX_ROWS_PER_CALL = 100
 PATH_INVESTOR_FLOW_BY_MARKET = "/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market"
 TR_INVESTOR_FLOW_BY_MARKET = "FHPTJ04030000"
 
+# 시장별 투자자매매동향(**일별**) — FL Feature의 유일한 백필 경로 (2026-08-04 신설·실측).
+#
+# 위 장중 엔드포인트(K2I/F001)는 **당일 누적만** 준다 — 과거 조회가 없다. 게다가
+# `InvestorFlowPoller`는 어떤 스크립트에도 결선돼 있지 않고 `raw.investor_flow.*` 구독자도
+# 없어서, 이 프로젝트는 파생 수급을 **한 건도 수집한 적이 없다**. 즉 파생 장중 수급으로는
+# 백테스트가 불가능하고, 앞으로 몇 달을 모아야 쓸 수 있다.
+#
+# 이 일별 엔드포인트는 다르다 — 날짜를 커서로 과거로 페이징된다. 대신 **현물 시장 전용**이다:
+#
+#   2026-08-04 실측 (같은 날 20260703, 업종코드만 바꿔 비교):
+#     FID_INPUT_ISCD_2="0001"(KOSPI) → frgn_ntby_qty=1057  prsn=-15031  orgn=13846
+#     FID_INPUT_ISCD_2="F001"(선물)  → **전 항목 0** (미지원)
+#     FID_INPUT_ISCD_2="OC01"(콜옵션) → **전 항목 0** (미지원)
+#
+#   페이징: 1회 300행, `FID_INPUT_DATE_1`이 뒤로 가는 커서다(종료일자는 무시되는 것으로 보임).
+#     커서 20260804 → 20250514~20260804,  20250408 → 20240112~20250408 … 다년 소급 확인.
+#
+# 그래서 FL Feature는 "KOSPI 현물 일별 수급"에서 나온다 — 파생 장중 수급이 아니다.
+# **일 단위**라 하루 안에서는 값이 고정된다(5분봉 78개가 전부 같은 값) — 일중 타이밍
+# 정보는 주지 못하고 그날의 방향성 기울기만 준다는 뜻이며, 이걸 모르고 쓰면 성능을
+# 오해하게 된다.
+PATH_INVESTOR_FLOW_DAILY_BY_MARKET = (
+    "/uapi/domestic-stock/v1/quotations/inquire-investor-daily-by-market"
+)
+TR_INVESTOR_FLOW_DAILY_BY_MARKET = "FHPTJ04040000"
+INVESTOR_FLOW_DAILY_MAX_ROWS_PER_CALL = 300  # 실측
+
+# 일별 엔드포인트 전용 파라미터 값 (실측).
+FID_MRKT_DIV_SECTOR = "U"  # FID_COND_MRKT_DIV_CODE — 업종
+FID_INPUT_ISCD_KOSPI = "0001"  # 업종코드: KOSPI 종합
+FID_INPUT_ISCD_1_KOSPI = "KSP"  # 시장구분: KOSPI
+
 # FID_INPUT_ISCD=K2I(선물/콜옵션/풋옵션 통합 시장구분)일 때 FID_INPUT_ISCD_2(업종구분) 값
 FID_INVESTOR_FLOW_FUTURES = "F001"
 FID_INVESTOR_FLOW_CALL_OPTION = "OC01"

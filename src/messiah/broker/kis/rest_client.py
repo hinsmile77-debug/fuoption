@@ -309,6 +309,38 @@ class KISRestClient:
             params={"FID_INPUT_ISCD": market_code, "FID_INPUT_ISCD_2": sector_code},
         )
 
+    def get_investor_flow_daily(
+        self,
+        *,
+        date_yyyymmdd: str,
+        sector_code: str = tr_codes.FID_INPUT_ISCD_KOSPI,
+        market_code: str = tr_codes.FID_INPUT_ISCD_1_KOSPI,
+    ) -> dict:
+        """
+        시장별 투자자매매동향(**일별**) — FL Feature 백필의 원천(`data/investor_flow_history.py`).
+
+        입력: `date_yyyymmdd`는 **뒤로 가는 커서**다 — 이 날짜부터 과거로 최대 300행이 온다
+             (종료일자 파라미터는 무시되는 것으로 관측됨, `tr_codes` 주석의 2026-08-04 실측).
+             `sector_code`는 업종코드(KOSPI 종합 "0001"), `market_code`는 시장구분("KSP").
+        계산: PATH_INVESTOR_FLOW_DAILY_BY_MARKET GET 호출.
+        해석: **현물 시장 전용이다.** 파생 업종코드(F001 선물 / OC01 콜옵션)를 넣으면 rt_cd=0에
+             전 항목 0이 온다 — 오류가 아니라 미지원이라 호출측이 빈 데이터로 오해하기 쉽다.
+             파생 수급은 장중 엔드포인트(`get_investor_flow`)뿐이고 그쪽은 과거 조회가 없다.
+        실패 조건: 4xx/5xx면 httpx.HTTPStatusError 그대로 전파.
+        """
+        return self._get(
+            f"{tr_codes.REAL_REST_DOMAIN}{tr_codes.PATH_INVESTOR_FLOW_DAILY_BY_MARKET}",
+            headers=self._headers(tr_codes.TR_INVESTOR_FLOW_DAILY_BY_MARKET),
+            params={
+                "FID_COND_MRKT_DIV_CODE": tr_codes.FID_MRKT_DIV_SECTOR,
+                "FID_INPUT_ISCD": tr_codes.FID_INPUT_ISCD_KOSPI,
+                "FID_INPUT_DATE_1": date_yyyymmdd,
+                "FID_INPUT_ISCD_1": market_code,
+                "FID_INPUT_DATE_2": date_yyyymmdd,
+                "FID_INPUT_ISCD_2": sector_code,
+            },
+        )
+
     def get_overseas_future_price(self, srs_cd: str) -> dict:
         """
         해외선물 현재가(inquire-price) — VIX 선물(VX)·USDCNH 선물(CNH) 등 Cross-asset stress

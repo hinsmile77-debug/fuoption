@@ -40,6 +40,9 @@ TAG_LEVELS: dict[str, int] = {
     # 백필 하루치 페이징이 호출 상한에 걸림 — 더 이른 봉이 남아 있을 수 있다(조용히 잘린
     # 하루가 학습 데이터에 섞이면 그 결손을 나중에 시장 상태로 오인한다).
     "BackfillPagingLimit": logging.WARNING,
+    # 일별 수급 페이징이 상한에 걸림 — 더 이른 날이 남아 있을 수 있다
+    # (`data/investor_flow_history.py`).
+    "InvestorFlowPagingLimit": logging.WARNING,
     "FeatureSetMismatch": logging.ERROR,  # L3: 침묵(DEBUG) 금지 — 무조건 ERROR
     "OrderSubmit": logging.INFO,
     "OrderPendingSet": logging.INFO,
