@@ -28,6 +28,12 @@ Trainer 파이프라인(Ver 1.6 §7.1) 2단계 "레이블 생성"에 해당한�
 미래봉이 시계열 끝에서 부족한 진입은 레이블을 만들지 않고 건너뛴다(결과를 끝까지 확정할 수
 없는 표본은 애초에 만들지 않는다 — 결측치로 채우지 않음).
 
+**이 레이블은 하류 판단 게이트와 결합돼 있다**(2026-08-04): flat 비율이 `meta_decision`의
+우위 게이트(|S| >= 0.20) 도달 가능성을 산술적으로 정한다 — 교정된 모델의 |S|는
+`1 − flat_share`를 넘을 수 없기 때문이다. 30m은 flat 76.3%라 천장이 0.237로 게이트 바로
+위다. 배리어 폭(`_WIDTH_ATR_MULT`)을 만질 때는 반드시 `models/label_geometry.py`를 함께
+돌릴 것 — 그 결합을 판정하는 도구다.
+
 ## 샘플 고유도 (Ver 1.2 §3.3)
 
 겹치는 레이블(동시에 열려 있는 여러 진입)은 정보가 중복된다. Lopez de Prado(2018) 평균
@@ -45,7 +51,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal, Mapping, Sequence
 
-from messiah.core.messages import HORIZON_SECONDS, BarClosed, Horizon, bar_confirm_time
+from messiah.core.messages import BarClosed, Horizon, bar_confirm_time
 from messiah.features.px_core import atr as compute_atr
 
 BarrierSide = Literal["upper", "lower", "time"]
@@ -59,14 +65,29 @@ class BarrierParams:
     width_atr_mult: float  # 상/하단 폭 = 이 값 × ATR
 
 
-# Ver 1.2 §3.2 표 원본(시간배리어는 분 단위) — 봉 수로 변환해 BARRIER_PARAMS에 반영한다.
-_TIME_BARRIER_MINUTES: dict[Horizon, int] = {
+# Ver 1.2 §3.2 표는 시간배리어를 **분**으로 준다: 1m→3, 3m→9, 5m→15, 10m→30, 15m→45,
+# 30m→90. 예전엔 그 표를 그대로 상수로 두고 여기서 봉 수로 나눴는데, 그러면 코드만 봐서는
+# 안 보이는 사실이 하나 숨는다 — **그 분 수가 전부 봉 크기의 정확히 3배라, 봉 수로 환산하면
+# 전 Horizon이 3봉으로 같아진다.** 그래서 봉 수를 정본으로 적는다(분 환산이 필요하면
+# `label_geometry.time_barrier_minutes()`가 되돌려 준다).
+#
+# 왜 이게 중요한가(2026-08-04 실측): 터치 확률은 대략 폭/(σ√H)의 함수인데 H가 3봉으로
+# 고정이면 Horizon 축은 **배리어 폭 축 하나로 붕괴**한다. 즉 flat 비율을 width_atr_mult
+# 하나가 단조로 결정한다 — 5m(×1.0) 35.6% / 15m(×1.5) 64.3% / 30m(×2.0) 76.3%.
+# "긴 Horizon일수록 flat이 많다"는 관측은 시장 성질이 아니라 이 표의 모양이었다.
+#
+# 값 자체는 바꾸지 않았다. 2026-08-04 A/B(피처·모델·분할 고정, 레이블만 교체, 드리프트
+# 차감·겹침 보정)에서 폭을 낮춰 flat을 33%로 되돌린 변형이 30m에서 오히려 **나빠졌고**
+# (초과손익 t 2.38 → 1.38), 15m에서는 어느 변형도 유의성에 못 미쳤다. 8개월 단일 상승
+# 국면 표본으로 새 표를 확정할 근거가 없어, 구조만 드러내고 숫자는 보존한다.
+# 진단은 `models/label_geometry.py`(`check_horizon_ladder()`)가 상시로 잡는다.
+_TIME_BARRIER_BARS: dict[Horizon, int] = {
     Horizon.M1: 3,
-    Horizon.M3: 9,
-    Horizon.M5: 15,
-    Horizon.M10: 30,
-    Horizon.M15: 45,
-    Horizon.M30: 90,
+    Horizon.M3: 3,
+    Horizon.M5: 3,
+    Horizon.M10: 3,
+    Horizon.M15: 3,
+    Horizon.M30: 3,
 }
 _WIDTH_ATR_MULT: dict[Horizon, float] = {
     Horizon.M1: 0.5,
@@ -79,7 +100,7 @@ _WIDTH_ATR_MULT: dict[Horizon, float] = {
 
 BARRIER_PARAMS: dict[Horizon, BarrierParams] = {
     h: BarrierParams(
-        time_barrier_bars=_TIME_BARRIER_MINUTES[h] // (HORIZON_SECONDS[h] // 60),
+        time_barrier_bars=_TIME_BARRIER_BARS[h],
         width_atr_mult=_WIDTH_ATR_MULT[h],
     )
     for h in Horizon
