@@ -2,11 +2,18 @@
 (Ver 2.0 §9 W27~29, Options AI 선행 인프라 갭 해소, `Docs/capability_matrix.md`
 "OP(옵션체인 그릭스) REST 폴링 수집기 미착수" 항목).
 
-`FixedTickScheduler.run_forever(poller.poll_once)`로 구동된다. 매 호출마다
+`FixedTickScheduler.run_forever(poller.poll_once)`로 구동된다. 매 호출마다 **확정 유니버스의
+옵션 시리즈 3종**(2026-08-04: 먼쓰리·월위클리·목위클리, `core/universe.py`)을 돌며
 `IndexDerivativesMaster.nearest_expiry_chain()`(이미 실측된 종목코드 마스터 조회,
-2026-07-22)으로 현재 콜/풋 근월물 체인을 얻고, 각 다리(leg)를 `KISRestClient.
+2026-07-22)으로 콜/풋 근월물 체인을 얻고, 각 다리(leg)를 `KISRestClient.
 get_asking_price()`(이미 TR_ID·헤더 실측된 REST, `tests/broker/test_kis_rest_client.py`)로
 순차 조회해 `raw.option_chain.{underlying}`에 `OptionQuoteSnapshot`을 발행한다.
+
+**여전히 어떤 스크립트에도 결선돼 있지 않다**(2026-08-04 확인 — 테스트에서만 인스턴스화).
+유니버스 확정으로 "무엇을 수집해야 하는가"는 정해졌지만 "언제 켜는가"는 별개이고,
+`run_l1_daily.py` 결선은 같은 계좌 WS 다중연결 문제(capability_matrix.md)와 함께 풀어야
+한다. `InvestorFlowPoller`가 폴러만 만들고 7개월을 날린 전례가 있으므로 이건 결선 과제로
+`NEXT_TODO.md`에 남긴다.
 
 ## 스코프 경계 — 필드 파싱은 별도 과제 (InvestorFlowPoller와 동일)
 
@@ -27,12 +34,17 @@ surface.py`로 이어지는 정규화는 그 근거가 생긴 뒤 별도 세션�
 from __future__ import annotations
 
 import asyncio
+from typing import Sequence
 
 from messiah.broker.kis.rest_client import KISRestClient
 from messiah.broker.kis.symbol_master import IndexDerivativesMaster, OptionLeg
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_RAW, BusLike
 from messiah.core.messages import OptionQuoteSnapshot
+from messiah.core.universe import DEFAULT_UNIVERSE, option_series
+
+# 확정 유니버스(2026-08-04)의 옵션 시리즈 — 먼쓰리·월위클리·목위클리.
+DEFAULT_SERIES: tuple[str, ...] = tuple(option_series(list(DEFAULT_UNIVERSE)))
 
 
 class OptionChainPoller:
@@ -46,27 +58,42 @@ class OptionChainPoller:
         bus: BusLike,
         *,
         underlying: str = "KOSPI200",
-        series: str = "regular",
+        series: Sequence[str] = DEFAULT_SERIES,
     ) -> None:
+        """`series`는 확정 유니버스의 옵션 시리즈 목록이다(2026-08-04: 먼쓰리·월위클리·
+        목위클리). `core/universe.option_series(cfg.universe)`의 반환값을 그대로 넘기면
+        된다 — 기본값도 그 확정 유니버스와 같다.
+
+        예전엔 `series: str = "regular"` 하나였는데, 그러면 폴러 하나가 먼쓰리만 보고
+        위클리 둘은 **설정에 적혀 있어도 조회 자체가 안 됐다.** 시리즈마다 폴러를 따로
+        띄우는 방법도 있지만, 그러면 유량(초당 건수)을 셋이 각자 모른 채 나눠 쓰게 된다 —
+        한 폴러가 순차로 도는 편이 REST 페이싱과 맞다.
+        """
+        if not series:
+            raise ValueError("series가 비어 있음 — 조회할 옵션 시리즈가 없다")
         self._rest_client = rest_client
         self._master = master
         self._bus = bus
         self._underlying = underlying
-        self._series = series
+        self._series = tuple(series)
 
     async def poll_once(self) -> None:
-        """현재 근월물 체인(콜+풋 전 행사가)을 조회해 다리별로 순차 발행한다. 다리 하나의
-        실패가 나머지를 막지 않는다(L22 — 항목 하나의 실패가 루프 전체를 죽이면 안 됨)."""
-        chain = self._master.nearest_expiry_chain(self._underlying, series=self._series)
-        if not chain:
-            mlog.log(
-                "OptionChainPollEmpty",
-                "근월물 체인이 비어 있음 — 마스터파일 갱신 필요할 수 있음",
-                underlying=self._underlying,
-            )
-            return
-        for leg in chain:
-            await self._poll_one(leg)
+        """시리즈마다 근월물 체인(콜+풋 전 행사가)을 조회해 다리별로 순차 발행한다.
+        다리 하나의 실패가 나머지를 막지 않고(L22), **시리즈 하나가 비어도 나머지는
+        계속 돈다** — 위클리는 만기 주간에 따라 체인이 실제로 빌 수 있어서, 그걸 전체
+        폴링 중단으로 번지게 하면 먼쓰리까지 같이 멈춘다."""
+        for series in self._series:
+            chain = self._master.nearest_expiry_chain(self._underlying, series=series)
+            if not chain:
+                mlog.log(
+                    "OptionChainPollEmpty",
+                    "근월물 체인이 비어 있음 — 마스터파일 갱신 필요할 수 있음",
+                    underlying=self._underlying,
+                    series=series,
+                )
+                continue
+            for leg in chain:
+                await self._poll_one(leg)
 
     async def _poll_one(self, leg: OptionLeg) -> None:
         try:

@@ -13,7 +13,9 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from messiah.core import universe as universe_vocab
 
 load_dotenv()
 
@@ -43,13 +45,21 @@ class InstanceConfig(BaseModel):
     broker: BrokerConfig = Field(default_factory=BrokerConfig)
     secondary_broker: BrokerConfig | None = None  # LS 이중화 (데이터 교차검증)
     capital: CapitalConfig = Field(default_factory=CapitalConfig)
-    universe: list[str] = Field(default_factory=lambda: ["K200_MINI_FUT", "K200_OPT"])
+    # 2026-08-04 확정: 미니선물 + 먼쓰리/월위클리/목위클리 옵션 (`core/universe.py`).
+    # 검증기를 붙인 이유는 종전 `K200_OPT`가 소비자 없이 설정에만 남아 있었기 때문이다 —
+    # 기동 시점에 깨지는 편이 "수집되는 줄 알았다"보다 낫다.
+    universe: list[str] = Field(default_factory=lambda: list(universe_vocab.DEFAULT_UNIVERSE))
     model_bundle: str = "none"  # 릴리스 번들 ID (예: messiah-2026.08)
     redis_url: str = "redis://localhost:6379/0"
     feature_set: str = "v2026.07"  # FeatureVector.feature_set 기본값 (Ver 1.4 §5.2, W6~8)
     # 미니선물(A05608) 2026-07-22 실측값(호가 5단계 간격 역산) — 다른 상품/근월물에 그대로
     # 일반화하지 말 것(capability_matrix.md "알려진 갭" 참고, 상품별 실측 전까지는 이 값만 사용).
     futures_tick_size: str = "0.02"
+
+    @field_validator("universe")
+    @classmethod
+    def _known_tokens_only(cls, v: list[str]) -> list[str]:
+        return universe_vocab.validate(v)
 
 
 def resolve_secret(ref: str) -> str:

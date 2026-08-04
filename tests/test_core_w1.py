@@ -66,7 +66,14 @@ def test_no_trade_carries_rationale() -> None:
 
 def test_instance_config_defaults() -> None:
     cfg = InstanceConfig()
-    assert cfg.universe == ["K200_MINI_FUT", "K200_OPT"]  # 미니선물 표준 (Holding Policy)
+    # 거래 대상 확정 2026-08-04 — 미니선물 + 먼쓰리/월위클리/목위클리 (core/universe.py).
+    # 종전 단일 옵션 토큰 "K200_OPT"는 소비자가 없어 죽어 있었다(tests/test_universe.py).
+    assert cfg.universe == [
+        "K200_MINI_FUT",
+        "K200_OPT_MONTHLY",
+        "K200_OPT_WEEKLY_MON",
+        "K200_OPT_WEEKLY_THU",
+    ]
     assert cfg.capital.daily_loss_limit_pct == 2.0  # R2
 
 

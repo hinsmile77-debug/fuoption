@@ -28,10 +28,13 @@ from messiah.core.messages import OrderRequest, Side
 
 _UNDERLYING_KOSPI200 = "KOSPI200"
 _DEFAULT_MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
-# probe_front_month()가 받는 product 문자열(configs/instance.yaml universe와 동일 어휘) ->
-# symbol_master 상품종류 코드. 옵션(K200_OPT)은 단일 근월물 "코드" 개념이 없어(행사가마다 다른
-# 종목코드) 여기 포함하지 않는다 — 옵션 종목 조회는 IndexDerivativesMaster.option_symbol()/
-# nearest_expiry_chain()을 별도로 쓴다.
+# probe_front_month()가 받는 product 문자열(configs/instance.yaml universe와 동일 어휘,
+# `core/universe.py`) -> symbol_master 상품종류 코드.
+#
+# 옵션 토큰(K200_OPT_MONTHLY/WEEKLY_MON/WEEKLY_THU)은 여기 없다 — 옵션은 단일 근월물 "코드"
+# 개념이 없어(행사가마다 다른 종목코드) 근월물 탐색이 성립하지 않기 때문이다. 옵션 종목
+# 조회는 IndexDerivativesMaster.option_symbol()/nearest_expiry_chain()을 별도로 쓴다.
+# K200_FUT(정규선물)은 유니버스에 없지만 여기 남긴다 — 데이터 교차검증용 조회 경로다.
 _PROBE_PRODUCT_TYPES = {
     "K200_MINI_FUT": symbol_master.PRODUCT_TYPE_MINI_FUTURES,
     "K200_FUT": symbol_master.PRODUCT_TYPE_FUTURES,

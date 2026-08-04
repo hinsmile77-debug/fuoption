@@ -25,7 +25,14 @@ capital:
   overnight_margin_cap_pct: 25.0
   max_overnight_positions: 2
 
-universe: ["K200_MINI_FUT", "K200_OPT"]   # 미니선물 표준
+# 거래 대상 확정 (2026-08-04) — 어휘·검증은 src/messiah/core/universe.py.
+# 종전 "K200_OPT" 단일 토큰은 소비자가 없어 죽어 있었다(설정에만 존재). 먼쓰리/월위클리/
+# 목위클리는 만기 주기가 달라 체인·롤·그릭스가 전부 다르므로 시리즈마다 토큰을 준다.
+universe:
+  - K200_MINI_FUT        # 미니선물 (틱 0.02 실측)
+  - K200_OPT_MONTHLY     # 먼쓰리 (정규 월물)
+  - K200_OPT_WEEKLY_MON  # 월위클리
+  - K200_OPT_WEEKLY_THU  # 목위클리
 model_bundle: "none"                       # live 모드는 지정 필수 (자가 점검)
 redis_url: "redis://localhost:6380/0"
 feature_set: "v2026.07"                    # FeatureVector.feature_set (Ver 1.4 §5.2, W6~8 PX 핵심 30개)
