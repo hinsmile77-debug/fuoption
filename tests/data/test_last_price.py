@@ -42,6 +42,49 @@ def test_stale_price_is_treated_as_missing():
     assert tracker.price_points(now=_NOW + timedelta(seconds=181)) is None
 
 
+# ------------------------------------------- 장전 시드 (2026-08-05 장중 점검 P2-1)
+#
+# 수집은 08:35에 뜨는데 첫 틱은 08:45 정각이다 — 그 10분간 옵션체인 5사이클이 기준가 없이
+# 통째로 비었고, 옵션 스냅샷은 소급 경로가 없어 영원히 빈다.
+
+
+def test_preopen_seed_supplies_a_reference_price_before_the_first_tick():
+    tracker = _tracker()
+    tracker.seed_preopen(49904)
+
+    assert tracker.has_seen_tick is False
+    assert tracker.price_points(now=_NOW) == pytest.approx(998.08)
+
+
+def test_the_first_real_tick_overrides_the_seed():
+    tracker = _tracker()
+    tracker.seed_preopen(49904)
+
+    tracker.update(50000, seen_at=_NOW)
+
+    assert tracker.has_seen_tick is True
+    assert tracker.price_points(now=_NOW) == pytest.approx(1000.0)
+
+
+def test_the_seed_never_resurrects_a_stale_price_mid_session():
+    """**이 테스트가 시드 설계의 핵심 제약이다.**
+
+    장중에 WS가 끊기면 신선도 규칙이 None을 돌려주고 폴러가 그 사이클을 건너뛴다. 시드가
+    그 자리를 메우면, 이 모듈이 애초에 막으려던 실패(가격이 움직인 뒤에도 옛 창을 계속
+    조회)를 시드가 우회해 버린다 — 그것도 **하필 사고 중에**.
+    """
+    tracker = _tracker(max_age_seconds=180.0)
+    tracker.seed_preopen(49904)
+    tracker.update(50000, seen_at=_NOW)
+
+    assert tracker.price_points(now=_NOW + timedelta(seconds=181)) is None
+
+
+def test_no_seed_means_no_reference_price():
+    """시드를 안 넣으면 2026-08-05 이전과 완전히 같은 동작."""
+    assert _tracker().price_points(now=_NOW) is None
+
+
 def test_max_age_is_shorter_than_the_option_poll_grid():
     """폴링 격자(300초)보다 짧아야 한 사이클을 통째로 건너뛰기 전에 먼저 드러난다."""
     from messiah.data.last_price import DEFAULT_MAX_AGE_SECONDS

@@ -777,6 +777,87 @@ def test_horizon_findings_become_breaches(tmp_path: Path):
     assert "Horizon 정합" in format_summary(report)
 
 
+# ------------------------------- 버킷 유실 로그 축 (2026-08-05 장중 점검 P0-2)
+#
+# 그날 `ComposerLateBarDropped` 26건이 나는 동안 리포트가 볼 수 있는 축은 아카이브 항등식
+# 하나뿐이었다. 그 축은 장 종료 후 `run_recompose.py`를 돌리면 0이 된다 — 그러면 **수집이
+# 실제로 손상됐다는 사실이 다음 날 사라진다**.
+
+
+def test_late_bar_drops_are_counted_from_the_collection_logs(tmp_path: Path):
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            *[
+                {
+                    "ts": f"2026-07-29T09:{minute:02d}:00+09:00",
+                    "level": "WARNING",
+                    "tag": "ComposerLateBarDropped",
+                    "horizon": "3m",
+                }
+                for minute in range(3)
+            ],
+            {
+                "ts": "2026-07-29T09:10:00+09:00",
+                "level": "WARNING",
+                "tag": "ComposerFlushedIncomplete",
+                "horizon": "5m",
+            },
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.late_bar_drops == 4  # 늦은 봉 3 + 미완 확정 1
+    assert any("1분봉 4개 유실" in breach for breach in report.breaches)
+    assert "버킷 유실(늦은 봉·미완 확정): 4건" in format_summary(report)
+
+
+def test_late_bar_drops_survive_a_recompose_that_cleans_the_archive(tmp_path: Path):
+    """**이 테스트가 이 축이 따로 있어야 하는 이유다.**
+
+    아카이브는 재합성으로 완전히 정합해졌는데(`horizon_findings`가 빈다) 그날 라이브 수집이
+    잘렸다는 사실은 로그에 남아 있다. 두 축이 서로를 대체하면 안 된다.
+    """
+    bar_dir = tmp_path / "bars"
+    _write_bars(bar_dir, list(range(10)))
+    _write_composite(bar_dir, Horizon.M5, [(0, 50), (5, 50)])  # 재합성 후 = 항등식 만족
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {
+                "ts": "2026-07-29T09:03:00+09:00",
+                "level": "WARNING",
+                "tag": "ComposerLateBarDropped",
+                "horizon": "5m",
+            },
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.horizon_findings == []  # 아카이브는 깨끗하다
+    assert report.late_bar_drops == 1  # 그래도 그날 손상은 있었다
+    assert any("유실" in breach for breach in report.breaches)
+
+
+def test_a_clean_day_reports_zero_bucket_losses_explicitly(tmp_path: Path):
+    """0건도 찍는다 — 없으면 "검사했는데 0건"과 "그 축이 없다"가 구분되지 않는다(L18)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.late_bar_drops == 0
+    assert "버킷 유실(늦은 봉·미완 확정): 0건 ✅" in format_summary(report)
+
+
 # ------------------------------------------------- 시계 스큐 (2026-08-05 신설)
 
 

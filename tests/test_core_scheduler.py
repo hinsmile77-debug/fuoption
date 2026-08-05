@@ -125,6 +125,55 @@ async def test_run_forever_logs_missed_ticks_after_slow_callback(monkeypatch) ->
     assert missed_logs[0]["missed_ticks"] >= 1
 
 
+async def test_run_forever_never_fires_the_same_tick_twice(monkeypatch) -> None:
+    """`asyncio.sleep`이 목표보다 몇 밀리초 일찍 깨도 같은 틱을 두 번 쏘면 안 된다.
+
+    2026-08-05 실측(`logs/l1_daily_20260805.log`):
+
+        08:43:19.998  OptionChainSkipped  series=weekly_thu
+        08:43:20.013  OptionChainSkipped  series=weekly_thu   ← 15ms 뒤 같은 틱
+
+    sleep은 이벤트 루프의 단조 시계로 자는데 목표는 벽시계로 계산하므로 실제로 일어난다.
+    옵션체인에서는 42다리 REST 사이클이 통째로 두 번 도는 것이라 유량 예산이 2배가 된다.
+
+    **관측 방법**: 콜백이 예외를 던지면 `SchedulerCallbackError`가 그 회차의 `target`을
+    싣는다(L22 경로) — 그 값들이 서로 달라야 한다. 중복 발화 자체는 원래 조용하기 때문에
+    이 경로 말고는 밖에서 볼 수단이 없다는 사실도 이 테스트가 기록한다.
+    """
+    base = datetime(2026, 8, 5, 12, 0, 30, tzinfo=UTC)
+
+    def _at(minute: int, second: int, micro: int = 0) -> datetime:
+        return datetime(2026, 8, 5, 12, minute, second, micro, tzinfo=UTC)
+
+    # 회차마다 now_utc()가 정확히 두 번 불린다(target 계산 → delay 계산).
+    now_values = iter(
+        [
+            base,  # 1회차 target → 12:01:00
+            _at(0, 59, 999_000),  # 1회차 delay (1ms 남음)
+            _at(0, 59, 999_000),  # 2회차 target ← **목표보다 1ms 일찍 깼다**
+            _at(1, 59, 999_000),  # 2회차 delay
+            _at(2, 0),  # 3회차 target
+            _at(2, 59, 999_000),  # 3회차 delay
+        ]
+    )
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr("messiah.core.scheduler.now_utc", lambda: next(now_values))
+    monkeypatch.setattr(
+        "messiah.core.scheduler.mlog.log", lambda tag, msg, **f: logged.append((tag, f))
+    )
+
+    async def callback() -> None:
+        raise RuntimeError("target을 로그로 끌어내기 위한 의도적 실패")
+
+    scheduler = FixedTickScheduler(tick_seconds=60)
+    await scheduler.run_forever(callback, max_iterations=3)
+
+    targets = [f["target"] for tag, f in logged if tag == "SchedulerCallbackError"]
+    assert len(targets) == 3
+    assert len(set(targets)) == 3, f"같은 틱이 두 번 발화했다: {targets}"
+    assert targets == sorted(targets)
+
+
 async def test_run_forever_zero_iterations_never_calls_callback() -> None:
     scheduler = FixedTickScheduler(tick_seconds=0.02)
     calls = []

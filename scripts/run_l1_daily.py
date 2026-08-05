@@ -347,8 +347,47 @@ class _RestCollection:
         return (1.0 / DEFAULT_MIN_REQUEST_INTERVAL_SECONDS) / rps
 
 
+def _seed_preopen_reference_price(
+    tracker: LastPriceTracker, archiver: ParquetArchiver, symbol: str, today: date
+) -> None:
+    """옵션체인 ATM 기준가를 **직전 완성 1분봉의 종가**로 미리 채운다 (2026-08-05).
+
+    수집은 08:35에 뜨는데 미니선물 첫 틱은 08:45 정각에 온다 — 그 10분 동안 기준가가 없어
+    옵션체인 폴러가 매 사이클을 건너뛴다(2026-08-05 실측 5사이클). 옵션 스냅샷은 과거 조회
+    경로가 없으므로 **그 10분은 영원히 빈다**.
+
+    `load_recent_bars`가 오늘 파일도 포함해 읽으므로(그쪽 docstring) 장중 재시작이면 오늘
+    오전의 마지막 봉이, 정상 기동이면 전 거래일 15:34봉이 시드가 된다. 둘 다 ATM±10(50pt)
+    창을 벗어나게 만들 만한 값이 아니다.
+
+    실패해도 수집은 계속한다 — 시드는 부가 기능이지 기동 전제조건이 아니다(웜스타트와 같은
+    원칙). 시드가 없으면 종전처럼 08:45까지 사이클을 건너뛸 뿐이다.
+    """
+    try:
+        recent = archiver.load_recent_bars(symbol, Horizon.M1, on_or_before=today, max_bars=1)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[run_l1_daily] 장전 기준가 시드 실패(옵션체인은 첫 틱까지 대기): {exc}", flush=True)
+        return
+    if not recent:
+        print("[run_l1_daily] 장전 기준가 시드 없음 — 아카이브에 1분봉이 아직 없다", flush=True)
+        return
+
+    bar = recent[-1]
+    tracker.seed_preopen(bar.c_ticks)
+    print(
+        f"장전 기준가 시드 — {bar.bar_open_kst:%Y-%m-%d %H:%M} 종가 "
+        f"{tracker.price_points():.2f}pt (첫 실틱이 오면 무시된다)",
+        flush=True,
+    )
+
+
 def _build_rest_collection(
-    creds: KISCredentials, bus: MessageBus, symbol: str, tick_size: Decimal
+    creds: KISCredentials,
+    bus: MessageBus,
+    symbol: str,
+    tick_size: Decimal,
+    archiver: ParquetArchiver | None = None,
+    today: date | None = None,
 ) -> _RestCollection:
     """REST 폴러 묶음 — 만들다 실패해도 **수집 본 임무를 막지 않는다**.
 
@@ -372,6 +411,8 @@ def _build_rest_collection(
 
         master = symbol_master.load_index_derivatives_master(_MASTER_CACHE_DIR)
         tracker = LastPriceTracker(symbol, tick_size)
+        if archiver is not None and today is not None:
+            _seed_preopen_reference_price(tracker, archiver, symbol, today)
         plan = _option_chain_plan(now_kst().date())
         chain_pollers = tuple(
             (
@@ -477,6 +518,11 @@ async def _run_regular_session(
         # 억제한다(`strategy/pipeline.py` "한산과 단절"). 문자열이 갈리면 조용히 결선이 끊긴다.
         HealthReporter(bus, COLLECTOR_COMPONENT, probe=collector.health).run_forever(),
         HealthReporter(bus, "l1.feature_engine", probe=engine.health).run_forever(),
+        # 합성기 자가 판정 (2026-08-05 장중 추가). 위 둘이 **신선도**("최근에 받았나")를
+        # 재는 반면 이건 **"받은 것을 온전히 합쳤나"**를 잰다 — 그날 상위 Horizon 봉의
+        # 3~17%가 사라지는 동안 위 두 축은 하루 종일 OK였다. 손상은 일어나는 중에 보여야
+        # 하고, 장후 리포트에서 처음 아는 것은 이미 늦다.
+        HealthReporter(bus, "l1.composer", probe=composer.health).run_forever(),
         # 헤드리스 상태판 (2026-08-03 고도화 A) — UI가 하던 구독을 이 프로세스로 옮겨
         # `logs/status_snapshot.json`에 주기적으로 남긴다. 화면이 죽어도(07-30 32분,
         # 07-31 3시간) 관측은 계속되고, 15:40에 UI가 종료된 뒤의 장후 리뷰도 가능해진다.
@@ -690,7 +736,7 @@ async def main(cfg: InstanceConfig) -> None:
     # REST 폴링 3종 — 파생 장중 수급(1분 격자) + 옵션체인 시리즈별(주기·위상 분리).
     # 근거는 `_option_chain_plan()` 위 주석과 `_RestCollection` docstring. 클라이언트를
     # 하나만 만들어 공유하는 것이 핵심이다(페이서가 갈리면 실효 호출률이 배수로 뛴다).
-    rest = _build_rest_collection(creds, bus, symbol, tick_size)
+    rest = _build_rest_collection(creds, bus, symbol, tick_size, archiver=archiver, today=today)
 
     # 첫 틱이 들어오기 전에 끝내야 한다 — 웜업 구간(09:00 이전)에 부르는 이유가 그것이다.
     await asyncio.to_thread(_load_warmup_artifacts, engine, archiver, symbol, today)

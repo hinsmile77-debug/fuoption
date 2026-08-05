@@ -23,6 +23,20 @@
 WS가 끊겨 틱이 멈춰도 마지막 값은 메모리에 남는다. 그 값으로 ATM을 잡으면 **가격이 크게
 움직인 뒤에도 옛 창을 계속 조회**하게 된다. `max_age_seconds`를 넘긴 값은 None을 돌려주고,
 폴러는 그 사이클을 건너뛴다(전량 폴백은 하지 않는다 — 그게 22.6분짜리 폭주다).
+
+## 장전 시드 — 첫 틱 이전에만 (2026-08-05)
+
+수집은 08:35에 뜨는데 미니선물 첫 틱은 **08:45 정각**에 온다(3거래일 연속 실측,
+`data/collector.py`의 `_note_tick_received`). 그 10분 동안 이 추적기는 값이 없고, 옵션체인
+폴러는 매 사이클 `OptionChainSkipped`를 남기며 건너뛴다 — 2026-08-05엔 5사이클이 그렇게
+비었다. 옵션 스냅샷은 과거 조회 경로가 없어 **그 10분은 영원히 빈다.**
+
+그래서 `seed_preopen()`으로 전일 종가를 넣을 수 있게 했다. 행사가 간격이 2.5pt이고 ATM±10
+창이 50pt를 덮으므로, 하룻밤 갭이 그 창을 벗어나는 일은 사실상 없다.
+
+**시드는 첫 실틱이 오기 전까지만 유효하다.** `update()`가 한 번이라도 불리면 그 뒤로는
+영원히 무시된다 — 안 그러면 장중에 WS가 끊겼을 때 위의 신선도 규칙(오래된 값은 없는 것으로
+친다)을 시드가 우회해 버린다. 그건 이 모듈이 막으려던 바로 그 실패다.
 """
 
 from __future__ import annotations
@@ -55,10 +69,25 @@ class LastPriceTracker:
         self._max_age = timedelta(seconds=max_age_seconds)
         self._price_ticks: int | None = None
         self._seen_at: datetime | None = None
+        self._seed_ticks: int | None = None
 
     @property
     def symbol(self) -> str:
         return self._symbol
+
+    @property
+    def has_seen_tick(self) -> bool:
+        """이 세션에서 실제 체결틱을 한 번이라도 받았는가 — 장전 시드의 유효 조건."""
+        return self._seen_at is not None
+
+    def seed_preopen(self, price_ticks: int) -> None:
+        """첫 실틱 이전에만 쓰일 기준가(전일 종가 등)를 넣는다.
+
+        **첫 틱이 오면 영구히 무시된다** — 장중 WS 단절 시 신선도 규칙을 우회하지 않게
+        하기 위해서다(모듈 docstring "장전 시드"). 이 메서드는 `_seen_at`을 건드리지 않으므로
+        시드만 있는 상태는 `has_seen_tick=False` 그대로다.
+        """
+        self._seed_ticks = int(price_ticks)
 
     def update(self, price_ticks: int, *, seen_at: datetime | None = None) -> None:
         self._price_ticks = int(price_ticks)
@@ -66,11 +95,15 @@ class LastPriceTracker:
 
     def price_points(self, *, now: datetime | None = None) -> float | None:
         """
-        반환: 최신 체결가(지수 포인트). 틱을 한 번도 못 받았거나 `max_age_seconds`를 넘겨
-             오래됐으면 None — 호출자(`OptionChainPoller`)가 그 사이클을 건너뛴다.
+        반환: 최신 체결가(지수 포인트). 틱을 한 번도 못 받았어도 장전 시드가 있으면 그 값을
+             돌려준다. 틱을 받은 뒤라면 시드는 무시하고, `max_age_seconds`를 넘겨 오래된
+             값은 None — 호출자(`OptionChainPoller`)가 그 사이클을 건너뛴다.
         """
         if self._price_ticks is None or self._seen_at is None:
-            return None
+            # 아직 실틱 전 — 시드가 있으면 그것으로 ATM을 잡는다(장전 08:35~08:45).
+            if self._seed_ticks is None:
+                return None
+            return float(self._tick_size * self._seed_ticks)
         if (now or now_kst()) - self._seen_at > self._max_age:
             return None
         return float(self._tick_size * self._price_ticks)

@@ -77,6 +77,16 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # 거래소 시각과 로컬 시계의 어긋남 (2026-08-05, `ops/clock_skew.py`). |값|이 이걸 넘으면
     # 완성봉 규율의 500ms 유예가 의미를 잃는다. 2026-08-04 실측은 9.72초였다.
     "clock_skew_seconds": 2.0,
+    # 상위 Horizon 버킷에서 빠진 1분봉 수 (2026-08-05 장중, `data/bar_composer.py`).
+    #
+    # **0인 이유**: 1건이 곧 상위 봉 하나가 한 분(分) 모자라게 확정됐다는 뜻이고, 그건
+    # `analyze_horizon_consistency`가 검사하는 정의상의 항등식 위반이다. "조금은 괜찮다"가
+    # 성립하는 축이 아니다.
+    #
+    # **`horizon_findings`와 왜 둘 다 두나**: 그쪽은 아카이브(결과)를, 이쪽은 로그(원인)를
+    # 본다. 재합성(`run_recompose.py`)을 돌리면 아카이브는 복구되지만 **그날 수집이 실제로
+    # 손상됐다는 사실은 남아야 한다** — 안 그러면 다음 날 "어제는 깨끗했는데"로 읽힌다.
+    "late_bar_drops": 0.0,
 }
 
 
@@ -125,6 +135,13 @@ class IntegrityReport:
     # 외부 기준이 필요 없는 **내부 정합성** 검사라 매일 자동으로 돈다
     # (`analyze_horizon_consistency` docstring — 2026-08-04 유실을 당일 잡았을 검사).
     horizon_findings: list[str]
+    # 상위 Horizon 버킷에서 빠진 1분봉 수 (2026-08-05 장중). `ComposerLateBarDropped`(늦게
+    # 와서 버림) + `ComposerFlushedIncomplete`(끝내 안 와서 못 넣음)의 합이다.
+    #
+    # `horizon_findings`가 **아카이브**를 보는 반면 이건 **수집 당시의 사건**을 센다. 장 종료
+    # 후 `run_recompose.py`로 상위 Horizon을 재합성하면 전자는 깨끗해지는데, 그날 라이브
+    # 수집이 손상됐다는 사실 자체는 지워지면 안 된다 — 그 사실이 곧 코드 결함의 신호다.
+    late_bar_drops: int
     # 그날 거래소 시각 − 로컬 시계(초). None은 못 쟀다는 뜻 — 0초와 구분한다(L18).
     clock_skew_seconds: float | None
     # 그날 프로세스가 실제로 돌던 커밋. 지금 HEAD와 다르면 그 수집분은 **그 시점 코드의
@@ -735,6 +752,17 @@ def build_report(
     horizon_findings = analyze_horizon_consistency(bar_dir, symbol, day)
     breaches.extend(horizon_findings)
 
+    # 같은 손상을 **로그 쪽**에서 센다(2026-08-05 장중). 위 항등식은 재합성으로 지워지지만
+    # 이건 안 지워진다 — 그날 라이브 수집이 실제로 잘렸다는 사실의 기록이다.
+    late_bar_drops = logs["tag_counts"].get("ComposerLateBarDropped", 0) + logs["tag_counts"].get(
+        "ComposerFlushedIncomplete", 0
+    )
+    if late_bar_drops > limits["late_bar_drops"]:
+        breaches.append(
+            f"상위 Horizon 버킷에서 1분봉 {late_bar_drops}개 유실 — 합성봉이 그만큼 짧게 "
+            "확정됐다(장 종료 후 `run_recompose.py`로 재합성 필요, 원인은 수집 경로에 있다)"
+        )
+
     # **측정 불능은 0건이 아니다** (2026-08-05). 종전에는 `available=False`가 조용히
     # 지나가서, 크래시 0건인 날에만 집계가 실패하는 결함이 드러나지 않았고 그 상태로는
     # "3거래일 연속 크래시 0건" 등록부가 영원히 판정을 못 채웠다.
@@ -829,6 +857,7 @@ def build_report(
         circuit_breaker_events=logs["circuit_breaker_events"],
         data_flow_findings=data_flow_findings,
         horizon_findings=horizon_findings,
+        late_bar_drops=late_bar_drops,
         clock_skew_seconds=clock_skew,
         session_git_shas=logs["session_git_shas"],
         degenerate_features=degenerate_features,
@@ -924,6 +953,12 @@ def format_summary(report: IntegrityReport) -> str:
         lines.append(f"  ⚠ 탐지·복구 불일치: {finding}")
     for finding in report.horizon_findings:
         lines.append(f"  ⚠ Horizon 정합: {finding}")
+    # 0건도 찍는다 — 이 줄이 없으면 "검사했는데 0건"과 "이 리포트에 그 축이 없다"가
+    # 구분되지 않는다(L18, 고도화 2가 `unmeasured`로 세운 것과 같은 원칙).
+    lines.append(
+        f"  버킷 유실(늦은 봉·미완 확정): {report.late_bar_drops}건"
+        + (" ✅" if report.late_bar_drops == 0 else " ⚠")
+    )
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
 

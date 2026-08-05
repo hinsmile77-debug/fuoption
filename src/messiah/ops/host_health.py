@@ -19,6 +19,24 @@
 | 디스크 여유 | Parquet 아카이브·틱 원본이 매일 쌓인다. 꽉 차면 그날 수집이 통째로 없어진다 |
 | 전원 관리 | 절전은 **무인 운영의 조용한 사망**이다. 깨어나도 그 사이 데이터는 없다 |
 | Docker | Redis(메시지 버스)가 여기 있다. 기동은 자동인데 상태가 리포트에 안 남았다 |
+| CPU 경합 | 2026-08-05 실측 — 이 PC에서 MESSIAH 말고도 파이썬 워크로드 4개가 동시에 돌고 있었다 |
+
+## CPU 경합을 왜 재나 (2026-08-05 추가)
+
+그날 상위 Horizon 합성봉이 매 버킷 마지막 1분봉을 잃었다(`data/bar_composer.py`). 주 원인은
+따로 있었지만, 그 판단의 근거가 된 1분봉 발행 지연 분포는 **최대 7.96초**까지 벌어져 있었다
+— 중앙값 0.655초의 12배다. 그런 꼬리는 틱 도착만으로는 설명되지 않고 이벤트 루프 지연을
+의심하게 하는데, **그걸 뒷받침하거나 기각할 측정이 이 프로젝트에 하나도 없었다.**
+
+같은 시각 이 PC의 실제 상태(`Win32_Process` 실측):
+
+    futures/main.py (py37_32)          CPU 260.6초   ← 08:57 기동
+    mahdi.main ×2 + mahdi 대시보드 ×2   CPU 250 / 58.9초
+    MESSIAH l1_daily / g2_paper / UI    CPU 39 / 4.6 / 27초
+
+**판정은 안 한다.** 임계를 정할 근거가 아직 없다 — 며칠 실측해서 "정상인 날의 경합"이
+얼마인지 본 뒤에 정한다(디스크·전원 임계를 미검증 초기값으로 둔 것과 같은 태도). 지금
+필요한 것은 다음에 같은 꼬리를 봤을 때 **참조할 숫자가 리포트에 남아 있는 것**이다.
 
 ## 판정 원칙 — 못 재는 것과 정상은 다르다
 
@@ -73,6 +91,31 @@ _POWER_QUERY = (
 
 # powercfg 출력에서 뽑을 16진 토큰.
 _HEX_TOKEN = re.compile(r"0x([0-9a-fA-F]+)")
+
+# CPU 경합 조회 — 전체 사용률 1표본 + 파이썬 프로세스의 (CPU초, 명령줄).
+#
+# 프로세스를 파이썬으로만 좁히는 이유: 이 PC에서 실제로 경합을 만든 것이 전부 파이썬
+# 워크로드였고(mahdi 2 + 대시보드 2 + futures 1), 전체 프로세스를 세면 브라우저·IDE까지 섞여
+# 매일 다른 숫자가 나와 아무도 안 보게 된다.
+#
+# **로케일 의존을 피한다** — `Get-Counter`는 카운터 이름이 번역되지만
+# `Win32_PerfFormattedData_PerfOS_Processor`의 `_Total`은 숫자 필드라 언어와 무관하다
+# (`check_power_plan`이 `powercfg` 문장을 안 읽고 16진 토큰만 쓰는 것과 같은 회피법).
+#
+# **MESSIAH 자신을 거르는 일은 파이썬에서 한다.** PowerShell 문자열 안에 경로를 끼워 넣으면
+# 따옴표·백슬래시 이스케이프가 층층이 쌓여 조용히 안 걸리기 쉽다 — 그 판정을 여기 두면
+# 테스트로 확인할 수도 없다.
+#
+# 출력 형식: 첫 줄 = CPU 사용률(정수), 이후 각 줄 = "<CPU초>{sep}<명령줄>".
+_CPU_FIELD_SEP = " ## "
+_CPU_QUERY = (
+    "$t = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor "
+    "| Where-Object { $_.Name -eq '_Total' }).PercentProcessorTime; "
+    "Write-Output ([int]$t); "
+    "Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | ForEach-Object { "
+    "Write-Output ([string][int](($_.KernelModeTime + $_.UserModeTime) / 10000000) "
+    f"+ '{_CPU_FIELD_SEP}' + [string]$_.CommandLine) }}"
+)
 
 
 @dataclass
@@ -185,11 +228,91 @@ def check_docker(*, runner=subprocess.run) -> HostCheck:
     return HostCheck("docker", available=True, ok=True, detail=f"v{(result.stdout or '').strip()}")
 
 
+def messiah_command_markers(project_root: Path | str = ".") -> set[str]:
+    """명령줄이 **MESSIAH 자신의 프로세스**인지 가르는 소문자 표지들.
+
+    프로젝트 루트 경로만으로는 안 된다 — 2026-08-05 실측으로 이 PC의 수집·페이퍼 프로세스는
+    루트가 명령줄에 아예 안 나온다:
+
+        "C:\\...\\anaconda3\\python.exe" -u scripts\\run_l1_daily.py       ← 상대 경로
+        .venv\\Scripts\\python.exe  -u scripts\\run_g2_paper_trading.py    ← uv 트램폴린
+        "C:\\...\\fuoption\\.venv\\Scripts\\streamlit.exe" run C:\\...     ← 이것만 절대 경로
+
+    (`.venv\\Scripts\\python.exe`가 부모, 실제 작업은 기저 인터프리터 자식 프로세스가 한다 —
+    uv가 만든 venv의 트램폴린이라 프로세스가 짝으로 보이는 것은 정상이다.)
+
+    그래서 `scripts/`의 실제 파일 이름을 표지로 쓴다 — **진입점이 늘면 자동으로 따라온다.**
+    목록을 상수로 박아 두면 새 스크립트가 조용히 "외부 프로세스"로 세어진다.
+
+    한계: 다른 프로젝트가 우연히 같은 이름의 스크립트를 돌리면 그것도 MESSIAH로 센다.
+    이 항목은 판정을 안 하고 참고 숫자만 남기므로(모듈 docstring) 그 오차를 감수한다.
+    """
+    root = Path(project_root).resolve()
+    markers = {str(root).lower(), "messiah"}
+    scripts_dir = root / "scripts"
+    if scripts_dir.is_dir():
+        markers.update(path.name.lower() for path in scripts_dir.glob("*.py"))
+    return markers
+
+
+def check_cpu_contention(*, runner=subprocess.run, project_root: Path | str = ".") -> HostCheck:
+    """CPU 사용률과 **MESSIAH 밖의** 파이썬 워크로드 — 기록만 하고 판정은 안 한다.
+
+    `ok`가 항상 True인 유일한 항목이다. 임계를 정할 근거가 아직 없기 때문이다(모듈
+    docstring "CPU 경합을 왜 재나"). `available=False`(못 쟀다)와는 여전히 구분되므로,
+    측정이 조용히 사라지면 `unmeasured`에 뜬다 — 그게 이 항목에서 진짜 경계할 일이다.
+
+    `project_root` 아래 경로를 명령줄에 가진 프로세스는 MESSIAH 자신이라 세지 않는다.
+    """
+    if sys.platform != "win32":
+        return HostCheck("cpu", available=False, ok=True, detail="Windows 전용 — 건너뜀")
+    try:
+        result = runner(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _CPU_QUERY],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 — 못 재는 것과 정상은 다르다
+        return HostCheck("cpu", available=False, ok=True, detail=f"측정 실패({type(exc).__name__})")
+
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if result.returncode != 0 or not lines or not lines[0].lstrip("-").isdigit():
+        return HostCheck("cpu", available=False, ok=True, detail="측정 실패(조회 출력 형식 불일치)")
+
+    percent = int(lines[0])
+    markers = messiah_command_markers(project_root)
+    outside_cpu_seconds = 0
+    outside = 0
+    for line in lines[1:]:
+        cpu_text, _, command = line.partition(_CPU_FIELD_SEP)
+        lowered = command.lower()
+        if any(marker in lowered for marker in markers):
+            continue  # MESSIAH 자신 — 경합이 아니라 본 임무다
+        if not cpu_text.strip().lstrip("-").isdigit():
+            continue  # 명령줄에 구분자와 같은 문자열이 섞인 줄 — 세지 않는다
+        outside += 1
+        outside_cpu_seconds += int(cpu_text)
+
+    return HostCheck(
+        "cpu",
+        available=True,
+        ok=True,  # 판정 안 함 — 위 docstring
+        detail=(
+            f"사용률 {percent}% · 외부 파이썬 {outside}개"
+            + (f"(누적 CPU {outside_cpu_seconds}초)" if outside else "")
+        ),
+    )
+
+
 def collect(
     *,
     path: Path | str = ".",
     min_free_gb: float = MIN_FREE_GB,
     runner=subprocess.run,
+    project_root: Path | str = ".",
 ) -> HostHealth:
     """전 항목 점검. 어느 하나가 실패해도 나머지는 계속한다(L22 — 항목별 격리)."""
     return HostHealth(
@@ -197,5 +320,6 @@ def collect(
             check_disk_free(path, min_free_gb=min_free_gb),
             check_power_plan(runner=runner),
             check_docker(runner=runner),
+            check_cpu_contention(runner=runner, project_root=project_root),
         ]
     )

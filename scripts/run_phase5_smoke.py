@@ -214,7 +214,9 @@ async def main(args: argparse.Namespace) -> None:
     for i, bar in enumerate(m1_bars):
         await bus.publish(f"bar.{Horizon.M1.value}.{bar.symbol}", bar)
         if (i + 1) % int(_HORIZON.value.rstrip("m")) == 0:
-            await composer.flush_due_horizon(_HORIZON)
+            # `force=True` — 동기 재생이라 대기 중 새 봉 도착이 성립하지 않는다
+            # (`bar_composer.flush_due_horizon`의 "기다릴 이유가 없는 경로").
+            await composer.flush_due_horizon(_HORIZON, force=True)
     await composer.flush_all_final()
 
     shadow_fill_counts = {

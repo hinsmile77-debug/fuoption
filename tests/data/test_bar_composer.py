@@ -2,7 +2,7 @@ import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import BarClosed, HealthLevel, Horizon
 from messiah.core.timeutil import KST
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.bar_composer import MultiHorizonBarComposer, floor_to_horizon
@@ -30,10 +30,27 @@ class FakeBus:
         self.published.append((topic, msg))
 
 
-def _composer(tmp_path: Path, bus: FakeBus, horizons=None) -> MultiHorizonBarComposer:
+async def _yield_only(_seconds: float) -> None:
+    """주입용 sleep — 실제로 자지 않고 이벤트 루프에만 양보한다.
+
+    겹④(`_await_last_constituent`)가 마지막 1분봉을 최대 5초 기다리므로, 미완 버킷을
+    확정하는 테스트가 실제로 5초씩 자면 스위트가 못 쓰게 느려진다. `wait_for_bar()`는
+    시간이 아니라 **횟수**로 세도록 만들어져 있어(그쪽 docstring) 대기 로직 자체는 그대로
+    검증된다. 양보는 유지해야 한다 — 대기 중에 봉이 도착하는 시나리오가 성립해야 한다.
+    """
+    await asyncio.sleep(0)
+
+
+def _composer(
+    tmp_path: Path, bus: FakeBus, horizons=None, *, sleep=_yield_only
+) -> MultiHorizonBarComposer:
     targets = {Horizon.M5: 300} if horizons is None else horizons
     return MultiHorizonBarComposer(
-        symbol="A05608", archiver=ParquetArchiver(tmp_path), bus=bus, target_horizons=targets
+        symbol="A05608",
+        archiver=ParquetArchiver(tmp_path),
+        bus=bus,
+        target_horizons=targets,
+        sleep=sleep,
     )
 
 
@@ -476,8 +493,10 @@ async def test_wait_for_bar_gives_the_final_minute_time_to_land(tmp_path: Path):
     실행된다는 보장이 없어, 곧바로 `flush_all_final()`을 부르면 그날 마지막 1분봉이 상위
     Horizon 전부에서 빠졌다(15:34봉 137계약). 여기서는 그 봉이 **대기 중에** 도착한다.
     """
+    # 이 테스트만 **진짜** sleep을 쓴다 — 검증 대상이 "실제 시간 경과 중에 봉이 도착한다"는
+    # 경합 그 자체라, 양보만 하는 가짜 sleep으로는 재현되지 않는다.
     bus = FakeBus()
-    composer = _composer(tmp_path, bus)
+    composer = _composer(tmp_path, bus, sleep=asyncio.sleep)
     for minute in range(30, 34):
         await composer.handle_one_minute_bar(_m1(minute))
 
@@ -493,3 +512,133 @@ async def test_wait_for_bar_gives_the_final_minute_time_to_land(tmp_path: Path):
     assert arrived is True
     assert len(bus.published) == 1
     assert bus.published[0][1].volume == 50  # 5봉 전부 — 137계약이 빠지던 자리
+
+
+# ------------------------------- 겹④ 마지막 구성봉 대기 (2026-08-05 장중 실측 사고)
+#
+# 시계를 맞추자(P0-1) 그날 바로 26건의 `ComposerLateBarDropped`가 났다. 3분봉 18개 중 12개가
+# 2분짜리, 30분봉 2개 다 29분짜리. 원인은 스큐가 아니라 **1분봉이 시각이 아니라 다음 분의 첫
+# 틱으로 확정된다**는 것이었다(발행 지연 중앙값 0.655초 > 스케줄러 위상 0.5초).
+
+
+async def test_scheduler_waits_for_the_last_minute_bar_to_arrive(tmp_path: Path):
+    """2026-08-05 사고의 직접 회귀 — 스케줄러가 먼저 쐈어도 버킷이 잘리면 안 된다.
+
+    스큐는 0이다(겹②가 한 번도 안 잔다). 그런데도 마지막 1분봉이 아직 안 왔다 — 시계가
+    아니라 틱 도착이 늦은 것이라, 시계를 보는 어떤 방어로도 이 상황은 못 막는다.
+    """
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus, sleep=asyncio.sleep)  # M5
+    for minute in range(30, 34):  # 09:34봉이 아직 안 왔다
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    async def _deliver_last_minute() -> None:
+        await asyncio.sleep(0.02)
+        await composer.handle_one_minute_bar(_m1(34))
+
+    delivery = asyncio.create_task(_deliver_last_minute())
+    await composer.flush_due_horizon(Horizon.M5)
+    await delivery
+
+    published = [b for _, b in bus.published]
+    assert len(published) == 1
+    assert published[0].volume == 50, "마지막 1분봉을 안 기다리고 4봉으로 확정했다"
+    assert published[0].quality_ok is True
+    assert composer.late_bar_drops == 0
+    assert composer.incomplete_flushes == 0
+
+
+async def test_no_wait_when_every_constituent_has_already_arrived(tmp_path: Path):
+    """정상 경로(구성봉이 다 와 있음)에서는 겹④가 **한 번도 안 잔다** — 이 수정이 매 버킷에
+    지연을 얹지 않는다는 확인."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus, sleep=_record)
+    for minute in range(30, 35):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_due_horizon(Horizon.M5)
+
+    assert slept == []
+    assert [b.volume for _, b in bus.published] == [50]
+
+
+async def test_incomplete_flush_is_logged_when_the_last_minute_never_trades(
+    tmp_path: Path, monkeypatch
+):
+    """거래가 없는 분은 봉 자체가 안 나온다 — 무한 대기는 유실보다 나쁘므로 확정하되,
+    짧은 봉이 나갔다는 사실은 조용하면 안 된다(L18)."""
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.data.bar_composer.mlog.log",
+        lambda tag, msg, **f: logged.append((tag, f)),
+    )
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)  # 양보만 하는 sleep — 상한을 즉시 소진한다
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    await composer.flush_due_horizon(Horizon.M5)
+
+    assert [b.volume for _, b in bus.published] == [40]  # 4봉으로 확정됐다
+    assert bus.published[0][1].quality_ok is False
+    incomplete = [f for tag, f in logged if tag == "ComposerFlushedIncomplete"]
+    assert len(incomplete) == 1
+    assert incomplete[0]["awaited_bar_open_kst"] == _at(34).isoformat()
+    assert composer.incomplete_flushes == 1
+
+
+async def test_waiting_scheduler_never_flushes_a_bucket_that_rolled_over(tmp_path: Path):
+    """겹②·④의 대기 중에 다음 버킷이 열리면, 깨어난 스케줄러는 **아무것도 안 해야** 한다.
+
+    안 그러면 갓 열린 버킷을 1봉짜리로 확정하고 `_last_flushed_start`가 그 시각으로 올라가,
+    뒤이어 올 그 버킷의 나머지 봉이 전부 늦은 봉으로 버려진다 — 원래 결함보다 나쁘다.
+    """
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus, sleep=asyncio.sleep)  # M5
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    async def _deliver_next_bucket() -> None:
+        await asyncio.sleep(0.02)
+        await composer.handle_one_minute_bar(_m1(34))  # [09:30,09:35) 완성
+        await composer.handle_one_minute_bar(_m1(35))  # 겹① — 여기서 09:30이 확정된다
+
+    delivery = asyncio.create_task(_deliver_next_bucket())
+    await composer.flush_due_horizon(Horizon.M5)
+    await delivery
+
+    # 겹①이 낸 09:30 하나뿐이어야 한다 — 09:35가 1봉짜리로 따라 나가면 안 된다.
+    assert [b.bar_open_kst for _, b in bus.published] == [_at(30)]
+    assert bus.published[0][1].volume == 50
+
+    # 그리고 09:35 버킷은 아직 살아 있어야 한다 — 나머지 봉을 정상으로 받는다.
+    for minute in range(36, 40):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_all_final()
+
+    assert [b.bar_open_kst for _, b in bus.published] == [_at(30), _at(35)]
+    assert sum(b.volume for _, b in bus.published) == 100  # 1분봉 10개 — 총합 보존
+    assert composer.late_bar_drops == 0
+
+
+async def test_health_reports_bucket_losses(tmp_path: Path):
+    """26건이 나는 동안 heartbeat가 계속 OK였던 자리 — 손상은 일어나는 중에 보여야 한다."""
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)
+
+    assert composer.health().level is HealthLevel.OK
+
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_due_horizon(Horizon.M5)  # 09:34가 안 와 짧게 확정
+    await composer.handle_one_minute_bar(_m1(34))  # 뒤늦게 도착 → 버려진다
+
+    status = composer.health()
+    assert status.level is HealthLevel.WARN
+    assert "버킷 손실 2건" in status.detail
+    assert composer.late_bar_drops == 1
+    assert composer.incomplete_flushes == 1

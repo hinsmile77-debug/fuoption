@@ -78,7 +78,12 @@ TAG_LEVELS: dict[str, int] = {
     "TickArchiveError": logging.WARNING,
     "TickArchiveSummary": logging.INFO,  # 장후 적재 요약 — 결선만 하고 0행인 상태를 매일 드러낸다
     "OptionChainPollEmpty": logging.WARNING,  # 근월물 체인이 비어있음 — 마스터파일 갱신 필요할 수도
-    "OptionChainPollError": logging.WARNING,  # 다리 1개 조회/발행 실패 — 나머지는 계속 시도(L22)
+    # 다리 1개가 **끝내** 실패 — 이 태그의 건수가 곧 그날 빈 다리 수다(2026-08-05 재시도 도입
+    # 이후). 나머지 다리는 계속 시도한다(L22).
+    "OptionChainPollError": logging.WARNING,
+    # 다리 1개가 재시도로 **살아났다** — 결손이 아니므로 WARNING이 아니다. 태그를 가르지 않으면
+    # `OptionChainPollError` 건수가 "잃은 다리 수"를 더 이상 뜻하지 않게 된다.
+    "OptionChainPollRetried": logging.INFO,
     # 기준가 없어 사이클 스킵 — 전량 폴링 폴백을 **일부러 안 하는** 정상 동작이지만(전량은
     # 1,356다리 = 22.6분), 조용하면 "옵션이 안 모인다"의 원인을 못 찾으므로 WARNING으로 남긴다.
     "OptionChainSkipped": logging.WARNING,
@@ -130,6 +135,12 @@ TAG_LEVELS: dict[str, int] = {
     # 이미 확정한 상위 Horizon 버킷으로 1분봉이 늦게 도착 (`data/bar_composer.py`).
     # 버리는 쪽이 맞지만(중복 합성봉 방지) 유실이므로 조용히는 안 된다(L18).
     "ComposerLateBarDropped": logging.WARNING,
+    # 스케줄러가 그 버킷의 마지막 1분봉을 상한만큼 기다렸는데도 안 와서 짧게 확정
+    # (`data/bar_composer.py` 겹④). `ComposerLateBarDropped`와 짝이다 — 그쪽이 "늦게 와서
+    # 버렸다"면 이쪽은 "끝내 안 와서 못 넣었다"고, 결과(그 분이 상위 Horizon에서 빠진다)는
+    # 같다. 둘 다 WARNING인 이유: 확정 자체는 의도된 동작이고(무한 대기가 더 나쁘다),
+    # 판정은 무결성 리포트의 `late_bar_drops` 임계가 한다.
+    "ComposerFlushedIncomplete": logging.WARNING,
     # 종료 시퀀스에서 마지막 1분봉이 상위 Horizon 구독자에게 도달하지 못함
     # (`scripts/run_l1_daily.py`). 그 봉은 1분봉 아카이브에만 남고 합성봉에서 빠진다 —
     # 2026-08-04에 조용히 일어났던 바로 그 사고라 ERROR다.

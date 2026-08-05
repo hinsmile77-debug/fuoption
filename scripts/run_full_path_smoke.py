@@ -317,7 +317,9 @@ async def _feed_bars(
                 continue
             minutes = int(horizon.value.rstrip("m"))
             if (i + 1) % minutes == 0:
-                await composer.flush_due_horizon(horizon)
+                # `force=True` — 동기 재생이라 대기 중 새 봉 도착이 성립하지 않는다
+                # (`bar_composer.flush_due_horizon`의 "기다릴 이유가 없는 경로").
+                await composer.flush_due_horizon(horizon, force=True)
 
 
 def _collector(sink: list):

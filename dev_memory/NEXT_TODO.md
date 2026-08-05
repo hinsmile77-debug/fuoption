@@ -2587,3 +2587,63 @@ python scripts/daily_integrity_report.py --date <오늘>  # 위 둘을 읽어 �
 1. `unmeasured`가 비었는가 — 안 비었으면 그 항목이 곧 오늘 안 돌아간 것
 2. `degenerate_features`에 뭐가 잡혔는가 — 웜스타트가 200봉을 채웠으면 비어야 한다
 3. 그다음 기존 D-1~D-5(시계·Horizon 항등식·크래시 집계·무장·등록부)
+
+---
+
+## 2026-08-05 장중점검 P0/P1/P2 전건 구현 완료 ([MW0601], 2026-08-05)
+
+상세 근거·유도는 `dev_memory/DECISION_LOG.md` 2026-08-05 장중점검 항목. 여기엔 **할 일**만.
+
+- [x] **P0-1 겹④** — 마지막 구성 1분봉 도착 대기(상한 5초) + 대기 전 확정 대상 고정
+      (겹②에 있던 잠복 결함 동반 수정) + 오프라인 재생 3곳 `force=True`
+- [x] **P0-2 관측** — `l1.composer` heartbeat · 리포트 `late_bar_drops` · 등록부
+      `composer-bucket-completeness`
+- [x] **P1-1** — `FixedTickScheduler` 중복 발화 차단
+- [x] **P1-2** — 옵션체인 다리 1회 재시도 + `OptionChainPollRetried` 태그 분리
+- [x] **P2-1** — `LastPriceTracker.seed_preopen()`(첫 실틱 전까지만)
+- [x] **P2-2** — `host_health.check_cpu_contention()`(기록만, 판정 없음)
+
+### ⚠ 오늘(08-05) 장 종료 후 반드시 — 순서가 중요하다
+
+**아직 적용 안 됐다.** R11(장중 배포 금지)에 따라 파일만 고쳤고, 돌고 있는 프로세스는
+08:35에 뜬 옛 코드다 — **오늘 남은 수집분은 계속 손상된다**(3m 기준 ~17%).
+
+```
+1. python scripts/daily_integrity_report.py --date 2026-08-05
+   → late_bar_drops가 26+ 로 찍히는가 · horizon_findings가 비지 않는가
+   (관측 장치가 이 사고를 실제로 잡는지 보는 것이 목적 — 재합성 전에 봐야 한다)
+
+2. python scripts/run_recompose.py --symbol A05608
+   → 1분봉은 무손상이므로 상위 Horizon 전량 복구된다
+
+3. python scripts/verify_archive_volume.py --date 2026-08-05
+   python scripts/run_vol_scorecard.py     --date 2026-08-05
+   python scripts/daily_integrity_report.py --date 2026-08-05
+   → 재산출. horizon_findings는 비고 late_bar_drops는 남아 있어야 정상이다
+     (전자는 아카이브, 후자는 수집 당시의 사건)
+
+4. 프로세스 재기동 → 다음 거래일(08-06)이 이 수정들의 첫 실전 검증
+```
+
+> **EV 재학습(`run_model_sweep.py --feature-set v2026.08-ev`)은 2번보다 뒤에.**
+> 지금 돌리면 손상된 상위 Horizon 봉으로 학습한다.
+
+### 2026-08-06 장후에 볼 것 — 이 수정들의 첫 실전 검증
+
+- [ ] **E-1** `late_bar_drops == 0`인가. 아니면 겹④ 상한 5초가 모자란 것이다 —
+      `ComposerFlushedIncomplete`의 `awaited_bar_open_kst`로 어느 분이 안 왔는지 본다.
+- [ ] **E-2** `horizon_findings`가 빈 배열인가(E-1과 짝. 둘이 어긋나면 재합성 흔적이다).
+- [ ] **E-3** 장전 옵션체인 — `OptionChainSkipped`가 **0건**인가. 08:35 사이클부터
+      스냅샷이 있는가(`data/option_chain/regular/2026-08-06.parquet`의 첫 `ts_kst`).
+      기동 로그에 "장전 기준가 시드" 줄이 찍혔는지 먼저 확인.
+- [ ] **E-4** `OptionChainPollRetried`가 나왔는가. 나왔는데 `OptionChainPollError`가 0이면
+      재시도가 실제로 다리를 살린 것이다 — 사이클당 42다리가 채워지는지 행수로 대조.
+- [ ] **E-5** 호스트 `cpu` 항목이 리포트에 찍히는가. 며칠 모아 "정상인 날의 경합"을
+      본 뒤에 임계를 정한다(지금은 판정 안 함).
+- [ ] **E-6** `SchedulerTickMissed`·중복 사이클이 없는가(P1-1).
+
+### 앞선 체크리스트와의 관계
+
+기존 A/B/C(08-11 기한)와 D-1~D-5는 그대로 유효하다. 다만 **D-2(Horizon 항등식)는 오늘
+이미 답이 나왔다** — 비지 않았고, 원인은 예상했던 셋(①경합 재발 ②스큐 ③재합성 누락) 중
+어느 것도 아닌 **네 번째**였다. 예상 목록이 틀렸다는 사실 자체가 기록해 둘 값이다.

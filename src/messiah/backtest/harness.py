@@ -175,7 +175,10 @@ async def _feed_m1_bars(
                 continue
             minutes = int(horizon.value.rstrip("m"))
             if (i + 1) % minutes == 0:
-                await composer.flush_due_horizon(horizon)
+                # `force=True` — 이 루프는 봉을 **동기로** 밀어 넣으므로 대기 중에 새 봉이
+                # 도착하는 일이 성립하지 않는다. 실시간 경로의 겹④(마지막 구성봉 대기,
+                # 2026-08-05)를 여기서 타면 오지 않을 봉을 매 버킷 상한까지 기다린다.
+                await composer.flush_due_horizon(horizon, force=True)
 
 
 async def run_walk_forward_backtest(

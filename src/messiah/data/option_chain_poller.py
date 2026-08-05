@@ -50,7 +50,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Sequence
+from typing import Awaitable, Callable, Sequence
 
 from messiah.broker.kis import tr_codes
 from messiah.broker.kis.rest_client import KISRestClient
@@ -58,6 +58,27 @@ from messiah.broker.kis.symbol_master import IndexDerivativesMaster, OptionLeg
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_RAW, BusLike
 from messiah.core.messages import OptionQuoteSnapshot
+
+RETRY_ATTEMPTS = 1
+"""다리 하나가 실패했을 때 **같은 사이클 안에서** 다시 시도하는 횟수 (2026-08-05).
+
+2026-08-05 장중 실측: 다리 조회 5건이 실패했다 — KIS 모의투자 서버의 `500 Internal Server
+Error` 3건, `Server disconnected without sending a response` 2건. 그 결과 먼쓰리 3사이클과
+목위클리 1사이클이 **42다리가 아니라 41다리**로 남았다. 재시도 경로가 아예 없었기 때문이다.
+
+재시도를 못 할 이유가 없다는 것이 실측으로 확인됐다: 그날 유량 점유는 **33%**(수요 0.330건/초
+/ 용량 1.00건/초)에 백오프 내성 3.03배였다. 실패한 다리에 한 번 더 쓰는 호출은 사이클당 최대
+42건이 아니라 **실제 실패 건수**(그날 5건/약 800건 = 0.6%)라 예산에 실질적 영향이 없다.
+
+**다음 사이클로 넘기지 않는다.** 격자 규율(`FixedTickScheduler`)이 이 모듈 설계의 전부이고,
+재시도 큐를 다음 사이클에 얹으면 그 사이클의 호출 수가 가변이 된다 — 마흐디가 2026-07-30에
+총수요를 한계선에 붙여 25사이클을 통째로 잃은 것과 같은 형태의 위험이다.
+"""
+
+RETRY_DELAY_SECONDS = 0.5
+"""재시도 전 대기. 공유 `RateLimiter`가 이미 요청 간 최소 1.0초를 강제하므로
+(`rest_client.DEFAULT_MIN_REQUEST_INTERVAL_SECONDS`) 실제 간격은 1.5초 이상이 된다 —
+500은 즉시 재시도하면 대개 또 500이라 그 간격이 필요하다."""
 
 DEFAULT_STRIKE_WINDOW = 10
 """ATM 편측 행사가 개수 — 창 크기는 (2N+1)×2다리.
@@ -93,6 +114,9 @@ class OptionChainPoller:
         reference_price: Callable[[], float | None],
         underlying: str = "KOSPI200",
         strike_window: int = DEFAULT_STRIKE_WINDOW,
+        retry_attempts: int = RETRY_ATTEMPTS,
+        retry_delay_seconds: float = RETRY_DELAY_SECONDS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """
         입력: `series`는 `core/universe.OPTION_SERIES_BY_TOKEN`의 값 하나
@@ -110,6 +134,8 @@ class OptionChainPoller:
         """
         if strike_window < 1:
             raise ValueError("strike_window는 1 이상이어야 한다 — 0이면 GEX가 성립하지 않는다")
+        if retry_attempts < 0:
+            raise ValueError("retry_attempts는 0 이상이어야 한다")
         self._rest_client = rest_client
         self._master = master
         self._bus = bus
@@ -117,6 +143,9 @@ class OptionChainPoller:
         self._reference_price = reference_price
         self._underlying = underlying
         self._strike_window = strike_window
+        self._retry_attempts = retry_attempts
+        self._retry_delay_seconds = retry_delay_seconds
+        self._sleep = sleep
 
     @property
     def series(self) -> str:
@@ -158,18 +187,8 @@ class OptionChainPoller:
             await self._poll_one(leg)
 
     async def _poll_one(self, leg: OptionLeg) -> None:
-        try:
-            raw = await asyncio.to_thread(
-                self._rest_client.get_quote, leg.symbol, tr_codes.FID_MRKT_DIV_INDEX_OPTION
-            )
-        except Exception as exc:  # noqa: BLE001 — REST 실패로 폴링 루프가 죽으면 안 됨
-            mlog.log(
-                "OptionChainPollError",
-                f"조회 실패: {exc}",
-                underlying=self._underlying,
-                series=self._series,
-                symbol=leg.symbol,
-            )
+        raw = await self._fetch_with_retry(leg)
+        if raw is None:
             return
 
         snapshot = OptionQuoteSnapshot(
@@ -191,6 +210,49 @@ class OptionChainPoller:
                 series=self._series,
                 symbol=leg.symbol,
             )
+
+    async def _fetch_with_retry(self, leg: OptionLeg) -> dict | None:
+        """다리 1개를 조회한다. 실패하면 같은 사이클 안에서 `retry_attempts`번 더 시도한다.
+
+        **성공한 재시도와 끝내 잃은 다리를 다른 태그로 가른다**(2026-08-05). 둘 다
+        `OptionChainPollError`(WARNING)로 남기면 무결성 리포트의 WARNING 수가 "잃은 다리 수"를
+        더 이상 뜻하지 않게 된다 — 재시도로 살아난 다리까지 세기 때문이다. 그러면 다음 점검이
+        "42다리 중 몇 개가 실제로 비었나"를 로그에서 못 읽는다.
+
+        - 재시도로 살아남 → `OptionChainPollRetried` (INFO). 서버 상태의 기록이지 결손이 아니다.
+        - 끝내 실패 → `OptionChainPollError` (WARNING) + `attempts`. **이때만** 다리가 빈다.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1 + self._retry_attempts):
+            if attempt:
+                await self._sleep(self._retry_delay_seconds)
+            try:
+                raw = await asyncio.to_thread(
+                    self._rest_client.get_quote, leg.symbol, tr_codes.FID_MRKT_DIV_INDEX_OPTION
+                )
+            except Exception as exc:  # noqa: BLE001 — REST 실패로 폴링 루프가 죽으면 안 됨
+                last_error = exc
+                continue
+            if attempt:
+                mlog.log(
+                    "OptionChainPollRetried",
+                    f"{attempt}회 재시도로 복구: {last_error}",
+                    underlying=self._underlying,
+                    series=self._series,
+                    symbol=leg.symbol,
+                    attempts=attempt + 1,
+                )
+            return raw
+
+        mlog.log(
+            "OptionChainPollError",
+            f"조회 실패({1 + self._retry_attempts}회 시도): {last_error}",
+            underlying=self._underlying,
+            series=self._series,
+            symbol=leg.symbol,
+            attempts=1 + self._retry_attempts,
+        )
+        return None
 
 
 def select_atm_window(

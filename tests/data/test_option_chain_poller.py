@@ -49,6 +49,25 @@ class FakeRestClient:
         return {"rt_cd": "0", "output1": {"futs_prpr": "1.23"}}
 
 
+class FlakyRestClient(FakeRestClient):
+    """지정한 심볼이 **첫 호출에서만** 실패한다 — 2026-08-05 실측의 일시적 500/끊김 재현."""
+
+    def __init__(self, fail_once_for: set[str]) -> None:
+        super().__init__()
+        self._pending = set(fail_once_for)
+
+    def get_quote(self, symbol: str, market_div_code: str = "O") -> dict:
+        if symbol in self._pending:
+            self._pending.discard(symbol)
+            self.calls.append((symbol, market_div_code))
+            raise RuntimeError(f"KIS 500(일시): {symbol}")
+        return super().get_quote(symbol, market_div_code)
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """재시도 지연을 실제로 자지 않는다 — 대기 여부는 `sleep` 주입으로 따로 검증한다."""
+
+
 def _chain(strikes, series_prefix="B01608"):
     """행사가마다 콜/풋 한 쌍. 실제 마스터처럼 순서를 섞어 둔다 — 선택기가 정렬에
     의존하지 않는지 보려고."""
@@ -217,14 +236,145 @@ async def test_one_leg_failure_does_not_stop_the_rest(monkeypatch):
     rest = FakeRestClient(fail_for={failing})
     bus = FakeBus()
     poller = OptionChainPoller(
-        rest, master, bus, series="regular", reference_price=lambda: 100.0, strike_window=1
+        rest,
+        master,
+        bus,
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=1,
+        sleep=_no_sleep,
     )
 
     await poller.poll_once()
 
-    assert len(rest.calls) == 2  # 둘 다 시도
+    # 실패한 다리는 재시도까지 2번, 성공한 다리는 1번 (2026-08-05 재시도 도입)
+    assert len(rest.calls) == 3
     assert len(bus.published) == 1  # 성공한 것만 발행
     assert "OptionChainPollError" in logged
+
+
+# ------------------------------------------- 다리 재시도 (2026-08-05 장중 실측 대응)
+#
+# 그날 5건이 실패해(500 ×3 · disconnect ×2) 먼쓰리 3사이클·목위클리 1사이클이 41다리로 남았다.
+# 유량 점유가 33%(내성 3.03배)였으므로 재시도할 여유가 없어서가 아니라 경로가 없어서였다.
+
+
+async def test_transient_failure_is_recovered_by_the_retry(monkeypatch):
+    """첫 호출만 실패하는 다리는 **같은 사이클 안에서** 살아나야 한다."""
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log",
+        lambda tag, msg, **f: logged.append((tag, f)),
+    )
+    chain = _chain([100.0])
+    flaky = chain[0].symbol
+    rest = FlakyRestClient(fail_once_for={flaky})
+    bus = FakeBus()
+    poller = OptionChainPoller(
+        rest,
+        FakeMaster(chain),
+        bus,
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=1,
+        sleep=_no_sleep,
+    )
+
+    await poller.poll_once()
+
+    assert len(bus.published) == 2, "재시도로 살아난 다리가 발행되지 않았다"
+    tags = [tag for tag, _ in logged]
+    assert "OptionChainPollRetried" in tags
+    # **결손이 아니므로** WARNING 태그는 안 나와야 한다 — 안 그러면 리포트의 WARNING 수가
+    # 더 이상 "잃은 다리 수"를 뜻하지 않는다.
+    assert "OptionChainPollError" not in tags
+
+
+async def test_retry_waits_before_trying_again():
+    """즉시 재시도는 대개 또 500이다 — 최소한 설정된 지연만큼은 쉬어야 한다."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    chain = _chain([100.0])
+    rest = FlakyRestClient(fail_once_for={chain[0].symbol})
+    poller = OptionChainPoller(
+        rest,
+        FakeMaster(chain),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=1,
+        retry_delay_seconds=0.5,
+        sleep=_record,
+    )
+
+    await poller.poll_once()
+
+    assert slept == [0.5]  # 실패한 다리 1개에 대해 한 번만
+
+
+async def test_persistent_failure_still_gives_up_and_reports_the_attempts(monkeypatch):
+    """계속 실패하는 다리는 결국 포기하되, **몇 번 시도했는지**가 로그에 남아야 한다 —
+    다음 점검이 "서버가 잠깐 흔들린 것"과 "그 종목이 계속 안 된 것"을 구분할 수 있게."""
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log",
+        lambda tag, msg, **f: logged.append((tag, f)),
+    )
+    chain = _chain([100.0])
+    dead = chain[0].symbol
+    rest = FakeRestClient(fail_for={dead})
+    poller = OptionChainPoller(
+        rest,
+        FakeMaster(chain),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=1,
+        sleep=_no_sleep,
+    )
+
+    await poller.poll_once()
+
+    errors = [f for tag, f in logged if tag == "OptionChainPollError"]
+    assert len(errors) == 1, "포기한 다리는 정확히 한 번만 WARNING이어야 한다"
+    assert errors[0]["attempts"] == 2
+    assert errors[0]["symbol"] == dead
+
+
+async def test_retry_can_be_disabled():
+    """`retry_attempts=0`이면 2026-08-05 이전과 완전히 같은 동작 — 유량이 빠듯한 인스턴스가
+    끌 수 있어야 한다."""
+    chain = _chain([100.0])
+    rest = FakeRestClient(fail_for={chain[0].symbol})
+    poller = OptionChainPoller(
+        rest,
+        FakeMaster(chain),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        strike_window=1,
+        retry_attempts=0,
+        sleep=_no_sleep,
+    )
+
+    await poller.poll_once()
+
+    assert len(rest.calls) == 2  # 다리 2개 × 1회씩
+
+
+def test_negative_retry_attempts_is_rejected():
+    with pytest.raises(ValueError, match="retry_attempts"):
+        OptionChainPoller(
+            FakeRestClient(),
+            FakeMaster([]),
+            FakeBus(),
+            series="regular",
+            reference_price=lambda: 100.0,
+            retry_attempts=-1,
+        )
 
 
 async def test_publish_failure_is_logged_but_not_raised(monkeypatch):

@@ -62,11 +62,31 @@ class FixedTickScheduler:
              SchedulerTickMissed로 로깅한다(침묵 금지 — DecisionIntent가 NO_TRADE에도 rationale을
              남기는 것과 같은 원칙). callback이 예외를 던지면 SchedulerCallbackError로 로깅하고
              루프는 계속한다(L22: 항목 하나의 실패가 루프 전체를 죽이면 안 됨).
+
+        ## 같은 틱을 두 번 쏘지 않는다 (2026-08-05 실측)
+
+        `asyncio.sleep()`은 이벤트 루프의 **단조 시계**로 자는데 목표 시각은 `now_utc()`의
+        **벽시계**로 계산한다. 둘의 분해능이 달라 sleep이 목표보다 몇 밀리초 일찍 깨는 일이
+        실제로 있다 — 그러면 `next_tick_at(now)`의 `math.floor()`가 **같은 n**을 돌려주고
+        같은 틱이 한 번 더 발화한다. 2026-08-05 로그에 그 흔적이 남았다:
+
+            08:43:19.998  OptionChainSkipped  series=weekly_thu
+            08:43:20.013  OptionChainSkipped  series=weekly_thu   ← 15ms 뒤 같은 틱
+
+        옵션체인에서 이건 42다리 REST 사이클을 통째로 두 번 도는 것이라 유량 예산이 2배로
+        나가고(모듈 `data/option_chain_poller.py`의 유량 설계가 전제부터 깨진다) 아카이브에
+        같은 사이클이 두 번 들어간다. 그날은 기준가가 없어 실제 폴링까지 가지 않아 운이
+        좋았을 뿐이다.
+
+        그래서 목표가 직전 틱보다 뒤가 아니면 **격자상 다음 칸으로 올린다** — 격자 자체는
+        epoch 기준 그대로라 위상은 안 밀린다.
         """
         iterations = 0
         previous_target: datetime | None = None
         while max_iterations is None or iterations < max_iterations:
             target = self.next_tick_at(now_utc())
+            if previous_target is not None and target <= previous_target:
+                target = previous_target + timedelta(seconds=self._tick_seconds)
             if previous_target is not None:
                 expected = previous_target + timedelta(seconds=self._tick_seconds)
                 if target > expected:

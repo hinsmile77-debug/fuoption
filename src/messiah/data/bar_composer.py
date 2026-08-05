@@ -45,6 +45,49 @@ KST(UTC+9:00)는 5/10/15/30분 격자와 정수 배로 맞아떨어져(540분 = 
 3. **늦은 봉 거부** (`handle_one_minute_bar`) — 이미 확정한 버킷으로 오는 봉은 새 버킷을
    열지 않고 `ComposerLateBarDropped`로 남긴다. 1·2가 다 뚫려도 **중복 행은 안 생기고**,
    유실은 조용하지 않다.
+
+## 스큐를 고쳤더니 드러난 것 — 겹②의 숨은 전제 (2026-08-05 장중 실측)
+
+위 셋을 넣은 바로 그날, **26건의 `ComposerLateBarDropped`**가 났다. 3분봉 18개 중 12개가
+2분짜리로 확정됐고 30분봉은 2개 다 29분짜리였다. 거래량 결손은 3m 16.9% · 5m 11.2% ·
+10m 4.8% · 15m 3.2% · 30m 3.9%.
+
+겹③이 설계대로 동작해서 **중복 행 대신 로그가 남은 것**이 유일한 소득이었다. 원인은 겹②의
+전제가 틀렸다는 것이다:
+
+> 겹②는 "스케줄러가 거래소 경계를 지나서 쏘기만 하면 그 버킷의 1분봉은 다 와 있다"를
+> 전제한다. 그런데 **1분봉은 시각으로 확정되지 않는다** — `MinuteBarAggregator`는
+> *다음 분의 첫 틱이 도착해야* 이전 분의 봉을 내놓는다(`data/collector.py`의
+> `_handle_message`). 즉 1분봉의 도착 시각은 시계가 아니라 **틱 도착률**이 정한다.
+
+같은 날 실측한 1분봉 발행 지연(경계 이후): 중앙값 **0.655초** · p90 **1.62초** · 최대
+**7.96초**. 스케줄러 위상은 0.5초다 — **69%가 그 뒤에 도착했다**. 관측된 드롭률(3m 67% ·
+5m 70% · 30m 100%)과 그대로 맞는다.
+
+그 전날까지 이게 안 터진 이유도 이걸로 설명된다. 로컬 시계가 거래소보다 9.7초 **느려서**
+스케줄러가 거래소 기준 9.7초 늦게 쐈다 — 우연한 9.7초짜리 유예였다. 시계를 맞추자
+(`ops/clock_skew.py`, 2026-08-05) 그 쿠션이 사라지고 잠복 결함이 첫날 드러났다.
+
+그래서 겹을 하나 더 놓는다:
+
+4. **마지막 구성 1분봉 도착 대기** (`_await_last_constituent`) — 스케줄러 경로는 그 버킷의
+   **마지막 분봉이 실제로 도착할 때까지** (상한 `_MAX_CONSTITUENT_WAIT_SECONDS`) 기다린 뒤
+   확정한다. 시계가 아니라 **데이터의 도착**을 기준으로 삼는 것이라, 스큐·틱 지연·이벤트
+   루프 지연 중 무엇이 원인이든 같이 막힌다. 상한을 넘겨 그냥 확정할 때는
+   `ComposerFlushedIncomplete`로 남긴다 — 거래가 없는 분은 봉 자체가 안 나오므로 무한
+   대기는 성립하지 않고, 짧은 봉이 나갈 수 있다는 사실은 조용하면 안 된다(L18).
+
+## 대기 중에 버킷이 바뀔 수 있다 — 확정 대상 고정
+
+겹②·④는 둘 다 **await**다. 그 사이에 다음 버킷의 1분봉이 도착하면 겹①이 그 자리에서
+이전 버킷을 (정확하게) 확정하고 새 버킷을 연다. 이때 깨어난 스케줄러가 아무 생각 없이
+`_flush_bucket()`을 부르면 **방금 열린 새 버킷을 1봉짜리로 확정해 버린다** — 그리고
+`_last_flushed_start`가 그 시각으로 올라가, 뒤이어 올 그 버킷의 나머지 봉이 전부 늦은 봉으로
+버려진다. 겹②를 넣은 2026-08-05 시점의 코드에 이미 있던 잠복 결함이다(스큐가 그날 실제로
+대기를 유발하지 않아 드러나지 않았을 뿐이다).
+
+그래서 `flush_due_horizon`은 **대기 전에 확정 대상 버킷을 고정**하고, 깨어났을 때 그 버킷이
+그대로일 때만 확정한다. 바뀌었으면 이미 겹①이 옳게 처리한 뒤이므로 할 일이 없다.
 """
 
 from __future__ import annotations
@@ -55,7 +98,8 @@ from typing import Awaitable, Callable, Sequence
 
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, BusLike
-from messiah.core.messages import HORIZON_SECONDS, BarClosed, BarSession, Horizon
+from messiah.core.health import HealthStatus
+from messiah.core.messages import HORIZON_SECONDS, BarClosed, BarSession, HealthLevel, Horizon
 from messiah.core.scheduler import FixedTickScheduler
 from messiah.core.timeutil import KST, UTC, ensure_aware, now_kst
 from messiah.data.archiver import ParquetArchiver
@@ -73,6 +117,20 @@ _BOUNDARY_GRACE_SECONDS = 0.5  # Ver 1.2 §2.2 "지연 틱 유예 500ms"
 # (`scripts/self_check.py`), 여기서 더 기다리면 다음 버킷 경계를 침범한다 — 그 지점부터는
 # 기다리는 것보다 짧은 봉을 내고 그 사실이 리포트에 남는 편이 낫다.
 _MAX_FLUSH_DEFER_SECONDS = 30.0
+
+# 겹④ — 그 버킷의 마지막 1분봉이 도착하기를 기다리는 상한.
+#
+# 2026-08-05 실측 1분봉 발행 지연: 중앙값 0.655초 · p75 0.966초 · p90 1.62초 · 최대 7.96초
+# (모듈 docstring "스큐를 고쳤더니 드러난 것"). 5초면 그날 표본의 p99 위쪽을 덮는다.
+#
+# 상한을 이 크기로 둬도 안전한 이유: 가장 짧은 합성 Horizon이 3분(180초)이라 5초는 그 2.8%다.
+# 그리고 대기의 최악은 "합성봉이 몇 초 늦게 나간다"인 반면, 안 기다린 최악은 **조용한 데이터
+# 손상**이다 — 2026-08-05에 실제로 상위 봉의 3~17%가 그렇게 사라졌다. 비대칭이 명확하다.
+_MAX_CONSTITUENT_WAIT_SECONDS = 5.0
+
+# 대기 폴링 간격 — `wait_for_bar()`의 기본값과 같은 값·같은 근거(횟수로 세어 테스트가 실제
+# 시계를 안 타게 한다).
+_CONSTITUENT_POLL_SECONDS = 0.05
 
 
 def floor_to_horizon(dt: datetime, horizon_seconds: int) -> datetime:
@@ -195,6 +253,11 @@ class MultiHorizonBarComposer:
         self._last_flushed_start: dict[Horizon, datetime | None] = dict.fromkeys(self._targets)
         # 지금까지 본 1분봉 중 가장 나중 것 — `wait_for_bar()`가 종료 시퀀스에서 본다.
         self._last_seen_bar_open: datetime | None = None
+        # 이 세션에서 버린 늦은 봉 / 짧게 확정한 버킷의 누적 수 — `health()`가 이걸 발행해
+        # 장중 화면과 상태판이 **손상이 일어나는 동안** 볼 수 있게 한다(2026-08-05).
+        # 종전에는 이 사실이 로그에만 있었고, 26건이 나는 동안 heartbeat는 계속 OK였다.
+        self._late_bar_drops = 0
+        self._incomplete_flushes = 0
         self._clock_skew_seconds = clock_skew_seconds
         self._now = now
         self._sleep = sleep
@@ -203,6 +266,36 @@ class MultiHorizonBarComposer:
     def last_seen_bar_open(self) -> datetime | None:
         """구독으로 실제 **도착한** 마지막 1분봉의 시작 시각 — 발행됐다는 사실과 다르다."""
         return self._last_seen_bar_open
+
+    @property
+    def late_bar_drops(self) -> int:
+        """이미 확정한 버킷으로 늦게 와서 버린 1분봉 수 — 그만큼 상위 Horizon에서 사라졌다."""
+        return self._late_bar_drops
+
+    @property
+    def incomplete_flushes(self) -> int:
+        """마지막 구성 1분봉을 못 기다리고 확정한 버킷 수(겹④ 상한 초과)."""
+        return self._incomplete_flushes
+
+    def health(self) -> HealthStatus:
+        """`sys.health` heartbeat용 자가 판정 — 합성 손상은 **일어나는 중에** 보여야 한다.
+
+        `TickCollector.health()`/`FeatureEngine.health()`가 "최근에 받았나"(신선도)를 재는
+        것과 달리, 이건 **"받은 것을 온전히 합쳤나"**를 잰다. 2026-08-05에 이 구분이 없어서
+        상태판 3축이 전부 OK인 채로 상위 봉의 3~17%가 사라졌다.
+
+        임계가 0인 이유: 늦은 봉 1건은 곧 상위 Horizon 1개가 한 분(分) 모자라게 확정됐다는
+        뜻이고, 그건 정의상의 항등식(`ops/integrity_report.analyze_horizon_consistency`)
+        위반이다. "조금은 괜찮다"가 성립하는 축이 아니다.
+        """
+        losses = self._late_bar_drops + self._incomplete_flushes
+        if losses == 0:
+            return HealthStatus(HealthLevel.OK, "버킷 손실 없음")
+        return HealthStatus(
+            HealthLevel.WARN,
+            f"버킷 손실 {losses}건(늦은 봉 {self._late_bar_drops} · "
+            f"미완 확정 {self._incomplete_flushes}) — 상위 Horizon 거래량이 1분봉 합보다 적다",
+        )
 
     async def handle_one_minute_bar(self, bar: BarClosed) -> None:
         """
@@ -225,6 +318,7 @@ class MultiHorizonBarComposer:
             start = floor_to_horizon(bar.bar_open_kst, seconds)
             flushed = self._last_flushed_start[horizon]
             if flushed is not None and start <= flushed:
+                self._late_bar_drops += 1
                 mlog.log(
                     "ComposerLateBarDropped",
                     f"이미 확정한 {horizon.value} 버킷({start:%H:%M})으로 1분봉"
@@ -257,15 +351,82 @@ class MultiHorizonBarComposer:
         (모듈 docstring 2번). 스큐가 0 이하(거래소가 앞섬 = 2026-08-04 실측 방향)면 대기는
         0초라 종전과 완전히 같은 동작이다.
 
-        `force=True`는 종료 시퀀스(`flush_all_final`) 전용 — 그 시점엔 더 기다릴 수 없다.
+        그 다음 **그 버킷의 마지막 1분봉이 실제로 도착했는지**를 본다(겹④, 2026-08-05 장중).
+        스큐를 아무리 정확히 보상해도 1분봉 자체가 시각이 아니라 **다음 분의 첫 틱**으로
+        확정되므로, 시계만 보는 판단으로는 이 경주에서 이길 수 없다(모듈 docstring).
+
+        ## `force=True` — 기다릴 수 없거나, 기다릴 이유가 없는 경로
+
+        둘 다 "지금 즉시 확정"이지만 근거가 다르다.
+
+        - **종료 시퀀스**(`flush_all_final`) — 더 기다릴 수 없다. 호출측이 대신
+          `wait_for_bar()`로 마지막 1분봉의 도착을 먼저 확인한다.
+        - **오프라인 재생**(`backtest/harness.py`의 `_feed_m1_bars`, `run_full_path_smoke.py`,
+          `run_phase5_smoke.py`) — 기다릴 이유가 **없다**. 봉을 동기 루프로 밀어 넣으므로
+          대기 중에 새 봉이 도착하는 일 자체가 성립하지 않는다. 여기서 `force=False`를 쓰면
+          겹④가 오지 않을 봉을 매 버킷 상한까지 기다려, 재생이 실시간보다 느려진다
+          (2026-08-05에 실제로 그렇게 만들 뻔했다). 대기가 무의미한 경로에서 대기하는 것은
+          안전이 아니라 그냥 결함이다.
         """
-        if not force:
-            await self._defer_until_boundary_passed(horizon)
+        if force:
+            await self._flush_bucket(horizon)
+            return
+
+        # **확정 대상을 여기서 고정한다.** 아래 두 대기는 await이고, 그 사이에 다음 버킷의
+        # 봉이 도착하면 겹①이 이 버킷을 이미 옳게 확정한 뒤 새 버킷을 연다 — 그때 깨어나
+        # 그냥 flush하면 갓 열린 버킷을 1봉짜리로 확정해 버린다(모듈 docstring 마지막 절).
+        target_start = self._bucket_start[horizon]
+
+        await self._defer_until_boundary_passed(horizon, target_start)
+        await self._await_last_constituent(horizon, target_start)
+
+        if self._bucket_start[horizon] != target_start:
+            return  # 대기 중 겹①이 처리했다 — 여기서 할 일이 없다
         await self._flush_bucket(horizon)
 
-    async def _defer_until_boundary_passed(self, horizon: Horizon) -> None:
+    async def _await_last_constituent(
+        self, horizon: Horizon, bucket_start: datetime | None
+    ) -> None:
+        """그 버킷의 **마지막 분(分) 봉**이 도착할 때까지만 (상한을 두고) 기다린다 — 겹④.
+
+        판단 기준이 시계가 아니라 **데이터의 도착**이라, 원인이 스큐든 틱 지연이든 이벤트
+        루프 지연이든 같이 막힌다. 2026-08-05 실측으로 1분봉 발행 지연 중앙값이 0.655초라
+        스케줄러 위상 0.5초보다 크다 — 즉 정상적인 날에도 매 버킷이 이 경주에서 졌다.
+
+        상한을 넘겨도 확정은 한다. 거래가 한 건도 없는 분은 봉 자체가 발행되지 않으므로
+        (`MinuteBarAggregator`) 무한정 기다리면 그 Horizon이 통째로 멈춘다 — 그건 유실보다
+        나쁘다. 대신 짧은 봉이 나갔다는 사실을 `ComposerFlushedIncomplete`로 남긴다(L18).
+        """
+        if bucket_start is None:
+            return
+        last_minute_open = bucket_start + timedelta(seconds=self._targets[horizon] - 60)
+        if self._last_seen_bar_open is not None and self._last_seen_bar_open >= last_minute_open:
+            return  # 이미 다 왔다 — 정상 경로에서는 여기서 끝난다(대기 0초)
+
+        arrived = await self.wait_for_bar(
+            last_minute_open,
+            timeout_seconds=_MAX_CONSTITUENT_WAIT_SECONDS,
+            poll_seconds=_CONSTITUENT_POLL_SECONDS,
+        )
+        # 대기 중 겹①이 이 버킷을 확정했으면 짧게 나간 게 아니다 — 그 경우는 세지 않는다.
+        if arrived or self._bucket_start[horizon] != bucket_start:
+            return
+        self._incomplete_flushes += 1
+        mlog.log(
+            "ComposerFlushedIncomplete",
+            f"{horizon.value} 버킷({bucket_start:%H:%M})의 마지막 1분봉"
+            f"({last_minute_open:%H:%M})이 {_MAX_CONSTITUENT_WAIT_SECONDS:.0f}초 안에 안 와 "
+            "짧은 채로 확정 — 그 분의 거래량이 이 Horizon에서 빠진다",
+            symbol=self._symbol,
+            horizon=horizon.value,
+            bucket_start=bucket_start.isoformat(),
+            awaited_bar_open_kst=last_minute_open.isoformat(),
+        )
+
+    async def _defer_until_boundary_passed(
+        self, horizon: Horizon, bucket_start: datetime | None
+    ) -> None:
         """거래소 시각으로 이 버킷의 경계가 지날 때까지만 (상한을 두고) 기다린다."""
-        bucket_start = self._bucket_start[horizon]
         if bucket_start is None:
             return
         skew = self._clock_skew_seconds() if self._clock_skew_seconds is not None else None

@@ -103,6 +103,9 @@ DEFAULT_TICK_SIZE = 0.02  # 미니선물(A05608) 2026-07-22 실측값(core/confi
 _HEALTH_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("l1.collector", "수집기(WS)"),
     ("l1.feature_engine", "피처엔진"),
+    # 2026-08-05 추가 — 위 둘은 "최근에 받았나"(신선도)를 재고, 이건 "받은 것을 온전히
+    # 합쳤나"를 잰다. 그날 상위 Horizon 봉의 3~17%가 사라지는 동안 화면은 전부 초록이었다.
+    ("l1.composer", "봉 합성기"),
     ("g2.pipeline", "G2 파이프라인"),
 )
 

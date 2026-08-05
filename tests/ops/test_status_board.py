@@ -173,3 +173,20 @@ def test_subscribes_to_the_real_bus_and_writes_a_snapshot(tmp_path: Path):
     assert snapshot is not None
     assert snapshot["components"]["l1.collector"]["level"] == "OK"
     assert snapshot["command_center_ui"] == "UP"
+
+
+# ------------------------------- 합성기 축 (2026-08-05 장중 점검 P0-2)
+
+
+def test_default_components_include_the_bar_composer():
+    """2026-08-05 장중, 상위 Horizon 봉의 3~17%가 사라지는 동안 상태판 세 축은 전부 OK였다.
+
+    나머지 축이 **신선도**("최근에 받았나")를 재는 반면 합성 손상은 "받은 것을 온전히
+    합쳤나"라서, 볼 축이 아예 없었다. 화면(`ui/app.py`의 `_HEALTH_COMPONENTS`)과 목록이
+    갈리면 조용히 한쪽에서만 사라지므로 함께 확인한다.
+    """
+    from messiah.ops.status_board import DEFAULT_COMPONENTS
+    from messiah.ui.app import _HEALTH_COMPONENTS
+
+    assert "l1.composer" in DEFAULT_COMPONENTS
+    assert set(DEFAULT_COMPONENTS) == {name for name, _label in _HEALTH_COMPONENTS}

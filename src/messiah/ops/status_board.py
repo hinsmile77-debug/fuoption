@@ -58,7 +58,15 @@ DEFAULT_INTERVAL_SECONDS = 15.0
 # UI와 같은 컴포넌트 목록을 **고정으로** 들고 있는다 — 동적으로 "수신된 것만" 담으면 프로세스가
 # 통째로 죽었을 때 그 줄이 스냅샷에서 사라져 사고가 오히려 안 보인다(`ui/app.py`의
 # `_HEALTH_COMPONENTS`와 같은 근거, `core/health.py` "침묵도 상태다").
-DEFAULT_COMPONENTS: tuple[str, ...] = ("l1.collector", "l1.feature_engine", "g2.pipeline")
+# `l1.composer`는 2026-08-05 장중에 추가됐다. 그날 상위 Horizon 봉의 3~17%가 사라지는 동안
+# 이 세 축은 전부 OK였다 — 나머지가 **신선도**("최근에 받았나")를 재는 반면 합성 손상은
+# "받은 것을 온전히 합쳤나"라서, 볼 축이 아예 없었다(`data/bar_composer.health()`).
+DEFAULT_COMPONENTS: tuple[str, ...] = (
+    "l1.collector",
+    "l1.feature_engine",
+    "l1.composer",
+    "g2.pipeline",
+)
 
 _CB_STALE_AFTER = 40.0  # `ui/app.py`의 `_STALE_AFTER["CircuitBreakerStatus"]`와 같은 값·같은 근거
 

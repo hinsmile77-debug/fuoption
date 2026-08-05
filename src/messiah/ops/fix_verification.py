@@ -131,6 +131,13 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     ),
     # 1분봉 ↔ 상위 Horizon 거래량 항등식 위반 건수 (`analyze_horizon_consistency`).
     "horizon_findings": lambda r: float(len(r.get("horizon_findings", []))),
+    # 상위 Horizon 버킷에서 빠진 1분봉 수 (2026-08-05 장중, `data/bar_composer.py`).
+    #
+    # `horizon_findings`와 **짝이되 대체재가 아니다**: 그쪽은 아카이브를 보므로 장 종료 후
+    # `run_recompose.py`를 돌리면 0이 된다. 그러면 "재합성했으니 등록부도 통과"가 되어,
+    # 정작 고쳐야 할 수집 경로의 결함이 판정에서 사라진다. 이 지표는 로그를 세므로 재합성에
+    # 지워지지 않는다 — **결과가 아니라 원인을 채점하는 자리다.**
+    "late_bar_drops": lambda r: float(r.get("late_bar_drops", 0)),
     # **좁은 지표 둘** (2026-08-05). 종전에 이 둘은 `breaches`라는 넓은 그물로 채점됐는데,
     # 그러면 **아무 상관 없는 사고 하나가 이 수정들을 "재발"로 만든다**. 실제로 2026-08-04
     # 리포트에서 체결틱 0행(그날 결선 전이라 정상) 때문에 `crash-forensics-armed`가 ERROR로
