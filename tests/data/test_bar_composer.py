@@ -2,6 +2,8 @@ import asyncio
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from messiah.core.messages import BarClosed, HealthLevel, Horizon
 from messiah.core.timeutil import KST
 from messiah.data.archiver import ParquetArchiver
@@ -630,7 +632,8 @@ async def test_health_reports_bucket_losses(tmp_path: Path):
     bus = FakeBus()
     composer = _composer(tmp_path, bus)
 
-    assert composer.health().level is HealthLevel.OK
+    # 아직 아무 봉도 확정 안 했으면 OK가 아니라 **판정 불가**다(고도화 3).
+    assert composer.health().level is HealthLevel.UNKNOWN
 
     for minute in range(30, 34):
         await composer.handle_one_minute_bar(_m1(minute))
@@ -642,3 +645,55 @@ async def test_health_reports_bucket_losses(tmp_path: Path):
     assert "버킷 손실 2건" in status.detail
     assert composer.late_bar_drops == 1
     assert composer.incomplete_flushes == 1
+
+
+# ------------------- 장중 거래량 항등식 (2026-08-05 2차, 고도화 2)
+#
+# `ops/integrity_report.analyze_horizon_consistency`가 보는 항등식과 **같은 것**을 메모리에서
+# 즉시 본다. 2026-08-05엔 첫 증거가 08:48에 있었는데 사람이 알아챈 건 한 시간 뒤였다.
+
+
+async def test_volume_identity_holds_on_a_clean_session(tmp_path: Path):
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)  # M5
+    for minute in range(30, 40):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_all_final()
+
+    identity = composer.volume_identity()["5m"]
+
+    assert identity["composed_volume"] == 100  # 1분봉 10개 × 10
+    assert identity["lost_volume"] == 0
+    assert identity["lost_ratio"] == 0.0
+    assert identity["bars"] == 2
+
+
+async def test_volume_identity_counts_the_lost_contracts_not_just_the_bars(tmp_path: Path):
+    """건수가 아니라 **거래량**이 항등식의 단위다 — "3봉이 늦었다"는 크기를 말해주지 않는다."""
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+    await composer.flush_due_horizon(Horizon.M5)  # 09:34가 안 와 4봉으로 확정
+    await composer.handle_one_minute_bar(_m1(34, volume=37))  # 뒤늦게 도착 → 버려진다
+
+    identity = composer.volume_identity()["5m"]
+
+    assert identity["composed_volume"] == 40
+    assert identity["lost_volume"] == 37
+    assert identity["lost_ratio"] == pytest.approx(37 / 77)
+    assert "37" in composer.health().detail
+
+
+async def test_health_says_what_it_is_ok_on_the_basis_of(tmp_path: Path):
+    """정상일 때도 근거를 말한다(고도화 3) — 근거 없는 OK와 구분되어야 한다."""
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus)
+    for minute in range(30, 40):
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    status = composer.health()
+
+    assert status.level is HealthLevel.OK
+    assert "합성봉 1개" in status.detail
+    assert "항등식 일치" in status.detail

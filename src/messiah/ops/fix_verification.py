@@ -65,6 +65,9 @@ class VerificationStatus:
     # 연속으로 못 잰 상태 (2026-08-05 고도화 2) — "진행 중"이 아니라 **계측 고장**이다.
     # 2026-08-04에 크래시 집계가 0건인 날에만 실패해 등록부가 영원히 0/3이었다.
     STALLED = "판정 불가 정체"
+    # 결과 지표는 아직 깨끗한데 **그 수정이 딛고 선 전제**가 무너졌다 (2026-08-05 2차,
+    # 고도화 4). 재발보다 이른 신호다 — 다음 사고의 예고에 가깝다.
+    PREMISE_BROKEN = "전제 붕괴"
 
 
 def _bar_1m(report: dict[str, Any]) -> dict[str, Any] | None:
@@ -72,6 +75,30 @@ def _bar_1m(report: dict[str, Any]) -> dict[str, Any] | None:
         if entry.get("horizon") == "1m":
             return entry
     return None
+
+
+def _latency(report: dict[str, Any], key: str) -> float | None:
+    """회선 수신 지연 분위수 — 못 잰 날은 None(판정 불가)이지 0이 아니다(L18)."""
+    latency = report.get("delivery_latency")
+    if not isinstance(latency, dict):
+        return None
+    value = latency.get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _absent_watchlist_features(report: dict[str, Any]) -> float | None:
+    """변동성 축 채점에서 "피처셋에 없음"으로 찍힌 관심 피처 수 (Horizon 전체 합)."""
+    horizons = (report.get("vol_axis") or {}).get("horizons")
+    if not isinstance(horizons, dict) or not horizons:
+        return None  # 채점을 안 돌린 날 — 0개와 구분한다(L18)
+    total = 0
+    seen_field = False
+    for entry in horizons.values():
+        if not isinstance(entry, dict) or "absent_features" not in entry:
+            continue  # 이 필드 이전에 쓰인 옛 산출물 — 판정 근거가 없다
+        seen_field = True
+        total += len(entry.get("absent_features") or [])
+    return float(total) if seen_field else None
 
 
 def _native_crashes(report: dict[str, Any]) -> float | None:
@@ -165,11 +192,42 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # 그날 못 잰 축의 수 (2026-08-05 고도화 2). **이 지표가 이 등록부의 메타 지표다** —
     # 다른 항목들이 "판정 불가"로 정체되는 근본 원인이 여기 모여 있다.
     "unmeasured_count": lambda r: float(len(r.get("unmeasured") or [])),
+    # 회선 수신 지연 초과분 (2026-08-05 2차, 고도화 1·4). 주로 **전제 지표**로 쓴다 —
+    # 봉 확정 관련 수정들이 전부 "1분봉이 경계 뒤 얼마 안에 도착한다"를 전제하기 때문이다.
+    "delivery_latency_p99_seconds": lambda r: _latency(r, "p99"),
+    "delivery_latency_max_seconds": lambda r: _latency(r, "max"),
+    # 변동성 축 관심 피처 중 **프로덕션 feature_set에 없어 측정조차 못 하는** 것의 수
+    # (2026-08-05 2차, 고도화 5). `ev_tod_cos`·`ev_close_remain`이 그 상태다 — 2026-08-04
+    # 관문이 상위로 지목했는데 아직 안 켜져 있다.
+    #
+    # **"존재하는가"를 재는 지표다**(`tick_rows`와 같은 계열). 재학습 후
+    # `configs/instance.yaml`의 `feature_set`을 승격하면 0이 되어야 하고, 안 되면
+    # **승격이 조용히 안 먹은 것**이다 — 이 프로젝트가 반복한 실패 형태(결선했다고 믿는데
+    # 안 붙어 있음)를 이 자리에서 잡는다. 채점을 안 돌린 날은 None(판정 불가).
+    "absent_watchlist_features": _absent_watchlist_features,
 }
 
 
 @dataclass(frozen=True)
 class PendingVerification:
+    """등록된 수정 하나 — 그 수정의 **결과**(metric)와 **전제**(premise_*)를 함께 채점한다.
+
+    ## 왜 전제를 따로 적는가 (2026-08-05 2차, 고도화 4)
+
+    2026-08-05에 일어난 일의 형태가 이렇다: 전날 넣은 P0-1(시계 동기)이 P0-2(합성기 3겹
+    방어)의 **전제를 깼다**. 겹②는 "스케줄러가 거래소 경계를 지나 쏘면 그 버킷의 1분봉은
+    다 와 있다"를 전제했는데, 시계를 맞추자 그 전제가 처음부터 거짓이었음이 드러났다
+    (1분봉 발행 지연 중앙값 0.655초 > 스케줄러 위상 0.5초).
+
+    **등록부는 이걸 볼 수 없었다.** 각 수정을 자기 지표로만 독립 채점하기 때문이다 —
+    08-04 리포트에서 `horizon_findings`는 빈 배열이었고 `horizon-volume-identity`는 깨끗하게
+    통과 중이었다. 통과하던 그 순간에 이미 전제가 무너져 있었다.
+
+    그래서 수정마다 **"이 수정이 성립하려면 참이어야 하는 것"**을 지표로 함께 적는다. 결과가
+    아직 나쁘지 않아도 전제가 깨지면 그 자체로 사람이 봐야 할 신호다 — 그게 곧 다음 사고의
+    예고이기 때문이다.
+    """
+
     id: str
     summary: str
     registered: date
@@ -178,6 +236,11 @@ class PendingVerification:
     deadline: date | None = None
     max_value: float | None = None
     min_value: float | None = None
+    # 이 수정이 성립하려면 참이어야 하는 조건. 지표 이름은 `metric`과 같은 등록부를 쓴다.
+    premise_metric: str | None = None
+    premise_max: float | None = None
+    premise_min: float | None = None
+    premise_summary: str = ""
 
     def satisfied_by(self, value: float) -> bool:
         if self.max_value is not None and value > self.max_value:
@@ -185,6 +248,24 @@ class PendingVerification:
         if self.min_value is not None and value < self.min_value:
             return False
         return True
+
+    def premise_holds(self, value: float) -> bool:
+        if self.premise_max is not None and value > self.premise_max:
+            return False
+        if self.premise_min is not None and value < self.premise_min:
+            return False
+        return True
+
+    def premise_text(self) -> str:
+        if self.premise_metric is None:
+            return ""
+        if self.premise_max is not None and self.premise_min is not None:
+            return f"{self.premise_min:g} ≤ {self.premise_metric} ≤ {self.premise_max:g}"
+        if self.premise_max is not None:
+            return f"{self.premise_metric} ≤ {self.premise_max:g}"
+        if self.premise_min is not None:
+            return f"{self.premise_metric} ≥ {self.premise_min:g}"
+        return self.premise_metric
 
     def criterion_text(self) -> str:
         if self.max_value is not None and self.min_value is not None:
@@ -212,6 +293,7 @@ class VerificationVerdict:
             VerificationStatus.RECURRED,
             VerificationStatus.OVERDUE,
             VerificationStatus.STALLED,
+            VerificationStatus.PREMISE_BROKEN,
         )
 
 
@@ -241,6 +323,20 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
             )
         if entry.get("max") is None and entry.get("min") is None:
             raise RegistryError(f"{entry.get('id', '?')}: max/min 중 최소 하나는 있어야 한다")
+        premise = entry.get("premise") or {}
+        premise_metric = premise.get("metric")
+        if premise:
+            # 전제도 결과와 **같은 엄격도**로 검증한다 — 오타 난 전제를 조용히 건너뛰면
+            # "전제를 감시 중"이라고 믿는 항목이 실제로는 아무것도 안 본다(이 모듈의 취지 그 자체).
+            if premise_metric not in METRIC_EXTRACTORS:
+                raise RegistryError(
+                    f"{entry.get('id', '?')}: 알 수 없는 전제 지표 '{premise_metric}' — "
+                    f"사용 가능: {sorted(METRIC_EXTRACTORS)}"
+                )
+            if premise.get("max") is None and premise.get("min") is None:
+                raise RegistryError(
+                    f"{entry.get('id', '?')}: 전제에 max/min 중 최소 하나는 있어야 한다"
+                )
         out.append(
             PendingVerification(
                 id=str(entry["id"]),
@@ -251,6 +347,10 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
                 deadline=_as_date(entry["deadline"]) if entry.get("deadline") else None,
                 max_value=None if entry.get("max") is None else float(entry["max"]),
                 min_value=None if entry.get("min") is None else float(entry["min"]),
+                premise_metric=premise_metric,
+                premise_max=None if premise.get("max") is None else float(premise["max"]),
+                premise_min=None if premise.get("min") is None else float(premise["min"]),
+                premise_summary=str(premise.get("summary", "")),
             )
         )
     return out
@@ -302,8 +402,28 @@ def evaluate(
                 violated_on = day
                 break
 
-        verdicts.append(_verdict_for(item, clean, violated_on, unjudged, today))
+        verdicts.append(
+            _verdict_for(item, clean, violated_on, unjudged, today, _latest_premise(item, reports))
+        )
     return verdicts
+
+
+def _latest_premise(
+    item: PendingVerification, reports: dict[date, dict[str, Any]]
+) -> tuple[date, float] | None:
+    """전제 지표의 **가장 최근 측정값** — 없으면 None(전제 미정의 또는 못 잼).
+
+    가장 최근 것만 보는 이유: 전제는 "지금도 참인가"를 묻는 것이라 이력의 연속성이 필요
+    없다. 결과 지표가 N거래일 연속을 요구하는 것과 성격이 다르다.
+    """
+    if item.premise_metric is None:
+        return None
+    extractor = METRIC_EXTRACTORS[item.premise_metric]
+    for day in sorted(reports, reverse=True):
+        value = extractor(reports[day])
+        if value is not None:
+            return day, value
+    return None
 
 
 def _verdict_for(
@@ -312,6 +432,7 @@ def _verdict_for(
     violated_on: date | None,
     unjudged: list[date],
     today: date,
+    premise: tuple[date, float] | None = None,
 ) -> VerificationVerdict:
     note = f"({item.criterion_text()}"
     if unjudged:
@@ -327,6 +448,23 @@ def _verdict_for(
             item.consecutive_days,
             f"{violated_on.isoformat()}에 기준 위반 — 수정이 듣지 않았다 {note}",
         )
+
+    # **재발 다음으로 이른 신호** (2026-08-05 2차, 고도화 4). 결과 지표는 아직 깨끗한데
+    # 이 수정이 딛고 선 전제가 무너진 상태다 — 2026-08-04에 `horizon-volume-identity`가
+    # 정확히 그랬다(통과 중이었고, 그 순간 이미 전제가 거짓이었다).
+    if premise is not None and not item.premise_holds(premise[1]):
+        measured_on, value = premise
+        return VerificationVerdict(
+            item.id,
+            item.summary,
+            VerificationStatus.PREMISE_BROKEN,
+            clean,
+            item.consecutive_days,
+            f"결과는 아직 깨끗하지만 전제가 무너졌다 — {measured_on.isoformat()} 측정 "
+            f"{item.premise_metric}={value:g} (요구: {item.premise_text()})"
+            + (f" · {item.premise_summary}" if item.premise_summary else ""),
+        )
+
     if clean >= item.consecutive_days:
         return VerificationVerdict(
             item.id,
@@ -383,6 +521,7 @@ def format_verdicts(verdicts: list[VerificationVerdict]) -> list[str]:
         VerificationStatus.RECURRED: "❌",
         VerificationStatus.STALLED: "🚫",
         VerificationStatus.OVERDUE: "⚠",
+        VerificationStatus.PREMISE_BROKEN: "🧨",
     }
     return [
         f"  {marks.get(v.status, '·')} [{v.status}] {v.id} — {v.summary}\n      {v.detail}"

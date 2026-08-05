@@ -70,9 +70,25 @@ class OrderKind(str, Enum):
 
 
 class HealthLevel(str, Enum):
+    """컴포넌트 자가 판정.
+
+    `UNKNOWN`은 2026-08-05 2차(고도화 3)에 추가됐다. 그전까지 이 열거형에는 **"모른다"를
+    말할 방법이 없었고**, 그래서 판정할 근거가 없는 상태가 전부 `OK`로 나갔다:
+
+    - `staleness_status()`의 웜업 구간(첫 틱 이전)이 `OK`였다 — 08:36에 뜬 G2가 08:45
+      첫 틱 전까지 "수집기 정상"이라는 보고를 9분간 받았다. 받은 데이터는 0건이었다.
+    - 합성기가 아직 아무 봉도 확정 안 한 상태도 `OK`였다.
+
+    **소비처가 이미 3분법을 쓰고 있었다는 점이 결정적이다.**
+    `TradingPipeline._collector_reports_healthy()`는 `None`(모름) / `True` / `False`를
+    나눠 쓰는데, 발행 쪽이 `OK`/`WARN`/`CRITICAL`뿐이라 "모름"을 표현할 수단이 없었다.
+    소비처의 `None` 자리에 이제 이 값이 대응된다.
+    """
+
     OK = "OK"
     WARN = "WARN"
     CRITICAL = "CRITICAL"
+    UNKNOWN = "UNKNOWN"
 
 
 # ---------------------------------------------------------------- 베이스

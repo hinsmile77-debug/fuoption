@@ -389,11 +389,26 @@ class TradingPipeline:
           정지시키는 게 맞다. WARN도 정상으로 안 쳐주는 건, WARN이 뜨는 시점이 이미 적응
           임계의 절반이라 곧 강제 재연결이 걸릴 구간이기 때문이다(`data/collector.py`
           `health()`).
+
+        ## `UNKNOWN`은 `None`과 같은 갈래다 (2026-08-05 2차, 고도화 3)
+
+        이 함수는 처음부터 3분법이었는데 **발행 쪽에 "모른다"가 없었다.** 그래서 수집기가
+        한 건도 못 받은 웜업 상태가 `OK`로 와서 여기 `True`가 됐고, 결과적으로
+        **데이터가 0건인 것이 CB 억제 근거로 쓰였다** — 08:36~08:45의 9분, 그리고 재연결
+        직후마다(워치독이 리셋된다). 실제 수정은 `core/health.staleness_status()`가 그
+        구간을 `UNKNOWN`으로 내보내게 한 것이다.
+
+        여기서 `False`가 아니라 `None`으로 접는 이유는 **의미** 때문이다. `False`는 "수집기가
+        이상하다고 말하는 중"이라는 적극적 주장인데 `UNKNOWN`은 그런 주장을 한 적이 없다.
+        (오늘의 `CircuitBreakerMonitor.observe()`는 `not collector_healthy`로 읽어 둘을
+        구분하지 않지만, 그건 그쪽 구현의 사정이지 이 함수의 계약이 아니다.)
         """
         health = self._last_collector_health
         if health is None:
             return None
         if (as_of - health.ts_utc).total_seconds() > HEALTH_STALE_AFTER_SECONDS:
+            return None
+        if health.level is HealthLevel.UNKNOWN:
             return None
         return health.level is HealthLevel.OK
 

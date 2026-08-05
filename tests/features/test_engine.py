@@ -447,7 +447,12 @@ class _Clock:
         return self.now
 
 
-async def test_health_is_ok_before_the_first_publish():
+async def test_health_is_unknown_not_ok_before_the_first_publish():
+    """웜업은 장애가 아니지만 **정상도 아니다** (2026-08-05 2차, 고도화 3).
+
+    한 번도 발행 안 한 상태를 `OK`로 내보내면 화면·상태판에서 초록으로 보인다 — 근거 없는
+    OK와 근거 있는 OK가 구분되지 않는 것이 그날 장중점검의 핵심 지적이었다.
+    """
     clock = _Clock()
     engine = FeatureEngine(
         "A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5], monotonic=clock
@@ -455,7 +460,8 @@ async def test_health_is_ok_before_the_first_publish():
 
     status = engine.health()
 
-    assert status.level is HealthLevel.OK
+    assert status.level is HealthLevel.UNKNOWN
+    assert status.level not in (HealthLevel.WARN, HealthLevel.CRITICAL)
     assert "웜업" in status.detail
 
 

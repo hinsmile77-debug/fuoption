@@ -133,8 +133,21 @@ def test_never_received_is_not_treated_as_an_outage():
     """08:35 기동 후 첫 틱(실측 08:45)까지 10분을 장애로 표시하면 매일 아침 거짓 경보다."""
     status = staleness_status(None, warn_after=60.0, critical_after=120.0)
 
-    assert status.level is HealthLevel.OK
+    assert status.level not in (HealthLevel.WARN, HealthLevel.CRITICAL)
     assert "웜업" in status.detail
+
+
+def test_never_received_is_not_called_ok_either():
+    """**"장애가 아니다"와 "정상이다"는 다르다** (2026-08-05 2차, 고도화 3).
+
+    한 건도 못 받은 상태가 `OK`로 나가면 화면·상태판에서 초록으로 보이고, 더 나쁜 것은
+    `TradingPipeline._collector_reports_healthy()`가 그걸 "한산하다"로 읽어 **서킷브레이커
+    승격을 막는다는 점**이다 — 데이터가 0건인 것이 CB 억제 근거로 쓰였다(08:36~08:45의
+    9분, 그리고 재연결 직후마다).
+    """
+    status = staleness_status(None, warn_after=60.0, critical_after=120.0)
+
+    assert status.level is HealthLevel.UNKNOWN
 
 
 @pytest.mark.parametrize(

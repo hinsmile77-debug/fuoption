@@ -97,3 +97,88 @@ def test_naive_datetime_is_rejected():
     tracker = ClockSkewTracker()
     with pytest.raises(ValueError):
         tracker.observe(datetime(2026, 8, 4, 9, 0), _BASE)  # noqa: DTZ001
+
+
+# ---------------------------------- 수신 지연 분포 (2026-08-05 2차, 고도화 1)
+#
+# 1분봉을 시각으로 닫으려면 "경계 뒤 몇 초까지 기다려야 안전한가"를 알아야 하는데, 그 답을
+# 줄 측정이 이 프로젝트에 하나도 없었다 — 틱 아카이브는 거래소 시각만 남긴다.
+# 같은 표본에서 지연의 **상한**이 공짜로 나온다(모듈 docstring의 유도).
+
+
+def _fill_with_delay(
+    tracker: ClockSkewTracker, delays: list[float], *, skew_seconds: float = 0.0
+) -> None:
+    """지연이 `delays`인 프레임들을 넣는다. `frac(t)`는 0으로 고정해 지연만 남긴다."""
+    for i, delay in enumerate(delays):
+        true_moment = _BASE + timedelta(seconds=i)  # frac(t) = 0
+        ts_exchange = true_moment.replace(microsecond=0)
+        received = true_moment - timedelta(seconds=skew_seconds) + timedelta(seconds=delay)
+        tracker.observe(ts_exchange, received)
+
+
+def test_delivery_latency_is_none_until_enough_samples():
+    """못 잰 것과 "지연 0"을 절대 합치지 않는다(L18) — 유예를 정하는 근거라 특히 그렇다."""
+    tracker = ClockSkewTracker()
+    _fill_with_delay(tracker, [0.2] * (MIN_SAMPLES - 1))
+
+    assert tracker.delivery_latency_seconds() is None
+
+
+def test_it_measures_excess_over_the_fastest_frame_not_absolute_delay():
+    """**이 성질이 이 지표의 정의다.**
+
+    지연이 전부 0.1초로 일정하면 초과분은 0이다 — 절대 지연을 재는 게 아니기 때문이다.
+    그리고 그게 맞다: 봉 경계 판정이 쓰는 스큐 추정 ŝ가 그 0.1초를 이미 흡수하고 있으므로,
+    유예가 덮어야 하는 것은 "가장 빠른 프레임보다 얼마나 늦었나"뿐이다.
+    """
+    tracker = ClockSkewTracker()
+    _fill_with_delay(tracker, [0.1] * 100)
+
+    stats = tracker.delivery_latency_seconds()
+    assert stats is not None
+    assert stats["max"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_delivery_latency_recovers_the_spread():
+    """빠른 프레임이 섞여 있으면 느린 쪽의 초과분이 그대로 드러나야 한다."""
+    tracker = ClockSkewTracker()
+    delays = [0.1] * 90 + [0.9] * 9 + [3.0]
+    _fill_with_delay(tracker, delays)
+
+    stats = tracker.delivery_latency_seconds()
+    assert stats is not None
+    assert stats["p50"] == pytest.approx(0.0, abs=1e-6)  # 0.1 − 0.1
+    assert stats["p99"] == pytest.approx(2.9, abs=1e-6)  # 3.0 − 0.1
+    assert stats["max"] == pytest.approx(2.9, abs=1e-6)
+    assert stats["samples"] == 100
+
+
+def test_delivery_latency_never_understates_the_spread():
+    """`frac(t)`가 섞이면 초과분이 참값보다 커진다(최대 1초). **커지는 방향인 것이 중요하다**
+    — 이 값으로 유예를 잡으면 항상 안전한 쪽으로 잡히고, 봉이 잘리는 일은 안 생긴다."""
+    tracker = ClockSkewTracker()
+    true_delay = 0.25
+    for i in range(200):
+        fraction = (i % 100) / 100.0
+        true_moment = _BASE + timedelta(seconds=i, microseconds=int(fraction * 1_000_000))
+        tracker.observe(
+            true_moment.replace(microsecond=0), true_moment + timedelta(seconds=true_delay)
+        )
+
+    stats = tracker.delivery_latency_seconds()
+    assert stats is not None
+    assert stats["max"] <= 1.0  # frac(t) 과대평가는 1초를 못 넘는다
+    assert stats["p90"] > 0.0  # 그래도 0으로 뭉개지지는 않는다
+
+
+def test_delivery_latency_is_unaffected_by_a_clock_jump():
+    """시계가 하루 중 점프해도 분포가 통째로 밀리면 안 된다 — 각 표본의 기준이 **그 시점의**
+    창 최댓값이기 때문이다. 스큐가 0초에서 5초로 뛰어도 지연 추정은 그대로여야 한다."""
+    tracker = ClockSkewTracker()
+    _fill_with_delay(tracker, [0.2] * 300, skew_seconds=0.0)
+    _fill_with_delay(tracker, [0.2] * 300, skew_seconds=5.0)
+
+    stats = tracker.delivery_latency_seconds()
+    assert stats is not None
+    assert stats["p90"] < 1.5, f"시계 점프가 지연 분포를 오염시켰다: {stats}"

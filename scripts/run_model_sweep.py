@@ -40,7 +40,7 @@ import json
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -137,6 +137,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--out", default="logs/model_sweep_20260804.json")
     session_guard.add_force_intraday_argument(p)
+    session_guard.add_force_corrupt_archive_argument(p)
     return p.parse_args()
 
 
@@ -267,6 +268,14 @@ async def main() -> int:
     archiver = ParquetArchiver(Path(args.base_dir))
     start = datetime.strptime(args.start, "%Y-%m-%d").date()  # noqa: DTZ007
     end = datetime.strptime(args.end, "%Y-%m-%d").date()  # noqa: DTZ007
+    # 손상 판정된 날 위에서 학습하지 않는다 (2026-08-05 2차, 고도화 5). 2026-08-05에 상위
+    # Horizon 봉의 3~17%가 잘렸고, 1분봉은 무손상이라 재합성으로 복구되지만 **복구 전에
+    # 학습하면 잘린 봉을 그대로 배운다.** 그 순서가 문서에만 있으면 지켜지지 않는다.
+    session_guard.refuse_if_archive_corrupt(
+        "모델 스윕",
+        [start + timedelta(days=i) for i in range((end - start).days + 1)],
+        force=args.force_corrupt_archive,
+    )
     segments = backfill.front_month_days(start, end)
     m1_bars, _ = backfill.load_continuous_series(archiver, segments, symbol_out=_SYMBOL)
     if not m1_bars:

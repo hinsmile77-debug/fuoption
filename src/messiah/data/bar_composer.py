@@ -258,6 +258,13 @@ class MultiHorizonBarComposer:
         # 종전에는 이 사실이 로그에만 있었고, 26건이 나는 동안 heartbeat는 계속 OK였다.
         self._late_bar_drops = 0
         self._incomplete_flushes = 0
+        # Horizon별 거래량 회계 (2026-08-05 2차, 고도화 2) — 항등식을 **장중에 연속으로**
+        # 잰다. `ops/integrity_report.analyze_horizon_consistency`가 같은 항등식을 보지만
+        # 그건 아카이브를 읽는 장후 검사라, 2026-08-05엔 첫 증거가 08:48에 있었는데도
+        # 사람이 알아챈 것은 한 시간 뒤였다. 여기서는 **첫 버킷에서 즉시** 드러난다.
+        self._composed_volume: dict[Horizon, int] = dict.fromkeys(self._targets, 0)
+        self._lost_volume: dict[Horizon, int] = dict.fromkeys(self._targets, 0)
+        self._composed_bars: dict[Horizon, int] = dict.fromkeys(self._targets, 0)
         self._clock_skew_seconds = clock_skew_seconds
         self._now = now
         self._sleep = sleep
@@ -277,6 +284,31 @@ class MultiHorizonBarComposer:
         """마지막 구성 1분봉을 못 기다리고 확정한 버킷 수(겹④ 상한 초과)."""
         return self._incomplete_flushes
 
+    def volume_identity(self) -> dict[str, dict[str, int | float]]:
+        """Horizon별 거래량 항등식의 **현재까지** 상태 (고도화 2, 2026-08-05 2차).
+
+        `composed`는 지금까지 내보낸 합성봉 거래량의 합, `lost`는 늦게 도착해 버린 1분봉
+        거래량의 합이다. 정의상 `lost == 0`이어야 하고, 그때 이 Horizon의 합성봉 총합은
+        같은 구간 1분봉 총합과 정확히 일치한다 — 장후 `analyze_horizon_consistency`가
+        아카이브에서 보는 그 항등식을, 여기서는 **메모리에서 즉시** 본다.
+
+        왜 아카이브를 다시 읽지 않나: 파일 I/O가 필요 없고(수집 루프에 붙는다), 조각/통합본
+        배치를 신경 쓸 필요가 없고, 무엇보다 **첫 버킷에서 바로** 드러난다. 아카이브 검사는
+        여전히 필요하다 — 그쪽은 적재 단계의 결함(예: 같은 시각 덮어쓰기)을 보는데 이건 못 본다.
+        """
+        out: dict[str, dict[str, int | float]] = {}
+        for horizon in self._targets:
+            composed = self._composed_volume[horizon]
+            lost = self._lost_volume[horizon]
+            total = composed + lost
+            out[horizon.value] = {
+                "composed_volume": composed,
+                "lost_volume": lost,
+                "bars": self._composed_bars[horizon],
+                "lost_ratio": (lost / total) if total else 0.0,
+            }
+        return out
+
     def health(self) -> HealthStatus:
         """`sys.health` heartbeat용 자가 판정 — 합성 손상은 **일어나는 중에** 보여야 한다.
 
@@ -287,14 +319,26 @@ class MultiHorizonBarComposer:
         임계가 0인 이유: 늦은 봉 1건은 곧 상위 Horizon 1개가 한 분(分) 모자라게 확정됐다는
         뜻이고, 그건 정의상의 항등식(`ops/integrity_report.analyze_horizon_consistency`)
         위반이다. "조금은 괜찮다"가 성립하는 축이 아니다.
+
+        **정상일 때도 근거를 말한다**(고도화 3): "손실 없음"만 찍으면 "검사했는데 0"과
+        "합성기가 아직 아무것도 안 했다"가 구분되지 않는다. 확정한 봉이 0개면 OK가 아니라
+        `UNKNOWN`이다 — 판정할 재료가 아직 없다는 뜻이고, 장전 구간이 실제로 그 상태다.
         """
+        identity = self.volume_identity()
+        bars = sum(int(entry["bars"]) for entry in identity.values())
         losses = self._late_bar_drops + self._incomplete_flushes
         if losses == 0:
-            return HealthStatus(HealthLevel.OK, "버킷 손실 없음")
+            if bars == 0:
+                return HealthStatus(
+                    HealthLevel.UNKNOWN, "확정한 합성봉이 아직 없다 — 판정할 근거 없음"
+                )
+            return HealthStatus(HealthLevel.OK, f"합성봉 {bars}개 · 거래량 항등식 일치(유실 0)")
+        worst = max(identity.items(), key=lambda kv: kv[1]["lost_ratio"])
         return HealthStatus(
             HealthLevel.WARN,
             f"버킷 손실 {losses}건(늦은 봉 {self._late_bar_drops} · "
-            f"미완 확정 {self._incomplete_flushes}) — 상위 Horizon 거래량이 1분봉 합보다 적다",
+            f"미완 확정 {self._incomplete_flushes}) — 최악 {worst[0]} "
+            f"{int(worst[1]['lost_volume']):,}계약 유실({worst[1]['lost_ratio']:.1%})",
         )
 
     async def handle_one_minute_bar(self, bar: BarClosed) -> None:
@@ -319,6 +363,7 @@ class MultiHorizonBarComposer:
             flushed = self._last_flushed_start[horizon]
             if flushed is not None and start <= flushed:
                 self._late_bar_drops += 1
+                self._lost_volume[horizon] += bar.volume
                 mlog.log(
                     "ComposerLateBarDropped",
                     f"이미 확정한 {horizon.value} 버킷({start:%H:%M})으로 1분봉"
@@ -327,6 +372,9 @@ class MultiHorizonBarComposer:
                     horizon=horizon.value,
                     bucket_start=start.isoformat(),
                     bar_open_kst=bar.bar_open_kst.isoformat(),
+                    # 건수가 아니라 **거래량**이 항등식의 단위다 — 리포트가 "몇 봉이 늦었나"가
+                    # 아니라 "얼마가 빠졌나"를 집계할 수 있어야 한다(2026-08-05 2차).
+                    lost_volume=bar.volume,
                 )
                 continue
 
@@ -448,9 +496,10 @@ class MultiHorizonBarComposer:
         self._last_flushed_start[horizon] = bucket_start
 
         # 합성 규칙 자체는 `compose_composite_bar()`에 있다 — 오프라인 재합성과 한 곳을 쓴다.
-        await self._archive_and_publish(
-            compose_composite_bar(self._symbol, horizon, bucket_start, bars)
-        )
+        composite = compose_composite_bar(self._symbol, horizon, bucket_start, bars)
+        self._composed_volume[horizon] += composite.volume
+        self._composed_bars[horizon] += 1
+        await self._archive_and_publish(composite)
 
     async def wait_for_bar(
         self,

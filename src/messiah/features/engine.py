@@ -337,7 +337,18 @@ class FeatureEngine:
         if degraded:
             worst = ", ".join(f"{h} {r:.0%}" for h, r in sorted(degraded.items()))
             return HealthStatus(HealthLevel.WARN, f"NaN 비율 임계 초과 — 신호 정지 권고: {worst}")
-        return status
+
+        # **OK일 때 무엇을 근거로 OK인지 말한다** (2026-08-05 2차, 고도화 3). 종전에는
+        # "최근 수신 3초 전"만 나갔는데, 그건 신선도일 뿐 NaN 검사가 실제로 돌았다는 뜻이
+        # 아니다 — `_last_nan_ratio`가 비어 있어도 같은 문장이 나갔다. 근거를 못 대는 OK와
+        # 근거가 있는 OK를 화면에서 구분할 수 있어야 한다.
+        if not self._last_nan_ratio:
+            return HealthStatus(
+                HealthLevel.UNKNOWN, f"{status.detail} · NaN 비율 표본 없음(검사 미수행)"
+            )
+        return HealthStatus(
+            status.level, f"{status.detail} · NaN 임계 이하 {len(self._last_nan_ratio)}개 Horizon"
+        )
 
     @property
     def history_capacity(self) -> int:

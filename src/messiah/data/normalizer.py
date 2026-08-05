@@ -47,14 +47,25 @@ _parse_tick/_parse_futures_tick이 가진 한계를 그대로 이식했고, "별
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from messiah.core import logging as mlog
 from messiah.core.event_calendar import DEFAULT_SESSION
 from messiah.core.messages import BarClosed, BarSession, Horizon, Tick
-from messiah.core.timeutil import KST, now_kst, to_kst
+from messiah.core.timeutil import KST, ensure_aware, now_kst, to_kst
+
+# 시각 구동 1분봉 확정(`MinuteBarAggregator.flush_due`)의 경계 이후 유예 (고도화 1).
+#
+# **아직 실측으로 확정된 값이 아니다.** 2026-08-05에 수신 지연 계측
+# (`ops/clock_skew.delivery_latency_seconds`)을 붙였고, 며칠 p99를 본 뒤 이 값을 확정한 다음
+# `minute_bar_close: timer`로 승격한다. 그때까지 기본은 틱 구동이라 이 상수는 안 쓰인다.
+#
+# 1.0초로 시작하는 근거: 같은 날 스큐 추정이 −0.315초였고(= 수신 지연 중앙값 ~0.3초),
+# 상위 Horizon 합성기의 유예가 0.5초인데 그 값이 69% 부족했다. 그보다 넉넉하되 다음 분
+# 경계를 침범하지 않는 크기로 잡았다.
+MINUTE_CLOSE_GRACE_SECONDS = 1.0
 
 # H0IFCNT0(지수선물 실시간체결가) 필드 인덱스 — "^" 구분, 0-based. 실제 메시지는 50개 필드다
 # (2026-07-22 라이브 캡처로 확인).
@@ -315,6 +326,41 @@ class MinuteBarAggregator:
     직전 종가는 **이 인스턴스가 만든 봉**만 기준으로 삼는다. 재연결 시 `collector.py`가
     aggregator를 새로 만드므로 기준선도 함께 리셋되는데, 그게 맞다 — 단절 구간을 사이에 둔
     두 봉의 변화율은 "가격이 튀었다"가 아니라 "그 사이를 못 봤다"이기 때문이다.
+
+    ## 봉을 언제 닫는가 — 두 경로 (2026-08-05 2차, 고도화 1)
+
+    원래 이 클래스는 **다음 분의 첫 틱이 도착해야** 이전 분의 봉을 내놓았다(`add_tick`).
+    그 결과 1분봉의 발행 시각을 시계가 아니라 **틱 도착률**이 정했고, 2026-08-05 실측으로
+    발행 지연 중앙값이 0.655초·p90 1.62초·최대 7.96초였다. 상위 Horizon 합성기가 경계+0.5초에
+    확정하므로 69%가 그 뒤에 도착했고, 상위 봉이 매 버킷 한 분씩 잘렸다
+    (`data/bar_composer.py` "스큐를 고쳤더니 드러난 것").
+
+    합성기 쪽은 겹④(마지막 구성봉 대기)로 막았다. 그건 **정확하지만 느리다** — 매 상위 봉이
+    1분봉을 기다린 만큼 늦게 나간다. 근본 처방은 1분봉 자체를 시각으로 닫는 것이다:
+
+    - **`add_tick`(틱 구동, 기본)** — 종전 그대로. 틱이 흐르는 동안은 즉시·정확하다.
+    - **`flush_due`(시각 구동, 선택)** — 거래소 시각이 경계+유예를 지나면 닫는다.
+
+    둘은 **배타가 아니다.** 먼저 오는 쪽이 닫고, 늦은 쪽은 `_last_flushed_minute` 가드에
+    걸려 아무 일도 안 한다. 그래서 시각 구동을 켜도 정상 구간의 동작은 안 바뀌고,
+    **틱이 늦는 구간에서만** 봉이 제때 나간다.
+
+    ## 왜 시각 구동이 기본이 아닌가
+
+    시각으로 닫으면 그 분에 속하지만 유예 뒤에 도착한 틱은 **버려진다**. 즉 유실을 고치려고
+    다른 유실을 들여올 수 있다. 그 크기를 정하는 것은 회선의 수신 지연 분포인데,
+    2026-08-05 시점에 이 프로젝트엔 그걸 잰 데이터가 하나도 없었다 — 틱 아카이브는 거래소
+    시각만 남기고 수신 시각을 안 남긴다.
+
+    그래서 같은 날 `ClockSkewTracker.delivery_latency_seconds()`로 **측정부터 붙였다.**
+    며칠 p99를 보고 `MINUTE_CLOSE_GRACE_SECONDS`를 확정한 뒤 `minute_bar_close: timer`로
+    승격한다. 임계를 실측 없이 정하지 않는다는 것이 이 프로젝트의 반복된 교훈이다.
+
+    ## 늦은 틱은 조용히 버리지 않는다
+
+    종전에도 `minute < _current_minute`인 틱은 버렸는데 **로그가 없었다**(L18 위반). 시각
+    구동에서는 그 경로가 훨씬 자주 열리므로, 분(分)마다 한 줄씩 남기고 건수를 센다 —
+    매 틱 로그하면 하루 수만 줄이 되어 아무도 안 본다(`FeaturePublish`가 그랬다).
     """
 
     MIN_TICKS_FOR_QUALITY_OK = 3  # mahdi MinuteBarAggregator.MIN_TICKS_FOR_NORMAL_QUALITY와 동일
@@ -330,23 +376,39 @@ class MinuteBarAggregator:
         self._current_minute: datetime | None = None
         self._ticks: list[Tick] = []
         self._prev_close_ticks: int | None = None
+        # 이미 닫아서 내보낸 마지막 분 — 그 분으로 오는 틱이 새 버킷을 열지 못하게 막는다
+        # (`MultiHorizonBarComposer._last_flushed_start`와 같은 역할·같은 이유).
+        self._last_flushed_minute: datetime | None = None
+        self._late_tick_drops = 0
+        self._last_late_log_minute: datetime | None = None
+
+    @property
+    def late_tick_drops(self) -> int:
+        """이미 닫힌 분으로 도착해 버린 틱 수 — 그만큼 1분봉 거래량에서 빠졌다."""
+        return self._late_tick_drops
 
     def add_tick(self, tick: Tick) -> BarClosed | None:
         """
         계산: tick의 분(ts_exchange를 초 단위로 절삭)이 누적 중인 분과 다르면 기존 버킷을
              BarClosed로 flush하고 새 버킷을 시작한다. 같은 분이면 누적만 하고 None.
-        실패 조건: tick이 현재 버킷보다 과거 분(지연 도착)이면 무시하고 None.
+        실패 조건: 이미 닫은 분으로 오는 틱(지연 도착)은 버린다 — 조용히는 안 버린다(L18).
         """
         minute = tick.ts_exchange.replace(second=0, microsecond=0)
+
+        if self._last_flushed_minute is not None and minute <= self._last_flushed_minute:
+            self._note_late_tick(minute)
+            return None
 
         if self._current_minute is None:
             self._current_minute = minute
 
         if minute < self._current_minute:
+            self._note_late_tick(minute)
             return None
 
         if minute > self._current_minute:
             completed = self._build_bar()
+            self._last_flushed_minute = self._current_minute
             self._current_minute = minute
             self._ticks = [tick]
             return completed
@@ -354,11 +416,58 @@ class MinuteBarAggregator:
         self._ticks.append(tick)
         return None
 
+    def flush_due(
+        self, exchange_now: datetime, *, grace_seconds: float = MINUTE_CLOSE_GRACE_SECONDS
+    ) -> BarClosed | None:
+        """거래소 시각이 **경계 + 유예**를 지났으면 누적 중인 분을 닫는다 (고도화 1).
+
+        입력: `exchange_now`는 로컬 시각이 아니라 **거래소 시각**이어야 한다 — 호출측
+             (`TickCollector.flush_due_minute`)이 측정된 스큐를 더해서 넘긴다. 로컬 시계로
+             판단하면 2026-08-05에 상위 Horizon을 잘라먹은 것과 똑같은 실패를 1분봉에서
+             반복한다.
+        반환: 닫은 봉, 아직 때가 아니거나 누적 틱이 없으면 None.
+
+        `add_tick`의 롤오버와 **경합하지 않는다**: 먼저 닫는 쪽이 `_last_flushed_minute`를
+        올리고, 늦은 쪽은 그 가드에 걸려 아무 일도 안 한다.
+        """
+        ensure_aware(exchange_now)
+        if self._current_minute is None or not self._ticks:
+            return None
+        deadline = self._current_minute + timedelta(minutes=1, seconds=grace_seconds)
+        if exchange_now < deadline:
+            return None
+        completed = self._build_bar()
+        self._last_flushed_minute = self._current_minute
+        self._current_minute = None
+        self._ticks = []
+        return completed
+
     def flush_final(self) -> BarClosed | None:
         """세션 종료(WS 연결 종료 등) 시 마지막 누적 버킷을 강제로 flush한다."""
         completed = self._build_bar()
+        if self._current_minute is not None:
+            self._last_flushed_minute = self._current_minute
         self._ticks = []
         return completed
+
+    def _note_late_tick(self, minute: datetime) -> None:
+        """건수는 매번 세고, 로그는 **분마다 한 줄**만 남긴다.
+
+        매 틱 남기면 하루 수만 줄이 되어 아무도 안 본다 — `FeaturePublish`가 8거래일 내내
+        `nan_ratio=0.0165`를 찍고도 아무도 안 물어본 실패 형태다(2026-08-04). 분당 한 줄이면
+        최악이어도 정규장 405줄이고, 각 줄이 곧 조치 대상이다.
+        """
+        self._late_tick_drops += 1
+        if self._last_late_log_minute == minute:
+            return
+        self._last_late_log_minute = minute
+        mlog.log(
+            "AggregatorLateTickDropped",
+            f"이미 닫은 {minute:%H:%M} 분봉으로 체결틱이 늦게 도착 — 그 분의 거래량에서 빠진다",
+            symbol=self._symbol,
+            horizon=self._horizon.value,
+            bar_open_kst=minute.isoformat(),
+        )
 
     def _build_bar(self) -> BarClosed | None:
         if not self._ticks or self._current_minute is None:

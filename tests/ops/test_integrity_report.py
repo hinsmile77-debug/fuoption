@@ -1042,6 +1042,16 @@ def test_measured_axes_drop_out_of_unmeasured(tmp_path: Path):
             {"level": "INFO", "tag": "ClockSkewMeasured", "skew_seconds": -0.01},
             {
                 "level": "INFO",
+                "tag": "TickDeliveryLatency",
+                "measured": True,
+                "p50": 0.05,
+                "p90": 0.31,
+                "p99": 0.88,
+                "max": 2.4,
+                "samples": 12000,
+            },
+            {
+                "level": "INFO",
                 "tag": "FeatureHealthSummary",
                 "horizon": "1m",
                 "always_nan": [],
@@ -1115,3 +1125,56 @@ def test_degraded_host_is_a_breach_but_unmeasured_host_is_not(tmp_path: Path):
     assert any("호스트 위생: disk" in breach for breach in report.breaches)
     assert any("power" in item for item in report.unmeasured)
     assert not any("power" in breach for breach in report.breaches)
+
+
+# ------------------------- 회선 수신 지연 분포 (2026-08-05 2차, 고도화 1)
+#
+# `minute_bar_close: timer`(1분봉 시각 확정) 승격의 **유일한 근거 데이터**다. 2026-08-05까지
+# 이 프로젝트엔 회선 지연을 잰 것이 하나도 없었다 — 틱 아카이브는 거래소 시각만 남긴다.
+
+
+def test_delivery_latency_is_carried_into_the_report(tmp_path: Path):
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {
+                "level": "INFO",
+                "tag": "TickDeliveryLatency",
+                "measured": True,
+                "p50": 0.05,
+                "p90": 0.31,
+                "p99": 0.88,
+                "max": 2.4,
+                "samples": 12000,
+            },
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.delivery_latency is not None
+    assert report.delivery_latency["p99"] == 0.88
+    assert "회선 수신 지연 초과분" in format_summary(report)
+    # **판정은 안 한다** — 임계를 정할 근거를 모으는 중이라 breach가 되면 안 된다.
+    assert not any("지연" in breach for breach in report.breaches)
+
+
+def test_unmeasured_latency_is_not_treated_as_zero(tmp_path: Path):
+    """못 잰 것과 "지연 없음"을 합치면 승격 근거가 조용히 사라진다(L18)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "l1.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"level": "INFO", "tag": "TickDeliveryLatency", "measured": False},
+        ],
+    )
+
+    report = _report(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.delivery_latency is None
+    assert any("회선 수신 지연" in item for item in report.unmeasured)

@@ -1,4 +1,5 @@
-"""장중 학습·백필 거부 — SYSTEM.md R11 / 금지 15계명 3·4를 코드로 강제 (2026-08-05).
+"""오프라인 작업의 전제 조건을 코드로 강제 — **언제** 돌려도 되는가(R11)와 **무엇 위에서**
+돌려도 되는가(아카이브 정합) 두 가지 (2026-08-05).
 
 ## 왜 이 모듈이 생겼나
 
@@ -29,8 +30,11 @@
 
 from __future__ import annotations
 
+import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
+from pathlib import Path
+from typing import Sequence
 
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.timeutil import now_kst
@@ -96,4 +100,97 @@ def add_force_intraday_argument(parser) -> None:  # type: ignore[no-untyped-def]
         "--force-intraday",
         action="store_true",
         help="정규장 중에도 실행(R11 예외 — REST 유량·CPU를 수집 파이프라인과 공유한다)",
+    )
+
+
+# ------------------------------------------------ 아카이브 정합 (2026-08-05 2차, 고도화 5)
+
+
+def corrupt_archive_days(
+    days: Sequence[date], *, log_dir: Path = Path("logs")
+) -> dict[date, list[str]]:
+    """학습 구간 중 **상위 Horizon 봉이 손상된 것으로 이미 판정된** 날들.
+
+    근거는 그날 무결성 리포트의 `horizon_findings`다 — "상위 봉 거래량 합 ≠ 1분봉 합"이라는
+    정의상의 항등식 위반이고, `run_recompose.py`로 재합성하면 사라진다. 즉 이 목록이 비면
+    "재합성이 끝났다"는 뜻이기도 하다.
+
+    **`late_bar_drops`는 일부러 안 본다.** 그건 수집 당시의 사건을 세는 지표라 재합성 후에도
+    남는다(그게 그 지표의 존재 이유다). 그걸로 막으면 2026-08-05가 영원히 학습 불가가 된다.
+
+    리포트가 없는 날은 목록에 넣지 않는다 — 리포트는 2026-07-27부터 있고 학습 구간은 보통
+    수개월이라, 없는 날을 전부 막으면 아무것도 학습할 수 없다. 대신 호출측이 "몇 날을 못
+    봤는지"를 함께 알리도록 `unjudged_days()`를 따로 둔다.
+    """
+    findings: dict[date, list[str]] = {}
+    wanted = set(days)
+    for path in sorted(log_dir.glob("daily_integrity_*.json")):
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            day = date.fromisoformat(report["date"])
+        except (OSError, ValueError, KeyError):
+            continue  # 깨진 리포트 하나가 가드 전체를 막지 않는다
+        if day not in wanted:
+            continue
+        items = [str(item) for item in (report.get("horizon_findings") or [])]
+        if items:
+            findings[day] = items
+    return findings
+
+
+def refuse_if_archive_corrupt(
+    what: str,
+    days: Sequence[date],
+    *,
+    force: bool = False,
+    log_dir: Path = Path("logs"),
+) -> None:
+    """학습 구간에 손상 판정된 날이 있으면 `SystemExit(REFUSED_EXIT_CODE)`.
+
+    ## 왜 필요했나 (2026-08-05 2차)
+
+    그날 상위 Horizon 봉의 3~17%가 잘린 채 아카이브에 들어갔다(`data/bar_composer.py`).
+    1분봉은 무손상이라 `run_recompose.py`로 복구되지만, **복구 전에 학습을 돌리면 잘린 봉을
+    그대로 배운다.** 그리고 그 순서는 그날 문서에만 적혀 있었다 — 2026-07-29~08-03에 "다음
+    거래일에 확인한다"가 문서에만 있어 세 번 재발했던 것과 같은 형태다.
+
+    실패 조건: 리포트를 못 읽는 등 판정이 불가능하면 **통과시킨다** — 가드가 본 기능을 막는
+              쪽으로 실패하면 안 된다(`refuse_if_regular_session`과 같은 원칙). 조용히는 안 한다.
+    """
+    try:
+        corrupt = corrupt_archive_days(days, log_dir=log_dir)
+    except Exception as exc:  # noqa: BLE001 — 가드가 본 기능을 막지 않는다
+        print(f"[session_guard] 아카이브 정합 판정 불가({exc}) — 그대로 진행", flush=True)
+        return
+
+    if not corrupt:
+        return
+    listed = ", ".join(day.isoformat() for day in sorted(corrupt))
+    if force:
+        print(
+            f"[session_guard] 손상 판정된 날({listed})이 있지만 --force-corrupt-archive로 "
+            f"{what} 진행 — 잘린 상위 Horizon 봉을 그대로 학습한다",
+            flush=True,
+        )
+        return
+
+    sample = next(iter(sorted(corrupt)))
+    print(
+        f"[session_guard] {what} 구간에 상위 Horizon 봉이 손상된 날이 있다: {listed}\n"
+        f"  예: {sample.isoformat()} — {corrupt[sample][0]}\n"
+        "  1분봉은 무손상이므로 먼저 재합성할 것:\n"
+        "      python scripts/run_recompose.py --symbol <심볼>\n"
+        "      python scripts/daily_integrity_report.py --date <해당일>   # 판정 갱신\n"
+        "  정말 손상된 봉으로 학습해야 하면 --force-corrupt-archive 를 붙일 것.",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise SystemExit(REFUSED_EXIT_CODE)
+
+
+def add_force_corrupt_archive_argument(parser) -> None:  # type: ignore[no-untyped-def]
+    parser.add_argument(
+        "--force-corrupt-archive",
+        action="store_true",
+        help="상위 Horizon 봉이 손상 판정된 날이 있어도 학습 진행(재합성 전 학습 — 권장하지 않음)",
     )

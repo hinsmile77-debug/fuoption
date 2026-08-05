@@ -37,3 +37,9 @@ model_bundle: "none"                       # live 모드는 지정 필수 (자�
 redis_url: "redis://localhost:6380/0"
 feature_set: "v2026.07"                    # FeatureVector.feature_set (Ver 1.4 §5.2, W6~8 PX 핵심 30개)
 futures_tick_size: "0.02"                  # 미니선물(A05608) 실측값 — 다른 상품엔 그대로 쓰지 말 것
+
+# 1분봉 확정 방식 (2026-08-05 고도화 1) — tick | timer
+#   tick  : 다음 분의 첫 틱이 도착하면 닫는다(종전 동작)
+#   timer : 거래소 시각이 경계+유예를 지나면 닫는다(근본 처방, 승격 대기)
+# 승격 조건: `TickDeliveryLatency` p99를 며칠 보고 MINUTE_CLOSE_GRACE_SECONDS 확정 후.
+minute_bar_close: "tick"

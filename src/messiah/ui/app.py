@@ -193,6 +193,10 @@ _HEALTH_LEVEL_COLOR: dict[str, str] = {
     "OK": "#00C9A7",  # `_BADGE_COLOR`/`_CB_PHASE_COLOR`와 같은 팔레트 재사용
     "WARN": "#FFB020",
     "CRITICAL": "#FF5C7A",
+    # UNKNOWN은 **초록이 아니다**(2026-08-05 2차, 고도화 3). 판정할 근거가 없는 상태를
+    # 정상색으로 칠하면 "한 건도 못 받았다"가 화면에서 "잘 돌고 있다"로 보인다 — `NO_DATA`
+    # 배지와 같은 그레이를 쓴다(`_BADGE_COLOR[FreshnessBadge.NO_DATA]`와 같은 값·같은 뜻).
+    "UNKNOWN": "#8A8F98",
 }
 
 

@@ -66,6 +66,7 @@ import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Sequence
 
@@ -537,6 +538,50 @@ class TickCollector:
         """거래소 시각 − 로컬 시계(초). 표본이 부족하면 None — `MultiHorizonBarComposer`가
         완성봉 경계 판정에 쓴다(`data/bar_composer.py` "왜 스큐를 보는가")."""
         return self._clock_skew.seconds
+
+    def exchange_now(self) -> datetime:
+        """측정된 스큐를 반영한 **거래소 시각** 추정치. 표본이 없으면 로컬 시각 그대로."""
+        return now_kst() + timedelta(seconds=self._clock_skew.seconds or 0.0)
+
+    async def flush_due_minute(self) -> None:
+        """시각 구동 1분봉 확정 (고도화 1) — `FixedTickScheduler`가 분 격자로 부른다.
+
+        `minute_bar_close: timer`일 때만 결선된다(`scripts/run_l1_daily.py`). 기본값인
+        틱 구동에서는 이 메서드가 아예 안 불리므로 동작이 종전과 완전히 같다.
+
+        판단은 **거래소 시각**으로 한다 — 로컬 시계로 하면 2026-08-05에 상위 Horizon을
+        잘라먹은 것과 똑같은 실패를 1분봉에서 반복한다.
+        """
+        bar = self._aggregator.flush_due(self.exchange_now())
+        if bar is not None:
+            await self._archive_and_publish_bar(bar)
+
+    def log_delivery_latency(self) -> None:
+        """회선 수신 지연 분포를 세션당 한 줄 남긴다 (고도화 1) — 장 마감 절차에서 부른다.
+
+        **이것이 `minute_bar_close: timer` 승격의 근거 데이터다.** 유예를 몇 초로 둘지는
+        이 분포의 p99가 정하고, 그 값은 2026-08-05까지 이 프로젝트에 존재하지 않았다.
+        못 잰 날은 그 사실을 남긴다 — "측정했는데 0"과 "측정 자체를 못 함"을 안 합친다(L18).
+        """
+        stats = self._clock_skew.delivery_latency_seconds()
+        if stats is None:
+            mlog.log(
+                "TickDeliveryLatency",
+                "수신 지연 표본 부족 — 분포 미측정(그날 틱이 거의 없었다는 뜻)",
+                symbol=self._symbol,
+                samples=self._clock_skew.samples,
+                measured=False,
+            )
+            return
+        mlog.log(
+            "TickDeliveryLatency",
+            f"회선 수신 지연 상한 — p50 {stats['p50']:.3f}s · p90 {stats['p90']:.3f}s · "
+            f"p99 {stats['p99']:.3f}s · 최대 {stats['max']:.3f}s "
+            f"(표본 {int(stats['samples'])}건, frac(t)만큼 과대평가된 상한)",
+            symbol=self._symbol,
+            measured=True,
+            **{key: round(value, 4) for key, value in stats.items()},
+        )
 
     async def _archive_and_publish_bar(self, bar: BarClosed) -> None:
         """완성봉 적재/발행은 파싱과 달리 인프라 실패라 침묵하면 안 됨(L22) — 잡아서 로깅하고

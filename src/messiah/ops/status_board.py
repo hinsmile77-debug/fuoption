@@ -233,9 +233,18 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
             lines.append(f"  {name}: 데이터 없음 — 한 번도 heartbeat를 안 보냈다")
             continue
         age = info.get("age_seconds")
-        mark = "정상" if state == "OK" else "응답 없음"
+        level = info.get("level")
+        # **"모른다"를 "정상"으로 쓰지 않는다** (2026-08-05 2차, 고도화 3). 신선도(state)와
+        # 자가 판정(level)은 다른 축이다 — heartbeat는 제때 왔는데(state=OK) 그 내용이
+        # "판정할 근거가 없다"(level=UNKNOWN)일 수 있고, 그게 장전 구간의 실제 상태다.
+        if state != "OK":
+            mark = "응답 없음"
+        elif level == "UNKNOWN":
+            mark = "판정 불가"
+        else:
+            mark = "정상"
         detail = f" · {info['detail']}" if info.get("detail") else ""
-        lines.append(f"  {name}: {mark}({info.get('level') or '?'}, {age}초 전){detail}")
+        lines.append(f"  {name}: {mark}({level or '?'}, {age}초 전){detail}")
 
     cb = snapshot.get("circuit_breaker") or {}
     if cb.get("state") == "NO_DATA":

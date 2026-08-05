@@ -16,6 +16,7 @@ import yaml
 
 from messiah.ops.fix_verification import (
     METRIC_EXTRACTORS,
+    PendingVerification,
     RegistryError,
     VerificationStatus,
     evaluate,
@@ -355,3 +356,199 @@ def test_progress_beats_stalled(tmp_path: Path):
 
     assert verdict.status == VerificationStatus.PENDING
     assert verdict.clean_days == 1
+
+
+# ------------------------- 전제 채점 (2026-08-05 2차, 고도화 4)
+#
+# 2026-08-05에 일어난 일: 전날 넣은 P0-1(시계 동기)이 P0-2(합성기 방어)의 **전제를 깼다**.
+# 등록부는 각 수정을 자기 지표로만 채점하므로 그걸 볼 수 없었다 — 08-04 리포트에서
+# `horizon_findings`는 빈 배열이었고 그 항목은 깨끗하게 통과 중이었다.
+
+
+def _premise_item(**overrides) -> PendingVerification:
+    base = dict(
+        id="composer-bucket-completeness",
+        summary="합성기 겹④",
+        registered=date(2026, 8, 5),
+        metric="late_bar_drops",
+        consecutive_days=3,
+        max_value=0.0,
+        premise_metric="delivery_latency_p99_seconds",
+        premise_max=3.0,
+        premise_summary="겹④ 상한 5초의 60%",
+    )
+    base.update(overrides)
+    return PendingVerification(**base)
+
+
+def _report_with(day: date, *, late_bar_drops: int = 0, latency_p99: float | None = None) -> dict:
+    report: dict = {"date": day.isoformat(), "late_bar_drops": late_bar_drops}
+    if latency_p99 is not None:
+        report["delivery_latency"] = {"p99": latency_p99, "max": latency_p99, "samples": 9000}
+    return report
+
+
+def test_a_clean_metric_with_a_broken_premise_is_flagged():
+    """**고도화 4의 핵심.** 결과가 아직 깨끗해도 딛고 선 전제가 무너지면 사람이 봐야 한다 —
+    그게 곧 다음 사고의 예고다."""
+    days = [date(2026, 8, 6), date(2026, 8, 7)]
+    reports = {d: _report_with(d, late_bar_drops=0, latency_p99=4.2) for d in days}
+
+    [verdict] = evaluate([_premise_item()], reports, today=date(2026, 8, 7))
+
+    assert verdict.status == VerificationStatus.PREMISE_BROKEN
+    assert verdict.needs_attention is True
+    assert "4.2" in verdict.detail
+    assert "겹④ 상한" in verdict.detail
+
+
+def test_a_holding_premise_does_not_disturb_the_normal_verdict():
+    """전제가 성립하면 종전과 완전히 같은 판정이어야 한다 —
+    이 기능이 정상일을 어지럽히면 안 된다."""
+    days = [date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
+    reports = {d: _report_with(d, late_bar_drops=0, latency_p99=0.9) for d in days}
+
+    [verdict] = evaluate([_premise_item()], reports, today=date(2026, 8, 10))
+
+    assert verdict.status == VerificationStatus.VERIFIED
+
+
+def test_recurrence_outranks_a_broken_premise():
+    """결과가 이미 나빠졌으면 그게 더 급한 사실이다 — 전제 얘기로 덮으면 안 된다."""
+    days = [date(2026, 8, 6), date(2026, 8, 7)]
+    reports = {d: _report_with(d, late_bar_drops=12, latency_p99=4.2) for d in days}
+
+    [verdict] = evaluate([_premise_item()], reports, today=date(2026, 8, 7))
+
+    assert verdict.status == VerificationStatus.RECURRED
+
+
+def test_an_unmeasured_premise_never_fabricates_a_verdict():
+    """전제를 못 잰 날을 "전제 성립"으로도 "붕괴"로도 읽지 않는다(L18)."""
+    days = [date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
+    reports = {d: _report_with(d, late_bar_drops=0) for d in days}  # delivery_latency 없음
+
+    [verdict] = evaluate([_premise_item()], reports, today=date(2026, 8, 10))
+
+    assert verdict.status == VerificationStatus.VERIFIED
+
+
+def test_a_typo_in_the_premise_metric_is_rejected_at_load(tmp_path: Path):
+    """전제도 결과와 **같은 엄격도**로 검증한다 — 조용히 건너뛰면 "전제를 감시 중"이라고
+    믿는 항목이 실제로는 아무것도 안 본다."""
+    path = tmp_path / "registry.yaml"
+    path.write_text(
+        "verifications:\n"
+        "  - id: x\n"
+        "    registered: 2026-08-05\n"
+        "    metric: late_bar_drops\n"
+        "    max: 0\n"
+        "    premise:\n"
+        "      metric: delivery_latency_p99_secondz\n"
+        "      max: 3.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RegistryError, match="알 수 없는 전제 지표"):
+        load_registry(path)
+
+
+def test_a_premise_without_bounds_is_rejected_at_load(tmp_path: Path):
+    path = tmp_path / "registry.yaml"
+    path.write_text(
+        "verifications:\n"
+        "  - id: x\n"
+        "    registered: 2026-08-05\n"
+        "    metric: late_bar_drops\n"
+        "    max: 0\n"
+        "    premise:\n"
+        "      metric: delivery_latency_p99_seconds\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RegistryError, match="전제에 max/min"):
+        load_registry(path)
+
+
+def test_the_shipped_registry_premises_are_loadable():
+    """실제 `configs/pending_verifications.yaml`이 로드되는지 — 오타는 기동이 아니라
+    여기서 잡혀야 한다."""
+    registry = load_registry()
+
+    with_premise = [item for item in registry if item.premise_metric]
+    assert with_premise, "전제가 붙은 항목이 하나도 없다"
+    for item in with_premise:
+        assert item.premise_metric in METRIC_EXTRACTORS
+
+
+# ------------------------- EV 승격 자기검증 (2026-08-05 2차, 고도화 5)
+#
+# `ev_tod_cos`·`ev_close_remain`은 2026-08-04 관문이 상위로 지목했는데 프로덕션
+# feature_set(v2026.07)에 없어 **측정조차 안 된다**. 승격이 조용히 안 먹는 것을 잡는다.
+
+
+def _vol_report(day: date, *, absent: list[str] | None, with_field: bool = True) -> dict:
+    entry: dict = {"samples": 900, "baseline_ic": 0.4, "beats_baseline": [], "measurable": True}
+    if with_field:
+        entry["absent_features"] = absent or []
+    return {"date": day.isoformat(), "vol_axis": {"horizons": {"5m": entry}}}
+
+
+def _ev_item(registered: date = date(2026, 8, 5)) -> PendingVerification:
+    return PendingVerification(
+        id="ev-features-measured",
+        summary="EV 승격",
+        registered=registered,
+        metric="absent_watchlist_features",
+        consecutive_days=3,
+        max_value=0.0,
+    )
+
+
+def test_absent_ev_features_are_counted_as_a_violation():
+    days = [date(2026, 8, 6), date(2026, 8, 7)]
+    reports = {d: _vol_report(d, absent=["ev_tod_cos", "ev_close_remain"]) for d in days}
+
+    [verdict] = evaluate([_ev_item()], reports, today=date(2026, 8, 7))
+
+    assert verdict.status == VerificationStatus.RECURRED
+
+
+def test_promotion_shows_up_as_zero_absent_features():
+    days = [date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
+    reports = {d: _vol_report(d, absent=[]) for d in days}
+
+    [verdict] = evaluate([_ev_item()], reports, today=date(2026, 8, 10))
+
+    assert verdict.status == VerificationStatus.VERIFIED
+
+
+def test_a_day_without_the_scorecard_is_unjudged_not_clean():
+    """채점을 안 돌린 날을 "0개 미탑재"로 읽으면 승격 안 했는데 통과해 버린다(L18)."""
+    days = [date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
+    reports = {d: {"date": d.isoformat()} for d in days}  # vol_axis 없음
+
+    [verdict] = evaluate([_ev_item()], reports, today=date(2026, 8, 10))
+
+    assert verdict.status == VerificationStatus.STALLED
+
+
+def test_old_scorecards_without_the_field_are_unjudged():
+    """`absent_features` 이전에 쓰인 산출물은 판정 근거가 없다 — 통과로 세면 안 된다."""
+    days = [date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
+    reports = {d: _vol_report(d, absent=None, with_field=False) for d in days}
+
+    [verdict] = evaluate([_ev_item()], reports, today=date(2026, 8, 10))
+
+    assert verdict.status == VerificationStatus.STALLED
+
+
+def test_a_future_registration_date_stays_quiet_until_then():
+    """승격 전 며칠을 매일 "재발"로 울리면 늑대소년이 된다 — 등록일이 미래면 조용해야 한다."""
+    days = [date(2026, 8, 6), date(2026, 8, 7)]
+    reports = {d: _vol_report(d, absent=["ev_tod_cos"]) for d in days}
+
+    [verdict] = evaluate([_ev_item(registered=date(2026, 8, 12))], reports, today=date(2026, 8, 7))
+
+    assert verdict.status == VerificationStatus.PENDING
+    assert verdict.needs_attention is False

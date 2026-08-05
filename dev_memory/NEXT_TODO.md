@@ -2647,3 +2647,55 @@ python scripts/daily_integrity_report.py --date <오늘>  # 위 둘을 읽어 �
 기존 A/B/C(08-11 기한)와 D-1~D-5는 그대로 유효하다. 다만 **D-2(Horizon 항등식)는 오늘
 이미 답이 나왔다** — 비지 않았고, 원인은 예상했던 셋(①경합 재발 ②스큐 ③재합성 누락) 중
 어느 것도 아닌 **네 번째**였다. 예상 목록이 틀렸다는 사실 자체가 기록해 둘 값이다.
+
+---
+
+## 2026-08-05 2차 — 고도화 5종 전건 구현 완료 ([MW0601], 2026-08-05)
+
+상세는 `DECISION_LOG.md` 2026-08-05 2차 항목. 여기엔 **운영 절차와 다음에 볼 것**만.
+
+- [x] **고도화 1** — `MinuteBarAggregator.flush_due()` + 수신 지연 계측(`TickDeliveryLatency`)
+      + 늦은 틱 로깅. **기본값은 여전히 `tick`** — 유예를 실측으로 정한 뒤 승격한다.
+- [x] **고도화 2** — 합성기 내부 거래량 회계(`volume_identity()`) → 장중 연속 항등식
+- [x] **고도화 3** — `HealthLevel.UNKNOWN` + CB 억제 경로 수정 + "근거 있는 OK"
+- [x] **고도화 4** — 등록부 `premise` 블록 + `PREMISE_BROKEN` 상태
+- [x] **고도화 5** — 학습 전 아카이브 정합 가드 + `ev-features-measured` 등록부
+
+### 며칠 모아야 답이 나오는 것 — `minute_bar_close: timer` 승격
+
+**이것만은 지금 결정할 수 없다.** 유예를 정할 회선 지연 분포가 오늘 처음 측정된다.
+
+1. 매일 리포트의 `delivery_latency` 확인 (p50/p90/p99/max)
+2. **3~5거래일** 모은 뒤 p99의 최댓값을 본다
+3. `MINUTE_CLOSE_GRACE_SECONDS`(현재 1.0)를 그 값 위로 확정 → `minute_bar_close: "timer"`
+4. 승격 후 첫 거래일에 `AggregatorLateTickDropped`가 **0에 가까운지** 확인 —
+   많으면 유예가 모자란 것이다(그 로그의 `bar_open_kst`로 어느 분인지 바로 보인다)
+
+> 승격 전까지 1분봉 확정 동작은 종전과 완전히 같다. 서두를 이유가 없다 — 겹④가 이미
+> 정확성은 확보했고, 이건 **지연을 줄이는** 개선이다.
+
+### EV 승격 (기한 2026-08-21, 등록부 `ev-features-measured`)
+
+순서가 강제된다 — 어기면 `session_guard`가 거부한다:
+
+```
+1. python scripts/run_recompose.py --symbol A05608          # 손상된 상위 봉 복구
+2. python scripts/daily_integrity_report.py --date 2026-08-05   # horizon_findings 비는지 확인
+3. python scripts/run_model_sweep.py --feature-set v2026.08-ev  # 장후에만(R11)
+4. configs/instance.yaml → feature_set: "v2026.08-ev"
+5. 다음 거래일 리포트에서 vol_axis.*.absent_features 가 비는지 확인
+```
+
+5번이 안 비면 **승격이 조용히 안 먹은 것**이다. 등록부가 08-12부터 채점을 시작한다.
+
+### 2026-08-06 장후 점검 — E-1~E-6에 더해서
+
+- [ ] **F-1** `delivery_latency`가 리포트에 찍히는가. p99가 몇 초인가(승격 판단의 1일차 표본)
+- [ ] **F-2** `l1.composer` 축이 상태판·UI에 뜨는가. 장전에는 `UNKNOWN`("확정한 합성봉이
+      아직 없다"), 09:00 이후엔 `OK`("합성봉 N개 · 거래량 항등식 일치")로 바뀌는가
+- [ ] **F-3** `l1.collector`가 08:35~08:45에 `UNKNOWN`인가(종전엔 `OK`였다). 그 구간에
+      G2가 CB를 억제하지 **않는지**도 함께 — 억제하면 UNKNOWN 매핑이 안 붙은 것이다
+- [ ] **F-4** `AggregatorLateTickDropped`가 몇 건인가. **틱 구동 기본값에서도** 나올 수
+      있다(순서 뒤바뀐 틱) — 종전엔 조용히 버려지던 것이라 **오늘이 첫 관측**이다.
+      0이 아니면 그 크기가 곧 timer 승격의 비용 추정치다
+- [ ] **F-5** 등록부에 `전제 붕괴`가 뜨는가. 떴다면 회선 p99가 3.0초를 넘은 것이다

@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.timeutil import KST
+from messiah.ops import session_guard
 from messiah.ops.session_guard import (
     REFUSED_EXIT_CODE,
     is_regular_session_now,
@@ -98,3 +101,68 @@ def test_guard_failure_does_not_block_the_task(capsys):
     refuse_if_regular_session("백필", now=_at(13, 0), calendar=_BrokenCalendar())  # type: ignore[arg-type]
 
     assert "판정 불가" in capsys.readouterr().out
+
+
+# ------------------- 아카이브 정합 가드 (2026-08-05 2차, 고도화 5)
+#
+# 2026-08-05에 상위 Horizon 봉의 3~17%가 잘린 채 아카이브에 들어갔다. 1분봉은 무손상이라
+# `run_recompose.py`로 복구되지만, **복구 전에 학습을 돌리면 잘린 봉을 그대로 배운다.**
+
+
+def _write_report(log_dir: Path, day: date, **fields) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"date": day.isoformat(), "horizon_findings": [], "late_bar_drops": 0}
+    payload.update(fields)
+    (log_dir / f"daily_integrity_{day:%Y%m%d}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_a_day_with_horizon_findings_is_refused(tmp_path: Path, capsys):
+    day = date(2026, 8, 5)
+    _write_report(tmp_path, day, horizon_findings=["3m 거래량 합 19,000 ≠ 1분봉 합 22,858"])
+
+    with pytest.raises(SystemExit) as exc:
+        session_guard.refuse_if_archive_corrupt("모델 스윕", [day], log_dir=tmp_path)
+
+    assert exc.value.code == session_guard.REFUSED_EXIT_CODE
+    err = capsys.readouterr().err
+    assert "run_recompose.py" in err
+    assert "2026-08-05" in err
+
+
+def test_late_bar_drops_alone_do_not_block_training(tmp_path: Path):
+    """**재합성이 끝난 뒤에도 남는 지표로 막으면 그날이 영원히 학습 불가가 된다.**
+
+    `late_bar_drops`는 수집 당시의 사건을 세는 지표라 재합성 후에도 남는다(그게 그 지표의
+    존재 이유다). 아카이브가 실제로 손상됐는지는 `horizon_findings`가 말한다.
+    """
+    day = date(2026, 8, 5)
+    _write_report(tmp_path, day, horizon_findings=[], late_bar_drops=26)
+
+    session_guard.refuse_if_archive_corrupt("모델 스윕", [day], log_dir=tmp_path)  # 통과
+
+
+def test_days_without_a_report_do_not_block(tmp_path: Path):
+    """리포트는 2026-07-27부터 있고 학습 구간은 보통 수개월이다 — 없는 날을 전부 막으면
+    아무것도 학습할 수 없다."""
+    session_guard.refuse_if_archive_corrupt(
+        "모델 스윕", [date(2026, 3, 2), date(2026, 3, 3)], log_dir=tmp_path
+    )
+
+
+def test_force_flag_passes_but_says_so(tmp_path: Path, capsys):
+    day = date(2026, 8, 5)
+    _write_report(tmp_path, day, horizon_findings=["3m 거래량 합 불일치"])
+
+    session_guard.refuse_if_archive_corrupt("모델 스윕", [day], force=True, log_dir=tmp_path)
+
+    assert "--force-corrupt-archive" in capsys.readouterr().out
+
+
+def test_a_broken_report_does_not_block_the_guard(tmp_path: Path, capsys):
+    """가드가 본 기능을 막는 쪽으로 실패하면 안 된다 — 깨진 리포트 하나는 건너뛴다."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "daily_integrity_20260805.json").write_text("{깨진 JSON", encoding="utf-8")
+
+    session_guard.refuse_if_archive_corrupt("모델 스윕", [date(2026, 8, 5)], log_dir=tmp_path)

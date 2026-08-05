@@ -37,6 +37,9 @@ class CapitalConfig(BaseModel):
     max_overnight_positions: int = 2  # R5
 
 
+_MINUTE_BAR_CLOSE_MODES = frozenset({"tick", "timer"})
+
+
 class InstanceConfig(BaseModel):
     """인스턴스 정의 — 멀티 PC 복제 배포 시 PC마다 이 파일 하나만 다르다 (Ver 1.1 §7.2)."""
 
@@ -59,11 +62,32 @@ class InstanceConfig(BaseModel):
     # 미니선물(A05608) 2026-07-22 실측값(호가 5단계 간격 역산) — 다른 상품/근월물에 그대로
     # 일반화하지 말 것(capability_matrix.md "알려진 갭" 참고, 상품별 실측 전까지는 이 값만 사용).
     futures_tick_size: str = "0.02"
+    # 1분봉을 언제 닫는가 (2026-08-05 고도화 1, `data/normalizer.py` "봉을 언제 닫는가").
+    #
+    #   tick  — 다음 분의 첫 틱이 도착하면 닫는다(종전 동작, 기본값)
+    #   timer — 거래소 시각이 경계+유예를 지나면 닫는다
+    #
+    # `timer`가 근본 처방이지만 **아직 기본이 아니다**: 유예 뒤에 도착한 틱을 버리게 되는데,
+    # 그 크기를 정할 회선 지연 분포가 2026-08-05까지 측정된 적이 없었다. 같은 날 계측을
+    # 붙였으므로(`TickDeliveryLatency`) 며칠 p99를 보고 승격한다. 실측 없이 임계를 정하지
+    # 않는다 — 이 프로젝트가 반복해서 배운 것이다.
+    minute_bar_close: str = "tick"
 
     @field_validator("universe")
     @classmethod
     def _known_tokens_only(cls, v: list[str]) -> list[str]:
         return universe_vocab.validate(v)
+
+    @field_validator("minute_bar_close")
+    @classmethod
+    def _known_close_mode_only(cls, v: str) -> str:
+        """오타가 조용히 기본 동작으로 떨어지면 "켰는데 왜 그대로지"로 며칠을 쓴다 —
+        `universe`·`feature_set`과 같은 이유로 기동 시점에 깨진다."""
+        if v not in _MINUTE_BAR_CLOSE_MODES:
+            raise ValueError(
+                f"minute_bar_close는 {sorted(_MINUTE_BAR_CLOSE_MODES)} 중 하나여야 한다: '{v}'"
+            )
+        return v
 
     @field_validator("feature_set")
     @classmethod

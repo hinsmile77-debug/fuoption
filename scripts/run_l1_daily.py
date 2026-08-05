@@ -112,6 +112,7 @@ from messiah.core.ui_launcher import (  # noqa: E402
     launch_command_center,
     watch_command_center_forever,
 )
+from messiah.data import normalizer  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
 from messiah.data.collector import TickCollector  # noqa: E402
@@ -474,6 +475,7 @@ async def _run_regular_session(
     symbol: str,
     rest: _RestCollection | None = None,
     tick_archiver: TickArchiver | None = None,
+    minute_bar_close: str = "tick",
 ) -> None:
     """수집 3종 + UI 생존 감시 + 컴포넌트 heartbeat를 동시에 돌린다.
 
@@ -523,6 +525,15 @@ async def _run_regular_session(
         # 3~17%가 사라지는 동안 위 두 축은 하루 종일 OK였다. 손상은 일어나는 중에 보여야
         # 하고, 장후 리포트에서 처음 아는 것은 이미 늦다.
         HealthReporter(bus, "l1.composer", probe=composer.health).run_forever(),
+        # 시각 구동 1분봉 확정 (2026-08-05 고도화 1) — `minute_bar_close: timer`일 때만
+        # 붙는다. 기본(`tick`)에서는 이 태스크가 아예 없으므로 동작이 종전과 완전히 같다.
+        # 위상 0초인 이유: 유예는 `flush_due()`가 **거래소 시각**으로 직접 판정하므로
+        # (`MINUTE_CLOSE_GRACE_SECONDS`) 스케줄러 위상으로 또 밀면 이중 계산이 된다.
+        *(
+            [FixedTickScheduler(tick_seconds=60).run_forever(collector.flush_due_minute)]
+            if minute_bar_close == "timer"
+            else []
+        ),
         # 헤드리스 상태판 (2026-08-03 고도화 A) — UI가 하던 구독을 이 프로세스로 옮겨
         # `logs/status_snapshot.json`에 주기적으로 남긴다. 화면이 죽어도(07-30 32분,
         # 07-31 3시간) 관측은 계속되고, 15:40에 UI가 종료된 뒤의 장후 리뷰도 가능해진다.
@@ -650,6 +661,10 @@ async def _daily_close(
     # 것을 본다. 퇴화 0건인 날도 남겨야 "검사했는데 0건"과 "검사를 안 함"이 갈린다.
     if engine is not None:
         engine.log_feature_health()
+    # 회선 수신 지연 분포 (2026-08-05 고도화 1) — `minute_bar_close: timer` 승격의 근거
+    # 데이터다. 유예를 몇 초로 둘지는 이 p99가 정하고, 그 값은 이 로그 이전엔 존재하지
+    # 않았다. 여기(장 마감)에서 남기는 이유: 세션 전체 표본이 다 모인 시점이다.
+    collector.log_delivery_latency()
     # 틱 아카이버도 버퍼링한다(하루 5~10만행이라 매 틱 재작성하면 O(n²)) — 남은 버퍼를
     # 확정하고, **그날 실제로 몇 행이 나갔는지 로그에 남긴다.** 결선만 하고 0행으로 하루가
     # 끝나는 것이 이 프로젝트의 반복 실패 모드였다(수급 폴러 7개월, 옵션체인 수개월).
@@ -700,6 +715,17 @@ async def main(cfg: InstanceConfig) -> None:
     symbol = await asyncio.to_thread(_resolve_front_month_symbol)
     tick_size = Decimal(cfg.futures_tick_size)
     print(f"근월물 심볼: {symbol} (tick_size={tick_size})", flush=True)
+    # 1분봉 확정 방식을 기동 로그에 찍는다 — 설정 하나가 봉 생성 규칙을 바꾸므로, 그날
+    # 아카이브가 어느 규칙의 산물인지 사후에 알 수 있어야 한다(`session_git_shas`와 같은 이유).
+    print(
+        f"1분봉 확정: {cfg.minute_bar_close}"
+        + (
+            f" (거래소 시각 경계+{normalizer.MINUTE_CLOSE_GRACE_SECONDS:.1f}초)"
+            if cfg.minute_bar_close == "timer"
+            else " (다음 분 첫 틱 도착 시 — 유예 뒤 도착 틱을 안 버리는 대신 발행이 늦다)"
+        ),
+        flush=True,
+    )
 
     bus = MessageBus(cfg.redis_url, cfg.instance_id)
     await bus.connect()
@@ -759,6 +785,7 @@ async def main(cfg: InstanceConfig) -> None:
                     symbol,
                     rest,
                     tick_archiver,
+                    cfg.minute_bar_close,
                 ),
                 timeout=remaining,
             )

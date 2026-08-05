@@ -146,9 +146,22 @@ def staleness_status(
     기준선이 없는 것과 끊긴 것은 다르다 — 08:35 기동 후 첫 틱(실측 08:45)까지 10분을
     장애로 표시하면 매일 아침 10분씩 거짓 경보가 뜬다(`strategy/pipeline.py`의 CB 콜드스타트
     가드, `data/collector.py`의 스톨 워치독과 같은 논리).
+
+    ## 그런데 그것을 `OK`라고 부른 것이 틀렸다 (2026-08-05 2차, 고도화 3)
+
+    "장애가 아니다"와 "정상이다"는 다르다. 웜업 구간을 `OK`로 내보내면 **한 건도 못 받은
+    상태가 화면과 상태판에서 초록으로 보인다** — 2026-08-05 장중점검에서 관측 축 전체가
+    "OK인데 실제로는 손상 중"이었던 것과 같은 형태의 실패다.
+
+    실제 영향이 있었다: `TradingPipeline._collector_reports_healthy()`가 `OK`를 "한산하다"로
+    읽어 **서킷브레이커 승격을 막는다.** 즉 08:36~08:45의 9분 동안, 수집기가 데이터를 한 건도
+    못 받은 상태가 CB 억제 근거로 쓰였다. 재연결 직후(워치독이 리셋된다)에도 같은 창이 열린다.
+
+    `UNKNOWN`은 그 소비처의 `None`(모름) 갈래로 매핑되어, 억제하지 않고 원래 규칙대로 간다 —
+    안전한 방향이다.
     """
     if age_seconds is None:
-        return HealthStatus(HealthLevel.OK, warming_up_detail)
+        return HealthStatus(HealthLevel.UNKNOWN, warming_up_detail)
     if age_seconds >= critical_after:
         return HealthStatus(HealthLevel.CRITICAL, f"{age_seconds:.0f}{unit}간 수신 없음")
     if age_seconds >= warn_after:

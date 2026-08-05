@@ -377,7 +377,17 @@ def log_scorecards(cards: Sequence[VolScorecard], *, symbol: str, date: str) -> 
 
 
 def summarise(cards: Mapping[str, VolScorecard] | Sequence[VolScorecard]) -> dict[str, object]:
-    """무결성 리포트에 실을 축약형 — Horizon → {기준선 IC, 초과 피처 목록}."""
+    """무결성 리포트에 실을 축약형 — Horizon → {기준선 IC, 초과 피처 목록, 미탑재 피처}.
+
+    `absent_features`가 있는 이유 (2026-08-05 2차, 고도화 5): 관심 목록의 `ev_tod_cos`·
+    `ev_close_remain`은 2026-08-04 관문이 상위로 지목했는데 **프로덕션 `feature_set`에 없어
+    측정조차 안 된다.** 재학습 후 `configs/instance.yaml`의 `feature_set`을 `v2026.08-ev`로
+    승격하면 사라져야 할 목록이고, 그 승격이 실제로 먹혔는지를 확인할 유일한 수단이다.
+
+    종전 축약형은 이 정보를 버렸다 — `STATUS_ABSENT`(피처셋에 없음)와 `STATUS_TOO_FEW`
+    (표본 부족)를 애써 갈라 놓고도 리포트까지 오면 둘 다 그냥 "beats_baseline에 없음"이었다.
+    이 프로젝트가 반복한 실패 형태다: **결선했다고 믿는데 조용히 안 붙어 있는 상태.**
+    """
     items = cards.values() if isinstance(cards, Mapping) else cards
     return {
         card.horizon: {
@@ -387,6 +397,7 @@ def summarise(cards: Mapping[str, VolScorecard] | Sequence[VolScorecard]) -> dic
             "baseline_used": card.baseline_used,
             "beats_baseline": card.beats_baseline,
             "measurable": card.measurable,
+            "absent_features": [f.name for f in card.features if f.status == STATUS_ABSENT],
         }
         for card in items
     }

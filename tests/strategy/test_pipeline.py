@@ -6,7 +6,7 @@ import pytest
 
 from messiah.broker.simulator.adapter import SimBroker
 from messiah.core.event_calendar import EventCalendar
-from messiah.core.health import COLLECTOR_COMPONENT
+from messiah.core.health import COLLECTOR_COMPONENT, staleness_status
 from messiah.core.messages import (
     BarClosed,
     CircuitBreakerStatus,
@@ -631,3 +631,50 @@ async def test_gate_is_inactive_without_an_event_calendar():
     await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05, ts=fresh_ts))
 
     assert len(await broker.positions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_never_received_a_tick_does_not_suppress_the_circuit_breaker():
+    """**고도화 3의 핵심 회귀** (2026-08-05 2차).
+
+    수집기가 한 건도 못 받은 웜업 상태를 `staleness_status()`가 `OK`로 내보냈고, 이 함수가
+    그걸 "한산하다"로 읽어 **CB 승격을 억제**했다 — 08:36~08:45의 9분, 그리고 재연결
+    직후마다(워치독이 리셋된다). 데이터가 0건인 것이 억제 근거로 쓰인 셈이다.
+
+    레벨을 손으로 넣지 않고 **실제 판정 함수를 통과시킨다** — 그래야 이 테스트가
+    `staleness_status()`의 회귀를 잡는다.
+    """
+    warming_up = staleness_status(None, warn_after=60.0, critical_after=120.0)
+
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    now_holder["t"] += timedelta(seconds=250)
+    # heartbeat 자체는 **방금** 왔다(신선하다) — 끊긴 것이 아니라 "받은 게 없다"는 보고다.
+    await pipeline._dispatch(  # noqa: SLF001
+        _collector_health(warming_up.level, now_holder["t"] - timedelta(seconds=5))
+    )
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert gateway.halted is True, "한 건도 못 받은 상태를 '한산'으로 읽어 CB를 억제했다"
+
+
+@pytest.mark.asyncio
+async def test_unknown_is_folded_into_the_dont_know_branch_not_the_unhealthy_one():
+    """`UNKNOWN`은 `None`(모름)과 같은 갈래여야 한다 — `False`("이상하다"는 적극적 주장)가
+    아니다. 오늘의 `CircuitBreakerMonitor`는 둘을 구분하지 않지만, 그건 그쪽 구현의 사정이지
+    이 함수의 계약이 아니다."""
+    now_holder = {"t": _START + timedelta(minutes=_WARMUP_BARS)}
+    _bus, broker, _gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: now_holder["t"]
+    )
+    await _warm_up(pipeline, broker)
+
+    await pipeline._dispatch(  # noqa: SLF001
+        _collector_health(HealthLevel.UNKNOWN, now_holder["t"])
+    )
+
+    assert pipeline._collector_healthy(now_holder["t"]) is None  # noqa: SLF001

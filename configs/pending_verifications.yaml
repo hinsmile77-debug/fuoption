@@ -120,6 +120,13 @@ verifications:
     max: 0
     consecutive_days: 3
     deadline: 2026-08-14
+    # **2026-08-05가 정확히 이 형태였다** (고도화 4). 08-04 리포트에서 이 항목은 깨끗하게
+    # 통과 중이었고, 바로 그 순간 전제(1분봉이 스케줄러 위상 안에 도착한다)가 이미 거짓이었다.
+    # 그 하루를 놓친 대가가 다음 날 상위 봉 3~17% 손실이다.
+    premise:
+      metric: delivery_latency_p99_seconds
+      max: 3.0
+      summary: "봉 확정 경로 전체가 '1분봉이 경계 뒤 곧 도착한다'를 전제한다"
 
   - id: crash-count-measurable
     summary: "크래시 집계 exit-code 오판 수정(P0-3) — 0건인 날에도 집계가 되는지"
@@ -186,3 +193,32 @@ verifications:
     max: 0
     consecutive_days: 3
     deadline: 2026-08-19
+    # **이 수정이 성립하려면 참이어야 하는 것** (2026-08-05 2차, 고도화 4).
+    # 겹④는 마지막 구성 1분봉을 최대 5초 기다린다. 회선 지연 초과분이 그 상한에 가까워지면
+    # 대기가 자주 헛돌아 `ComposerFlushedIncomplete`로 빠지기 시작한다 — 결과 지표가
+    # 나빠지기 **전에** 이 값이 먼저 움직인다.
+    premise:
+      metric: delivery_latency_p99_seconds
+      max: 3.0
+      summary: "겹④ 상한 5초의 60% — 여기 닿으면 유예를 재산정하거나 회선을 봐야 한다"
+
+  - id: ev-features-measured
+    summary: "EV 카테고리 승격(고도화 5) — 관문이 상위로 지목한 ev_*가 실제로 측정되는지"
+    registered: 2026-08-12
+    # **아직 승격 전이라 `registered`가 미래 날짜다.** `evaluate()`는 등록일 이후 리포트만
+    # 채점하므로 그때까지 조용히 "검증 대기"로 남는다 — 승격 전 며칠을 매일 "재발"로 울리면
+    # 늑대소년이 되고, 그건 이 등록부가 가장 경계하는 실패다.
+    #
+    # 승격 절차(전부 장후, R11):
+    #   1. python scripts/run_recompose.py --symbol A05608      ← 손상된 상위 봉 복구가 먼저
+    #   2. python scripts/run_model_sweep.py --feature-set v2026.08-ev
+    #      (아카이브 손상일이 남아 있으면 session_guard가 거부한다)
+    #   3. configs/instance.yaml 의 feature_set: "v2026.08-ev"
+    #
+    # 이 지표가 0이 되지 않으면 **승격이 조용히 안 먹은 것**이다. 2026-08-04 관문이 가장
+    # 값어치 있다고 지목한 카테고리가 운영에 안 붙어 있는 상태가 계속되는 것이라, 기한을
+    # 넘기면 그 자체가 회의 안건이 된다.
+    metric: absent_watchlist_features
+    max: 0
+    consecutive_days: 3
+    deadline: 2026-08-21

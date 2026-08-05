@@ -144,6 +144,15 @@ class IntegrityReport:
     late_bar_drops: int
     # 그날 거래소 시각 − 로컬 시계(초). None은 못 쟀다는 뜻 — 0초와 구분한다(L18).
     clock_skew_seconds: float | None
+    # 회선 수신 지연 **초과분**의 분위수 (2026-08-05 고도화 1, `ops/clock_skew.py`).
+    #
+    # **판정을 안 하는 축이다.** 임계를 정할 근거가 아직 없다 — 이 값을 며칠 모으는 것이
+    # 곧 근거를 만드는 일이고, 그 결과로 `MINUTE_CLOSE_GRACE_SECONDS`를 확정한 뒤
+    # `minute_bar_close: timer`(1분봉 시각 확정)로 승격한다.
+    #
+    # 동시에 등록부의 **전제 지표**다: 겹②·겹④가 "1분봉이 경계 뒤 얼마 안에 도착한다"를
+    # 전제하는데, 그 전제가 며칠 뒤 조용히 깨지는 것을 잡을 자리가 여기다.
+    delivery_latency: dict[str, float] | None
     # 그날 프로세스가 실제로 돌던 커밋. 지금 HEAD와 다르면 그 수집분은 **그 시점 코드의
     # 산물**이라는 사실이 사후 조사에 필요하다 — 2026-08-04가 정확히 그 경우였다(WS 프레임
     # 절반 유실 수정이 12:22에 들어갔는데 수집 프로세스는 08:35에 뜬 옛 코드로 하루를 돌았다).
@@ -321,6 +330,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     session_starts: list[str] = []
     session_git_shas: list[str] = []
     clock_skews: list[float] = []
+    delivery_latency: dict[str, float] | None = None
     degenerate: dict[str, dict[str, list[str]]] = {}
     nan_by_horizon: dict[str, list[float]] = {}
     cb_events: dict[str, int] = {}
@@ -340,6 +350,16 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             skew = record.get("skew_seconds")
             if isinstance(skew, (int, float)):
                 clock_skews.append(float(skew))
+        elif tag == "TickDeliveryLatency":
+            # 회선 수신 지연 초과분 분포 (2026-08-05 고도화 1). **판정을 안 하는 축**이지만
+            # 리포트에 있어야 한다 — 이 값이 `minute_bar_close: timer` 승격의 유일한 근거이고,
+            # 등록부의 전제 지표(`fix_verification.py` "전제를 채점한다")로도 쓰인다.
+            if record.get("measured"):
+                delivery_latency = {
+                    key: float(record[key])
+                    for key in ("p50", "p90", "p99", "max", "samples")
+                    if isinstance(record.get(key), (int, float))
+                }
         elif tag in ("FeatureHealthSummary", "FeatureHealthDegenerate"):
             horizon = str(record.get("horizon", "?"))
             degenerate[horizon] = {
@@ -371,6 +391,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
         # 상태가 판정 기준이다(그 시간대의 봉은 이미 그 스큐로 만들어졌다).
         "clock_skew_seconds": (max(clock_skews, key=abs) if clock_skews else None),
+        "delivery_latency": delivery_latency,
         "degenerate_features": degenerate,
         "nan_ratio_by_horizon": nan_summary,
         "circuit_breaker_events": cb_events,
@@ -833,6 +854,10 @@ def build_report(
         unmeasured.append("네이티브 크래시 집계")
     if clock_skew is None:
         unmeasured.append("시계 스큐(수집 세션의 ClockSkew 로그 없음)")
+    if logs["delivery_latency"] is None:
+        unmeasured.append(
+            "회선 수신 지연 분포(TickDeliveryLatency 로그 없음 — 1분봉 시각 확정 승격 근거)"
+        )
     if volume_check is None:
         unmeasured.append("공식 분봉 대비 거래량 대조(verify_archive_volume.py 미실행)")
     if not (vol_axis.get("horizons") if vol_axis else None):
@@ -859,6 +884,7 @@ def build_report(
         horizon_findings=horizon_findings,
         late_bar_drops=late_bar_drops,
         clock_skew_seconds=clock_skew,
+        delivery_latency=logs["delivery_latency"],
         session_git_shas=logs["session_git_shas"],
         degenerate_features=degenerate_features,
         volume_check=volume_check,
@@ -959,6 +985,13 @@ def format_summary(report: IntegrityReport) -> str:
         f"  버킷 유실(늦은 봉·미완 확정): {report.late_bar_drops}건"
         + (" ✅" if report.late_bar_drops == 0 else " ⚠")
     )
+    if report.delivery_latency is not None:
+        latency = report.delivery_latency
+        lines.append(
+            f"  회선 수신 지연 초과분: p50 {latency.get('p50', 0):.3f}s · "
+            f"p90 {latency.get('p90', 0):.3f}s · p99 {latency.get('p99', 0):.3f}s · "
+            f"최대 {latency.get('max', 0):.3f}s (표본 {int(latency.get('samples', 0)):,}건)"
+        )
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
 
@@ -1087,6 +1120,7 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
         fv.VerificationStatus.RECURRED: "FixVerificationRecurred",
         fv.VerificationStatus.OVERDUE: "FixVerificationOverdue",
         fv.VerificationStatus.STALLED: "FixVerificationStalled",
+        fv.VerificationStatus.PREMISE_BROKEN: "FixVerificationPremiseBroken",
     }
     for verdict in verdicts:
         tag = tags.get(verdict.status)

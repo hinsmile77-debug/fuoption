@@ -431,11 +431,16 @@ def _health_collector(tmp_path: Path, clock: _FakeClock) -> TickCollector:
     return _collector(tmp_path, _HangingConnection([]), clock)
 
 
-def test_health_is_ok_while_warming_up_before_the_first_tick(tmp_path: Path):
-    """기준선이 없는 것과 끊긴 것은 다르다 — 장 개시 전 10분이 매일 CRITICAL로 뜨면 안 된다."""
+def test_health_is_unknown_not_ok_while_warming_up_before_the_first_tick(tmp_path: Path):
+    """기준선이 없는 것과 끊긴 것은 다르다 — 장 개시 전 10분이 매일 CRITICAL로 뜨면 안 된다.
+
+    그렇다고 `OK`도 아니다(2026-08-05 2차, 고도화 3). 한 건도 못 받은 상태를 정상이라고
+    보고하면 G2가 그걸 "한산하다"로 읽어 서킷브레이커 승격을 억제한다.
+    """
     status = _health_collector(tmp_path, _FakeClock()).health()
 
-    assert status.level is HealthLevel.OK
+    assert status.level is HealthLevel.UNKNOWN
+    assert status.level not in (HealthLevel.WARN, HealthLevel.CRITICAL)
     assert "웜업" in status.detail
 
 

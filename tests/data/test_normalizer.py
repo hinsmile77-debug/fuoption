@@ -1,8 +1,10 @@
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from messiah.core.messages import BarClosed, BarSession, Horizon, Tick
+from messiah.core.timeutil import KST
 from messiah.data.normalizer import (
+    MINUTE_CLOSE_GRACE_SECONDS,
     MinuteBarAggregator,
     parse_futures_ticks,
     parse_option_ticks,
@@ -441,3 +443,100 @@ def test_minute_bar_aggregator_keeps_separate_symbols_independent():
 
     assert bar_a.symbol == "A05608"
     assert bar_b.symbol == "OTHER"
+
+
+# --------------------- 시각 구동 1분봉 확정 (2026-08-05 2차, 고도화 1)
+#
+# 종전에는 **다음 분의 첫 틱**이 와야 이전 분을 닫았다. 그래서 1분봉 발행 시각을 시계가
+# 아니라 틱 도착률이 정했고, 실측 지연 중앙값 0.655초 · p90 1.62초 · 최대 7.96초였다.
+# 상위 Horizon 합성기가 경계+0.5초에 확정하므로 69%가 그 뒤에 도착해 상위 봉이 잘렸다.
+
+
+def _agg() -> MinuteBarAggregator:
+    return MinuteBarAggregator("A05608")
+
+
+def test_flush_due_closes_the_minute_on_exchange_time():
+    agg = _agg()
+    agg.add_tick(_tick("090012", "1080.30"))
+    agg.add_tick(_tick("090045", "1080.50"))
+    boundary = datetime(2026, 7, 22, 9, 1, tzinfo=KST)
+
+    assert agg.flush_due(boundary) is None, "경계 정각엔 아직 유예가 안 지났다"
+    bar = agg.flush_due(boundary + timedelta(seconds=MINUTE_CLOSE_GRACE_SECONDS))
+
+    assert bar is not None
+    assert bar.bar_open_kst == datetime(2026, 7, 22, 9, 0, tzinfo=KST)
+    assert bar.volume > 0
+
+
+def test_flush_due_is_quiet_when_no_ticks_accumulated():
+    """거래가 없는 분에 가짜 OHLC를 만들지 않는다 — 합성기와 같은 규율."""
+    assert _agg().flush_due(datetime(2026, 7, 22, 9, 5, tzinfo=KST)) is None
+
+
+def test_tick_arriving_after_a_timed_close_is_dropped_loudly(monkeypatch):
+    """시각으로 닫은 뒤 도착한 그 분의 틱은 버려진다 — **이것이 시각 구동의 대가다.**
+
+    조용히 버리면 그 대가가 안 보여 승격 판단을 할 수 없다(L18). 종전 코드도 같은 틱을
+    버렸는데 로그가 아예 없었다.
+    """
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.data.normalizer.mlog.log", lambda tag, msg, **f: logged.append((tag, f))
+    )
+    agg = _agg()
+    agg.add_tick(_tick("090012", "1080.30"))
+    agg.flush_due(datetime(2026, 7, 22, 9, 1, 30, tzinfo=KST))
+
+    assert agg.add_tick(_tick("090058", "1080.40")) is None
+    assert agg.late_tick_drops == 1
+    dropped = [f for tag, f in logged if tag == "AggregatorLateTickDropped"]
+    assert len(dropped) == 1
+
+
+def test_late_ticks_log_once_per_minute_not_once_per_tick(monkeypatch):
+    """매 틱 남기면 하루 수만 줄이 되어 아무도 안 본다 — 분마다 한 줄, 건수는 전부 센다."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.normalizer.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    agg = _agg()
+    agg.add_tick(_tick("090012", "1080.30"))
+    agg.flush_due(datetime(2026, 7, 22, 9, 1, 30, tzinfo=KST))
+
+    for second in ("090050", "090055", "090058"):
+        agg.add_tick(_tick(second, "1080.40"))
+
+    assert agg.late_tick_drops == 3
+    assert logged.count("AggregatorLateTickDropped") == 1
+
+
+def test_the_two_close_paths_never_double_publish_a_minute():
+    """틱 구동과 시각 구동은 배타가 아니다 — 먼저 닫는 쪽이 닫고, 늦은 쪽은 가드에 걸린다.
+
+    이 성질 덕분에 시각 구동을 켜도 정상 구간의 동작이 안 바뀐다(틱이 제때 오면 틱 구동이
+    항상 먼저 닫는다).
+    """
+    agg = _agg()
+    agg.add_tick(_tick("090012", "1080.30"))
+
+    rolled = agg.add_tick(_tick("090105", "1080.50"))  # 틱 구동이 09:00을 닫는다
+    assert rolled is not None and rolled.bar_open_kst == datetime(2026, 7, 22, 9, 0, tzinfo=KST)
+
+    # 뒤늦게 시각 구동이 같은 분을 닫으려 해도 09:01 버킷은 아직 때가 아니다.
+    assert agg.flush_due(datetime(2026, 7, 22, 9, 1, 30, tzinfo=KST)) is None
+
+
+def test_out_of_order_tick_is_no_longer_dropped_silently(monkeypatch):
+    """종전 코드의 조용한 유실 — `minute < _current_minute`이면 아무 흔적 없이 버렸다."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.normalizer.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    agg = _agg()
+    agg.add_tick(_tick("090105", "1080.50"))
+
+    assert agg.add_tick(_tick("090012", "1080.30")) is None
+    assert agg.late_tick_drops == 1
+    assert "AggregatorLateTickDropped" in logged

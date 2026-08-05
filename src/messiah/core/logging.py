@@ -120,6 +120,11 @@ TAG_LEVELS: dict[str, int] = {
     "FixVerificationOverdue": logging.WARNING,
     # 연속 판정 불가 — 수정이 안 든 게 아니라 **계측이 고장 났다**는 뜻이라 재발과 같은 급.
     "FixVerificationStalled": logging.ERROR,
+    # 결과 지표는 깨끗한데 그 수정이 딛고 선 **전제**가 무너졌다 (2026-08-05 2차, 고도화 4).
+    # 재발보다 이른 신호라 ERROR다 — 2026-08-04에 `horizon-volume-identity`가 통과 중이었고
+    # 바로 그 순간 전제(1분봉이 경계+0.5초 안에 도착한다)가 이미 거짓이었다. 그 하루를
+    # 놓친 대가가 다음 날 상위 봉 3~17% 손실이었다.
+    "FixVerificationPremiseBroken": logging.ERROR,
     # 헤드리스 상태판 기록 실패 (고도화 A, `ops/status_board.py`) — 관측의 최후 보루가
     # 안 써지고 있다는 뜻이라 조용히 넘기면 안 된다. 수집 본 임무는 계속되므로 WARNING.
     "StatusSnapshotWriteFailed": logging.WARNING,
@@ -141,6 +146,15 @@ TAG_LEVELS: dict[str, int] = {
     # 같다. 둘 다 WARNING인 이유: 확정 자체는 의도된 동작이고(무한 대기가 더 나쁘다),
     # 판정은 무결성 리포트의 `late_bar_drops` 임계가 한다.
     "ComposerFlushedIncomplete": logging.WARNING,
+    # 이미 닫은 1분봉으로 체결틱이 늦게 도착 (`data/normalizer.py`, 2026-08-05 고도화 1).
+    # 분(分)마다 한 줄만 남긴다 — 매 틱 남기면 하루 수만 줄이 되어 아무도 안 본다.
+    # 종전에도 같은 틱을 버렸는데 **로그가 없었다**(L18 위반). 시각 구동 확정을 켜면 이
+    # 경로가 더 자주 열리므로, 그 대가가 보여야 승격 여부를 판단할 수 있다.
+    "AggregatorLateTickDropped": logging.WARNING,
+    # 회선 수신 지연 분포 (`ops/clock_skew.py`, 2026-08-05 고도화 1). 세션당 한 줄.
+    # 사고가 아니라 **임계를 정하기 위한 측정**이라 INFO다 — 이 값 없이는 1분봉을 몇 초에
+    # 닫아도 되는지 정할 수 없고, 실제로 2026-08-05까지 그 측정이 하나도 없었다.
+    "TickDeliveryLatency": logging.INFO,
     # 종료 시퀀스에서 마지막 1분봉이 상위 Horizon 구독자에게 도달하지 못함
     # (`scripts/run_l1_daily.py`). 그 봉은 1분봉 아카이브에만 남고 합성봉에서 빠진다 —
     # 2026-08-04에 조용히 일어났던 바로 그 사고라 ERROR다.
