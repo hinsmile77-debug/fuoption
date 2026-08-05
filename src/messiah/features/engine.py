@@ -325,6 +325,9 @@ class FeatureEngine:
             warn_after=120.0,
             critical_after=240.0,
             warming_up_detail="웜업 — 아직 첫 발행 전",
+            # 이 축이 재는 것은 **발행** 간격이다 — 수집기의 "수신"과 같은 단어를 쓰면
+            # M1 주기(60초) 안의 정상 간격이 정체로 오독된다(`core/health.py` P1-1).
+            subject="발행",
         )
         if status.level is not HealthLevel.OK:
             return status

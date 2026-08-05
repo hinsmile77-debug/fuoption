@@ -81,7 +81,14 @@ from messiah.core.messages import (
     RegimeState,
 )
 from messiah.core.state_cache import CacheSubscriber, StateCache
-from messiah.core.timeutil import now_utc
+from messiah.core.timeutil import now_kst, now_utc
+from messiah.core.version import (
+    PROCESS_GIT_SHA,
+    PROCESS_STARTED_AT,
+    assess_version_drift,
+    head_git_sha,
+    uptime_text,
+)
 from messiah.data import bar_paths
 from messiah.ui.bar_reader import BarExportError, read_day_series
 from messiah.ui.bar_series import BarSeries
@@ -277,14 +284,33 @@ def _run_live_subscriber(redis_url: str, symbol: str, cache: StateCache) -> None
         cache.update("LiveConnectionError", _error_message(str(exc)))
 
 
-async def _poll_streams_forever(bus: MessageBus, cache: StateCache, *, poll_ms: int = 1000) -> None:
-    last_ids = {"decision.intent": "$", "exec.fill": "$"}
+# 화면이 따라가는 Stream 토픽 — pub/sub으로는 못 받는 것들(모듈 docstring).
+_WATCHED_STREAM_TOPICS: tuple[str, ...] = ("decision.intent", "exec.fill")
+
+
+async def _poll_streams_forever(
+    bus: MessageBus,
+    cache: StateCache,
+    *,
+    poll_ms: int = 1000,
+    topics: tuple[str, ...] = _WATCHED_STREAM_TOPICS,
+) -> None:
+    """Stream 폴링 — **`$`를 두 번 쓰지 않는다** (2026-08-05 3차, P0-2).
+
+    종전엔 토픽별로 순차 블록하며 `last_id`를 `"$"`로 남겨뒀는데, `$`는 위치가 아니라
+    "호출 시점의 마지막 ID"라 그 사이에 도착한 메시지가 영영 안 왔다(`core/bus.py`의
+    `read_streams()` docstring에 재현 경로). 판단이 하루 몇 건뿐인 토픽에서 절반을 놓치는
+    구조였고, **놓쳤다는 사실조차 화면에 안 남는다** — 첫 판단이 나오는 순간이 가장 놓치기
+    쉬운 순간이었다.
+
+    여기서는 기동 시 한 번만 구체 ID로 고정하고(그게 "지금부터"의 정확한 표현이다), 그
+    뒤로는 읽은 만큼만 전진한다. 블록도 토픽별이 아니라 한 번에 걸어 창 자체를 없앤다.
+    """
+    last_ids = {topic: await bus.stream_last_id(topic) for topic in topics}
     while True:
-        for topic in list(last_ids):
-            entries = await bus.read_stream(topic, last_id=last_ids[topic], block_ms=poll_ms)
-            for entry_id, message in entries:
-                last_ids[topic] = entry_id
-                cache.update(type(message).__name__, message)
+        for topic, entry_id, message in await bus.read_streams(last_ids, block_ms=poll_ms):
+            last_ids[topic] = entry_id
+            cache.update(type(message).__name__, message)
 
 
 def _error_message(text: str) -> BusMessage:
@@ -506,13 +532,140 @@ def _candlestick_figure(bars: BarSeries, tick_size: float) -> go.Figure:
 
 # ---------------------------------------------------------------- 배지 렌더링 helper
 
+# NO_DATA 한 색이 **서로 다른 세 가지 사실**을 덮고 있었다 (2026-08-05 3차, P1-2):
+#
+#   ① 끊김    — 발행자가 있었는데 지금 안 온다 (진짜 사고)
+#   ② 미배선  — 이 구성엔 발행자가 아예 없다 (구조적으로 영원히 안 온다)
+#   ③ 대기    — 발행자는 살아 있는데 아직 발행 조건이 안 됐다
+#
+# 셋이 같은 회색 NO_DATA로 보이면 Redis가 끊긴 것과 "원래 그런 것"이 구분되지 않는다 —
+# 마흐디 L18(값 없음과 정상을 혼동하지 않는다)이 정확히 막으려던 형태다. CB 배지가 이미
+# "미사용/데이터 없음"으로 쓰던 패턴을 나머지 토픽으로 넓힌 것이다.
+#
+# **②·③은 선언이지만 ①은 관측으로 판정한다** — 발행자의 heartbeat가 살아 있으면 ②/③,
+# 죽었으면 ①이다. 그래서 나중에 번들이 승격돼 발행이 시작된 뒤 그 프로세스가 죽으면,
+# 이 표는 "미배선"이라고 우기지 않고 "끊김"으로 바뀐다.
+_ABSENCE_REASON: dict[str, str] = {
+    "FuturesView": "미배선 — Registry에 live 번들이 0개라 FuturesAIService가 전문가 0개로 기동",
+    "OptionsView": "미배선 — OptionsAIService가 G2 러너에 결선되지 않음",
+    "RegimeState": "미배선 — 학습된 RegimeAI 인스턴스가 아직 없음(W20~21 알려진 갭)",
+    "DecisionIntent": "대기 — intel.futures가 없으면 MetaDecisionEngine이 판단할 게 없다",
+    "Fill": "대기 — 판단이 없으면 체결도 없다",
+}
 
-def _badge_caption(label: str, snapshot) -> None:
+# 위 토픽들의 발행 프로세스 — 전부 G2 러너 한 프로세스다(`scripts/run_g2_paper_trading.py`).
+# 그 heartbeat가 ①과 ②/③을 가르는 유일한 관측 근거다.
+_PUBLISHER_OF: dict[str, str] = dict.fromkeys(_ABSENCE_REASON, "g2.pipeline")
+
+
+def _absence_reason(source, key: str) -> str | None:
+    """NO_DATA 배지에 붙일 사유 — 없으면 None(사유를 못 대면 아무 말도 안 한다).
+
+    REPLAY에서는 판정하지 않는다. 그 모드의 NO_DATA는 "이 재생 스냅샷에 그 값이 없다"는
+    뜻이지 발행자의 생사와 무관하다 — LIVE의 사유를 그대로 갖다 붙이면 재생 화면이 있지도
+    않은 사고를 보고하게 된다.
+    """
+    if source.mode != DataSourceMode.LIVE:
+        return None
+
+    # 연결 자체가 실패했으면 모든 토픽이 같은 이유로 비어 있다 — 개별 사유보다 이게 먼저다.
+    if isinstance(source.snapshot("LiveConnectionError").message, Health):
+        return "끊김 — LIVE 연결 실패"
+
+    publisher = _PUBLISHER_OF.get(key)
+    if publisher is not None:
+        snap = source.snapshot(health_cache_key(publisher))
+        if not isinstance(snap.message, Health):
+            return f"끊김 — {publisher} heartbeat 없음(프로세스 미기동)"
+        if snap.badge == FreshnessBadge.STALE:
+            return f"끊김 — {publisher} 응답 없음({snap.age_seconds:.0f}초)"
+
+    return _ABSENCE_REASON.get(key)
+
+
+def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
     color = _BADGE_COLOR[snapshot.badge]
     st.markdown(
         f"**{label}** &nbsp; <span style='color:{color}'>● {snapshot.badge.value}</span>",
         unsafe_allow_html=True,
     )
+    if snapshot.badge == FreshnessBadge.NO_DATA and reason:
+        st.caption(reason)
+
+
+# ---------------------------------------------------------------- Kill Switch
+
+# `sys.kill` 발행 경로가 아직 없다(모듈 docstring "알려진 갭"). 배선되면 True로 바꾼다.
+_KILL_SWITCH_WIRED = False
+
+
+def _render_kill_switch() -> None:
+    """미배선 상태에서는 **누를 수 없다** (2026-08-05 3차, P2).
+
+    종전엔 화면에서 가장 강한 요소(적색 primary 버튼)가 멀쩡히 눌렸고, 2단 확인까지 통과하면
+    "알려진 갭"이라는 에러가 떴다. 그런데 그 에러는 `st.session_state`에 남지 않아 **5초 뒤
+    fragment 재실행에 사라졌다** — 비상시에 누르고, 사라진 문구를 못 본 채 "발동됐다"고 믿는
+    것이 안 눌리는 것보다 훨씬 위험하다. 못 하는 일은 못 하게 보여야 한다(L18의 조작 버전).
+
+    2단 확인 흐름 자체는 그대로 둔다 — 배선되는 날 이 상수만 뒤집으면 되고, 그때 발동 사실이
+    화면에서 사라지지 않도록 표시를 세션 상태에 걸어뒀다.
+    """
+    clicked = st.button("🛑 KILL SWITCH", type="primary", disabled=not _KILL_SWITCH_WIRED)
+    if not _KILL_SWITCH_WIRED:
+        st.caption("미배선 — sys.kill 발행 경로 없음(비상시 브로커 화면에서 직접 청산)")
+
+    if clicked:
+        st.session_state["kill_confirm_pending"] = True
+    if st.session_state.get("kill_confirm_pending"):
+        st.warning("정말 전량 청산·주문 차단하시겠습니까? (2단 확인)")
+        if st.button("확인 — 즉시 발동"):
+            st.session_state["kill_confirm_pending"] = False
+            st.session_state["kill_requested"] = True
+    if st.session_state.get("kill_requested"):
+        # 한 번 뜨고 사라지지 않는다 — 발동 요청은 세션이 끝날 때까지 화면에 남는 사실이다.
+        st.error("Kill Switch 발동 요청됨 — 청산 완료 여부를 브로커 화면에서 직접 확인할 것")
+
+
+# ---------------------------------------------------------------- 코드 버전 스트립
+
+
+def _component_versions(source) -> dict[str, str]:
+    """heartbeat를 실제로 보내온 컴포넌트의 적재 코드 SHA — 안 보낸 건 담지 않는다.
+
+    안 보낸 컴포넌트는 이미 신호등이 "데이터 없음"으로 드러내고 있다. 여기까지 끌고 오면
+    같은 사실을 두 곳에서 다른 말로 보고하게 된다(버전 불일치 vs 프로세스 사망).
+    """
+    versions: dict[str, str] = {}
+    for component, _label in _HEALTH_COMPONENTS:
+        message = source.snapshot(health_cache_key(component)).message
+        if isinstance(message, Health):
+            versions[component] = message.git_sha
+    return versions
+
+
+def _render_version_strip(source) -> None:
+    """ "고친 코드가 지금 돌고 있는가" (2026-08-05 3차, P0-1).
+
+    2026-08-05엔 11:03·11:57에 커밋한 감시 장치가 장중 내내 안 돌았다 — 프로세스들이 08:35에
+    떴기 때문이다. 신호등은 전부 초록이었고 그 초록은 **구버전이 보낸 것**이었는데, 화면
+    어디에도 그 사실이 없었다. 이 한 줄이 그 축이다(`core/version.py` 모듈 docstring).
+
+    어긋남을 **초록으로 칠하지 않는다** — 앰버는 `_BADGE_COLOR[STALE]`과 같은 값·같은 뜻
+    ("이 화면이 지금 사실을 말하고 있는지 의심하라")이다.
+    """
+    drift = assess_version_drift(
+        process_sha=PROCESS_GIT_SHA,
+        head_sha=head_git_sha(),
+        component_shas=_component_versions(source),
+    )
+    color = "#FFB020" if drift.stale else "#8A8F98"
+    uptime = uptime_text(PROCESS_STARTED_AT)
+    st.markdown(
+        f"<span style='color:{color}'>● {drift.summary} · 화면 기동 후 {uptime}</span>",
+        unsafe_allow_html=True,
+    )
+    if drift.stale:
+        st.caption("재기동해야 최신 코드가 적재된다 — 지금 화면의 판정은 옛 규칙의 결과다")
 
 
 # ---------------------------------------------------------------- 존 렌더링
@@ -525,25 +678,16 @@ def render_top_bar(source, symbol: str) -> None:
         st.metric("모드", source.mode.value)
     with cols[1]:
         futures_snap = source.snapshot("FuturesView")
-        _badge_caption("intel.futures", futures_snap)
+        _badge_caption("intel.futures", futures_snap, reason=_absence_reason(source, "FuturesView"))
     with cols[2]:
         decision_snap = source.snapshot("DecisionIntent")
-        _badge_caption("decision.intent", decision_snap)
+        _badge_caption(
+            "decision.intent", decision_snap, reason=_absence_reason(source, "DecisionIntent")
+        )
     with cols[3]:
         _render_circuit_breaker_badge(source)
     with cols[4]:
-        confirmed = st.button("🛑 KILL SWITCH", type="primary")
-        if confirmed:
-            st.session_state["kill_confirm_pending"] = True
-        if st.session_state.get("kill_confirm_pending"):
-            st.warning("정말 전량 청산·주문 차단하시겠습니까? (2단 확인)")
-            if st.button("확인 — 즉시 발동"):
-                st.session_state["kill_confirm_pending"] = False
-                st.session_state["kill_requested"] = True
-                st.error(
-                    "Kill Switch 발동 요청 — LIVE 모드에서 sys.kill 발행 배선은 알려진 갭"
-                    "(모듈 docstring, 아직 실제 KillSwitch 프로세스에 연결되지 않음)"
-                )
+        _render_kill_switch()
 
     # `_run_live_subscriber`가 예외를 삼키고 "LiveConnectionError" 키에 Health(CRITICAL)를
     # 남긴다(모듈 docstring) — 지금까지는 그 키를 읽는 render_* 함수가 하나도 없어서, 연결
@@ -555,6 +699,7 @@ def render_top_bar(source, symbol: str) -> None:
         st.error(f"LIVE 연결 실패: {conn_error.message.detail}")
 
     _render_health_strip(source)
+    _render_version_strip(source)
     st.divider()
 
 
@@ -567,7 +712,7 @@ def render_ai_decision_panel(source) -> None:
         st.caption(f"불확실성 {intent.uncertainty:.2f}")
         st.text(intent.rationale)
     else:
-        st.info("decision.intent 데이터 없음")
+        st.info(_absence_reason(source, "DecisionIntent") or "decision.intent 데이터 없음")
 
     futures_snap = source.snapshot("FuturesView")
     if isinstance(futures_snap.message, FuturesView):
@@ -589,7 +734,25 @@ def render_ai_decision_panel(source) -> None:
                     f"POP={candidate.pop:.0%}"
                 )
     else:
-        st.info("intel.options 데이터 없음")
+        st.info(_absence_reason(source, "OptionsView") or "intel.options 데이터 없음")
+
+
+def _live_date_notice(chosen: date, *, today: date) -> tuple[bool, str]:
+    """LIVE 차트 위에 붙일 날짜 문구 — 반환은 (오늘인가, 문구).
+
+    ## **"오늘"이라고 쓰기 전에 오늘인지 확인한다** (2026-08-05 3차, P1-3)
+
+    종전엔 가장 최근 날짜를 무조건 `f"오늘({chosen}) 봉"`으로 캡션했다. 장 개시 전이거나
+    봉 적재가 멈추면 그 최근 날짜는 **전일**이고, 그때 화면은 어제 차트에 "오늘" 라벨을
+    붙인다. 차트는 화면에서 가장 큰 요소라 그 한 단어가 곧 "지금 시장이 이렇게 움직이고
+    있다"로 읽힌다 — 값은 진짜인데 문구가 틀린, L18이 정확히 막으려던 형태다.
+    """
+    if chosen == today:
+        return True, f"오늘({chosen.isoformat()}) 봉 — LIVE는 항상 최신 날짜"
+    return False, (
+        f"⚠ 오늘({today.isoformat()}) 봉이 아직 없어 {chosen.isoformat()} 차트를 표시 중 "
+        "— 장 개시 전이거나 봉 적재가 멈춘 상태"
+    )
 
 
 def render_market_view(
@@ -606,7 +769,8 @@ def render_market_view(
         chosen = st.selectbox("날짜(REPLAY)", options=list(reversed(available)), key="replay_date")
     else:
         chosen = available[-1]
-        st.caption(f"오늘({chosen.isoformat()}) 봉 — LIVE는 항상 최신 날짜")
+        is_today, notice = _live_date_notice(chosen, today=now_kst().date())
+        (st.caption if is_today else st.warning)(notice)
 
     bars, stale_reason = _load_bars_with_status(symbol, horizon, chosen, bar_dir)
     if stale_reason is not None:
@@ -638,7 +802,7 @@ def render_bottom_zone(source) -> None:
         fill = fill_snap.message
         st.caption(f"최근 체결: {fill.symbol} {fill.qty}계약 @ {fill.price_ticks}")
     else:
-        st.caption("exec.fill 데이터 없음")
+        st.caption(_absence_reason(source, "Fill") or "exec.fill 데이터 없음")
     st.caption("이벤트 캘린더 D-day: 알려진 갭 — EventCalendar 연동 미배선")
     st.caption("Self-Evaluation 미니보드: Phase 5 미구현 — 자리만")
 

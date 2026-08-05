@@ -146,11 +146,49 @@ class MessageBus:
     async def read_stream(
         self, topic: str, last_id: str = "$", block_ms: int = 1000
     ) -> list[tuple[str, BusMessage]]:
-        """Streams 소비 — 재시작 시 last_id부터 재생 가능 (무상태 복원, R12)."""
-        result = await self._redis.xread({topic: last_id}, block=block_ms, count=100)
-        out: list[tuple[str, BusMessage]] = []
-        for _stream, entries in result or []:
+        """Streams 소비 — 재시작 시 last_id부터 재생 가능 (무상태 복원, R12).
+
+        여러 토픽을 **끊김 없이** 따라가야 하면 이걸 토픽 수만큼 부르지 말고
+        `read_streams()`를 쓴다 — 그 이유는 그쪽 docstring에 있다.
+        """
+        entries = await self.read_streams({topic: last_id}, block_ms=block_ms)
+        return [(entry_id, message) for _topic, entry_id, message in entries]
+
+    async def read_streams(
+        self, last_ids: dict[str, str], block_ms: int = 1000
+    ) -> list[tuple[str, str, BusMessage]]:
+        """여러 스트림을 **한 번의 XREAD**로 읽는다 — 반환은 (토픽, 엔트리ID, 메시지).
+
+        ## 왜 단일 호출이어야 하나 (2026-08-05 3차, P0-2)
+
+        `ui/app.py`가 `decision.intent`와 `exec.fill`을 순차 루프로 각각 1초씩 블록하며
+        읽고 있었다. 그런데 `"$"`는 고정된 위치가 아니라 **호출 시점의 마지막 ID로 매번 다시
+        해석**되는 값이다 — 엔트리가 없어 `last_id`가 `"$"`인 채로 남으면, `exec.fill`을
+        블록하는 그 1초 동안 도착한 `decision.intent`는 다음 읽기에서 `$`가 그 **뒤로**
+        재해석되며 영영 전달되지 않는다. 토픽당 약 50%의 사각지대였다.
+
+        블록 한 번이 모든 토픽을 함께 덮으면 그 창 자체가 사라진다. 남은 조건은 `last_id`가
+        구체 ID여야 한다는 것 — 기동 시 한 번만 `stream_last_id()`로 해석해 두면 그 뒤로는
+        읽은 만큼 전진하므로 `$`가 다시 등장하지 않는다.
+        """
+        result = await self._redis.xread(dict(last_ids), block=block_ms, count=100)
+        out: list[tuple[str, str, BusMessage]] = []
+        for stream, entries in result or []:
+            topic = stream.decode() if isinstance(stream, bytes) else stream
             for entry_id, fields in entries:
                 eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
-                out.append((eid, decode(fields[b"data"])))
+                out.append((topic, eid, decode(fields[b"data"])))
         return out
+
+    async def stream_last_id(self, topic: str) -> str:
+        """ "지금 이 스트림의 마지막 엔트리 ID" — `"$"`를 **구체 ID로 한 번만** 고정하는 용도.
+
+        비어 있으면 `"0-0"`을 준다. 그 값으로 읽으면 "처음부터 전부"라 과거 재생처럼 보이지만,
+        비어 있으니 실제로 재생될 것이 없고 이후 추가분은 하나도 안 놓친다 — `$`가 남기는
+        사각지대(위 `read_streams` docstring)를 여는 것보다 이쪽이 안전하다.
+        """
+        entries = await self._redis.xrevrange(topic, count=1)
+        if not entries:
+            return "0-0"
+        entry_id = entries[0][0]
+        return entry_id.decode() if isinstance(entry_id, bytes) else entry_id

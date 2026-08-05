@@ -190,3 +190,55 @@ def test_default_components_include_the_bar_composer():
 
     assert "l1.composer" in DEFAULT_COMPONENTS
     assert set(DEFAULT_COMPONENTS) == {name for name, _label in _HEALTH_COMPONENTS}
+
+
+# ------------------------------------------------- 코드 버전 축 (2026-08-05 3차, P0-1)
+
+
+def test_snapshot_records_which_code_reported_the_state():
+    """화면이 죽으면 이 파일이 유일한 관측 수단인데(모듈 docstring), 버전 축이 없으면
+    "구버전이 보낸 초록"과 "최신 코드가 보낸 초록"이 파일에서도 똑같이 보인다."""
+    cache = StateCache()
+    cache.update(
+        health_cache_key("l1.collector"),
+        Health(component="l1.collector", level=HealthLevel.OK, git_sha="bb60f19"),
+    )
+
+    snapshot = _board(cache).snapshot()
+
+    assert snapshot["components"]["l1.collector"]["git_sha"] == "bb60f19"
+    assert "code_version" in snapshot
+    assert snapshot["code_version"]["process_git_sha"]
+
+
+def test_snapshot_flags_a_component_running_older_code(monkeypatch):
+    monkeypatch.setattr("messiah.ops.status_board.head_git_sha", lambda: "8810867")
+    monkeypatch.setattr("messiah.ops.status_board.PROCESS_GIT_SHA", "8810867")
+    cache = StateCache()
+    cache.update(
+        health_cache_key("l1.collector"),
+        Health(component="l1.collector", level=HealthLevel.OK, git_sha="bb60f19"),
+    )
+
+    snapshot = _board(cache).snapshot()
+
+    assert snapshot["code_version"]["stale"] is True
+    assert "bb60f19" in snapshot["code_version"]["summary"]
+
+
+def test_terminal_output_surfaces_version_drift(monkeypatch):
+    """터미널이 화면 없을 때의 마지막 수단이다 — 여기서도 어긋남이 눈에 띄어야 한다."""
+    monkeypatch.setattr("messiah.ops.status_board.head_git_sha", lambda: "8810867")
+    monkeypatch.setattr("messiah.ops.status_board.PROCESS_GIT_SHA", "bb60f19")
+
+    text = format_snapshot(_board(StateCache()).snapshot())
+
+    assert "⚠" in text
+    assert "코드 불일치" in text
+
+
+def test_terminal_output_survives_a_snapshot_without_the_version_block():
+    """이 필드가 생기기 전에 쓰인 스냅샷 파일도 계속 읽혀야 한다(장후 리뷰가 과거 파일을 본다)."""
+    text = format_snapshot({"generated_at_kst": "2026-08-03T15:00:00+09:00", "components": {}})
+
+    assert "MESSIAH 상태판" in text

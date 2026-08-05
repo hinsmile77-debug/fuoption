@@ -11,18 +11,23 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.health import health_cache_key
+from messiah.core.messages import BarClosed, Health, HealthLevel, Horizon
 from messiah.data.archiver import ParquetArchiver
 from messiah.ui import app as app_module
 from messiah.ui.app import (
+    _absence_reason,
     _available_dates,
     _candlestick_figure,
+    _component_versions,
     _default_redis_url,
+    _live_date_notice,
     _load_bars,
     _load_bars_with_status,
 )
 from messiah.ui.bar_reader import BarExportError
 from messiah.ui.bar_series import BarSeries
+from messiah.ui.data_source import DataSourceMode, FreshnessBadge, TopicSnapshot
 
 _KST = timezone(timedelta(hours=9))  # core/timeutil.py의 KST와 동일 정의(고정 오프셋)
 
@@ -317,3 +322,140 @@ def test_load_bars_rereads_after_file_changes(tmp_path):
 
     assert warning is None
     assert second is not None and second.x_kst[0].hour == 10
+
+
+# ---------------------------------------------------------------- NO_DATA 세 갈래 (P1-2)
+
+
+class _FakeSource:
+    """`DataSource` Protocol의 최소 구현 — 신선도 배지를 **직접 지정**할 수 있어야 한다.
+
+    실제 `LiveDataSource`는 벽시계로 age를 재므로 STALE 상태를 테스트에서 만들려면 시간을
+    조작해야 한다. 여기서 재려는 것은 "배지가 어떻게 계산되나"가 아니라 "주어진 배지에서
+    어떤 사유를 말하나"라, 배지를 입력으로 받는 편이 검증 의도에 맞는다.
+    """
+
+    def __init__(self, mode=DataSourceMode.LIVE, snapshots=None) -> None:
+        self.mode = mode
+        self._snapshots = dict(snapshots or {})
+
+    def snapshot(self, key: str) -> TopicSnapshot:
+        return self._snapshots.get(key) or TopicSnapshot(None, FreshnessBadge.NO_DATA, None)
+
+
+def _health_snapshot(level=HealthLevel.OK, *, badge=FreshnessBadge.LIVE, age=3.0, git_sha=""):
+    message = Health(component="g2.pipeline", level=level, git_sha=git_sha)
+    return TopicSnapshot(message=message, badge=badge, age_seconds=age)
+
+
+_G2 = health_cache_key("g2.pipeline")
+
+
+def test_unwired_publisher_is_not_reported_as_an_outage():
+    """`intel.futures`가 안 오는 건 사고가 아니라 구조다 — live 번들이 0개라 발행 자체가 없다.
+
+    끊김과 같은 회색 NO_DATA로 보이면 Redis 단절과 "원래 그런 것"이 구분되지 않는다(L18).
+    """
+    source = _FakeSource(snapshots={_G2: _health_snapshot()})
+
+    reason = _absence_reason(source, "FuturesView")
+
+    assert reason is not None
+    assert "미배선" in reason
+    assert "끊김" not in reason
+
+
+def test_waiting_is_distinguished_from_unwired():
+    source = _FakeSource(snapshots={_G2: _health_snapshot()})
+
+    assert "대기" in (_absence_reason(source, "DecisionIntent") or "")
+    assert "미배선" in (_absence_reason(source, "OptionsView") or "")
+
+
+def test_dead_publisher_turns_the_same_topic_into_an_outage():
+    """**선언이 관측을 이기지 않는다** — 발행자가 죽으면 "미배선"이라고 우기지 않는다."""
+    source = _FakeSource(snapshots={_G2: _health_snapshot(badge=FreshnessBadge.STALE, age=95.0)})
+
+    reason = _absence_reason(source, "FuturesView")
+
+    assert reason is not None
+    assert "끊김" in reason
+    assert "95초" in reason
+
+
+def test_publisher_that_never_started_is_an_outage_too():
+    source = _FakeSource()  # g2.pipeline heartbeat 자체가 없음
+
+    reason = _absence_reason(source, "FuturesView")
+
+    assert reason is not None
+    assert "끊김" in reason and "미기동" in reason
+
+
+def test_connection_failure_overrides_every_per_topic_reason():
+    """연결이 끊기면 모든 토픽이 같은 이유로 비어 있다 — 개별 사유가 그걸 가리면 안 된다."""
+    source = _FakeSource(
+        snapshots={
+            "LiveConnectionError": TopicSnapshot(
+                Health(component="command-center-ui", level=HealthLevel.CRITICAL),
+                FreshnessBadge.LIVE,
+                1.0,
+            ),
+            _G2: _health_snapshot(),
+        }
+    )
+
+    assert _absence_reason(source, "FuturesView") == "끊김 — LIVE 연결 실패"
+
+
+def test_replay_mode_never_claims_an_outage():
+    """재생 화면의 NO_DATA는 "이 스냅샷에 그 값이 없다"지 발행자의 생사와 무관하다."""
+    source = _FakeSource(mode=DataSourceMode.REPLAY)
+
+    assert _absence_reason(source, "FuturesView") is None
+
+
+def test_every_top_bar_topic_has_a_declared_reason():
+    """사유를 못 대는 토픽이 화면에 남으면 다시 "회색 하나로 뭉뚱그리기"로 되돌아간다."""
+    for key in ("FuturesView", "OptionsView", "DecisionIntent", "Fill", "RegimeState"):
+        assert key in app_module._ABSENCE_REASON
+        assert key in app_module._PUBLISHER_OF
+
+
+# ---------------------------------------------------------------- 코드 버전 (P0-1)
+
+
+def test_component_versions_only_include_components_that_reported():
+    """안 보낸 컴포넌트는 이미 신호등이 드러낸다 — 같은 사실을 두 곳에서 다르게 말하지 않는다."""
+    source = _FakeSource(snapshots={_G2: _health_snapshot(git_sha="8810867")})
+
+    versions = _component_versions(source)
+
+    assert versions == {"g2.pipeline": "8810867"}
+    assert "l1.collector" not in versions
+
+
+def test_component_versions_keep_the_empty_sha_of_an_old_process():
+    """빈 SHA는 "이 필드가 생기기 전 코드"라는 뜻이라 **버려지면 안 된다**(P0-1의 실제 상태)."""
+    source = _FakeSource(snapshots={_G2: _health_snapshot(git_sha="")})
+
+    assert _component_versions(source) == {"g2.pipeline": ""}
+
+
+# ---------------------------------------------------------------- LIVE 차트 날짜 (P1-3)
+
+
+def test_live_chart_labels_today_as_today():
+    is_today, notice = _live_date_notice(date(2026, 8, 5), today=date(2026, 8, 5))
+
+    assert is_today is True
+    assert "오늘(2026-08-05)" in notice
+
+
+def test_live_chart_never_calls_a_past_day_today():
+    """장 개시 전·적재 정지 구간에 전일 차트가 "오늘"로 찍히던 경로의 회귀 방지."""
+    is_today, notice = _live_date_notice(date(2026, 8, 4), today=date(2026, 8, 5))
+
+    assert is_today is False
+    assert "2026-08-04" in notice
+    assert "오늘(2026-08-05) 봉이 아직 없어" in notice

@@ -170,3 +170,68 @@ def test_health_cache_key_separates_components():
     발행자만 남아 나머지 컴포넌트가 화면에서 사라진다."""
     assert health_cache_key("l1.collector") != health_cache_key("g2.pipeline")
     assert health_cache_key("l1.collector") == "health:l1.collector"
+
+
+# ---------------------------------------------------------------- 문구 (2026-08-05 3차, P1-1)
+
+
+def test_staleness_wording_defaults_to_reception():
+    """수집기 등 "받는" 축의 기존 문구는 그대로 — 기존 화면 표현이 안 바뀐다."""
+    assert "최근 수신 3초 전" == staleness_status(3.0, warn_after=60.0, critical_after=120.0).detail
+
+
+def test_staleness_wording_follows_what_is_actually_measured():
+    """**재는 대상이 다르면 같은 단어를 쓰지 않는다.**
+
+    `FeatureEngine.health()`는 `seconds_since_last_publish()`를 넘기는데 문구는 "최근 수신"으로
+    하드코딩돼 있었다. 그래서 화면에 이렇게 떴다:
+
+        수집기(WS) — OK · 최근 수신 0초 전     피처엔진 — OK · 최근 수신 54초 전
+
+    읽는 사람은 54초짜리 정체로 읽는다. 실제로는 M1 봉 주기(60초) 안의 정상 발행 간격이었다.
+    """
+    status = staleness_status(54.0, warn_after=120.0, critical_after=240.0, subject="발행")
+
+    assert status.level is HealthLevel.OK
+    assert status.detail == "최근 발행 54초 전"
+    assert "수신" not in status.detail
+
+
+def test_staleness_wording_applies_to_warn_and_critical_too():
+    kwargs = dict(warn_after=120.0, critical_after=240.0, subject="발행")
+
+    assert staleness_status(130.0, **kwargs).detail == "130초간 발행 없음"
+    assert staleness_status(300.0, **kwargs).detail == "300초간 발행 없음"
+
+
+def test_feature_engine_reports_publishing_not_reception():
+    """발행측 결선까지 못박는다 — `core/health.py`만 고치고 호출부를 안 바꾸면 무의미하다."""
+    from messiah.features.engine import FeatureEngine
+
+    engine = FeatureEngine.__new__(FeatureEngine)
+    engine.seconds_since_last_publish = lambda: 54.0  # type: ignore[method-assign]
+    engine._last_nan_ratio = {}  # type: ignore[attr-defined]
+
+    assert "발행" in engine.health().detail
+    assert "최근 수신" not in engine.health().detail
+
+
+# ------------------------------------------------- heartbeat가 실어 나르는 코드 버전 (P0-1)
+
+
+async def test_heartbeat_carries_the_code_version_it_was_sent_from():
+    """2026-08-05엔 초록 신호등을 보낸 쪽이 3시간 전 코드였는데 알 방법이 없었다."""
+    from messiah.core.version import PROCESS_GIT_SHA, PROCESS_STARTED_AT
+
+    bus = _FakeBus()
+    message = await HealthReporter(bus, "l1.collector").publish_once()
+
+    assert message is not None
+    assert message.git_sha == PROCESS_GIT_SHA
+    assert message.started_at_utc == PROCESS_STARTED_AT
+
+
+def test_health_defaults_to_an_empty_sha_so_old_processes_are_detectable():
+    """기본값이 빈 문자열인 것이 핵심 — **미보고 자체가 구버전의 증거**가 된다."""
+    assert Health(component="x", level=HealthLevel.OK).git_sha == ""
+    assert Health(component="x", level=HealthLevel.OK).started_at_utc is None

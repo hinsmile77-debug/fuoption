@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import sys
 from datetime import datetime
 from math import isfinite
 from typing import Any
 
 from messiah.core.timeutil import now_kst
+from messiah.core.version import PROCESS_GIT_SHA
 
 # 태그 등록부: 태그 = 심각도 1개 고정 (신규 태그는 여기 등록 후 사용)
 TAG_LEVELS: dict[str, int] = {
@@ -174,15 +174,6 @@ TAG_LEVELS: dict[str, int] = {
 _logger = logging.getLogger("messiah")
 
 
-def _git_sha() -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except Exception:
-        return "nogit"
-
-
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -242,7 +233,9 @@ def session_start(instance_id: str) -> None:
         "SessionStart",
         "process start",
         instance_id=instance_id,
-        git_sha=_git_sha(),
+        # 프로세스가 **적재한** 코드의 SHA다 — 지금 작업트리의 HEAD가 아니다
+        # (`core/version.py` 모듈 docstring). 장중에 커밋이 들어와도 이 줄은 안 변한다.
+        git_sha=PROCESS_GIT_SHA,
         pid=__import__("os").getpid(),
     )
 

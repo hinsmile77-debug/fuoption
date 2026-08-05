@@ -478,12 +478,25 @@ class Fill(BusMessage):
 
 
 class Health(BusMessage):
-    """컴포넌트 heartbeat (sys.health) — 5초 주기, 15초 미수신 = 사망 판정."""
+    """컴포넌트 heartbeat (sys.health) — 5초 주기, 15초 미수신 = 사망 판정.
+
+    ## 버전 필드는 "고친 것과 도는 것"을 가른다 (2026-08-05 3차, P0-1)
+
+    `git_sha`/`started_at_utc`는 그 컴포넌트가 **적재한 코드**와 기동 시각이다
+    (`core/version.py`). 2026-08-05 장중에 커밋한 감시 장치(`l1.composer` 신호등)가 08:35에
+    뜬 프로세스들엔 적재되지 않았는데, 화면·상태판 어디에도 그 사실이 안 보였다 — 신호등은
+    전부 초록이었고 그 초록은 **구버전이 보낸 것**이었다.
+
+    기본값이 빈 문자열인 것이 중요하다: 현재 코드로 도는 프로세스는 `HealthReporter`가
+    반드시 채우므로, **미보고 자체가 구버전이라는 증거**가 된다(`assess_version_drift`).
+    """
 
     component: str
     level: HealthLevel
     detail: str = ""
     pid: int = 0  # PID 자가 등록 (L23)
+    git_sha: str = ""
+    started_at_utc: datetime | None = None
 
 
 class KillSignal(BusMessage):

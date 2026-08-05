@@ -40,6 +40,7 @@ from typing import Awaitable, Callable
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_HEALTH, BusLike
 from messiah.core.messages import Health, HealthLevel
+from messiah.core.version import PROCESS_GIT_SHA, PROCESS_STARTED_AT
 
 # heartbeat 주기 — `Health` docstring이 "5초 주기, 15초 미수신 = 사망 판정"을 적어뒀지만,
 # 그건 원안이고 실제 결선은 10초/30초로 잡는다: Redis pub/sub 부하를 반으로 줄이면서도
@@ -112,6 +113,12 @@ class HealthReporter:
             level=status.level,
             detail=status.detail,
             pid=self._pid,
+            # **어느 코드가 이 heartbeat를 보냈는지 함께 싣는다** (2026-08-05 3차, P0-1).
+            # 신호등이 초록인 것과 그 초록이 최신 코드의 판정인 것은 다른 사실이다 —
+            # 2026-08-05엔 초록을 보낸 쪽이 3시간 전 코드였고 그걸 알 방법이 없었다
+            # (`core/version.py` 모듈 docstring).
+            git_sha=PROCESS_GIT_SHA,
+            started_at_utc=PROCESS_STARTED_AT,
         )
         try:
             await self._bus.publish(TOPIC_HEALTH, message)
@@ -139,8 +146,21 @@ def staleness_status(
     critical_after: float,
     warming_up_detail: str = "웜업 — 아직 첫 수신 전",
     unit: str = "초",
+    subject: str = "수신",
 ) -> HealthStatus:
-    """ "마지막 수신 이후 경과"류 probe의 공통 판정 — 수집기·피처엔진이 같이 쓴다.
+    """ "마지막 {subject} 이후 경과"류 probe의 공통 판정 — 수집기·피처엔진이 같이 쓴다.
+
+    ## `subject`를 파라미터로 뺀 이유 (2026-08-05 3차, P1-1)
+
+    문구가 `"최근 수신 N초 전"`으로 **하드코딩**돼 있었는데, 정작 `FeatureEngine.health()`가
+    넘기는 값은 `seconds_since_last_publish()`(= 마지막 **발행** 이후 경과)였다. 그래서
+    화면에 이렇게 나란히 떴다:
+
+        수집기(WS) — OK · 최근 수신 0초 전     피처엔진 — OK · 최근 수신 54초 전
+
+    읽는 사람은 "수집기는 받는데 피처엔진이 54초째 못 받는다"로 읽는다. 실제로는 M1 봉이
+    1분 주기라 발행 간격이 그만큼 벌어지는 **정상 상태**였다. 재는 대상이 다른 두 축을 같은
+    단어로 부르면 안 된다 — 값이 정확해도 문구가 틀리면 화면은 거짓말을 한다(L18).
 
     `age_seconds is None`(아직 한 번도 못 받음)을 CRITICAL로 보지 않는 것이 핵심이다.
     기준선이 없는 것과 끊긴 것은 다르다 — 08:35 기동 후 첫 틱(실측 08:45)까지 10분을
@@ -163,7 +183,7 @@ def staleness_status(
     if age_seconds is None:
         return HealthStatus(HealthLevel.UNKNOWN, warming_up_detail)
     if age_seconds >= critical_after:
-        return HealthStatus(HealthLevel.CRITICAL, f"{age_seconds:.0f}{unit}간 수신 없음")
+        return HealthStatus(HealthLevel.CRITICAL, f"{age_seconds:.0f}{unit}간 {subject} 없음")
     if age_seconds >= warn_after:
-        return HealthStatus(HealthLevel.WARN, f"{age_seconds:.0f}{unit}간 수신 없음")
-    return HealthStatus(HealthLevel.OK, f"최근 수신 {age_seconds:.0f}{unit} 전")
+        return HealthStatus(HealthLevel.WARN, f"{age_seconds:.0f}{unit}간 {subject} 없음")
+    return HealthStatus(HealthLevel.OK, f"최근 {subject} {age_seconds:.0f}{unit} 전")

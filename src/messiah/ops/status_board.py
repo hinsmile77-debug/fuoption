@@ -51,6 +51,7 @@ from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
 from messiah.core.messages import BusMessage, CircuitBreakerStatus, Health
 from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
+from messiah.core.version import PROCESS_GIT_SHA, assess_version_drift, head_git_sha
 
 DEFAULT_SNAPSHOT_PATH = Path("logs") / "status_snapshot.json"
 DEFAULT_INTERVAL_SECONDS = 15.0
@@ -124,6 +125,7 @@ class StatusBoard:
                 "age_seconds": None if fresh.age_seconds is None else round(fresh.age_seconds, 1),
                 "level": message.level.value if isinstance(message, Health) else None,
                 "detail": message.detail if isinstance(message, Health) else None,
+                "git_sha": message.git_sha if isinstance(message, Health) else None,
             }
 
         cb_message = self._cache.get("CircuitBreakerStatus")
@@ -137,8 +139,28 @@ class StatusBoard:
             ),
         }
 
+        # **어느 코드가 이 상태를 보고했나** (2026-08-05 3차, P0-1). 화면이 죽었을 때 이
+        # 파일이 유일한 관측 수단인데(모듈 docstring), 버전 축이 없으면 "구버전이 보낸 초록"과
+        # "최신 코드가 보낸 초록"이 파일에서도 똑같이 보인다 — UI의 버전 스트립과 같은 근거·
+        # 같은 판정기를 쓴다(`core/version.py`).
+        drift = assess_version_drift(
+            process_sha=PROCESS_GIT_SHA,
+            head_sha=head_git_sha(),
+            component_shas={
+                name: info["git_sha"] or ""
+                for name, info in components.items()
+                if info["git_sha"] is not None
+            },
+        )
+
         snapshot: dict[str, Any] = {
             "generated_at_kst": now_kst().isoformat(),
+            "code_version": {
+                "process_git_sha": PROCESS_GIT_SHA,
+                "head_git_sha": head_git_sha(),
+                "stale": drift.stale,
+                "summary": drift.summary,
+            },
             "components": components,
             "circuit_breaker": circuit_breaker,
         }
@@ -223,6 +245,10 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
         )
 
     lines = [f"=== MESSIAH 상태판 (기록 시각 {snapshot.get('generated_at_kst', '?')}) ==="]
+    version = snapshot.get("code_version") or {}
+    if version:
+        mark = "⚠ " if version.get("stale") else "  "
+        lines.append(f"{mark}{version.get('summary', '코드 버전 미상')}")
     ui = snapshot.get("command_center_ui")
     if ui is not None:
         lines.append(f"  Command Center UI: {'정상' if ui == 'UP' else '응답 없음'}")
