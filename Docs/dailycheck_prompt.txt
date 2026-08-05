@@ -21,11 +21,23 @@ fix 할 작업 + 실행 점검결과를 바탕으로 고도화 방안을 수립�
 
 남은 것 — 오늘 8/5 15:35 이후
 
+오늘 15:35 이후 절차 (두 커밋 공통)
+
 1. python scripts/daily_integrity_report.py --date 2026-08-05   ← 재합성 전에
 2. python scripts/run_recompose.py --symbol A05608
 3. verify_archive_volume / run_vol_scorecard / daily_integrity_report 재산출
-4. 프로세스 재기동   ← 이 커밋이 실제로 적용되는 시점
-1번을 재합성 전에 돌리는 이유는 새로 넣은 late_bar_drops가 오늘 26건+를 실제로 잡는지 확인하기 위해서입니다 — 관측 장치 자체의 검증이고, 2번 이후에는 horizon_findings가 깨끗해져 그 기회가 사라집니다. 절차와 08-06 점검 항목(E-1~E-6)은 dev_memory/NEXT_TODO.md에 있습니다.
+4. 프로세스 재기동   ← 두 커밋이 실제로 적용되는 시점
+1번을 먼저 돌리는 이유는 그대로입니다 — 새로 넣은 late_bar_drops가 오늘 26건+를 실제로 잡는지 확인할 마지막 기회이고, 2번 이후엔 horizon_findings가 깨끗해집니다.
+
+내일(08-06) 장후에 답이 나오는 것
+E-1~E-6 (1차 커밋 검증): 버킷 유실 0인가 · 장전 옵션체인 스킵 0인가 · 다리 재시도가 실제로 살렸는가
+F-1~F-5 (2차 커밋 검증): delivery_latency p99가 몇 초인가 · l1.composer 축이 뜨는가 · 08:35~08:45 수집기가 UNKNOWN인가 · AggregatorLateTickDropped가 몇 건인가
+F-4가 특히 볼 값입니다. 틱 구동 기본값에서도 순서 뒤바뀐 틱이 잡힐 수 있고, 종전엔 조용히 버려지던 것이라 내일이 첫 관측입니다. 그 건수가 곧 timer 승격의 비용 추정치가 됩니다.
+
+minute_bar_close: timer 승격은 p99를 3~5거래일 모은 뒤입니다 — 겹④가 이미 정확성을 확보했으므로 서두를 이유가 없습니다.
+
+
+
 
 작업 중 발견한 것 중 커밋에 포함하지 않은 판단 하나:
 **G2 번들 미결선(5거래일 연속 판단 0건)**은 오늘 새로 생긴 이상이 아니라

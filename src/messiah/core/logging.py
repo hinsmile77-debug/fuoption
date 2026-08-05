@@ -159,6 +159,10 @@ TAG_LEVELS: dict[str, int] = {
     # (`scripts/run_l1_daily.py`). 그 봉은 1분봉 아카이브에만 남고 합성봉에서 빠진다 —
     # 2026-08-04에 조용히 일어났던 바로 그 사고라 ERROR다.
     "DailyCloseBarNotDrained": logging.ERROR,
+    # 종료 시퀀스에서 마지막 1분봉을 **버스 대신 직접** 합성기에 넘겼다 (2026-08-05).
+    # 정상 동작이지만 아키텍처 우회이므로 매일 눈에 보여야 한다 — 조용해지면 그 우회가
+    # 있다는 사실 자체가 잊힌다(L18/R10 "폴백에는 배지를 단다").
+    "DailyCloseBarHandedOff": logging.WARNING,
     # 피처 건강도 (2026-08-05 고도화 3, `features/engine.py`). 퇴화 0건도 매일 남긴다 —
     # 로그가 없는 날은 "검사했는데 0건"과 "검사를 안 함"이 구분되지 않는다(L18).
     "FeatureHealthSummary": logging.INFO,

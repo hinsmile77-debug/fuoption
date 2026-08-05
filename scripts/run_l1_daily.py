@@ -248,6 +248,27 @@ def _resolve_front_month_symbol() -> str:
     return symbol
 
 
+def _previous_day_close(archiver: ParquetArchiver, symbol: str, today: date) -> int | None:
+    """직전 거래일의 마지막 1분봉 종가(틱) — `px_gap_open`의 유일한 원천.
+
+    ## 왜 웜스타트 창에 기대면 안 되나 (2026-08-05 실측)
+
+    08:35 기동에서는 웜스타트 200봉이 통째로 전일 것이라 `SessionState`의 일자 롤오버가
+    저절로 일어난다. 그런데 **장중 재기동**에서는 최근 200봉이 전부 오늘 것이라 경계가 창
+    안에 없고, `prev_day_close_ticks`가 영영 None으로 남아 그날 나머지 시간 내내
+    `px_gap_open`이 NaN이 된다. 2026-08-05 14:12 재기동 후 실제로 그랬다.
+
+    아카이브에서 직접 읽으면 창 길이와 무관하게 항상 채워진다. 못 찾으면 None을 돌려주고
+    (첫 거래일·아카이브 없음) 그건 `px_gap_open`이 정직하게 NaN인 정상 상황이다.
+    """
+    days = [d for d in archiver.available_days(symbol, Horizon.M1) if d < today]
+    for day in reversed(days):  # 가장 가까운 과거부터
+        bars = archiver.read_day_bars(symbol, Horizon.M1, day)
+        if bars:
+            return max(bars, key=lambda b: b.bar_open_kst).c_ticks
+    return None
+
+
 def _load_warmup_artifacts(
     engine: FeatureEngine, archiver: ParquetArchiver, symbol: str, today: date
 ) -> None:
@@ -271,7 +292,9 @@ def _load_warmup_artifacts(
             )
             for horizon in Horizon
         }
-        loaded = engine.warm_start(history)
+        loaded = engine.warm_start(
+            history, prev_day_close_ticks=_previous_day_close(archiver, symbol, today)
+        )
     except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 수집을 막으면 안 됨
         mlog.log(
             "FeatureWarmStartFailed",
@@ -649,13 +672,33 @@ async def _daily_close(
     # 우회하지 않고 **관측 가능한 대기**로 바꾼다. 실패해도 종료는 계속하되 ERROR로 남긴다.
     final_bar = await collector.flush_final_bar()
     if final_bar is not None and not await composer.wait_for_bar(final_bar.bar_open_kst):
+        # **버스로는 절대 도달하지 못한다 — 구독자가 이미 취소됐기 때문이다** (2026-08-05).
+        #
+        # `_run_regular_session()`의 `asyncio.gather`에 `composer.run_forever()`가 들어 있고,
+        # 15:35에 `asyncio.wait_for(...)`가 그 gather를 통째로 취소한다. 그 뒤에 부르는
+        # `flush_final_bar()`는 **아무도 안 듣는 버스**로 발행하는 셈이라, 이 대기는 매일
+        # 반드시 실패하고 그날 마지막 1분봉이 상위 Horizon에서 빠진다(2026-08-05 15:35:06
+        # 실측 — 수정 전에는 이 ERROR가 나고도 봉이 그냥 유실됐다).
+        #
+        # 그래서 여기서 **직접 넘긴다**. 아키텍처 불변 원칙 2("프로세스 간 통신은 Redis Bus
+        # 로만")는 프로세스 **사이**의 규칙이고, 이 둘은 같은 프로세스 안에 있으며 지금은
+        # 버스 자체가 내려간 종료 경로다. 조용히 하지 않는다 — 무엇을 왜 우회했는지 남긴다.
         mlog.log(
-            "DailyCloseBarNotDrained",
-            f"마지막 1분봉({final_bar.bar_open_kst:%H:%M})이 합성기에 도달하지 않음 — "
-            "그 분은 상위 Horizon 합성봉에서 빠진다(1분봉 아카이브에는 남음)",
+            "DailyCloseBarHandedOff",
+            f"마지막 1분봉({final_bar.bar_open_kst:%H:%M})이 버스로 도달하지 않아 합성기에 "
+            "직접 전달 — 종료 시퀀스에서 구독이 이미 취소된 상태다",
             symbol=final_bar.symbol,
             bar_open_kst=final_bar.bar_open_kst.isoformat(),
         )
+        await composer.handle_one_minute_bar(final_bar)
+        if not await composer.wait_for_bar(final_bar.bar_open_kst, timeout_seconds=0.05):
+            mlog.log(
+                "DailyCloseBarNotDrained",
+                f"마지막 1분봉({final_bar.bar_open_kst:%H:%M})이 직접 전달로도 반영되지 않음 "
+                "— 그 분은 상위 Horizon 합성봉에서 빠진다(1분봉 아카이브에는 남음)",
+                symbol=final_bar.symbol,
+                bar_open_kst=final_bar.bar_open_kst.isoformat(),
+            )
     await composer.flush_all_final()
     # 세션 내내 죽어 있던 피처를 남긴다 (2026-08-05 고도화 3) — `nan_ratio`가 못 보는
     # 것을 본다. 퇴화 0건인 날도 남겨야 "검사했는데 0건"과 "검사를 안 함"이 갈린다.

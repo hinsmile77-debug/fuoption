@@ -834,3 +834,66 @@ async def test_a_failed_warm_start_shows_up_as_degenerate(monkeypatch):
 
     assert health.always_nan, "긴 창 피처가 죽어 있는데 아무것도 안 잡혔다"
     assert any(tag == "FeatureHealthDegenerate" for tag, _ in logged)
+
+
+# ------------------- 장중 재기동에서도 전일 종가가 살아남는가 (2026-08-05 실측 회귀)
+
+
+def test_warm_start_seeds_prev_day_close_when_the_window_never_crosses_midnight():
+    """2026-08-05 14:12 재기동 회귀 — 그날 `px_gap_open`이 세션 내내 NaN이었다.
+
+    08:35 기동에서는 웜스타트 200봉이 통째로 전일 것이라 `SessionState`의 일자 롤오버가
+    저절로 일어난다. 그런데 **장중 재기동**에서는 최근 200봉이 전부 오늘 것이라 경계가
+    창 안에 없고, `prev_day_close_ticks`가 영영 None으로 남는다.
+
+    그날 처음 붙은 피처 건강도 검사가 이걸 잡아냈다 — 그 전에는 `nan_ratio`에 1/121로
+    묻혀 아무도 몰랐다.
+    """
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M1])
+    # 오늘 것만 있는 창(일자 경계 없음) — 장중 재기동 상황 그대로.
+    today_only = [
+        _bar(i, horizon=Horizon.M1, c=100 + i).model_copy(
+            update={"bar_open_kst": datetime(2026, 8, 5, 9, 0, tzinfo=KST) + timedelta(minutes=i)}
+        )
+        for i in range(60)
+    ]
+
+    engine.warm_start({Horizon.M1: today_only}, prev_day_close_ticks=98)
+
+    assert engine._session.prev_day_close_ticks == 98
+
+
+def test_warm_start_lets_a_real_day_rollover_win_over_the_hint():
+    """웜스타트 봉이 일자를 걸치면 그쪽이 이긴다 — 실측이 힌트보다 정확하다."""
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M1])
+    yesterday = [
+        _bar(i, horizon=Horizon.M1, c=200 + i).model_copy(
+            update={"bar_open_kst": datetime(2026, 8, 4, 15, 0, tzinfo=KST) + timedelta(minutes=i)}
+        )
+        for i in range(30)
+    ]
+    today = [
+        _bar(i, horizon=Horizon.M1, c=300 + i).model_copy(
+            update={"bar_open_kst": datetime(2026, 8, 5, 9, 0, tzinfo=KST) + timedelta(minutes=i)}
+        )
+        for i in range(30)
+    ]
+
+    engine.warm_start({Horizon.M1: yesterday + today}, prev_day_close_ticks=1)
+
+    assert engine._session.prev_day_close_ticks == 229  # 전일 마지막 종가(200+29)
+
+
+def test_warm_start_without_a_hint_is_unchanged():
+    """힌트를 안 주면 종전과 완전히 같다 — 08:35 정상 경로의 동작을 안 바꾼다."""
+    engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M1])
+    today_only = [
+        _bar(i, horizon=Horizon.M1, c=100 + i).model_copy(
+            update={"bar_open_kst": datetime(2026, 8, 5, 9, 0, tzinfo=KST) + timedelta(minutes=i)}
+        )
+        for i in range(10)
+    ]
+
+    engine.warm_start({Horizon.M1: today_only})
+
+    assert engine._session.prev_day_close_ticks is None

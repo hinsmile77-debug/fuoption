@@ -360,7 +360,10 @@ class FeatureEngine:
         return _MAX_HISTORY
 
     def warm_start(
-        self, bars_by_horizon: Mapping[Horizon, Sequence[BarClosed]]
+        self,
+        bars_by_horizon: Mapping[Horizon, Sequence[BarClosed]],
+        *,
+        prev_day_close_ticks: int | None = None,
     ) -> dict[Horizon, int]:
         """과거 완성봉으로 롤링 윈도우를 미리 채운다 — 발행은 하지 않는다.
 
@@ -378,8 +381,21 @@ class FeatureEngine:
         없어 **항상 None이었다**. 전일 봉을 시간순으로 흘리면 `on_bar()`의 일자 롤오버가
         자연스럽게 전일 종가를 채운다.
 
+        ## 그 자연스러운 롤오버는 **장중 재기동에서 깨진다** (2026-08-05 실측)
+
+        08:35 기동에서는 웜스타트 창(200봉)이 통째로 전일 것이라 롤오버가 반드시 일어난다.
+        그런데 장중에 재기동하면 최근 200봉이 **전부 오늘 것**이라 일자 경계가 창 안에 없고,
+        `prev_day_close_ticks`는 영영 None으로 남는다 — 그날 나머지 시간 내내 `px_gap_open`이
+        NaN이다. 2026-08-05 14:12 재기동 후 실제로 그랬고, 그날 처음 붙은 피처 건강도 검사가
+        `1m 피처 1개가 세션 내내 죽어 있었다(px_gap_open)`로 잡아냈다.
+
+        그래서 전일 종가를 **명시적으로 받는다**. 창이 우연히 일자를 걸치는지에 기대지 않는다.
+        웜스타트 봉이 일자를 걸치면 그쪽이 이기고(더 정확한 실측), 안 걸치면 이 인자가 채운다.
+
         입력: Horizon별 완성봉 목록. 심볼/Horizon이 안 맞는 봉은 버린다. 시간순이 아니어도
              되며(여기서 정렬한다), 용량(`history_capacity`)을 넘으면 최신 것만 남는다.
+             `prev_day_close_ticks`는 **직전 거래일의 마지막 종가**(틱 단위) — 호출측이
+             아카이브에서 읽어 넘긴다(`scripts/run_l1_daily.py`의 `_load_warmup_artifacts`).
         반환: Horizon별로 실제 적재된 봉 수 — 호출측이 로그로 남긴다.
         """
         for horizon, bars in bars_by_horizon.items():
@@ -392,6 +408,11 @@ class FeatureEngine:
             )
             history.clear()
             history.extend(accepted)  # deque(maxlen)이 알아서 오래된 것부터 버린다
+
+        # 명시 인자를 **먼저** 넣는다 — 웜스타트 봉이 일자를 걸치면 `on_bar()`의 롤오버가
+        # 이 값을 실측으로 덮어쓴다(그쪽이 더 정확하다). 안 걸치면 이 값이 그대로 남는다.
+        if prev_day_close_ticks is not None and prev_day_close_ticks > 0:
+            self._session.prev_day_close_ticks = prev_day_close_ticks
 
         for bar in self._history.get(self._session_horizon, ()):
             self._session.on_bar(bar)

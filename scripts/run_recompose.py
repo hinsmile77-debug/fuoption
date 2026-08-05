@@ -27,6 +27,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from messiah.core.event_calendar import DEFAULT_SESSION  # noqa: E402
 from messiah.core.messages import HORIZON_SECONDS, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
@@ -50,11 +51,37 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--include-today",
         action="store_true",
-        help="오늘도 재합성한다. 기본은 제외 — 라이브 수집이 조각을 쓰는 중이라 통합본으로 "
-        "덮으면 이후 수집분이 read_day()에서 조각으로만 남아 뒤섞인다.",
+        help="오늘도 재합성한다. 기본은 **연속거래 종료(15:35) 이후면 자동 포함** — 그때는 "
+        "라이브 수집이 이미 끝나 조각을 쓰지 않는다. 장중에 굳이 돌리려면 이 플래그를 준다.",
     )
     session_guard.add_force_intraday_argument(p)
     return p.parse_args()
+
+
+def _should_include_today(*, explicit: bool, now: datetime) -> tuple[bool, str]:
+    """오늘도 재합성할 것인가, 그리고 그 판단의 근거 문장.
+
+    ## 왜 자동 판단으로 바꿨나 (2026-08-05 실측)
+
+    이 스크립트는 **장후 일일 절차의 2단계**다(`dev_memory/NEXT_TODO.md`). 그런데 기본값이
+    "오늘 제외"라 장 마감 뒤에 그대로 돌리면 `완료 — 0일 / 상위봉 0행`만 찍고 끝났다 —
+    **그날 망가진 상위 Horizon을 고치라고 만든 절차가 아무것도 안 하고 성공처럼 보였다.**
+    2026-08-05에 실제로 그렇게 한 번 지나갔고, 출력만 봐서는 알 수가 없었다.
+
+    "오늘 제외"의 원래 이유는 유효하다: 라이브 수집이 조각을 쓰는 중에 통합본으로 덮으면
+    이후 수집분이 조각으로만 남아 뒤섞인다. 그런데 그 이유는 **연속거래가 끝나면 사라진다** —
+    `run_l1_daily.py`가 15:35에 `_compact_archive()`로 조각을 통합하고 종료하기 때문이다.
+
+    그래서 시각으로 판단하고, **어느 쪽이든 이유를 출력한다**(조용한 무동작 금지, L18).
+    """
+    if explicit:
+        return True, "오늘 포함 — --include-today"
+    if now.timetz().replace(tzinfo=None) >= DEFAULT_SESSION.close_time:
+        return True, f"오늘 포함 — 연속거래 종료({DEFAULT_SESSION.close_time:%H:%M}) 이후"
+    return False, (
+        f"오늘 제외 — 연속거래 종료({DEFAULT_SESSION.close_time:%H:%M}) 전이라 라이브 수집이 "
+        "조각을 쓰는 중이다(장중에도 돌리려면 --include-today)"
+    )
 
 
 def main() -> int:
@@ -62,19 +89,24 @@ def main() -> int:
     session_guard.refuse_if_regular_session("상위 Horizon 재합성", force=args.force_intraday)
     base = Path(args.base_dir)
     archiver = ParquetArchiver(base)
-    today = now_kst().date()
+    now = now_kst()
+    today = now.date()
+    include_today, today_reason = _should_include_today(explicit=args.include_today, now=now)
+    print(today_reason)
 
     symbols = [args.symbol] if args.symbol else sorted(p.name for p in base.iterdir() if p.is_dir())
     total_days = 0
     total_rows = 0
+    excluded_today = 0
     skipped_short: list[tuple[str, date, int]] = []
 
     for symbol in symbols:
         days = archiver.available_days(symbol, Horizon.M1)
         days = [d for d in days if not (args.start and d < args.start)]
         days = [d for d in days if not (args.end and d > args.end)]
-        if not args.include_today:
+        if not include_today and today in days:
             days = [d for d in days if d != today]
+            excluded_today += 1
         if not days:
             continue
         print(f"{symbol}: {len(days)}일")
@@ -96,6 +128,15 @@ def main() -> int:
             print(f"  {day}  1m={len(minute_bars)}  →  " + " ".join(written))
 
     print(f"\n완료 — {total_days}일 / 상위봉 {total_rows}행 재합성")
+    # 0일로 끝난 이유를 반드시 말한다 — "돌렸는데 아무 일도 안 일어났다"가 성공처럼 보이면
+    # 안 된다(2026-08-05에 실제로 그렇게 한 번 지나갔다).
+    if total_days == 0:
+        print(
+            f"  ** 재합성한 날이 없다 ** — {today.isoformat()}이(가) 제외됐고 그 외 대상일도 "
+            "없었다."
+            if excluded_today
+            else "  ** 재합성한 날이 없다 ** — 구간에 1분봉이 있는 날이 없다."
+        )
     if skipped_short:
         print("1분봉이 30개 미만인 날(상위 Horizon이 불완전):")
         for symbol, day, count in skipped_short:
