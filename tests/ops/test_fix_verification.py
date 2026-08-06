@@ -552,3 +552,56 @@ def test_a_future_registration_date_stays_quiet_until_then():
 
     assert verdict.status == VerificationStatus.PENDING
     assert verdict.needs_attention is False
+
+
+# ------------------- 2026-08-06 P0 신설 지표 (커버리지 축·부팅 무장)
+
+
+def test_series_gap_findings_metric_reads_the_coverage_axis():
+    extract = METRIC_EXTRACTORS["series_gap_findings"]
+
+    assert extract({"series_findings": ["a", "b"]}) == 2.0
+    assert extract({"series_findings": []}) == 0.0
+
+
+def test_series_head_gap_metric_takes_the_worst_series():
+    """2026-08-06에 4개 계열이 111~116분이었다 — 최악값이 그날의 크기다."""
+    extract = METRIC_EXTRACTORS["series_head_gap_minutes_max"]
+    report = {
+        "series_coverage": [
+            {"name": "ticks", "head_gap_minutes": 10.0},
+            {"name": "option_chain/regular", "head_gap_minutes": 115.0},
+        ]
+    }
+
+    assert extract(report) == 115.0
+
+
+def test_series_head_gap_metric_is_unjudged_without_the_axis():
+    """축이 없던 옛 리포트(2026-08-06 이전)를 0으로 세면 통과해 버린다(L18)."""
+    extract = METRIC_EXTRACTORS["series_head_gap_minutes_max"]
+
+    assert extract({}) is None
+
+
+def test_boot_recovery_metric_reads_the_host_check():
+    extract = METRIC_EXTRACTORS["boot_recovery_armed"]
+
+    armed = {"host_health": {"checks": [{"name": "boot_recovery", "available": True, "ok": True}]}}
+    unarmed = {
+        "host_health": {"checks": [{"name": "boot_recovery", "available": True, "ok": False}]}
+    }
+    assert extract(armed) == 1.0
+    assert extract(unarmed) == 0.0
+
+
+def test_boot_recovery_metric_separates_unmeasured_from_unarmed():
+    """못 잰 날을 "무장 안 됨"으로 세면 늑대소년이고, "무장됨"으로 세면 검사가 없느니만
+    못하다 — 둘 다 아닌 **판정 불가**여야 한다(L18)."""
+    extract = METRIC_EXTRACTORS["boot_recovery_armed"]
+    unmeasured = {
+        "host_health": {"checks": [{"name": "boot_recovery", "available": False, "ok": True}]}
+    }
+
+    assert extract(unmeasured) is None
+    assert extract({"host_health": {"checks": []}}) is None

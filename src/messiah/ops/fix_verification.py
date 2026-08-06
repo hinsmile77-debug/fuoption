@@ -128,6 +128,21 @@ def _native_crashes_measurable(report: dict[str, Any]) -> float | None:
     return 1.0 if crashes.get("available") else 0.0
 
 
+def _boot_recovery_armed(report: dict[str, Any]) -> float | None:
+    """수집 작업의 부팅 트리거 무장 여부 — `host_health`의 `boot_recovery` 항목에서 읽는다.
+
+    항목이 없는 옛 리포트(2026-08-06 이전)는 None이다 — 모르는 것을 좋은 쪽으로도 나쁜
+    쪽으로도 가정하지 않는다(`_native_crashes_measurable`과 같은 규율).
+    """
+    for check in (report.get("host_health") or {}).get("checks") or []:
+        if not isinstance(check, dict) or check.get("name") != "boot_recovery":
+            continue
+        if not check.get("available"):
+            return None  # 못 쟀다 — 0(무장 안 됨)과 구분한다(L18)
+        return 1.0 if check.get("ok") else 0.0
+    return None
+
+
 # 등록부에서 쓸 수 있는 지표 — **무결성 리포트에 실제로 있는 필드만** 연다. 임의 표현식을
 # 허용하면 등록부가 코드가 되고, 그러면 등록부 자체를 검증해야 하는 문제가 생긴다.
 METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
@@ -189,6 +204,28 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
             for entry in (r.get("degenerate_features") or {}).values()
         )
     ),
+    # 적재 계열 시간 커버리지 판정 수 (2026-08-06 고도화 2, `ops/series_coverage.py`).
+    #
+    # `horizon_findings`가 상위 봉의 정합을 보는 것과 같은 자리 — 이쪽은 **봉이 아닌 계열**
+    # (옵션체인·수급·틱)이 세션 내내 끊김 없이 쌓였는가를 본다. 2026-08-06에 옵션 1,500다리와
+    # 수급 264행이 사라졌는데 리포트가 조용했던 이유가 이 축의 부재였다.
+    #
+    # **행수가 아니라 시간을 센다**: 그날 regular는 1,302행이었고 행수로는 정상으로 보였다.
+    # 첫 사이클이 10:30이었다는 사실은 커버리지로만 드러난다.
+    "series_gap_findings": lambda r: float(len(r.get("series_findings", []))),
+    # 계열 중 가장 큰 **머리 구멍**(세션 시작 → 첫 행, 분). 재기동 파괴의 직접 지표다 —
+    # 2026-08-06에 4개 계열이 111~116분이었다. 정상일에는 카덴스 한 번(최대 10분)이다.
+    # 계열이 하나도 없으면 None(판정 불가)이지 0이 아니다(L18).
+    "series_head_gap_minutes_max": lambda r: (
+        max((float(e.get("head_gap_minutes") or 0.0) for e in (r.get("series_coverage") or [])))
+        if (r.get("series_coverage") or [])
+        else None
+    ),
+    # 수집 작업에 부팅 트리거가 걸려 있는가 — 1.0(무장) / 0.0(안 됨) / None(못 잼).
+    # **min 기준으로 쓰는 "존재하는가" 지표다**(`tick_rows`와 같은 계열). 부팅 복구가 실제로
+    # 동작하는지는 다음 재부팅까지 모르지만, 무장 여부는 매일 알 수 있다 — 2026-08-06 이전
+    # 상태(트리거 없음)로 조용히 돌아가는 것을 잡는 자리다.
+    "boot_recovery_armed": _boot_recovery_armed,
     # 그날 못 잰 축의 수 (2026-08-05 고도화 2). **이 지표가 이 등록부의 메타 지표다** —
     # 다른 항목들이 "판정 불가"로 정체되는 근본 원인이 여기 모여 있다.
     "unmeasured_count": lambda r: float(len(r.get("unmeasured") or [])),

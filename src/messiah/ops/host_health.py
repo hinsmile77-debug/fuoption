@@ -307,6 +307,85 @@ def check_cpu_contention(*, runner=subprocess.run, project_root: Path | str = ".
     )
 
 
+# 부팅 복구 무장 여부를 확인할 작업 — `scripts/install_scheduled_tasks.ps1`이 등록하는 것과
+# 같은 이름이다. 장후 정리(Messiah-Shutdown)·장후 절차(Messiah-Postmarket)는 부팅 트리거가
+# 필요 없으므로 대상이 아니다(그쪽은 뜰 이유가 재부팅과 무관하다).
+BOOT_RECOVERY_TASKS = ("Messiah", "Messiah-G2")
+
+_BOOT_TRIGGER_QUERY = (
+    "$ErrorActionPreference='SilentlyContinue';"
+    "foreach ($n in @('Messiah','Messiah-G2')) {"
+    "  $t = Get-ScheduledTask -TaskName $n;"
+    '  if (-not $t) { "$n=missing"; continue }'
+    "  $b = @($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' });"
+    '  if ($b.Count -gt 0) { "$n=boot" } else { "$n=none" }'
+    "}"
+)
+
+
+def check_boot_recovery(*, runner=subprocess.run) -> HostCheck:
+    """수집 작업에 **부팅 트리거가 걸려 있는가** (2026-08-06 신설).
+
+    ## 왜 호스트 위생 항목인가
+
+    2026-08-06 10:03:49에 PC가 재부팅됐다. OS는 10:05:03에 올라왔는데 MESSIAH는 안 올라왔다 —
+    Task Scheduler에 평일 08:35 트리거 하나뿐이었기 때문이다. 21분간 관측이 죽었고 1분봉
+    21개가 영구 소실됐다.
+
+    그날 트리거를 붙였다(`scripts/install_scheduled_tasks.ps1`). 그런데 **그 설정이 살아
+    있는지 매일 확인하는 것이 없으면** 08-06 이전과 똑같은 상태로 조용히 돌아갈 수 있다 —
+    이 프로젝트가 반복한 실패 형태가 정확히 그것이다("결선했다고 믿는데 안 붙어 있음").
+    설정은 코드가 아니라 OS 상태라 테스트로 못 잡는다. 그래서 매일 실측한다.
+
+    **이 항목은 재부팅이 나기 전에도 답을 준다.** 부팅 복구가 실제로 동작하는지는 다음
+    재부팅까지 알 수 없지만, 무장 여부는 오늘 알 수 있다 — 그 둘을 구분해 두는 것이
+    "고쳤다"를 기억이 아니라 실측이 판정하게 하는 방법이다.
+    """
+    if sys.platform != "win32":
+        return HostCheck("boot_recovery", available=False, ok=True, detail="Windows 전용 — 건너뜀")
+    try:
+        result = runner(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _BOOT_TRIGGER_QUERY],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 — 못 재는 것과 정상은 다르다
+        return HostCheck(
+            "boot_recovery", available=False, ok=True, detail=f"측정 실패({type(exc).__name__})"
+        )
+
+    states: dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        name, _, state = line.strip().partition("=")
+        if name and state:
+            states[name] = state
+    if result.returncode != 0 or set(states) != set(BOOT_RECOVERY_TASKS):
+        return HostCheck(
+            "boot_recovery", available=False, ok=True, detail="측정 실패(작업 조회 출력 불일치)"
+        )
+
+    unarmed = sorted(name for name, state in states.items() if state != "boot")
+    if unarmed:
+        return HostCheck(
+            "boot_recovery",
+            available=True,
+            ok=False,
+            detail=(
+                f"{', '.join(unarmed)}에 부팅 트리거 없음 — 장중 재부팅이 나면 사람이 "
+                "손으로 띄울 때까지 관측이 죽는다(2026-08-06에 21분)"
+            ),
+        )
+    return HostCheck(
+        "boot_recovery",
+        available=True,
+        ok=True,
+        detail=f"부팅 트리거 무장 {len(states)}개({', '.join(sorted(states))})",
+    )
+
+
 def collect(
     *,
     path: Path | str = ".",
@@ -321,5 +400,6 @@ def collect(
             check_power_plan(runner=runner),
             check_docker(runner=runner),
             check_cpu_contention(runner=runner, project_root=project_root),
+            check_boot_recovery(runner=runner),
         ]
     )

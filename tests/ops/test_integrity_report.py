@@ -188,10 +188,16 @@ def _write_ticks(tmp_path: Path, rows: int) -> Path:
 
     tick_dir = tmp_path / "ticks" / "A05608" / _DAY.isoformat()
     tick_dir.mkdir(parents=True, exist_ok=True)
-    base = datetime(_DAY.year, _DAY.month, _DAY.day, 9, 0, tzinfo=KST)
+    # **세션 전체에 고르게 편다** (2026-08-06). 종전에는 09:00부터 1초 간격이라 5,000행이
+    # 09:00~10:23에 몰려 있었다 — 행수 축(`tick_rows`)만 보던 시절엔 무해했지만, 시간
+    # 커버리지 축(`ops/series_coverage.py`)이 생기면서 그 픽스처는 "장 시작 25분 뒤에
+    # 시작해 10:23에 끊긴 날"이 됐다. 즉 픽스처 쪽이 "정상일"이 아니었다.
+    base = datetime(_DAY.year, _DAY.month, _DAY.day, 8, 45, tzinfo=KST)
+    span_seconds = (15 * 3600 + 34 * 60) - (8 * 3600 + 45 * 60)  # 08:45~15:34
+    step = span_seconds / max(rows - 1, 1)
     pl.DataFrame(
         {
-            "ts_kst": [base + timedelta(seconds=i) for i in range(rows)],
+            "ts_kst": [base + timedelta(seconds=i * step) for i in range(rows)],
             "symbol": ["A05608"] * rows,
             "price_ticks": [54015] * rows,
             "qty": [1] * rows,
@@ -1178,3 +1184,55 @@ def test_unmeasured_latency_is_not_treated_as_zero(tmp_path: Path):
 
     assert report.delivery_latency is None
     assert any("회선 수신 지연" in item for item in report.unmeasured)
+
+
+# ---------------------------------------------- 고도화 2(2026-08-06): 적재 계열 커버리지
+
+
+def _write_series(tmp_path: Path, relative: str, stamps) -> None:
+    """계열 파케이 하나 — `ops/series_coverage.py`가 발견해 읽는 배치 그대로."""
+    import polars as pl
+
+    path = tmp_path / relative / f"{_DAY.isoformat()}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"ts_kst": stamps, "v": [1] * len(stamps)}).write_parquet(path)
+
+
+def _session_minutes(first_hour: int, first_minute: int, count: int, step: int = 1):
+    base = datetime(_DAY.year, _DAY.month, _DAY.day, first_hour, first_minute, tzinfo=KST)
+    return [base + timedelta(minutes=i * step) for i in range(count)]
+
+
+def test_a_series_wiped_by_a_restart_becomes_a_breach(tmp_path: Path):
+    """**결선 회귀.** 2026-08-06에 옵션체인 1,500다리와 수급 264행이 사라졌는데 리포트가
+    완벽하게 조용했다 — 그 계열들을 아예 안 봤기 때문이다. 축을 만들고 `build_report()`에
+    안 붙이면 같은 상태가 그대로 남는다(이 프로젝트가 반복한 실패 형태)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    # 08:35 기동인데 첫 행이 10:30 — 재기동이 오전치를 덮어쓴 그날의 모양 그대로.
+    _write_series(tmp_path, "option_chain/regular", _session_minutes(10, 30, 30, step=10))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    assert any("option_chain/regular" in f for f in report.series_findings)
+    assert any("option_chain/regular" in b for b in report.breaches), "breach로 안 올라갔다"
+
+
+def test_series_coverage_is_recorded_even_when_healthy(tmp_path: Path):
+    """정상 계열도 리포트에 남아야 "검사했는데 이상 없다"와 "안 본다"가 갈린다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_series(tmp_path, "flow_intraday/K2I", _session_minutes(8, 36, 419))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    names = [entry["name"] for entry in report.series_coverage]
+    assert "flow_intraday/K2I" in names
+    assert not any("flow_intraday" in f for f in report.series_findings)
+
+
+def test_series_dirs_are_derived_from_the_bar_dir_not_the_repo(tmp_path: Path):
+    """tmp로 만든 리포트가 저장소의 진짜 `data/`를 집어 들면 테스트가 그 PC 상태를 탄다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    assert [entry["name"] for entry in report.series_coverage] == ["ticks"]

@@ -2699,3 +2699,132 @@ python scripts/daily_integrity_report.py --date <오늘>  # 위 둘을 읽어 �
       있다(순서 뒤바뀐 틱) — 종전엔 조용히 버려지던 것이라 **오늘이 첫 관측**이다.
       0이 아니면 그 크기가 곧 timer 승격의 비용 추정치다
 - [ ] **F-5** 등록부에 `전제 붕괴`가 뜨는가. 떴다면 회선 p99가 3.0초를 넘은 것이다
+
+---
+
+## 2026-08-06 장후 점검 — P0 3종 + 커버리지 축 ([MW0601], 2026-08-06)
+
+상세는 `DECISION_LOG.md` 2026-08-06 항목. 여기엔 **운영 절차와 다음에 볼 것**만.
+
+그날 10:03:49에 호스트가 재부팅됐다(이벤트 1074, 계획되지 않음). 그 사건 하나로 옵션체인
+약 1,500다리 · 수급 264행 · 1분봉 21개가 **영구 소실**됐고, 그중 앞의 둘에 대해 리포트는
+한 줄도 말하지 않았다.
+
+- [x] **P0-1 아카이버 재기동 복원** — `flow_archiver` · `option_chain_archiver`에 기동 복원
+      (`_restore_day`/`_restore_series`) + 축소 쓰기 거부(`_write_is_safe`)
+- [x] **P0-2 부팅 자동 복구** — `install_scheduled_tasks.ps1`(부팅 트리거·재시도·
+      StartWhenAvailable) + 기동 창 가드(`session_guard.launch_window_verdict`) +
+      매일 무장 실측(`host_health.check_boot_recovery`)
+- [x] **P0-3a 합성기 겹⑤** — `MultiHorizonBarComposer.restore_open_buckets()`
+- [x] **P0-3b 장후 절차 자동화** — 재합성은 종료 시퀀스로, 나머지는 `run_postmarket.py`(15:45)
+- [x] **고도화 2 적재 계열 커버리지** — `ops/series_coverage.py` + 리포트 결선 + 등록부 지표
+
+---
+
+### 장후 절차 — 이제 **자동이다** (2026-08-06 변경)
+
+종전에 손으로 돌리던 3줄이 스케줄러로 들어갔다. 이틀 연속(08-05·08-06) 안 돌아서 내린 결정이다.
+
+```
+15:35  run_l1_daily 종료 시퀀스 :  통합 → 재합성 → 리포트   ← 네트워크 안 탐
+15:40  Messiah-Shutdown        :  잔여 프로세스 정리
+15:45  Messiah-Postmarket      :  재합성 → 거래량 대조 → 변동성 채점 → 리포트 재생성
+```
+
+수동으로 돌릴 일이 생기면(소급·재조사) 진입점은 하나다:
+
+```
+python scripts/run_postmarket.py --date 2026-08-06
+python scripts/run_postmarket.py --skip-rest       # 망 장애 시 나머지라도
+```
+
+> **종료 코드 읽는 법**: 이 도구들의 `exit 1`은 **"볼 것을 찾았다"**이지 실패가 아니다
+> (`daily_integrity_report.py` 머리말). `run_postmarket.py`의 요약은 ✅(완료) /
+> ⚠(발견 있음) / ❌(실패) 셋으로 갈라 찍는다 — ⚠에 놀라지 말 것.
+
+### Task Scheduler 등록 상태는 이제 코드다
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\install_scheduled_tasks.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File scripts\install_scheduled_tasks.ps1
+```
+
+되돌리기: `schtasks /Create /TN "Messiah" /XML logs\task_backup_20260806-200601\Messiah.xml /F`
+
+> **`.ps1`은 UTF-8 BOM으로 저장해야 한다.** PS 5.1은 BOM 없는 파일을 CP949로 읽어 한글
+> 주석이 깨지고 파서가 죽는다(2026-08-06 실측). `.bat`의 "ASCII-only" 규율과 같은 계열.
+
+---
+
+### 2026-08-07 장후에 볼 것 — 이 수정들의 첫 실전 검증
+
+- [ ] **G-1** `series_gap_findings == 0`인가. 아니면 어느 계열이 언제 비었는지
+      리포트의 `적재 계열 커버리지` 표에서 **머리 구멍**과 **최장 구멍**을 본다.
+      재기동이 없던 날이면 0은 당연하다 — **조용함을 증거로 착각하지 말 것**
+      (등록부 `archiver-restart-restore` 주석).
+- [ ] **G-2** 커버리지 표에 계열이 **5개 다** 뜨는가(flow 1 + option 3 + ticks).
+      빠진 계열이 있으면 그날 파일이 아예 없다는 뜻이고, 그게 곧 판정 대상이다.
+- [ ] **G-3** 카덴스가 실제 폴링 주기와 맞는가(regular 10분 · weekly_mon 10분 ·
+      weekly_thu 5분 · flow 1분 · ticks 1분). 어긋나면 카덴스 추정이 깨진 것이고,
+      그러면 구멍 판정 전체를 못 믿는다.
+- [ ] **G-4** `boot_recovery=부팅 트리거 무장 2개`가 호스트 줄에 찍히는가.
+      안 찍히면 **작업이 지워졌거나 다시 만들어진 것**이다.
+- [ ] **G-5** 08:35 정시 기동이 **기동 창 가드에 안 막혔는가**. 로그에 `[기동 창]`이
+      찍혔으면 그날 수집이 통째로 없다 — 가장 먼저 볼 줄이다.
+- [ ] **G-6** 15:45 `Messiah-Postmarket`이 실제로 돌았는가
+      (`logs/postmarket_20260807.log` 존재 + 요약 4줄). 안 돌았으면 절차 자동화가
+      **또** 조용히 안 돈 것이고, 그건 이 세션 전체의 전제가 깨진 것이다.
+- [ ] **G-7** `unmeasured`가 비어 있는가(= G-6이 성공했다는 다른 증거).
+- [ ] **G-8** 종료 시퀀스의 `Recomposed` 로그가 찍히는가. 찍혔는데
+      `horizon_findings`가 안 비면 재합성이 못 고치는 손상이라는 뜻이다.
+
+### 재부팅이 실제로 나면 볼 것 (기회 대기)
+
+부팅 복구가 **동작한다**는 증명은 장중 재부팅이 한 번 나야 나온다. 그때:
+
+- [ ] `longest_gap_minutes`가 몇 분인가. 설계상 부팅 30초 + 트리거 지연 1분 + 기동 30초
+      ≈ **2~3분**이어야 한다. 21분(2026-08-06)과 비교한다.
+- [ ] `series_gap_findings`가 0인가 — 아카이버 복원이 재기동에서 실제로 살아남았는지의
+      **유일한 진짜 증거**다.
+- [ ] `ComposerBucketsRestored` 로그가 찍히는가(겹⑤가 미완 버킷을 되채웠는가).
+
+---
+
+### 다음 세션 P2 — `no-degenerate-features` 오탐 제거
+
+등록부에서 유일하게 `재발`로 남은 항목이고, **원인은 결함이 아니라 검출기 오탐**이다.
+
+10건 중 4건이 `px_gap_open` = `log(당일 시가 / 전일 종가)` — **정의상 장중 상수**다.
+`_FeatureStat.constant`(`lo == hi`)가 이걸 "죽었다"로 잡는다. `px_ema_cross_*`(값역
+{-1,0,+1})·`px_breakout_*`(대부분 0.0)도 같은 성격이고, 10m은 표본 31개라 저기수 피처가
+안 변하는 것이 정상 범위다.
+
+처방: 피처 레지스트리(`features/spec.py` 또는 `px_core` 등록부)에 표지를 둔다.
+
+```
+expected_constant_intraday   px_gap_open        → 상수를 경고하지 않는다.
+                                                  대신 "항상 NaN"만 잡는다(그게 진짜 사고고,
+                                                  2026-08-05 14:12 재기동에서 실제로 났다)
+low_cardinality              px_ema_cross_*      → 표본 60 미만이면 판정 보류(unmeasured)
+                             px_breakout_*
+```
+
+정정 후에도 0이 아니면 그때가 진짜 신호다.
+
+> `max: 0`을 요구하는 한 이 항목은 구조적으로 통과 불가다. 매일 ERROR가 찍히면
+> 늑대소년이 되고, 그건 이 등록부가 가장 경계하는 실패다.
+
+### 그 밖에 남은 것 (2026-08-06 보고서 P1, 미착수)
+
+- [ ] **UI 공백 계측** — `ui_restarts`는 인프로세스 워치독의 자동 재기동만 센다.
+      2026-08-06에 UI가 10:04~10:25 죽어 있었는데 지표는 0이었고, 등록부
+      `ui-restart-observability`는 그 위에서 "검증 완료 3거래일"을 찍었다.
+      `ui_downtime_minutes` 신설 + 등록부 지표 교체 + `consecutive_days` 리셋 필요.
+- [ ] **리포트가 "왜 끊겼는지" 말하게** — `_collect_native_crashes()`가 이미 이벤트로그를
+      연다. 거기에 호스트 생명주기 이벤트(1074/6005/6006/12/13/41)를 더하면
+      `관측 공백 10:04~10:25(21분) — 호스트 재부팅(10:03:49)` 한 줄이 자동으로 나온다.
+- [ ] **크래시 덤프 판독** — 2026-08-06의 덤프 3건은 **전부 오탐**(first-chance)이었다.
+      l1_daily는 08:36에 덤프를 찍고 10:04까지 88분을 계속 로깅했다. 그런데 리포트는
+      `네이티브 크래시: 0건`과 `크래시 덤프 3건`을 나란히 찍어 서로 모순된다.
+      필요한 것: 덤프에 시각 붙이기 + "프로세스가 죽었나"와 대조해 치명/비치명 분류 +
+      `Current thread` 부재를 "프레임 없음"이 아니라 "네이티브 스레드에서 폴트"로 표기.

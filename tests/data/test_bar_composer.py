@@ -697,3 +697,170 @@ async def test_health_says_what_it_is_ok_on_the_basis_of(tmp_path: Path):
     assert status.level is HealthLevel.OK
     assert "합성봉 1개" in status.detail
     assert "항등식 일치" in status.detail
+
+
+# ------------------------- 겹⑤ 재기동 복원 (2026-08-06 호스트 재부팅 대응, P0-3a)
+
+_DAY = date(2026, 7, 23)
+
+
+def _m1_at(hour: int, minute: int, volume: int = 10, c: int = 102) -> BarClosed:
+    return BarClosed(
+        symbol="A05608",
+        horizon=Horizon.M1,
+        bar_open_kst=datetime(2026, 7, 23, hour, minute, tzinfo=KST),
+        o_ticks=100,
+        h_ticks=105,
+        l_ticks=95,
+        c_ticks=c,
+        volume=volume,
+        quality_ok=True,
+    )
+
+
+def _seed_session_one(archiver: ParquetArchiver, horizons: dict) -> None:
+    """재부팅 직전 아카이브 상태를 만든다 — 1분봉 09:55~10:03은 남고,
+    상위 봉은 09:55까지만 나간 상태(10:00 버킷은 합성기 메모리와 함께 사라졌다)."""
+    for minute in range(55, 60):
+        archiver.append_bar(_m1_at(9, minute))
+    for minute in range(0, 4):
+        archiver.append_bar(_m1_at(10, minute))
+    for horizon, seconds in horizons.items():
+        bars = [_m1_at(9, m) for m in range(55, 60)]
+        start = floor_to_horizon(bars[0].bar_open_kst, seconds)
+        if start != floor_to_horizon(bars[-1].bar_open_kst, seconds):
+            continue  # 이 Horizon에서는 09:55~09:59가 한 버킷이 아니다
+        archiver.append_bar(
+            BarClosed(
+                symbol="A05608",
+                horizon=horizon,
+                bar_open_kst=start,
+                o_ticks=100,
+                h_ticks=105,
+                l_ticks=95,
+                c_ticks=102,
+                volume=50,
+                quality_ok=True,
+            )
+        )
+
+
+async def test_restart_recovers_the_bucket_lost_with_the_process(tmp_path: Path):
+    """**이 파일에서 가장 중요한 테스트다.**
+
+    2026-08-06 실측: 재부팅으로 5m 10:00 버킷(1분봉 4개, 2,043계약)이 통째로 사라졌다.
+    1분봉은 아카이브에 있었는데 재기동한 합성기가 그것을 안 읽었다. `late_bar_drops`는
+    0이었다 — 겹④가 아니라 다섯 번째 구멍이다.
+    """
+    bus = FakeBus()
+    archiver = ParquetArchiver(tmp_path)
+    _seed_session_one(archiver, {Horizon.M5: 300})
+    composer = _composer(tmp_path, bus, {Horizon.M5: 300})
+
+    restored = composer.restore_open_buckets(_DAY)
+    # 재기동 후 첫 실봉이 도착하면 겹①이 10:00 버킷을 확정한다.
+    await composer.handle_one_minute_bar(_m1_at(10, 25))
+
+    assert restored == {"5m": 4}
+    written = archiver.read_day_bars("A05608", Horizon.M5, _DAY)
+    bucket_10 = [b for b in written if b.bar_open_kst.hour == 10 and b.bar_open_kst.minute == 0]
+    assert len(bucket_10) == 1, "10:00 버킷이 여전히 없다 — 복원이 안 됐다"
+    assert bucket_10[0].volume == 40, "복원된 버킷의 거래량이 1분봉 4개 합과 다르다"
+
+
+async def test_restart_inside_a_bucket_lets_later_bars_join_it(tmp_path: Path):
+    """30m 10:00 버킷은 재기동 **전** 4봉 + **후** 5봉이 한 봉이어야 한다.
+
+    2026-08-06에는 재기동 후 5봉만으로 확정돼 1,627 ≠ 3,670이 났다. 마지막 미완 버킷을
+    닫지 않고 **열어 두는** 것이 이 결과를 만든다(모듈 docstring 겹⑤).
+    """
+    bus = FakeBus()
+    archiver = ParquetArchiver(tmp_path)
+    _seed_session_one(archiver, {Horizon.M30: 1800})
+    composer = _composer(tmp_path, bus, {Horizon.M30: 1800})
+
+    composer.restore_open_buckets(_DAY)
+    for minute in range(25, 30):
+        await composer.handle_one_minute_bar(_m1_at(10, minute))
+    await composer.flush_all_final()
+
+    written = archiver.read_day_bars("A05608", Horizon.M30, _DAY)
+    bucket_10 = [b for b in written if b.bar_open_kst.hour == 10 and b.bar_open_kst.minute == 0]
+    assert len(bucket_10) == 1
+    assert bucket_10[0].volume == 90, "재기동 전 4봉이 빠졌다(2026-08-06의 1,627 상태)"
+
+
+async def test_restored_buckets_satisfy_the_volume_identity(tmp_path: Path):
+    """복원의 판정 기준은 결국 항등식이다 — 상위 Horizon 합 == 1분봉 합."""
+    horizons = {Horizon.M3: 180, Horizon.M5: 300, Horizon.M10: 600, Horizon.M30: 1800}
+    bus = FakeBus()
+    archiver = ParquetArchiver(tmp_path)
+    _seed_session_one(archiver, horizons)
+    composer = _composer(tmp_path, bus, horizons)
+
+    composer.restore_open_buckets(_DAY)
+    for minute in range(25, 30):
+        bar = _m1_at(10, minute)
+        archiver.append_bar(bar)  # 라이브에서는 수집기가 1분봉을 적재한다
+        await composer.handle_one_minute_bar(bar)
+    await composer.flush_all_final()
+
+    m1_total = sum(b.volume for b in archiver.read_day_bars("A05608", Horizon.M1, _DAY))
+    for horizon in horizons:
+        total = sum(b.volume for b in archiver.read_day_bars("A05608", horizon, _DAY))
+        assert total == m1_total, f"{horizon.value} 합 {total} ≠ 1분봉 합 {m1_total}"
+
+
+async def test_restore_does_not_publish_historical_bars(tmp_path: Path):
+    """복원 봉을 버스로 내보내면 `FeatureEngine.warm_start()`가 읽은 봉과 겹쳐 롤링 윈도에
+    같은 봉이 두 번 들어간다 — 적재만 한다(모듈 docstring)."""
+    bus = FakeBus()
+    archiver = ParquetArchiver(tmp_path)
+    _seed_session_one(archiver, {Horizon.M3: 180})
+    composer = _composer(tmp_path, bus, {Horizon.M3: 180})
+
+    composer.restore_open_buckets(_DAY)
+
+    assert bus.published == []
+
+
+async def test_restore_is_idempotent(tmp_path: Path):
+    """두 번 기동해도 같은 봉이 두 줄이 되면 안 된다(재기동이 두 번 나는 날이 실제로 있다)."""
+    bus = FakeBus()
+    archiver = ParquetArchiver(tmp_path)
+    _seed_session_one(archiver, {Horizon.M5: 300})
+
+    first = _composer(tmp_path, bus, {Horizon.M5: 300})
+    first.restore_open_buckets(_DAY)
+    await first.handle_one_minute_bar(_m1_at(10, 25))
+    second = _composer(tmp_path, bus, {Horizon.M5: 300})
+    second.restore_open_buckets(_DAY)
+    await second.handle_one_minute_bar(_m1_at(10, 30))
+
+    written = archiver.read_day_bars("A05608", Horizon.M5, _DAY)
+    starts = [b.bar_open_kst for b in written]
+    assert len(starts) == len(set(starts)), f"같은 시각 합성봉이 두 줄이다: {starts}"
+
+
+async def test_cold_start_with_no_bars_today_restores_nothing(tmp_path: Path):
+    """08:35 정시 기동 — 그날 1분봉이 없으니 조용히 0건이어야 한다."""
+    composer = _composer(tmp_path, FakeBus(), {Horizon.M5: 300})
+
+    assert composer.restore_open_buckets(_DAY) == {}
+
+
+async def test_restore_failure_falls_back_to_cold_start(monkeypatch, tmp_path: Path):
+    """복원 실패가 그날 수집을 막으면 안 된다(L22) — 조용히는 안 넘긴다(L18)."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.bar_composer.mlog.log", lambda tag, msg, **kw: logged.append(tag)
+    )
+    composer = _composer(tmp_path, FakeBus(), {Horizon.M5: 300})
+    monkeypatch.setattr(
+        composer._archiver,
+        "read_day_bars",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("아카이브 손상")),
+    )
+
+    assert composer.restore_open_buckets(_DAY) == {}
+    assert logged == ["ComposerRestoreFailed"]

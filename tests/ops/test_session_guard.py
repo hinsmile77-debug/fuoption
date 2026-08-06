@@ -166,3 +166,76 @@ def test_a_broken_report_does_not_block_the_guard(tmp_path: Path, capsys):
     (tmp_path / "daily_integrity_20260805.json").write_text("{깨진 JSON", encoding="utf-8")
 
     session_guard.refuse_if_archive_corrupt("모델 스윕", [date(2026, 8, 5)], log_dir=tmp_path)
+
+
+# --------------------------------- 기동 창 (2026-08-06 P0-2, 부팅 자동 복구)
+
+from datetime import date as _date  # noqa: E402
+
+from messiah.core.timeutil import KST as _KST  # noqa: E402
+
+
+class _Cal:
+    def __init__(self, trading: bool = True) -> None:
+        self._trading = trading
+
+    def is_trading_day(self, day: _date) -> bool:
+        return self._trading
+
+
+def _at(hour: int, minute: int):
+    return datetime(2026, 8, 6, hour, minute, tzinfo=_KST)
+
+
+def test_reboot_during_the_session_may_relaunch():
+    """2026-08-06의 사건 그 자체 — 10:05 부팅 후 즉시 재개돼야 21분 공백이 안 생긴다."""
+    allowed, reason = session_guard.launch_window_verdict(now=_at(10, 5), calendar=_Cal())
+
+    assert allowed, reason
+
+
+def test_scheduled_start_time_is_inside_the_window():
+    """정시 트리거(08:35)가 자기 가드에 막히면 매일 아침 아무것도 안 뜬다."""
+    assert session_guard.launch_window_verdict(now=_at(8, 35), calendar=_Cal())[0]
+
+
+def test_boot_before_the_window_does_not_launch():
+    """새벽 재부팅에 하루 종일 빈 프로세스가 KIS WS를 물고 있으면 안 된다."""
+    allowed, reason = session_guard.launch_window_verdict(now=_at(3, 0), calendar=_Cal())
+
+    assert not allowed
+    assert "이전" in reason
+
+
+def test_boot_after_the_close_does_not_launch():
+    allowed, reason = session_guard.launch_window_verdict(now=_at(16, 30), calendar=_Cal())
+
+    assert not allowed
+    assert "run_postmarket.py" in reason, "대안 절차를 안 알려주면 사람이 헤맨다"
+
+
+def test_close_time_itself_is_outside_the_window():
+    """15:35는 수집 종료 시각 — 그 시각에 뜨면 수집할 구간이 0초다(반개구간 규율)."""
+    assert not session_guard.launch_window_verdict(now=_at(15, 35), calendar=_Cal())[0]
+
+
+def test_holiday_does_not_launch():
+    allowed, reason = session_guard.launch_window_verdict(
+        now=_at(10, 5), calendar=_Cal(trading=False)
+    )
+
+    assert not allowed
+    assert "거래일이 아니다" in reason
+
+
+def test_calendar_failure_allows_launch():
+    """가드가 오판해서 수집을 막는 것이 오판해서 한 번 더 뜨는 것보다 나쁘다."""
+
+    class _Broken:
+        def is_trading_day(self, day):
+            raise RuntimeError("달력 파일 손상")
+
+    allowed, reason = session_guard.launch_window_verdict(now=_at(10, 5), calendar=_Broken())
+
+    assert allowed
+    assert "판정 불가" in reason

@@ -236,3 +236,92 @@ async def test_read_day_returns_kst_not_utc(tmp_path):
 
     assert frame["ts_kst"][0].hour == 9
     assert frame["ts_kst"][0].utcoffset().total_seconds() == 9 * 3600
+
+
+# ------------------------------------ 재기동 복원 (2026-08-06 호스트 재부팅 대응, P0-1)
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_rows_written_before_the_restart(tmp_path):
+    """**이 파일에서 가장 중요한 테스트다.**
+
+    2026-08-06: 10:03:49 호스트 재부팅 → 10:25 재기동. 그날 파일의 첫 행이 10:26이었고
+    08:36~10:03의 88분 × 3업종이 사라졌다. 원인은 `_flush()`가 메모리에 있는 것만 쓰면서
+    `os.replace()`로 파일을 통째로 교체한 것 — 재기동하면 메모리가 비어 있다.
+    장중 수급은 과거 조회가 없어 **소급이 불가능**하다.
+    """
+    morning = InvestorFlowArchiver(tmp_path, _MARKET)
+    await morning.handle_snapshot(_snap("0900", frgn=1))
+    await morning.handle_snapshot(_snap("0901", frgn=2))
+    del morning  # 재부팅 — close() 없이 사라진다
+
+    afternoon = InvestorFlowArchiver(tmp_path, _MARKET)  # 새 프로세스, 빈 메모리
+    await afternoon.handle_snapshot(_snap("1030", frgn=3))
+
+    frame = flow_archiver.read_day(tmp_path, _MARKET, date(2026, 8, 4))
+    assert frame.height == 3, "재기동 전 2행이 지워졌다 — 소급 불가능한 소실"
+    assert frame["frgn_ntby_qty"].to_list() == [1.0, 2.0, 3.0]
+
+
+@pytest.mark.asyncio
+async def test_restored_rows_keep_kst_and_all_columns(tmp_path):
+    """복원이 시각을 9시간 틀리게 되돌리거나 필드를 떨구면 복원이 아니라 손상이다."""
+    morning = InvestorFlowArchiver(tmp_path, _MARKET)
+    await morning.handle_snapshot(_snap("0900", bank_ntby_qty="7", hts_kor_isnm="코스피200"))
+
+    afternoon = InvestorFlowArchiver(tmp_path, _MARKET)
+    await afternoon.handle_snapshot(_snap("1030", bank_ntby_qty="9", hts_kor_isnm="코스피200"))
+
+    frame = flow_archiver.read_day(tmp_path, _MARKET, date(2026, 8, 4))
+    assert frame["ts_kst"].to_list()[0].hour == 9
+    assert frame["ts_kst"].to_list()[0].utcoffset().total_seconds() == 9 * 3600
+    assert frame["bank_ntby_qty"].to_list() == [7.0, 9.0]
+    assert frame["hts_kor_isnm"].to_list() == ["코스피200", "코스피200"]
+
+
+@pytest.mark.asyncio
+async def test_same_minute_after_restart_is_replaced_not_duplicated(tmp_path):
+    """복원이 중복을 만들면 누적 계열이 두 배로 틀어진다 — 키가 병합을 정의해야 한다."""
+    morning = InvestorFlowArchiver(tmp_path, _MARKET)
+    await morning.handle_snapshot(_snap("0900", frgn=100))
+
+    afternoon = InvestorFlowArchiver(tmp_path, _MARKET)
+    await afternoon.handle_snapshot(_snap("0900", frgn=999))
+
+    frame = flow_archiver.read_day(tmp_path, _MARKET, date(2026, 8, 4))
+    assert frame.height == 1
+    assert frame["frgn_ntby_qty"].to_list() == [999.0]
+
+
+@pytest.mark.asyncio
+async def test_shrinking_write_is_refused_when_restore_fails(monkeypatch, tmp_path):
+    """겹②: 복원이 깨져도 **줄어드는 쓰기**는 안 일어난다(옛 행은 복구 불가, 새 행은 가능)."""
+    morning = InvestorFlowArchiver(tmp_path, _MARKET)
+    for i in range(3):
+        await morning.handle_snapshot(_snap(f"09{i:02d}", frgn=i))
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.flow_archiver.mlog.log", lambda tag, msg, **kw: logged.append(tag)
+    )
+    monkeypatch.setattr(
+        "messiah.data.flow_archiver.read_day",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("복원 불가")),
+    )
+    afternoon = InvestorFlowArchiver(tmp_path, _MARKET)
+    await afternoon.handle_snapshot(_snap("1030", frgn=9))
+
+    # `read_day`가 monkeypatch돼 있으므로 파일을 직접 읽어 확인한다.
+    on_disk = pl.read_parquet(tmp_path / _MARKET / "2026-08-04.parquet")
+    assert on_disk.height == 3, "복원이 깨진 상태에서 파일이 줄어들었다"
+    assert "InvestorFlowArchiveShrinkRefused" in logged
+
+
+@pytest.mark.asyncio
+async def test_day_rollover_does_not_absorb_the_previous_day(tmp_path):
+    """복원은 **그 날짜 파일**만 본다 — 날짜가 바뀌면 전날 행이 따라오면 안 된다."""
+    arch = InvestorFlowArchiver(tmp_path, _MARKET)
+    await arch.handle_snapshot(_snap("1530", day=4))
+    await arch.handle_snapshot(_snap("0900", day=5))
+
+    assert flow_archiver.read_day(tmp_path, _MARKET, date(2026, 8, 5)).height == 1

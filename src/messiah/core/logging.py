@@ -73,6 +73,14 @@ TAG_LEVELS: dict[str, int] = {
     # 수급 스냅샷 적재 실패 — 장중 수급은 **과거 조회가 없어** 놓치면 영원히 못 받는다
     # (`data/flow_archiver.py`). 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
     "InvestorFlowArchiveError": logging.WARNING,  # REST 폴링 1회 실패 — 다음 틱에 자연 재시도(L22)
+    # ---- 재기동 복원 (2026-08-06 P0-1). 두 아카이버는 그날 파일을 통째로 교체하는데,
+    # 재기동하면 메모리가 비어 있어 **재기동 전 수집분을 지웠다.** 8/5·8/6 이틀 연속 발생했고
+    # 두 계열 다 소급 조회가 없다. 복원은 매 기동 정상 경로라 INFO, 못 하면 WARNING이다.
+    "InvestorFlowArchiveRestored": logging.INFO,
+    "InvestorFlowArchiveRestoreFailed": logging.WARNING,
+    # 줄어드는 쓰기를 막았다 — 복원이 깨졌거나 다른 프로세스가 같은 파일을 쓰는 중이라는
+    # 뜻이고, 둘 다 사람이 봐야 한다. 정상 경로에서는 절대 안 찍힌다.
+    "InvestorFlowArchiveShrinkRefused": logging.WARNING,
     # 체결틱 조각 적재 실패 (`data/tick_archiver.py`). 틱은 **백필 경로가 아예 없어** 이
     # 버퍼는 그대로 유실된다 — 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
     "TickArchiveError": logging.WARNING,
@@ -88,6 +96,11 @@ TAG_LEVELS: dict[str, int] = {
     # 1,356다리 = 22.6분), 조용하면 "옵션이 안 모인다"의 원인을 못 찾으므로 WARNING으로 남긴다.
     "OptionChainSkipped": logging.WARNING,
     "OptionChainArchiveError": logging.WARNING,  # 적재 실패 — 수집 루프는 계속(L22)
+    # 재기동 복원 (2026-08-06 P0-1) — `InvestorFlowArchive*`와 같은 결함·같은 처방.
+    # 2026-08-06 실측: 재부팅 후 재기동으로 08:40~10:00의 9사이클 × 42다리가 지워졌다.
+    "OptionChainArchiveRestored": logging.INFO,
+    "OptionChainArchiveRestoreFailed": logging.WARNING,
+    "OptionChainArchiveShrinkRefused": logging.WARNING,
     "OptionsCandidateRejected": logging.INFO,  # 안전규칙 기각 — 정상 동작(§6 하드룰 의도대로 작동)
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
@@ -146,6 +159,15 @@ TAG_LEVELS: dict[str, int] = {
     # 같다. 둘 다 WARNING인 이유: 확정 자체는 의도된 동작이고(무한 대기가 더 나쁘다),
     # 판정은 무결성 리포트의 `late_bar_drops` 임계가 한다.
     "ComposerFlushedIncomplete": logging.WARNING,
+    # 기동 시 미완 상위 버킷 복원 (`data/bar_composer.py` 겹⑤, 2026-08-06 P0-3a).
+    # 2026-08-06 호스트 재부팅에서 5개 Horizon 전부가 버킷을 하나씩 잃었다 — 1분봉은
+    # 아카이브에 있었는데 재기동한 합성기가 안 읽었기 때문이다. 복원은 정상 경로라 INFO.
+    "ComposerBucketsRestored": logging.INFO,
+    "ComposerRestoreFailed": logging.WARNING,  # 복원 실패 — 콜드스타트로 진행(L22)
+    # 장후 상위 Horizon 재합성 (`scripts/run_l1_daily.py` `_recompose_today`, 2026-08-06 P0-3b).
+    # 사람이 돌리던 절차가 이틀 연속 안 돌아 종료 시퀀스로 들어왔다 — 매일 도는 정상 경로라 INFO.
+    "Recomposed": logging.INFO,
+    "RecomposeFailed": logging.WARNING,  # 재합성 실패 — horizon_findings가 그 사실을 드러낸다
     # 이미 닫은 1분봉으로 체결틱이 늦게 도착 (`data/normalizer.py`, 2026-08-05 고도화 1).
     # 분(分)마다 한 줄만 남긴다 — 매 틱 남기면 하루 수만 줄이 되어 아무도 안 본다.
     # 종전에도 같은 틱을 버렸는데 **로그가 없었다**(L18 위반). 시각 구동 확정을 켜면 이

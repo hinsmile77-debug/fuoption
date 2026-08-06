@@ -32,11 +32,11 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Sequence
 
-from messiah.core.event_calendar import EventCalendar
+from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.timeutil import now_kst
 
 # 거부 시 종료 코드 — 0(성공)·1(일반 실패)과 구분해 자동화가 "규칙에 막혔다"를 식별할 수 있게.
@@ -92,6 +92,62 @@ def refuse_if_regular_session(
         flush=True,
     )
     raise SystemExit(REFUSED_EXIT_CODE)
+
+
+# ------------------------------------------------ 기동 창 (2026-08-06 P0-2, 부팅 자동 복구)
+
+# 정시 기동(08:35)보다 5분 이르다 — 부팅이 08:32에 끝난 날 "5분 뒤 스케줄러가 부를 테니까"
+# 하고 거절하면 그 5분을 사람이 지켜봐야 한다. 앞으로 당기되, 장 시작 훨씬 전에 켜진 PC가
+# 하루 종일 빈 프로세스를 물고 있지는 않게 한다.
+LAUNCH_WINDOW_START = time(8, 30)
+
+# 끝은 정규장 종료와 같다 — 그 뒤에 뜨는 것은 수집할 것이 없다. `run_l1_daily.py`의
+# 종료 절차(통합·재합성·리포트)를 소급해 돌리고 싶으면 그건 `run_postmarket.py`의 일이다.
+LAUNCH_WINDOW_END = DEFAULT_SESSION.close_time
+
+
+def launch_window_verdict(
+    *, now: datetime | None = None, calendar: EventCalendar | None = None
+) -> tuple[bool, str]:
+    """지금 일일 수집 프로세스를 띄워도 되는가 — (가부, 근거 문장).
+
+    ## 왜 필요한가 (2026-08-06 실측)
+
+    그날 10:03:49에 호스트가 재부팅됐다(Windows 이벤트 1074, `RuntimeBroker.exe`,
+    "기타(계획되지 않음)"). OS는 10:05:03에 올라왔는데 **MESSIAH는 안 올라왔다** —
+    Task Scheduler에 평일 08:35 트리거만 있고 at-startup 트리거도, 실패 시 재시작도
+    없었기 때문이다. 사람이 알아챈 10:25까지 21분이 죽어 있었고 1분봉 21개가 영구 소실됐다.
+
+    at-startup 트리거를 붙이면 그 21분이 사라진다. 대신 **아무 때나 부팅해도 뜨는** 문제가
+    생긴다 — 새벽 3시 재부팅에 수집 프로세스가 떠서 하루 종일 KIS WS를 물고 있으면 안 된다.
+    이 함수가 그 경계다.
+
+    실패 조건: 없다. 달력을 못 읽으면 **띄우는 쪽으로** 판단한다 — 가드가 오판해서 수집을
+              막는 것이 오판해서 한 번 더 뜨는 것보다 나쁘다(휴장일이면 진입점의 기존
+              휴장일 검사가 어차피 한 번 더 거른다).
+    """
+    moment = now or now_kst()
+    clock = moment.timetz().replace(tzinfo=None)
+
+    try:
+        trading_day = (calendar or EventCalendar.from_file()).is_trading_day(moment.date())
+    except Exception as exc:  # noqa: BLE001 — 판정 불가는 "띄운다"로 (docstring)
+        return True, f"기동 허용 — 거래일 판정 불가({exc}), 진입점의 휴장일 검사에 맡긴다"
+
+    if not trading_day:
+        return False, f"{moment.date().isoformat()}은 거래일이 아니다 — 기동 생략"
+    if clock < LAUNCH_WINDOW_START:
+        return False, (
+            f"기동 창({LAUNCH_WINDOW_START:%H:%M}~{LAUNCH_WINDOW_END:%H:%M}) 이전 "
+            f"{clock:%H:%M:%S} — 정시 트리거(08:35)에 맡기고 지금은 뜨지 않는다"
+        )
+    if clock >= LAUNCH_WINDOW_END:
+        return False, (
+            f"기동 창({LAUNCH_WINDOW_START:%H:%M}~{LAUNCH_WINDOW_END:%H:%M}) 이후 "
+            f"{clock:%H:%M:%S} — 수집할 정규장이 남아 있지 않다"
+            " (장후 절차는 scripts/run_postmarket.py)"
+        )
+    return True, f"기동 허용 — 정규장 종료까지 {clock:%H:%M:%S} 시점 기준 남은 구간 있음"
 
 
 def add_force_intraday_argument(parser) -> None:  # type: ignore[no-untyped-def]

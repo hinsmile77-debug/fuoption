@@ -50,6 +50,7 @@ import polars as pl
 from messiah.core.messages import BarSession, Horizon
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
+from messiah.ops import series_coverage
 from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
 _KST_ZONE_NAME = "Asia/Seoul"
@@ -191,6 +192,15 @@ class IntegrityReport:
     # 틱 수집이 정확히 같은 위험에 있다: 백필 경로가 없어 안 쌓인 날은 영원히 없는데, 결선이
     # 조용히 안 붙어도 봉 수집은 멀쩡하므로 다른 지표는 전부 정상으로 보인다.
     tick_rows: int
+    # **적재 계열 전수 커버리지** (2026-08-06 고도화 2, `ops/series_coverage.py`).
+    #
+    # `tick_rows`가 틱 하나에 대해 하는 일("존재하는가")을 **모든 계열**에 대해, 그리고
+    # 행수가 아니라 **시간**으로 한다. 2026-08-06에 옵션체인 1,500다리와 수급 264행이
+    # 사라졌는데 리포트가 완벽하게 조용했던 이유가 이 축의 부재였다 — 그날 regular는
+    # 1,302행이었고, 행수만 보면 아무 문제가 없어 보인다(첫 사이클이 10:30이었다).
+    series_coverage: list[dict[str, Any]]
+    # 위 커버리지에서 나온 판정 문장 — `horizon_findings`와 같은 성격(정의 위반 목록)이다.
+    series_findings: list[str]
     breaches: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -699,6 +709,8 @@ def build_report(
     log_dir: Path | None = None,
     tick_dir: Path | None = None,
     host_collector=None,
+    flow_dir: Path | None = None,
+    option_chain_dir: Path | None = None,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
 
@@ -866,6 +878,27 @@ def build_report(
         unmeasured.append("피처 건강도(장 마감 FeatureHealth 로그 없음)")
     unmeasured.extend(f"호스트 위생 — {item}" for item in host.unmeasured)
 
+    # ---- 고도화 2(2026-08-06): 적재 계열 전수 커버리지 ----
+    #
+    # 봉·틱 말고 **나머지 전부**를 본다. 판정 창의 시작을 첫 프로세스 기동으로 잡는 이유는
+    # `series_coverage.session_window()` docstring 참고 — 재기동으로 늦게 뜬 공백을
+    # `restarts`와 두 번 세지 않기 위해서다.
+    # 계열 경로는 **`bar_dir`의 부모에서 파생**한다. 다섯 계열이 전부 같은 `data/` 아래
+    # 형제라서(`data/bars` · `data/ticks` · `data/flow_intraday` · `data/option_chain`)
+    # 한 인자로 묶이는 것이 실제 배치와 맞고, 무엇보다 **테스트가 자동으로 격리된다** —
+    # 모듈 기본값을 쓰면 tmp 디렉터리로 만든 리포트가 저장소의 진짜 `data/`를 집어 든다.
+    data_root = Path(bar_dir).parent
+    coverages = series_coverage.collect(
+        day,
+        symbol,
+        window=series_coverage.session_window(day, start=_first_session_start(day, session_starts)),
+        flow_dir=flow_dir or data_root / "flow_intraday",
+        option_chain_dir=option_chain_dir or data_root / "option_chain",
+        tick_dir=tick_dir or data_root / "ticks",
+    )
+    series_findings = [f for item in coverages for f in series_coverage.findings_for(item)]
+    breaches.extend(series_findings)
+
     return IntegrityReport(
         date=day.isoformat(),
         symbol=symbol,
@@ -897,6 +930,8 @@ def build_report(
         native_crashes=crashes,
         crash_forensics=forensics,
         tick_rows=tick_rows,
+        series_coverage=[item.to_dict() for item in coverages],
+        series_findings=series_findings,
         breaches=breaches,
     )
 
@@ -985,6 +1020,18 @@ def format_summary(report: IntegrityReport) -> str:
         f"  버킷 유실(늦은 봉·미완 확정): {report.late_bar_drops}건"
         + (" ✅" if report.late_bar_drops == 0 else " ⚠")
     )
+    # 적재 계열 커버리지 (2026-08-06 고도화 2) — **정상인 계열도 전부 찍는다.**
+    # 2026-08-06에 리포트가 조용했던 이유는 이 계열들을 "정상"으로 판정해서가 아니라
+    # 아예 안 봐서였다. 목록 자체가 "무엇을 보고 있는가"의 증거다.
+    if report.series_coverage:
+        lines.append(f"  적재 계열 커버리지 ({len(report.series_coverage)}개):")
+        lines.extend(
+            series_coverage.summarize(
+                [series_coverage.SeriesCoverage(**entry) for entry in report.series_coverage]
+            )
+        )
+    for finding in report.series_findings:
+        lines.append(f"  ⚠ 적재 공백: {finding}")
     if report.delivery_latency is not None:
         latency = report.delivery_latency
         lines.append(

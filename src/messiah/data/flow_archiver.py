@@ -21,6 +21,26 @@
 폴링마다 그날 전체를 다시 쓴다(원자적 교체). 행이 하루 1,200개 수준이라 비용이 없고,
 프로세스가 어느 시점에 죽어도 직전 폴링까지가 온전히 남는다 — `data/archiver.py`가
 조각 쓰기를 도입해야 했던 O(n²) 문제(1분봉 405행 × 매분 전체 재작성)와는 규모가 다르다.
+
+## "죽어도 남는다"는 **재기동에서 거짓이었다** (2026-08-06 실측)
+
+위 문단은 크래시에만 맞고 재기동에는 틀렸다. `_flush()`가 쓰는 것은 **메모리에 있는
+`self._rows` 전부**이고, 재기동하면 그게 빈 채로 시작한다 — 재기동 후 첫 폴링의 flush가
+`os.replace()`로 **그날 오전치를 담은 파일을 통째로 갈아엎었다.**
+
+2026-08-06: 10:03:49에 호스트가 재부팅되고 10:25에 수동 재기동했더니, 파일의 첫 행이
+**10:26**이었다. 08:36~10:03의 88분 × 3업종 ≈ 264행이 사라졌다. 폴러는 그 시간 내내
+정상 동작했고 로그에도 그 흔적이 남아 있다 — 파일만 없다. 8/5(14:11 재기동)에는 같은
+방식으로 **5시간 35분치**가 날아갔고, 아무도 몰랐다.
+
+이 계열은 **소급이 불가능**하다(모듈 상단 "못 받는 데이터는 지금 안 받으면 영원히 없다").
+그래서 두 겹으로 막는다:
+
+1. **기동 복원**(`_restore_day`) — 그날 파일이 이미 있으면 읽어서 `self._rows`를 채운 뒤
+   시작한다. 중복 키는 나중 값이 이기므로(이 클래스의 기존 규율) 병합이 정의돼 있다.
+2. **파괴 거부**(`_flush`) — 쓰기 직전에 디스크 행수가 메모리 행수보다 많으면 덮지 않고
+   먼저 병합한다. 1이 어떤 이유로 실패해도(파일 손상·스키마 변경) **줄어드는 쓰기는
+   일어나지 않는다.** 조용히는 안 한다(L18) — `InvestorFlowArchiveShrinkRefused`.
 """
 
 from __future__ import annotations
@@ -73,6 +93,11 @@ class InvestorFlowArchiver:
         if self._day is not None and day != self._day:
             # 날짜가 바뀌면 이전 날 버퍼를 비운다 — 안 그러면 다음 날 파일에 전날 행이 섞인다.
             self._rows.clear()
+        if day != self._day:
+            # 이 날짜를 처음 다루는 순간(기동 직후 또는 날짜 롤오버) 디스크에 이미 있는
+            # 그날치를 먼저 흡수한다 — 안 그러면 첫 flush가 오전치를 덮어쓴다(모듈 docstring).
+            self._day = day
+            self._restore_day(day)
         self._day = day
 
         row: dict[str, object] = {
@@ -90,10 +115,89 @@ class InvestorFlowArchiver:
         self._rows[(kst.strftime("%H%M%S"), snapshot.sector_code)] = row
         self._flush()
 
+    def _restore_day(self, day: date) -> int:
+        """디스크에 이미 있는 그날치를 `self._rows`로 흡수한다 — 재기동 복원(겹①).
+
+        반환: 흡수한 행 수(파일이 없으면 0).
+        실패 조건: 없다 — 복원 실패가 그날 수집을 막으면 안 된다(L22). 다만 조용히 넘기면
+                  다음 flush가 파일을 줄여 버리므로 반드시 로그를 남긴다(L18). 그 경우
+                  `_flush`의 파괴 거부(겹②)가 마지막 방어선이 된다.
+
+        `ts_kst`는 `to_kst()`로 다시 정규화한다 — `read_day()`가 돌려주는 tzinfo와 새
+        스냅샷의 tzinfo가 섞이면 polars가 한 컬럼으로 못 묶을 수 있다.
+        """
+        try:
+            frame = read_day(self._base_dir, self._market_code, day)
+        except Exception as exc:  # noqa: BLE001 — 복원 실패가 수집을 막지 않는다(L22)
+            mlog.log(
+                "InvestorFlowArchiveRestoreFailed",
+                f"{day.isoformat()} 기존 적재분을 못 읽었다 — 덮어쓰기 방지만 남는다: {exc}",
+                market_code=self._market_code,
+                date=day.isoformat(),
+            )
+            return 0
+        if frame is None or frame.height == 0:
+            return 0
+
+        restored = 0
+        for row in frame.to_dicts():
+            moment, sector = row.get("ts_kst"), row.get("sector_code")
+            if moment is None or sector is None:
+                continue  # 키를 못 만드는 행은 병합 대상이 아니다(옛 포맷 방어)
+            row["ts_kst"] = to_kst(moment)
+            self._rows[(row["ts_kst"].strftime("%H%M%S"), str(sector))] = row
+            restored += 1
+        if restored:
+            mlog.log(
+                "InvestorFlowArchiveRestored",
+                f"{day.isoformat()} 기존 적재분 {restored}행을 이어받고 시작 — "
+                "재기동 전 수집분이 다음 쓰기에 지워지지 않는다",
+                market_code=self._market_code,
+                date=day.isoformat(),
+                rows=restored,
+            )
+        return restored
+
+    def _write_is_safe(self, path: Path) -> bool:
+        """쓰기 직전 겹② — 이 쓰기가 파일을 **줄이지 않는가**.
+
+        정상 경로에서는 `_restore_day()` 덕에 항상 True다. False가 나온다면 복원이
+        실패했거나 다른 프로세스가 같은 파일을 쓰고 있다는 뜻이고, 둘 다 **덮어쓰면
+        영구 소실**이다(이 계열은 소급 조회가 없다).
+
+        한 번 더 병합을 시도하고, 그래도 줄어들면 **이번 쓰기를 건너뛴다**. 메모리 행은
+        그대로 남아 다음 폴링에서 다시 시도하므로 새 데이터는 안 잃고, 디스크의 옛
+        데이터는 확실히 안 지운다 — 비대칭이 명확하다(새 것은 복구 가능, 옛 것은 아니다).
+        """
+        if not path.exists():
+            return True
+        try:
+            on_disk = pl.read_parquet(path).height
+        except Exception:  # noqa: BLE001 — 못 읽으면 판정 불가, 기존 동작대로 진행
+            return True
+        if on_disk <= len(self._rows):
+            return True
+
+        if self._day is not None:
+            self._restore_day(self._day)
+        if on_disk <= len(self._rows):
+            return True
+        mlog.log(
+            "InvestorFlowArchiveShrinkRefused",
+            f"디스크 {on_disk}행 > 병합 후 메모리 {len(self._rows)}행 — 덮으면 소실이므로 "
+            "이번 쓰기를 건너뛴다(다음 폴링에서 재시도)",
+            market_code=self._market_code,
+            on_disk=on_disk,
+            in_memory=len(self._rows),
+        )
+        return False
+
     def _flush(self) -> None:
         if not self._rows or self._day is None:
             return
         path = self.path_for(self._day)
+        if not self._write_is_safe(path):
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             frame = pl.DataFrame(list(self._rows.values()), infer_schema_length=None).sort(

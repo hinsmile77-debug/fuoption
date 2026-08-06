@@ -114,6 +114,7 @@ from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
 from messiah.models.wiring_completeness import WiringCompleteness  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor  # noqa: E402
 from messiah.simulator.engine import LiveSimBrokerFeed  # noqa: E402
 from messiah.strategy.futures.service import FuturesAIService  # noqa: E402
@@ -374,6 +375,13 @@ async def main(cfg: InstanceConfig) -> None:
     today = now_kst().date()
     if not EventCalendar.from_file().is_trading_day(today):
         print(f"{today.isoformat()}은 KRX 휴장일 — G2 운영 생략, 즉시 종료", flush=True)
+        return
+
+    # 기동 창 검사 (2026-08-06 P0-2) — `run_l1_daily.py`와 같은 이유·같은 판정. 둘은
+    # at-startup 트리거를 함께 받으므로 판단도 한 곳(`ops/session_guard.py`)을 써야 한다.
+    allowed, reason = session_guard.launch_window_verdict()
+    if not allowed:
+        print(f"[기동 창] {reason}", flush=True)
         return
 
     _launch_ui(today.strftime("%Y%m%d"))

@@ -114,7 +114,7 @@ from messiah.core.ui_launcher import (  # noqa: E402
 )
 from messiah.data import normalizer  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
-from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
+from messiah.data.bar_composer import MultiHorizonBarComposer, compose_offline  # noqa: E402
 from messiah.data.collector import TickCollector  # noqa: E402
 from messiah.data.flow_archiver import InvestorFlowArchiver  # noqa: E402
 from messiah.data.investor_flow_poller import InvestorFlowPoller  # noqa: E402
@@ -124,6 +124,7 @@ from messiah.data.option_chain_archiver import OptionChainArchiver  # noqa: E402
 from messiah.data.option_chain_poller import OptionChainPoller  # noqa: E402
 from messiah.data.tick_archiver import TickArchiver  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
+from messiah.ops import session_guard  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 from messiah.ops.status_board import run_status_board_forever  # noqa: E402
 
@@ -311,6 +312,29 @@ def _load_warmup_artifacts(
         bars_by_horizon=summary,
     )
     print(f"피처 웜스타트: {summary}", flush=True)
+
+
+def _restore_composer_buckets(composer: MultiHorizonBarComposer, symbol: str, today: date) -> None:
+    """장중 재기동 복원 — 아카이브에 있는데 상위 Horizon으로 안 나간 버킷을 되채운다
+    (`data/bar_composer.py` 겹⑤, 2026-08-06 P0-3a).
+
+    `_load_warmup_artifacts()` **뒤에** 부른다: 웜스타트는 피처 엔진의 롤링 윈도를 채우고
+    이건 합성기의 미완 버킷을 채운다 — 둘 다 "재기동해도 아침부터 돌던 것과 같아진다"는
+    같은 목적의 서로 다른 절반이다. 08:35 정시 기동에서는 그날 1분봉이 없어 조용히 0건이다.
+
+    실패해도 수집은 계속한다 — 복원은 부가 기능이지 기동 전제조건이 아니다."""
+    restored = composer.restore_open_buckets(today)
+    if not restored:
+        return
+    summary = " ".join(f"{h}={n}" for h, n in sorted(restored.items()))
+    mlog.log(
+        "ComposerBucketsRestored",
+        f"장중 재기동 복원 — 아카이브의 1분봉으로 미완 상위 버킷을 되채웠다 ({summary})",
+        symbol=symbol,
+        date=today.isoformat(),
+        restored_bars_by_horizon=restored,
+    )
+    print(f"합성기 미완 버킷 복원: {summary}", flush=True)
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -657,6 +681,68 @@ def _compact_archive(archiver: ParquetArchiver, symbol: str, today: date) -> Non
             )
 
 
+def _recompose_today(archiver: ParquetArchiver, symbol: str, today: date) -> None:
+    """장후 상위 Horizon 재합성 — 리포트를 쓰기 **전에** 아카이브를 정합 상태로 만든다
+    (2026-08-06 P0-3b).
+
+    ## 왜 종료 절차 안으로 들어왔나
+
+    이건 원래 사람이 `scripts/run_recompose.py`로 돌리는 절차였다. 그런데 이틀 연속
+    안 돌았다 — 2026-08-05에 한 번(그날 커밋 제목이 "그것을 쓰라던 절차는 조용히 안 돌았다"
+    였다), 그 교훈을 적은 **다음 거래일인 2026-08-06에 또**. 절차를 문서에 적는 것으로는
+    안 돈다는 것이 이틀치 실측으로 증명됐다.
+
+    비용은 사실상 0이다: 로컬 Parquet 읽기·쓰기뿐이고 네트워크를 안 탄다(REST를 쓰는
+    `verify_archive_volume.py`를 종료 예산에 안 넣기로 한 판단은 그대로 유효하다 —
+    그쪽은 `scripts/run_postmarket.py`가 맡는다).
+
+    겹⑤(`bar_composer.restore_open_buckets`)가 들어온 뒤로 이 함수가 고칠 것은 보통
+    없다. 그래도 남기는 이유: 겹⑤는 **기동 시점**에만 돌아서 15:35 직전에 프로세스가
+    비정상 종료하는 경우를 못 덮고, 무엇보다 리포트의 `horizon_findings`가 "정합하다"고
+    말할 때 그게 실제로 참이어야 하기 때문이다.
+
+    실패해도 종료 절차를 막지 않는다 — 실패하면 `horizon_findings`가 그 사실을 그대로
+    드러내므로 조용한 실패가 아니다."""
+    try:
+        minute_bars = archiver.read_day_bars(symbol, Horizon.M1, today)
+    except Exception as exc:  # noqa: BLE001
+        mlog.log(
+            "RecomposeFailed",
+            f"1분봉을 못 읽어 재합성을 건너뛴다 — horizon_findings로 드러난다: {exc}",
+            symbol=symbol,
+            date=today.isoformat(),
+        )
+        return
+    if not minute_bars:
+        return
+
+    written: dict[str, int] = {}
+    for horizon in Horizon:
+        if horizon is Horizon.M1:
+            continue  # 원본 — 합성 대상이 아니다
+        try:
+            composites = compose_offline(symbol, horizon, minute_bars)
+            written[horizon.value] = archiver.write_day(symbol, horizon, composites)
+        except Exception as exc:  # noqa: BLE001 — 한 Horizon 실패가 나머지를 막지 않는다
+            mlog.log(
+                "RecomposeFailed",
+                f"{horizon.value} 재합성 실패 — 그 Horizon은 수집 당시 상태로 남는다: {exc}",
+                symbol=symbol,
+                horizon=horizon.value,
+                date=today.isoformat(),
+            )
+    if written:
+        summary = " ".join(f"{h}={n}" for h, n in written.items())
+        mlog.log(
+            "Recomposed",
+            f"장후 상위 Horizon 재합성 — 1분봉 {len(minute_bars)}개 기준 ({summary})",
+            symbol=symbol,
+            date=today.isoformat(),
+            rows_by_horizon=written,
+        )
+        print(f"상위 Horizon 재합성: 1분봉 {len(minute_bars)}개 → {summary}", flush=True)
+
+
 async def _daily_close(
     collector: TickCollector,
     composer: MultiHorizonBarComposer,
@@ -752,6 +838,14 @@ async def main(cfg: InstanceConfig) -> None:
         )
         return
 
+    # 기동 창 검사 (2026-08-06 P0-2) — Task Scheduler에 at-startup 트리거가 붙으면서
+    # **아무 시각에나** 이 프로세스가 불릴 수 있게 됐다. 재부팅 복구(10:05 부팅 → 즉시
+    # 재개)는 살리고, 새벽 재부팅에 하루 종일 빈 프로세스가 뜨는 것은 막는다.
+    allowed, reason = session_guard.launch_window_verdict()
+    if not allowed:
+        print(f"[기동 창] {reason}", flush=True)
+        return
+
     _launch_ui(today.strftime("%Y%m%d"))
 
     creds = KISCredentials.from_broker_config(cfg.broker)
@@ -809,6 +903,7 @@ async def main(cfg: InstanceConfig) -> None:
 
     # 첫 틱이 들어오기 전에 끝내야 한다 — 웜업 구간(09:00 이전)에 부르는 이유가 그것이다.
     await asyncio.to_thread(_load_warmup_artifacts, engine, archiver, symbol, today)
+    await asyncio.to_thread(_restore_composer_buckets, composer, symbol, today)
 
     now = now_kst()
     session_stop = _today_at(now, *REGULAR_SESSION_STOP)
@@ -850,9 +945,11 @@ async def main(cfg: InstanceConfig) -> None:
         )
         raise SystemExit(1) from None
 
-    # 통합 → 리포트 순서 (조각이 남아 있어도 `read_day()`가 읽으므로 순서가 결과를 바꾸지는
-    # 않지만, 리포트가 최종 물리 배치를 보고 산출되는 편이 사후 조사와 일치한다)
+    # 통합 → **재합성** → 리포트 순서. 조각이 남아 있어도 `read_day()`가 읽으므로 통합과
+    # 리포트의 선후는 결과를 안 바꾸지만, **재합성은 반드시 리포트보다 앞**이어야 한다 —
+    # 그래야 `horizon_findings`가 "지금 아카이브가 정합한가"를 말한다(2026-08-06 P0-3b).
     _compact_archive(archiver, symbol, today)
+    _recompose_today(archiver, symbol, today)
     _write_integrity_report(today, symbol, cfg.instance_id)
     print("정상 종료.", flush=True)
 

@@ -26,7 +26,12 @@ class _FakeRun:
     def __call__(self, cmd, **_kwargs):  # noqa: ANN001
         key = cmd[0]
         if key == "powershell":
-            key = "cpu" if "Win32_Process" in cmd[-1] else "powershell"
+            if "Win32_Process" in cmd[-1]:
+                key = "cpu"
+            elif "Get-ScheduledTask" in cmd[-1]:
+                key = "boot"  # 2026-08-06 신설 — PowerShell을 쓰는 세 번째 검사
+            else:
+                key = "powershell"
         code, out = self.responses.get(key, (1, ""))
         return subprocess.CompletedProcess(cmd, code, stdout=out, stderr="")
 
@@ -204,4 +209,68 @@ def test_collect_includes_the_cpu_axis(tmp_path: Path, monkeypatch):
 
     health = host_health.collect(path=tmp_path, min_free_gb=0.0, runner=runner)
 
-    assert [c.name for c in health.checks] == ["disk", "power", "docker", "cpu"]
+    assert [c.name for c in health.checks] == [
+        "disk",
+        "power",
+        "docker",
+        "cpu",
+        "boot_recovery",
+    ]
+
+
+# ------------------------- 부팅 복구 무장 (2026-08-06 P0-2 검증용)
+
+
+def _boot_run(output: str, code: int = 0):
+    return _FakeRun({"boot": (code, output)})
+
+
+def test_boot_trigger_on_both_tasks_is_armed(monkeypatch):
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_boot_recovery(runner=_boot_run("Messiah=boot\nMessiah-G2=boot\n"))
+
+    assert check.available and check.ok
+    assert "무장 2개" in check.detail
+
+
+def test_a_task_without_a_boot_trigger_is_a_finding(monkeypatch):
+    """2026-08-06 이전 상태 — 평일 08:35 트리거만 있고 부팅 트리거가 없었다.
+
+    그 상태로 10:03:49에 재부팅이 나서 21분간 관측이 죽었다. 설정은 코드가 아니라 OS
+    상태라 테스트로는 못 잡는다 — 매일 실측하는 이 항목만이 잡는다.
+    """
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_boot_recovery(runner=_boot_run("Messiah=boot\nMessiah-G2=none\n"))
+
+    assert check.available and not check.ok
+    assert "Messiah-G2" in check.detail
+
+
+def test_a_missing_task_is_a_finding_not_silence(monkeypatch):
+    """작업 자체가 사라진 것이 트리거가 없는 것보다 나쁘다 — 둘 다 판정 대상이다."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_boot_recovery(runner=_boot_run("Messiah=missing\nMessiah-G2=boot\n"))
+
+    assert check.available and not check.ok
+    assert "Messiah" in check.detail
+
+
+def test_unreadable_task_list_is_unmeasured_not_ok(monkeypatch):
+    """못 잰 것을 "무장됨"으로 세면 이 검사가 있으나 마나다(L18)."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_boot_recovery(runner=_boot_run("", code=1))
+
+    assert not check.available
+
+
+def test_non_windows_is_skipped_not_failed(monkeypatch):
+    monkeypatch.setattr(host_health.sys, "platform", "linux")
+
+    check = host_health.check_boot_recovery(runner=_boot_run(""))
+
+    assert not check.available
+    assert "Windows 전용" in check.detail

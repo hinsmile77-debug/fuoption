@@ -88,12 +88,38 @@ KST(UTC+9:00)는 5/10/15/30분 격자와 정수 배로 맞아떨어져(540분 = 
 
 그래서 `flush_due_horizon`은 **대기 전에 확정 대상 버킷을 고정**하고, 깨어났을 때 그 버킷이
 그대로일 때만 확정한다. 바뀌었으면 이미 겹①이 옳게 처리한 뒤이므로 할 일이 없다.
+
+## 네 겹을 다 통과하는 다섯 번째 구멍 — **장중 재기동** (2026-08-06 실측)
+
+겹①~④는 전부 "프로세스가 살아 있는 동안"의 경합을 막는다. 프로세스가 죽으면 그 순간
+`_constituents`에 쌓여 있던 1분봉들이 **메모리와 함께 사라지고, 재기동한 합성기는 그것을
+다시 안 읽는다.**
+
+2026-08-06 10:03:49에 호스트가 재부팅됐다. 1분봉 10:00~10:03 네 개는 아카이브에 남았는데
+(수집기가 봉마다 즉시 적재한다), 그 봉들이 속한 상위 버킷은 통째로 안 나왔다:
+
+    3m  10:03 버킷 없음        (1분봉 1개,   482계약)
+    5m  10:00 버킷 없음        (1분봉 4개, 2,043계약)
+    10m 10:00 버킷 없음        (1분봉 4개, 2,043계약)
+    15m 10:00 버킷 없음        (1분봉 4개, 2,043계약)
+    30m 10:00 버킷 1,627 ≠ 3,670  (재기동 후 5봉만으로 확정)
+
+`late_bar_drops`는 **0이었다** — 겹④는 자기 몫을 다 했다. 이건 다른 사건이고, 그래서
+다섯 번째 겹이 필요하다:
+
+5. **기동 시 미완 버킷 복원** (`restore_open_buckets`) — 아카이브의 그날 1분봉과 이미
+   나간 상위 봉을 대조해, 안 나간 버킷을 되채운다. 과거 버킷은 그 자리에서 확정하고
+   **가장 마지막 하나만 열어 둔다** — 그래야 재기동 후 도착하는 봉이 겹①을 통해 같은
+   버킷에 자연스럽게 합류한다(30m 1,627 → 3,670이 되는 경로가 정확히 이것이다).
+
+   판정 규칙은 `compose_offline`과 같다 — 실시간·오프라인·복원 셋이 한 함수
+   (`compose_composite_bar`)를 쓰므로 정의상 같은 봉이 나온다.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Awaitable, Callable, Sequence
 
 from messiah.core import logging as mlog
@@ -340,6 +366,107 @@ class MultiHorizonBarComposer:
             f"미완 확정 {self._incomplete_flushes}) — 최악 {worst[0]} "
             f"{int(worst[1]['lost_volume']):,}계약 유실({worst[1]['lost_ratio']:.1%})",
         )
+
+    def restore_open_buckets(self, day: date) -> dict[str, int]:
+        """겹⑤ — 기동 시 아카이브를 보고 **아직 안 나간 상위 버킷**을 되채운다.
+
+        계산: 그날 1분봉을 Horizon 경계로 묶어 "있어야 할 버킷"을 만들고, 이미 아카이브에
+             있는 상위 봉을 빼면 남는 것이 안 나간 버킷이다. 그중 **마지막 하나만 열어
+             두고**(`_bucket_start`/`_constituents`) 나머지는 여기서 확정한다.
+        반환: Horizon별 "복원한 1분봉 수"(열어 둔 것 + 확정한 것) — 호출측이 로그로 남긴다.
+        실패 조건: 없다 — 아카이브를 못 읽으면 복원을 건너뛰고 콜드스타트로 진행한다
+                  (`_load_warmup_artifacts`와 같은 원칙: 부가 기능이 본 기능을 막지 않는다).
+                  조용히는 안 넘긴다(L18).
+
+        ## 왜 마지막 하나는 안 닫나
+
+        재기동 시각이 그 버킷 **안**일 수 있다(예: 10:02 재기동, 10:00~10:05 버킷 진행 중).
+        닫아 버리면 그 버킷이 짧게 확정되고, 뒤이어 도착하는 나머지 분봉이 겹③에 의해
+        늦은 봉으로 버려진다 — 고치려던 것과 같은 손실이 반대 방향으로 난다. 열어 두면
+        재기동 시각이 버킷 안이든 밖이든 겹①이 알아서 옳게 처리한다.
+
+        ## 왜 발행은 안 하나
+
+        복원으로 확정한 봉은 **적재만** 하고 버스에 안 내보낸다. 구독자인 `FeatureEngine`은
+        같은 아카이브로 `warm_start()`를 따로 하므로, 여기서 또 발행하면 같은 봉이 롤링
+        윈도에 두 번 들어간다. 적재는 `(bar_open_kst, horizon)` 중복제거가 있어 안전하다.
+        """
+        try:
+            minute_bars = sorted(
+                self._archiver.read_day_bars(self._symbol, Horizon.M1, day),
+                key=lambda b: b.bar_open_kst,
+            )
+        except Exception as exc:  # noqa: BLE001 — 복원 실패가 그날 수집을 막지 않는다
+            mlog.log(
+                "ComposerRestoreFailed",
+                f"{day.isoformat()} 1분봉을 못 읽어 미완 버킷 복원을 건너뛴다: {exc}",
+                symbol=self._symbol,
+            )
+            return {}
+        if not minute_bars:
+            return {}
+
+        restored: dict[str, int] = {}
+        for horizon, seconds in self._targets.items():
+            try:
+                count = self._restore_one_horizon(horizon, seconds, day, minute_bars)
+            except Exception as exc:  # noqa: BLE001 — 한 Horizon의 실패가 나머지를 막지 않는다
+                mlog.log(
+                    "ComposerRestoreFailed",
+                    f"{horizon.value} 미완 버킷 복원 실패 — 이 Horizon은 콜드스타트: {exc}",
+                    symbol=self._symbol,
+                    horizon=horizon.value,
+                )
+                continue
+            if count:
+                restored[horizon.value] = count
+        return restored
+
+    def _restore_one_horizon(
+        self, horizon: Horizon, seconds: int, day: date, minute_bars: Sequence[BarClosed]
+    ) -> int:
+        """한 Horizon의 안 나간 버킷을 되채운다 — `restore_open_buckets()`의 본체."""
+        already = {
+            bar.bar_open_kst for bar in self._archiver.read_day_bars(self._symbol, horizon, day)
+        }
+        buckets: dict[datetime, list[BarClosed]] = {}
+        for bar in minute_bars:
+            buckets.setdefault(floor_to_horizon(bar.bar_open_kst, seconds), []).append(bar)
+
+        pending = sorted(start for start in buckets if start not in already)
+        # 이미 나간 버킷 중 가장 나중 것 — 늦은 봉 거부(겹③)의 기준선이다.
+        newest_done = max(already) if already else None
+        if newest_done is not None:
+            self._last_flushed_start[horizon] = newest_done
+        if not pending:
+            return 0
+
+        # **열어 둘 수 있는 것은 기준선보다 뒤에 있는 버킷뿐이다.** 앞에 있는 구멍을 열어
+        # 두면 그 버킷으로 오는 봉이 겹③에 걸려 도로 버려진다 — 그 경우는 지금 확정한다.
+        last = pending[-1]
+        keep_open = newest_done is None or last > newest_done
+        to_close = pending[:-1] if keep_open else pending
+
+        restored_bars = 0
+        for start in to_close:
+            composite = compose_composite_bar(self._symbol, horizon, start, buckets[start])
+            self._archiver.append_bar(composite)  # 적재만 — 발행 안 함(docstring)
+            self._composed_volume[horizon] += composite.volume
+            self._composed_bars[horizon] += 1
+            self._last_flushed_start[horizon] = max(
+                start, self._last_flushed_start[horizon] or start
+            )
+            restored_bars += len(buckets[start])
+
+        if keep_open:
+            self._bucket_start[horizon] = last
+            self._constituents[horizon] = list(buckets[last])
+            restored_bars += len(buckets[last])
+            if self._last_seen_bar_open is None or buckets[last][-1].bar_open_kst > (
+                self._last_seen_bar_open
+            ):
+                self._last_seen_bar_open = buckets[last][-1].bar_open_kst
+        return restored_bars
 
     async def handle_one_minute_bar(self, bar: BarClosed) -> None:
         """

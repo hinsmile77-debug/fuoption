@@ -192,3 +192,109 @@ def test_read_day_returns_kst_not_utc(tmp_path):
 
     assert frame["ts_kst"][0].hour == 9
     assert option_chain_archiver.available_days(tmp_path, "weekly_mon") == [date(2026, 8, 4)]
+
+
+# ------------------------------------ 재기동 복원 (2026-08-06 호스트 재부팅 대응, P0-1)
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_cycles_written_before_the_restart(tmp_path):
+    """**이 파일에서 가장 중요한 테스트다.**
+
+    2026-08-06: 10:03:49 호스트 재부팅 → 10:25 재기동. `regular/2026-08-06.parquet`의 첫
+    사이클이 10:30이었고 08:40~10:00의 9사이클 × 42다리가 사라졌다. 원인은 `_flush()`가
+    메모리에 있는 것만 쓰면서 `os.replace()`로 파일을 통째로 교체한 것이다.
+    옵션 시세는 **과거 조회 경로가 없어** 소급이 불가능하다.
+    """
+    morning = OptionChainArchiver(tmp_path, flush_every=1)
+    await morning.handle_snapshot(_snap("084000", strike=860.0))
+    await morning.handle_snapshot(_snap("085000", strike=862.5))
+    del morning  # 재부팅 — close() 없이 사라진다
+
+    afternoon = OptionChainArchiver(tmp_path, flush_every=1)  # 새 프로세스, 빈 메모리
+    await afternoon.handle_snapshot(_snap("103000", strike=865.0))
+
+    frame = option_chain_archiver.read_day(tmp_path, "weekly_mon", date(2026, 8, 4))
+    assert frame.height == 3, "재기동 전 2다리가 지워졌다 — 소급 불가능한 소실"
+    assert frame["strike"].to_list() == [860.0, 862.5, 865.0]
+
+
+@pytest.mark.asyncio
+async def test_restore_is_per_series_not_cross_contaminated(tmp_path):
+    """시리즈별로 파일이 갈리므로 복원도 시리즈별이어야 한다."""
+    morning = OptionChainArchiver(tmp_path, flush_every=1)
+    await morning.handle_snapshot(_snap("084000", series="regular", strike=860.0))
+    await morning.handle_snapshot(_snap("084100", series="weekly_thu", strike=861.0))
+
+    afternoon = OptionChainArchiver(tmp_path, flush_every=1)
+    await afternoon.handle_snapshot(_snap("103000", series="regular", strike=865.0))
+    await afternoon.handle_snapshot(_snap("103100", series="weekly_thu", strike=866.0))
+
+    reg = option_chain_archiver.read_day(tmp_path, "regular", date(2026, 8, 4))
+    thu = option_chain_archiver.read_day(tmp_path, "weekly_thu", date(2026, 8, 4))
+    assert reg["strike"].to_list() == [860.0, 865.0]
+    assert thu["strike"].to_list() == [861.0, 866.0]
+
+
+@pytest.mark.asyncio
+async def test_restored_rows_keep_kst_and_output3_spot_index(tmp_path):
+    """output3(KOSPI200 현물)은 이 프로젝트가 다른 데서 못 구하는 값이다 — 복원이 떨구면 안 된다."""
+    morning = OptionChainArchiver(tmp_path, flush_every=1)
+    await morning.handle_snapshot(_snap("084000", strike=860.0))
+
+    afternoon = OptionChainArchiver(tmp_path, flush_every=1)
+    await afternoon.handle_snapshot(_snap("103000", strike=865.0))
+
+    frame = option_chain_archiver.read_day(tmp_path, "weekly_mon", date(2026, 8, 4))
+    assert frame["idx3_bstp_nmix_prpr"].to_list() == [1000.03, 1000.03]
+    assert frame["ts_kst"].to_list()[0].hour == 8
+    assert frame["ts_kst"].to_list()[0].utcoffset().total_seconds() == 9 * 3600
+
+
+@pytest.mark.asyncio
+async def test_same_cycle_leg_after_restart_is_replaced_not_duplicated(tmp_path):
+    """복원이 중복을 만들면 같은 시각 같은 다리가 두 줄이 되어 시계열이 틀어진다."""
+    morning = OptionChainArchiver(tmp_path, flush_every=1)
+    await morning.handle_snapshot(_snap("084000", strike=860.0))
+
+    afternoon = OptionChainArchiver(tmp_path, flush_every=1)
+    await afternoon.handle_snapshot(_snap("084000", strike=860.0))
+
+    frame = option_chain_archiver.read_day(tmp_path, "weekly_mon", date(2026, 8, 4))
+    assert frame.height == 1
+
+
+@pytest.mark.asyncio
+async def test_shrinking_write_is_refused_when_restore_fails(monkeypatch, tmp_path):
+    """겹②: 복원이 깨져도 **줄어드는 쓰기**는 안 일어난다."""
+    import polars as pl
+
+    morning = OptionChainArchiver(tmp_path, flush_every=1)
+    for i in range(3):
+        await morning.handle_snapshot(_snap(f"08{40 + i}00", strike=860.0 + i))
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_archiver.mlog.log", lambda tag, msg, **kw: logged.append(tag)
+    )
+    monkeypatch.setattr(
+        "messiah.data.option_chain_archiver.read_day",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("복원 불가")),
+    )
+    afternoon = OptionChainArchiver(tmp_path, flush_every=1)
+    await afternoon.handle_snapshot(_snap("103000", strike=899.0))
+
+    on_disk = pl.read_parquet(tmp_path / "weekly_mon" / "2026-08-04.parquet")
+    assert on_disk.height == 3, "복원이 깨진 상태에서 파일이 줄어들었다"
+    assert "OptionChainArchiveShrinkRefused" in logged
+
+
+@pytest.mark.asyncio
+async def test_day_rollover_does_not_absorb_the_previous_day(tmp_path):
+    arch = OptionChainArchiver(tmp_path, flush_every=1)
+    await arch.handle_snapshot(_snap("153000", day=4, strike=860.0))
+    await arch.handle_snapshot(_snap("084000", day=5, strike=870.0))
+
+    day5 = option_chain_archiver.read_day(tmp_path, "weekly_mon", date(2026, 8, 5))
+    assert day5.height == 1
+    assert day5["strike"].to_list() == [870.0]
