@@ -221,6 +221,19 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
         if (r.get("series_coverage") or [])
         else None
     ),
+    # 가장 긴 **관측 공백**(분) — 프로세스가 죽어 아무것도 못 본 구간 (2026-08-06 P1-1).
+    #
+    # `restarts`(횟수)가 못 보는 것을 본다: 2분 재기동과 21분 정지가 같은 "1회"였다.
+    # 그리고 `ui_restarts`가 구조적으로 못 보는 **UI의 공백**이 여기 들어온다 — 그쪽은
+    # 인프로세스 워치독의 자동 재기동만 세므로, 2026-08-06에 UI가 21분 사라졌는데 0이었다.
+    #
+    # 축이 없던 옛 리포트(2026-08-06 이전)는 None이다 — 그날들을 0으로 세면 "공백이 없었다"가
+    # 되어 검증이 거짓으로 통과한다(L18).
+    "observation_gap_minutes_max": lambda r: (
+        max((float(g.get("minutes") or 0.0) for g in r["observation_gaps"]), default=0.0)
+        if isinstance(r.get("observation_gaps"), list)
+        else None
+    ),
     # 수집 작업에 부팅 트리거가 걸려 있는가 — 1.0(무장) / 0.0(안 됨) / None(못 잼).
     # **min 기준으로 쓰는 "존재하는가" 지표다**(`tick_rows`와 같은 계열). 부팅 복구가 실제로
     # 동작하는지는 다음 재부팅까지 모르지만, 무장 여부는 매일 알 수 있다 — 2026-08-06 이전

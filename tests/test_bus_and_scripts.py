@@ -250,3 +250,68 @@ def test_check_clock_does_not_block_startup_when_it_cannot_measure():
 
     assert result.ok is True
     assert "측정 실패" in result.detail
+
+
+# ------------------- git 점검이 진짜 원인을 말하는가 (2026-08-06 P2-2)
+
+
+class _GitRun:
+    """`subprocess.run` 대역 — git이 어떻게 실패했는지를 흉내낸다."""
+
+    def __init__(self, *, code: int = 0, out: str = "", err: str = "", raises=None) -> None:
+        self.code, self.out, self.err, self.raises = code, out, err, raises
+
+    def __call__(self, cmd, **_kwargs):  # noqa: ANN001
+        import subprocess as sp
+
+        if self.raises is not None:
+            raise self.raises
+        return sp.CompletedProcess(cmd, self.code, stdout=self.out, stderr=self.err)
+
+
+def test_git_rejection_quotes_what_git_actually_said(monkeypatch) -> None:
+    """**2026-08-06 실측 대응.** 그날 10:25 기동에서 `git 저장소 아님`이 찍혔는데, 같은
+    디렉터리가 두 시간 전에는 `clean`이었다. `except Exception:` 하나가 모든 실패를 하나의
+    고정된 거짓말로 덮었고, 진짜 원인은 예외와 함께 버려져 지금도 확정할 수 없다.
+    """
+    monkeypatch.setattr(
+        sc.subprocess,
+        "run",
+        _GitRun(code=128, err="fatal: Unable to create '.git/index.lock': File exists."),
+    )
+
+    result = sc.check_git_state("dev")
+
+    assert "index.lock" in result.detail, "git이 한 말이 사라졌다"
+    assert "저장소 아님" not in result.detail
+
+
+def test_missing_git_binary_says_so(monkeypatch) -> None:
+    monkeypatch.setattr(sc.subprocess, "run", _GitRun(raises=FileNotFoundError()))
+
+    assert "실행 파일 없음" in sc.check_git_state("dev").detail
+
+
+def test_git_timeout_is_named(monkeypatch) -> None:
+    import subprocess as sp
+
+    monkeypatch.setattr(sc.subprocess, "run", _GitRun(raises=sp.TimeoutExpired("git", 20)))
+
+    assert "무응답" in sc.check_git_state("dev").detail
+
+
+def test_dirty_tree_still_blocks_live(monkeypatch) -> None:
+    """계명 10은 그대로다 — 실패 사유를 나눈 것이지 관문을 푼 것이 아니다."""
+    monkeypatch.setattr(sc.subprocess, "run", _GitRun(out=" M src/a.py\n?? b.py\n"))
+
+    assert sc.check_git_state("live").ok is False
+    assert sc.check_git_state("dev").ok is True
+
+
+def test_clean_tree_passes(monkeypatch) -> None:
+    monkeypatch.setattr(sc.subprocess, "run", _GitRun(out=""))
+
+    result = sc.check_git_state("live")
+
+    assert result.ok is True
+    assert result.detail == "clean"

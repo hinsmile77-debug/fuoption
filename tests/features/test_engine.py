@@ -897,3 +897,83 @@ def test_warm_start_without_a_hint_is_unchanged():
     engine.warm_start({Horizon.M1: today_only})
 
     assert engine._session.prev_day_close_ticks is None
+
+
+# ------------------- 정의상 상수 피처의 오탐 제거 (2026-08-06 P2-1)
+
+
+async def test_intraday_constant_by_definition_is_not_reported_as_dead():
+    """`px_gap_open` = log(당일 시가 / 전일 종가) — **장중에 변할 수가 없다.**
+
+    2026-08-06 리포트의 퇴화 10건 중 4건이 이것이었고(1m/3m/5m/10m 전부), 등록부
+    `no-degenerate-features`는 `max: 0`이라 **구조적으로 통과 불가**였다. 매일 울리는
+    경고는 결국 아무도 안 본다.
+    """
+    from messiah.features import engine as engine_module
+
+    engine = _health_engine()
+    n = await _feed(engine, engine_module._MIN_SAMPLES_FOR_HEALTH + 5)
+    stats = engine._feature_stats[Horizon.M5]
+    stats["px_gap_open"] = engine_module._FeatureStat(n=n, n_nan=0, lo=0.003, hi=0.003)
+
+    [health] = [h for h in engine.feature_health() if h.horizon == "5m"]
+
+    assert "px_gap_open" not in health.constant
+
+
+async def test_low_cardinality_state_features_are_exempt_too():
+    """sign(±1)과 돌파강도(대부분 0.0)는 하루 종일 같은 값인 것이 정상 범위다."""
+    from messiah.features import engine as engine_module
+
+    engine = _health_engine()
+    n = await _feed(engine, engine_module._MIN_SAMPLES_FOR_HEALTH + 5)
+    stats = engine._feature_stats[Horizon.M5]
+    stats["px_ema_cross_20"] = engine_module._FeatureStat(n=n, n_nan=0, lo=1.0, hi=1.0)
+    stats["px_breakout_60"] = engine_module._FeatureStat(n=n, n_nan=0, lo=0.0, hi=0.0)
+
+    [health] = [h for h in engine.feature_health() if h.horizon == "5m"]
+
+    # 합성 봉이라 다른 피처가 상수로 잡힐 수 있다 — 관심사는 주입한 둘뿐이다.
+    assert "px_ema_cross_20" not in health.constant
+    assert "px_breakout_60" not in health.constant
+
+
+async def test_exempt_features_are_still_caught_when_always_nan():
+    """**검출력을 잃지 않는다.** `px_gap_open`이 값을 아예 못 내는 것이 이 피처의 진짜
+    사고다 — 2026-08-05 14:12 장중 재기동에서 전일 종가를 못 구해 하루 종일 NaN이었고,
+    그날 처음 붙은 검출기가 그걸 잡았다."""
+    from messiah.features import engine as engine_module
+
+    engine = _health_engine()
+    n = await _feed(engine, engine_module._MIN_SAMPLES_FOR_HEALTH + 5)
+    stats = engine._feature_stats[Horizon.M5]
+    stats["px_gap_open"] = engine_module._FeatureStat(n=n, n_nan=n)
+
+    [health] = [h for h in engine.feature_health() if h.horizon == "5m"]
+
+    assert "px_gap_open" in health.always_nan
+
+
+async def test_a_continuous_feature_stuck_at_zero_is_still_caught():
+    """면제가 넓어지면 검출기가 무의미해진다 — `px_macd_h_5`(연속값인데 버그로 0 고착,
+    8거래일 내내 안 보였던 그 피처)는 반드시 계속 잡혀야 한다."""
+    from messiah.features import engine as engine_module
+
+    engine = _health_engine()
+    n = await _feed(engine, engine_module._MIN_SAMPLES_FOR_HEALTH + 5)
+    stats = engine._feature_stats[Horizon.M5]
+    stats["px_macd_h_5"] = engine_module._FeatureStat(n=n, n_nan=0, lo=0.0, hi=0.0)
+
+    [health] = [h for h in engine.feature_health() if h.horizon == "5m"]
+
+    assert "px_macd_h_5" in health.constant
+
+
+def test_base_name_strips_only_the_window_suffix():
+    """`px_ema_cross_20` → `px_ema_cross`, 그러나 `px_gap_open`은 그대로여야 한다
+    (마지막 토큰이 숫자가 아니면 윈도우 접미사가 아니다)."""
+    from messiah.features.engine import _base_feature_name
+
+    assert _base_feature_name("px_ema_cross_20") == "px_ema_cross"
+    assert _base_feature_name("px_gap_open") == "px_gap_open"
+    assert _base_feature_name("px_macd_h_5") == "px_macd_h"

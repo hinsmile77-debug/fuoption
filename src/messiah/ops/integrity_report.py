@@ -50,7 +50,7 @@ import polars as pl
 from messiah.core.messages import BarSession, Horizon
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
-from messiah.ops import series_coverage
+from messiah.ops import observation_gaps, series_coverage
 from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
 _KST_ZONE_NAME = "Asia/Seoul"
@@ -88,6 +88,15 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # 본다. 재합성(`run_recompose.py`)을 돌리면 아카이브는 복구되지만 **그날 수집이 실제로
     # 손상됐다는 사실은 남아야 한다** — 안 그러면 다음 날 "어제는 깨끗했는데"로 읽힌다.
     "late_bar_drops": 0.0,
+    # 관측 공백(분) — 프로세스가 죽어 아무것도 못 본 구간 (2026-08-06 P1-1).
+    #
+    # **5분인 이유**: 부팅 트리거가 붙은 뒤 재부팅 복구의 설계값이 부팅 30초 + 트리거 지연
+    # 1분 + 기동 30초 ≈ 2~3분이다(`scripts/install_scheduled_tasks.ps1`). 5분은 그 위에
+    # 여유를 둔 값이고, 2026-08-06의 21분과는 4배 이상 떨어져 있다.
+    #
+    # `restarts`(횟수)와 **둘 다 두는 이유**: 2분 재기동과 21분 정지가 같은 "1회"로 세어지면
+    # 안 된다. 횟수는 안정성을, 시간은 손실 크기를 말한다.
+    "observation_gap_minutes": 5.0,
 }
 
 
@@ -201,6 +210,13 @@ class IntegrityReport:
     series_coverage: list[dict[str, Any]]
     # 위 커버리지에서 나온 판정 문장 — `horizon_findings`와 같은 성격(정의 위반 목록)이다.
     series_findings: list[str]
+    # **관측 공백과 그 원인** (2026-08-06 P1-1·P1-2, `ops/observation_gaps.py`).
+    #
+    # `restarts`가 **횟수**를 세는 자리라면 이쪽은 **시간과 원인**을 센다. 2026-08-06에
+    # 리포트가 말한 것은 "재기동 1회"뿐이었고, 21분을 잃었다는 것도 왜 그랬는지도 없었다.
+    # `ui_restarts`가 못 보는 UI의 공백도 여기서 보인다(그쪽은 인프로세스 워치독만 센다).
+    observation_gaps: list[dict[str, Any]]
+    host_events: list[dict[str, Any]]
     breaches: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -345,11 +361,19 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     nan_by_horizon: dict[str, list[float]] = {}
     cb_events: dict[str, int] = {}
 
+    # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
+    # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
+    # 사이로만 잴 수 있다(`ops/observation_gaps.py`).
+    activity: list[str] = []
+
     for record in _iter_json_lines(log_paths):
         level = str(record.get("level", "-"))
         tag = str(record.get("tag", "-"))
         level_counts[level] = level_counts.get(level, 0) + 1
         tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        stamp = str(record.get("ts", ""))[11:19]
+        if len(stamp) == 8:
+            activity.append(stamp)
 
         if tag == "SessionStart":
             session_starts.append(str(record.get("ts", ""))[11:19])
@@ -397,6 +421,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "level_counts": level_counts,
         "tag_counts": tag_counts,
         "session_starts": session_starts,
+        "activity_kst": sorted(activity),
         "session_git_shas": sorted(set(session_git_shas)),
         # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
         # 상태가 판정 기준이다(그 시간대의 봉은 이미 그 스큐로 만들어졌다).
@@ -711,6 +736,7 @@ def build_report(
     host_collector=None,
     flow_dir: Path | None = None,
     option_chain_dir: Path | None = None,
+    host_event_collector=observation_gaps.collect_host_events,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
 
@@ -888,16 +914,44 @@ def build_report(
     # 한 인자로 묶이는 것이 실제 배치와 맞고, 무엇보다 **테스트가 자동으로 격리된다** —
     # 모듈 기본값을 쓰면 tmp 디렉터리로 만든 리포트가 저장소의 진짜 `data/`를 집어 든다.
     data_root = Path(bar_dir).parent
+    coverage_window = series_coverage.session_window(
+        day, start=_first_session_start(day, session_starts)
+    )
     coverages = series_coverage.collect(
         day,
         symbol,
-        window=series_coverage.session_window(day, start=_first_session_start(day, session_starts)),
+        window=coverage_window,
         flow_dir=flow_dir or data_root / "flow_intraday",
         option_chain_dir=option_chain_dir or data_root / "option_chain",
         tick_dir=tick_dir or data_root / "ticks",
     )
     series_findings = [f for item in coverages for f in series_coverage.findings_for(item)]
     breaches.extend(series_findings)
+
+    # ---- P1-1·P1-2(2026-08-06): 관측 공백과 그 원인 ----
+    #
+    # UI는 구조화 로그를 안 내므로 기동 시각을 자기 로그에서 따로 뽑는다 — **관측 공백을
+    # 재려면 UI야말로 봐야 하는 프로세스다**(사람이 장중에 보는 화면이 그것이고,
+    # 2026-08-06에 21분간 사라졌는데 `ui_restarts`는 0이었다).
+    starts_for_gaps = dict(session_starts)
+    ui_starts = _read_ui_starts(day, resolved_log_dir)
+    if len(ui_starts) > 1:
+        starts_for_gaps["ui"] = ui_starts
+    observation = observation_gaps.ObservationReport()
+    observation.events, observation.events_available, observation.events_detail = (
+        host_event_collector(day)
+    )
+    observation.gaps = observation_gaps.find_gaps(
+        day,
+        starts_by_process=starts_for_gaps,
+        activity_by_process={name: result["activity_kst"] for name, result in per_process.items()},
+        events=observation.events,
+    )
+    for gap in observation.gaps:
+        if gap.minutes > limits["observation_gap_minutes"]:
+            breaches.append(gap.describe())
+    if not observation.events_available:
+        unmeasured.append(f"관측 공백 원인(호스트 이벤트 — {observation.events_detail})")
 
     return IntegrityReport(
         date=day.isoformat(),
@@ -932,8 +986,24 @@ def build_report(
         tick_rows=tick_rows,
         series_coverage=[item.to_dict() for item in coverages],
         series_findings=series_findings,
+        observation_gaps=[gap.to_dict() for gap in observation.gaps],
+        host_events=[event.to_dict() for event in observation.events],
         breaches=breaches,
     )
+
+
+def _read_ui_starts(day: date, log_dir: Path) -> list[str]:
+    """Streamlit UI 로그에서 기동 시각을 뽑는다 — 없으면 빈 목록.
+
+    UI 로그는 구조화 로그가 아니라 `analyze_logs()`의 시야 밖이다(`ops/crash_dumps.py`가
+    같은 이유로 UI 로그를 따로 읽는다). 실패해도 리포트를 막지 않는다.
+    """
+    path = log_dir / f"ui_{day:%Y%m%d}.log"
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return []
+    return observation_gaps.parse_ui_starts(text)
 
 
 def _infer_log_dir(log_paths: Mapping[str, Sequence[Path]]) -> Path:
@@ -1032,6 +1102,22 @@ def format_summary(report: IntegrityReport) -> str:
         )
     for finding in report.series_findings:
         lines.append(f"  ⚠ 적재 공백: {finding}")
+    # 관측 공백 (2026-08-06 P1-1·P1-2) — **공백이 없는 날도 한 줄 남긴다.**
+    lines.extend(
+        observation_gaps.summarize(
+            observation_gaps.ObservationReport(
+                events=[observation_gaps.HostEvent(**e) for e in report.host_events],
+                gaps=[observation_gaps.ObservationGap(**g) for g in report.observation_gaps],
+                events_available=True,
+            )
+        )
+    )
+    if report.host_events:
+        lines.append("  호스트 생명주기:")
+        lines.extend(
+            f"    {observation_gaps.describe_event(observation_gaps.HostEvent(**e))}"
+            for e in report.host_events
+        )
     if report.delivery_latency is not None:
         latency = report.delivery_latency
         lines.append(

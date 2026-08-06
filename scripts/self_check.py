@@ -203,13 +203,48 @@ def check_host(*, collector=None) -> CheckResult:
 
 
 def check_git_state(mode: str) -> CheckResult:
-    """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제)."""
+    """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제).
+
+    ## 왜 실패 사유를 나눠 적나 (2026-08-06 실측)
+
+    종전에는 `except Exception:` 하나로 받아 **언제나 같은 문구**를 돌려줬다:
+    `"git 저장소 아님 (dev에서만 허용)"`.
+
+    그날 10:25 재기동에서 그 줄이 찍혔는데, **같은 디렉터리가 두 시간 전 08:35에는
+    `clean`이었다.** `.bat`이 `cd /d "%~dp0.."`로 저장소 루트에서 도는데 저장소가 아닐 리가
+    없다. 진짜 원인(재부팅이 남긴 `index.lock` 추정)은 예외 텍스트와 함께 버려져서 지금도
+    확정할 수 없다 — **하나의 고정된 거짓말이 모든 실패를 덮었다.**
+
+    dev라서 PASS로 넘어갔지만, live/paper였으면 **틀린 이유로 기동이 거부**됐을 것이다.
+    그때 사람이 보는 첫 문장이 "저장소 아님"이면 조사는 엉뚱한 곳에서 시작한다.
+    """
     try:
-        dirty = subprocess.check_output(
-            ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
-        ).strip()
-    except Exception:
-        return CheckResult("git", mode == "dev", "git 저장소 아님 (dev에서만 허용)")
+        completed = subprocess.run(  # noqa: S603 — 고정 인자
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+    except FileNotFoundError:
+        return CheckResult("git", mode == "dev", "git 실행 파일 없음 (dev에서만 허용)")
+    except subprocess.TimeoutExpired:
+        return CheckResult("git", mode == "dev", "git status 20초 내 무응답 (dev에서만 허용)")
+    except Exception as exc:  # noqa: BLE001 — 남은 경우도 **무엇이었는지** 말한다
+        return CheckResult(
+            "git", mode == "dev", f"git status 실행 실패: {type(exc).__name__} (dev에서만 허용)"
+        )
+
+    if completed.returncode != 0:
+        # git이 돌긴 했는데 거부했다 — 저장소가 아닌 것도 이 경우에 들지만 유일하지 않다
+        # (index.lock 선점·권한·손상 등). **git이 한 말을 그대로 옮긴다.**
+        reason = (completed.stderr or "").strip().splitlines()
+        detail = reason[0] if reason else f"exit {completed.returncode}"
+        return CheckResult("git", mode == "dev", f"git status 거부: {detail} (dev에서만 허용)")
+
+    dirty = (completed.stdout or "").strip()
     if dirty and mode in ("live", "paper"):
         return CheckResult("git", False, f"미커밋 변경 {len(dirty.splitlines())}건 — 계명 10")
     return CheckResult("git", True, "clean" if not dirty else f"dirty({mode} 허용)")

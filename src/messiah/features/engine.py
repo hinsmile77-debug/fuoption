@@ -142,6 +142,22 @@ class FeatureHealth:
         return len(self.always_nan) + len(self.constant)
 
 
+def _base_feature_name(name: str) -> str:
+    """`px_ema_cross_20` → `px_ema_cross`. 윈도우형 이름은 `f"{기저}_{윈도우}"`로 만들어진다
+    (`_build_feature_vector`) — 판정은 기저 이름으로 한다."""
+    head, _, tail = name.rpartition("_")
+    return head if head and tail.isdigit() else name
+
+
+def _constant_is_normal(name: str) -> bool:
+    """세션 내내 안 변해도 결함이 아닌 피처인가 (2026-08-06).
+
+    근거와 목록은 `features/px_core.INTRADAY_CONSTANT_OK` — 정의상 상수(`px_gap_open`)이거나
+    값역이 좁아 하루 종일 같은 값이 정상인 상태형 지표들이다.
+    """
+    return _base_feature_name(name) in px_core.INTRADAY_CONSTANT_OK
+
+
 def _is_price_degenerate(history: Sequence[BarClosed]) -> bool:
     """최근 `_DEGENERATE_WINDOW`봉의 종가가 전부 같은가 — "NaN인데 결측은 아닌" 경우의 판정.
 
@@ -263,6 +279,16 @@ class FeatureEngine:
         초반 몇 봉이 우연히 같은 값인 것과 진짜 상수를 구분할 수 없기 때문이다. 30m처럼
         하루에 15봉밖에 안 나오는 Horizon은 그래서 대부분의 날 판정되지 않는데, 그게 맞다:
         표본이 없는 것을 "정상"이라고 말하지 않는다.
+
+        ## 정의상 상수인 피처는 상수라고 말하지 않는다 (2026-08-06)
+
+        `px_gap_open`은 `log(당일 시가 / 전일 종가)`라 **장중에 변할 수가 없다**.
+        `px_ema_cross`(sign)와 `px_breakout`(대부분 0.0)도 하루 종일 같은 값인 것이 정상
+        범위다. 2026-08-06 퇴화 10건 중 **9건이 이 셋**이었고, 등록부는 `max: 0`이라
+        구조적으로 통과 불가였다 — 매일 울리는 경고는 결국 아무도 안 본다.
+
+        **검출력은 안 잃는다**: 이 셋도 `always_nan`이면 그대로 잡힌다(그게 이 피처들의
+        진짜 사고다). 목록은 `features/px_core.INTRADAY_CONSTANT_OK`에 근거와 함께 있다.
         """
         out: list[FeatureHealth] = []
         for horizon in self._horizons:
@@ -275,7 +301,9 @@ class FeatureEngine:
                     horizon=horizon.value,
                     samples=samples,
                     always_nan=sorted(n for n, s in stats.items() if s.always_nan),
-                    constant=sorted(n for n, s in stats.items() if s.constant),
+                    constant=sorted(
+                        n for n, s in stats.items() if s.constant and not _constant_is_normal(n)
+                    ),
                 )
             )
         return out

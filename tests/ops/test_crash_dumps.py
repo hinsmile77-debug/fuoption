@@ -11,6 +11,7 @@ import textwrap
 from datetime import date
 from pathlib import Path
 
+from messiah.ops import crash_dumps
 from messiah.ops.crash_dumps import collect_crash_forensics, parse_dumps
 
 _DAY = date(2026, 8, 3)
@@ -181,3 +182,94 @@ def test_a_session_with_neither_source_is_still_reported(tmp_path: Path):
 
     assert forensics.armed == {"l1_daily": False}
     assert any("무장 마커 없음" in f for f in forensics.findings)
+
+
+# ------------------- 덤프 판독 (2026-08-06 P1-3)
+
+_SURVIVING = """{"ts": "2026-08-06T08:36:01.155113+09:00", "level": "WARNING", "tag": "X"}
+Windows fatal exception: access violation
+
+Thread 0x00000914 (most recent call first):
+  File "rest_client.py", line 86 in wait
+
+{"ts": "2026-08-06T08:45:00.280270+09:00", "level": "INFO", "tag": "CollectorFirstTick"}
+{"ts": "2026-08-06T10:04:00.741028+09:00", "level": "DEBUG", "tag": "FeaturePublish"}
+"""
+
+_RESTARTED = """{"ts": "2026-08-06T08:36:16.132944+09:00", "level": "INFO", "tag": "SessionStart"}
+Windows fatal exception: access violation
+
+Thread 0x00006508 (most recent call first):
+  File "thread.py", line 89 in _worker
+
+[OK ] config     instance=messiah-dev-01 mode=dev
+self-check: PASS — 기동 허용
+[crash_forensics] armed tag=g2_paper target=stderr
+{"ts": "2026-08-06T10:26:05.249117+09:00", "level": "INFO", "tag": "SessionStart"}
+"""
+
+
+def test_a_dump_followed_by_more_logging_is_first_chance():
+    """2026-08-06 l1_daily 실측 — 08:36에 덤프를 찍고 10:04까지 88분을 계속 로깅했다.
+    프로세스는 안 죽었고, 리포트가 `네이티브 크래시 0건`과 나란히 찍던 그 덤프다."""
+    [dump] = crash_dumps.parse_dumps("l1_daily", _SURVIVING)
+
+    assert dump.survived is True
+    assert "first-chance" in dump.verdict
+
+
+def test_startup_banner_is_not_counted_as_survival():
+    """재기동 프로세스의 self-check 출력(`[OK ] config ...`)은 `SessionStart`보다 먼저
+    찍힌다 — 이걸 활동으로 세면 "죽고 다시 뜬 것"이 "살아서 계속 돈 것"으로 뒤집힌다
+    (2026-08-06 g2_paper가 실제로 그렇게 잘못 판정됐다)."""
+    [dump] = crash_dumps.parse_dumps("g2_paper", _RESTARTED)
+
+    assert dump.survived is False
+    assert "생존 미확인" in dump.verdict
+
+
+def test_survival_false_is_not_called_fatal():
+    """로그가 없다는 것은 죽었다는 뜻이 아니다 — 조용한 프로세스는 살아 있어도 비어 있다.
+    사인 판정은 이벤트로그와 대조해야 나온다."""
+    [dump] = crash_dumps.parse_dumps("g2_paper", _RESTARTED)
+
+    assert "치명" not in dump.verdict
+
+
+def test_a_dump_carries_a_lower_bound_timestamp():
+    """faulthandler 출력에는 시각이 없다 — 직전 로그 줄로 "이 시각 이후"를 가둔다."""
+    [dump] = crash_dumps.parse_dumps("l1_daily", _SURVIVING)
+
+    assert dump.after_kst == "08:36:01"
+
+
+def test_missing_current_thread_block_is_reported_as_a_fact():
+    """`Current thread`가 없다는 것은 **파이썬 상태가 없는 스레드**에서 폴트가 났다는
+    뜻이다 — "프레임 없음"이라고만 찍으면 그 정보가 사라진다."""
+    [dump] = crash_dumps.parse_dumps("l1_daily", _SURVIVING)
+
+    assert dump.crashing_frames == []
+    assert "파이썬 스레드 아님" in dump.frame_summary
+
+
+def test_restart_without_an_eventlog_crash_is_a_finding(tmp_path):
+    """덤프 뒤 재기동인데 이벤트로그에 크래시가 없으면 **밖에서 종료된 것**일 수 있다 —
+    2026-08-06의 호스트 재부팅이 정확히 그 형태였고, 원인이 다르면 처방도 다르다."""
+    (tmp_path / "g2_daily_20260806.log").write_text(_RESTARTED, encoding="utf-8")
+
+    forensics = crash_dumps.collect_crash_forensics(
+        date(2026, 8, 6), log_dir=tmp_path, native_crash_count=0, native_crashes_available=True
+    )
+
+    assert any("밖에서 종료" in f for f in forensics.findings)
+
+
+def test_format_line_answers_when_what_died_and_where():
+    """덤프 한 줄로 판단이 끝나야 한다 — 종전에는 `프레임 없음`이 전부라 매번 로그를 열었다."""
+    (line,) = crash_dumps.format_dump_lines(
+        crash_dumps.CrashForensics(armed={}, dumps=crash_dumps.parse_dumps("l1_daily", _SURVIVING))
+    )
+
+    assert "08:36:01 이후" in line
+    assert "first-chance" in line
+    assert "access violation" in line

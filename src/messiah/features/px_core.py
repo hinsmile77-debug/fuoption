@@ -637,6 +637,37 @@ WINDOWED_FEATURES: list[tuple[str, "callable[[Bars, int], float | None]", tuple[
     ("px_runup", px_runup, W_STD),
 ]
 
+# 세션 내내 값이 안 변해도 **결함이 아닌** 피처의 기저 이름 (2026-08-06).
+#
+# ## 왜 필요한가
+#
+# `features/engine.py`의 퇴화 검출기는 "값을 내는데 한 번도 안 변한" 피처를 잡는다. 그
+# 검출기가 겨냥한 것은 `px_macd_h_5`처럼 **연속값인데 버그로 0에 고정된** 피처다(시그널
+# 기간이 1이 되어 8거래일 내내 정확히 0이었고, 값을 내므로 `nan_ratio`에 흔적이 없었다).
+#
+# 그런데 아래 셋은 **정의상 또는 성질상** 하루 종일 같은 값일 수 있다:
+#
+#   px_gap_open    log(당일 시가 / 전일 종가) — 장중에 변할 **수가 없다**. 매일, 영원히 상수다.
+#   px_ema_cross   sign(EMA_fast − EMA_slow) — 값역이 {-1, 0, +1}이라 한 방향으로
+#                  추세가 이어진 날은 안 변하는 것이 정상이다.
+#   px_breakout    직전 레인지를 안 깨면 0.0 — "오늘 돌파가 없었다"는 시장 상태이지 결함이 아니다.
+#
+# 2026-08-06 리포트의 퇴화 10건 중 **9건이 이 셋**이었고, 등록부 `no-degenerate-features`는
+# `max: 0`이라 **구조적으로 통과 불가**였다. 매일 ERROR가 찍히면 늑대소년이 되고, 그건 이
+# 등록부가 가장 경계하는 실패다.
+#
+# ## 검출력을 잃지 않는가
+#
+# 이 셋도 **항상 NaN**이면 여전히 잡힌다 — 그게 이 피처들의 진짜 사고다(2026-08-05 14:12
+# 장중 재기동에서 `px_gap_open`이 전일 종가를 못 구해 하루 종일 NaN이었고, 그날 처음 붙은
+# 검출기가 그걸 잡았다).
+#
+# "이 피처가 애초에 정보를 나르는가"는 **연구 경로**(`scripts/run_feature_gate.py`)가 IC로
+# 판정한다 — `px_macd_h_5`를 처음 찾아낸 것도 그 관문이다. 일일 운영 검사는 연속값 피처의
+# 고착만 본다. 둘은 대체가 아니라 분업이다.
+INTRADAY_CONSTANT_OK: frozenset[str] = frozenset({"px_gap_open", "px_ema_cross", "px_breakout"})
+
+
 # 상태형 4개: (id, 계산기) — session 인자를 받음, 윈도우 없음
 STATEFUL_FEATURES: list[tuple[str, "callable[[Bars, SessionState], float | None]"]] = [
     ("px_gap_open", px_gap_open),

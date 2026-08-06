@@ -1236,3 +1236,100 @@ def test_series_dirs_are_derived_from_the_bar_dir_not_the_repo(tmp_path: Path):
     report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
 
     assert [entry["name"] for entry in report.series_coverage] == ["ticks"]
+
+
+# ------------------- 관측 공백 결선 (2026-08-06 P1-1·P1-2)
+
+
+def _reboot_collector(day):  # noqa: ANN001
+    from messiah.ops.observation_gaps import HostEvent
+
+    return (
+        [
+            HostEvent(1074, "10:03:49", "shutdown", "RuntimeBroker.exe / 다시 시작 / 기타"),
+            HostEvent(13, "10:04:31", "shutdown"),
+            HostEvent(12, "10:05:03", "boot"),
+        ],
+        True,
+        "이벤트 3건",
+    )
+
+
+def _restart_log(tmp_path: Path) -> Path:
+    """08:35 기동 → 10:04까지 활동 → 10:25 재기동 (2026-08-06 실측 형태)."""
+    log = tmp_path / "l1_restart.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:23+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"ts": "2026-07-29T10:04:00+09:00", "level": "DEBUG", "tag": "FeaturePublish"},
+            {"ts": "2026-07-29T10:25:31+09:00", "level": "INFO", "tag": "SessionStart"},
+        ],
+    )
+    return log
+
+
+def test_an_observation_gap_becomes_a_breach_with_its_cause(tmp_path: Path):
+    """**결선 회귀.** 2026-08-06 리포트가 말한 것은 "재기동 1회"뿐이었다 — 21분을 잃었다는
+    것도, 왜 그랬는지도 없었다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths={"l1_daily": [_restart_log(tmp_path)]},
+        crash_collector=_no_crashes,
+        tick_dir=_write_ticks(tmp_path, 5000),
+        log_dir=tmp_path,
+        host_collector=_healthy_host(),
+        host_event_collector=_reboot_collector,
+    )
+
+    [gap] = report.observation_gaps
+    assert gap["minutes"] == 21.0
+    assert gap["exact"] is True
+    assert "RuntimeBroker.exe" in gap["cause"]
+    assert any("관측 공백" in b for b in report.breaches), "breach로 안 올라갔다"
+
+
+def test_host_events_are_recorded_as_facts(tmp_path: Path):
+    """공백이 없는 날에도 호스트 생명주기는 남는다 — 사후 조사의 재료다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths={"l1_daily": [_clean_log(tmp_path)]},
+        crash_collector=_no_crashes,
+        tick_dir=_write_ticks(tmp_path, 5000),
+        log_dir=tmp_path,
+        host_collector=_healthy_host(),
+        host_event_collector=_reboot_collector,
+    )
+
+    assert [e["event_id"] for e in report.host_events] == [1074, 13, 12]
+    assert report.observation_gaps == []  # 재기동이 없으면 공백도 없다
+
+
+def test_unreadable_host_events_land_in_unmeasured(tmp_path: Path):
+    """못 읽은 것을 "공백 없음"으로 세면 검증이 거짓으로 통과한다(L18)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths={"l1_daily": [_clean_log(tmp_path)]},
+        crash_collector=_no_crashes,
+        tick_dir=_write_ticks(tmp_path, 5000),
+        log_dir=tmp_path,
+        host_collector=_healthy_host(),
+        host_event_collector=lambda day: ([], False, "조회 실패"),
+    )
+
+    assert any("관측 공백 원인" in item for item in report.unmeasured)
