@@ -176,8 +176,24 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
     """실행할 단계 목록 — **순서가 계약이다**(모듈 docstring)."""
     stamp = day.isoformat()
     planned: list[Step] = [
+        # **재합성보다 먼저** 조각을 통합한다 (2026-08-07 P1-1). 통합은 원래 `run_l1_daily.py`
+        # 종료 시퀀스에만 있었는데, 그 시퀀스는 프로세스가 15:35까지 살아야 돈다 — 2026-08-07엔
+        # 13:41에 죽어 1분봉이 조각 디렉터리로 남았다. 장후 절차는 프로세스가 죽어도 돈다.
         Step(
-            "1/4 상위 Horizon 재합성",
+            "1/5 장중 조각 통합",
+            [
+                _python(),
+                str(_SCRIPTS / "run_compact.py"),
+                "--symbol",
+                args.symbol,
+                "--date",
+                stamp,
+            ],
+            # 통합 실패는 데이터 손실이 아니지만(조각은 읽힌다) "발견"도 아니다 — 진짜 실패다.
+            one_means_finding=False,
+        ),
+        Step(
+            "2/5 상위 Horizon 재합성",
             [
                 _python(),
                 str(_SCRIPTS / "run_recompose.py"),
@@ -191,12 +207,12 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
             ],
             # 재합성에는 "발견"이라는 개념이 없다 — 1이 나오면 진짜 실패다.
             one_means_finding=False,
-        )
+        ),
     ]
     if not args.skip_rest:
         planned.append(
             Step(
-                "2/4 공식 분봉 대비 거래량 대조",
+                "3/5 공식 분봉 대비 거래량 대조",
                 [
                     _python(),
                     str(_SCRIPTS / "verify_archive_volume.py"),
@@ -210,7 +226,7 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
         )
     planned.append(
         Step(
-            "3/4 변동성 축 채점",
+            "4/5 변동성 축 채점",
             [
                 _python(),
                 str(_SCRIPTS / "run_vol_scorecard.py"),
@@ -227,7 +243,7 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
     # 반드시 마지막 — 앞 단계들의 산출물을 읽어 `unmeasured`를 비운다.
     planned.append(
         Step(
-            "4/4 무결성 리포트 재생성",
+            "5/5 무결성 리포트 재생성",
             [
                 _python(),
                 str(_SCRIPTS / "daily_integrity_report.py"),

@@ -454,6 +454,12 @@ class FeatureEngine:
              않는 가장 촘촘한 단위이기 때문(다른 Horizon 봉으로 갱신하면 예컨대 30분봉
              경계 사이의 진짜 당일 고점을 놓칠 수 있음).
         """
+        # 타입부터 본다 (2026-08-07 P0-1). 2026-08-07 13:41에 이 줄이 `KillSignal`을 받아
+        # `bar.symbol`에서 AttributeError를 냈고, 그것이 구독 루프째 무너뜨려 수집 프로세스가
+        # 종료됐다(1시간 54분 유실). 버스가 이제 kill을 원한 구독자에게만 보내므로 그 경로는
+        # 막혔지만, **핸들러가 자기 타입을 확인하는 것이 마지막 방어선**이다.
+        if not isinstance(bar, BarClosed):
+            return
         if bar.symbol != self._symbol or bar.horizon not in self._history:
             return
         if bar.horizon == self._session_horizon:

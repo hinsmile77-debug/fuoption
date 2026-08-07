@@ -91,6 +91,7 @@ from messiah.core.version import (
     uptime_text,
 )
 from messiah.data import bar_paths
+from messiah.ops.status_board import DEAD_AFTER_MULTIPLE
 from messiah.ui.bar_reader import BarExportError, read_day_series
 from messiah.ui.bar_series import BarSeries
 from messiah.ui.data_source import (
@@ -183,8 +184,19 @@ def _render_circuit_breaker_badge(source) -> None:
     if snap.badge == FreshnessBadge.STALE:
         st.caption(f"⚠ 상태 갱신 지연({snap.age_seconds:.0f}초 전)")
 
-    # 추정 phase와 **실제 게이트 상태**는 별개 사실이다 — 2026-07-31엔 phase가 정상으로 돌아온
-    # 뒤에도 게이트가 6시간 42분간 halted로 남았는데 화면엔 아무 흔적이 없었다
+    # **거래소가 멈춘 것인가, 우리가 죽은 것인가** (2026-08-07 고도화 2).
+    #
+    # 2026-08-07 13:41에 수집 프로세스가 죽자 이 배지는 13:45부터 "CB 정지 추정"을 띄웠다.
+    # 그 문구는 거래소 얘기로 읽힌다 — 사람이 봤어야 할 문장은 "수집기가 죽었다"였고,
+    # G2는 그 사실을(`collector_healthy`) 이미 알고 있었다. 알고도 안 보여준 것이다.
+    if phase in ("suspected", "confirmed") and status.collector_healthy is not True:
+        st.caption(
+            "🛑 **수집기 heartbeat 없음 — 거래소 CB가 아니라 우리 쪽 사망 의심.** "
+            "l1_daily 프로세스를 먼저 확인할 것"
+        )
+
+    # 추정 phase와 **실제 게이트 상태**는 별개 사실이다 — 2026-07-31엔 phase가 정상으로
+    # 돌아온 뒤에도 게이트가 6시간 42분간 halted로 남았는데 화면엔 아무 흔적이 없었다
     # (`core/messages.py`의 `CircuitBreakerStatus.gateway_halted` docstring 참고).
     if status.gateway_halted:
         st.caption("🛑 주문 게이트 정지 중 — 신규 주문 차단 상태")
@@ -231,11 +243,16 @@ def _render_health_strip(source) -> None:
                 )
                 continue
             if snap.badge == FreshnessBadge.STALE:
-                st.markdown(
-                    f"<span style='color:#FF5C7A'>● {label} — 응답 없음"
-                    f"({snap.age_seconds:.0f}초)</span>",
-                    unsafe_allow_html=True,
+                # **지연과 사망을 가른다** (2026-08-07 고도화 2). 종전엔 둘 다 "응답 없음
+                # (N초)"였고, 2026-08-07에 수집기가 죽은 뒤 그 숫자만 커지는 것을 사람이
+                # 세고 있어야 했다. 처방이 다르면 문장도 달라야 한다.
+                dead = (snap.age_seconds or 0) > HEALTH_STALE_AFTER_SECONDS * DEAD_AFTER_MULTIPLE
+                text = (
+                    f"● {label} — **죽음**({snap.age_seconds / 60:.0f}분) · 프로세스 확인"
+                    if dead
+                    else f"● {label} — 응답 없음({snap.age_seconds:.0f}초)"
                 )
+                st.markdown(f"<span style='color:#FF5C7A'>{text}</span>", unsafe_allow_html=True)
                 continue
             color = _HEALTH_LEVEL_COLOR.get(message.level.value, "#8A8F98")
             detail = f" · {message.detail}" if message.detail else ""

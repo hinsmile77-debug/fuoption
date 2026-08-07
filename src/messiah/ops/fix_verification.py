@@ -155,6 +155,15 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     "missing_minutes": lambda r: (
         None if _bar_1m(r) is None else float(_bar_1m(r)["missing_minutes"])  # type: ignore[index]
     ),
+    # 마지막 봉 이후 마감까지의 공백 (2026-08-07 P0-2). `missing_minutes`가 **관측 구간
+    # 안쪽** 구멍만 세는 축이라면 이쪽은 **언제 끊겼나**를 센다. 2026-08-07에 봉이 115분
+    # 잘렸는데 `missing_minutes`는 0이었다 — 있는 것들 사이엔 정말 구멍이 없었기 때문이다.
+    # 축이 없던 옛 리포트는 None(판정 불가)이지 0이 아니다(L18).
+    "bar_tail_gap_minutes": lambda r: (
+        None
+        if _bar_1m(r) is None or "tail_gap_minutes" not in (_bar_1m(r) or {})
+        else float(_bar_1m(r)["tail_gap_minutes"])  # type: ignore[index]
+    ),
     "longest_gap_minutes": lambda r: (
         None if _bar_1m(r) is None else float(_bar_1m(r)["longest_gap_minutes"])  # type: ignore[index]
     ),
@@ -216,6 +225,19 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # 계열 중 가장 큰 **머리 구멍**(세션 시작 → 첫 행, 분). 재기동 파괴의 직접 지표다 —
     # 2026-08-06에 4개 계열이 111~116분이었다. 정상일에는 카덴스 한 번(최대 10분)이다.
     # 계열이 하나도 없으면 None(판정 불가)이지 0이 아니다(L18).
+    # **세션 커버리지 최솟값**(%) — 고도화 1 (2026-08-07). 모든 계열에 같은 질문을 던지는
+    # 단일 축이다: "세션 중 몇 %를 실제로 봤나". 2026-08-07엔 봉·틱·옵션체인·수급이 전부
+    # 70~72%였는데 봉 연속성·거래량 대조·관측 공백 세 축이 100%라고 답했다.
+    # 미상장 계열(`expected=False`)은 제외한다 — 안 모으는 것이 정답인 날에 0%로 끌어내리면
+    # 그 자체가 오탐이다(2026-08-07 P0-3과 같은 규율). 축이 없던 옛 리포트는 None.
+    "series_coverage_pct_min": lambda r: min(
+        (
+            float(e["coverage_pct"])
+            for e in (r.get("series_coverage") or [])
+            if e.get("measured") and e.get("expected", True) and "coverage_pct" in e
+        ),
+        default=None,
+    ),
     "series_head_gap_minutes_max": lambda r: (
         max((float(e.get("head_gap_minutes") or 0.0) for e in (r.get("series_coverage") or [])))
         if (r.get("series_coverage") or [])

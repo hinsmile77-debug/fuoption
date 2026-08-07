@@ -475,6 +475,9 @@ class TradingPipeline:
                 phase=event.phase.value,
                 reentry_cooldown_until=event.reentry_cooldown_until,
                 gateway_halted=self._gateway.halted,
+                # "거래소가 멈춤"과 "우리가 죽음"을 화면에서 가르는 유일한 근거
+                # (2026-08-07 고도화 2, `CircuitBreakerStatus.collector_healthy` 주석).
+                collector_healthy=self._collector_healthy(self._now()),
             ),
         )
 
@@ -516,7 +519,10 @@ class TradingPipeline:
             # 상태를 직접 잴 근거가 없다 — 그걸 아는 쪽의 보고를 받는다.
             TOPIC_HEALTH,
         ]
-        await self._bus.subscribe(patterns, self._dispatch)
+        # `on_kill`을 **명시적으로** 준다 (2026-08-07 P0-1). 종전엔 버스가 모든 구독자에게
+        # kill을 자동 배달했고, 그 자동 배달이 그날 수집 프로세스를 죽였다. 이제 kill은
+        # 원한 구독자에게만 가고 — 이 파이프라인은 원한다. 비상 청산이 그 일이다.
+        await self._bus.subscribe(patterns, self._dispatch, on_kill=self.handle_kill)
 
     async def _dispatch(self, msg: BusMessage) -> None:
         if isinstance(msg, BarClosed):
@@ -526,6 +532,8 @@ class TradingPipeline:
         elif isinstance(msg, Health) and msg.component == COLLECTOR_COMPONENT:
             self._last_collector_health = msg
         elif isinstance(msg, KillSignal):
+            # 버스가 `on_kill`로 보내므로 보통 여기 안 온다. `InProcessBus`에 직접
+            # `_dispatch`를 물린 경로(재생·스모크)와 테스트를 위해 남긴다.
             await self.handle_kill(msg)
 
     async def handle_kill(self, signal: KillSignal) -> None:
@@ -558,6 +566,19 @@ class TradingPipeline:
             triggered_by=signal.triggered_by,
             reason=signal.reason,
         )
+        # **재진입 차단** (2026-08-07, 카오스 점검이 잡은 결함).
+        #
+        # 아래 `evaluate(manual=True)`는 `KillSwitch._trigger()`를 거쳐 **자기도 `sys.kill`을
+        # 발행한다.** 그 발행이 버스를 돌아 이 핸들러로 되돌아오고, 두 번째 호출이 아직
+        # 체결되지 않은 포지션을 다시 보고 **청산 주문을 한 번 더** 낸다. 실측: 보유 +1이
+        # 청산 뒤 **−1**이 됐다(반대매매가 두 번 나가 반대 포지션이 생긴 것) —
+        # 비상 청산이 오히려 새 포지션을 만드는, 가장 나쁜 형태의 결함이다.
+        #
+        # `KillSwitch.triggered`가 이미 서 있으면 게이트만 확인하고 돌아간다. 게이트 정지는
+        # 멱등이라 다시 불러도 안전하다.
+        if self._kill_switch.triggered:
+            await self._gateway.halt(f"kill signal(재진입): {signal.reason}")
+            return
         try:
             await self._gateway.halt(f"kill signal: {signal.reason}")
             account = await self._broker.account()

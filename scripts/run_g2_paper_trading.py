@@ -461,6 +461,8 @@ async def main(cfg: InstanceConfig) -> None:
         raise SystemExit(1) from None
 
     registry.close()
+    # 정상 종료를 구조화 로그로 (2026-08-07 P0-3) — `run_l1_daily.py`의 같은 줄 참고.
+    mlog.log("SessionEnd", "정상 종료", process="g2_paper")
     print("정상 종료.", flush=True)
 
 

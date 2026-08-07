@@ -49,8 +49,9 @@ from typing import Any, Iterable, Mapping, Sequence
 import polars as pl
 
 from messiah.core import universe
-from messiah.core.event_calendar import EventCalendar
+from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.messages import BarSession, Horizon
+from messiah.core.timeutil import KST
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
 from messiah.ops import (
@@ -105,6 +106,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # `restarts`(횟수)와 **둘 다 두는 이유**: 2분 재기동과 21분 정지가 같은 "1회"로 세어지면
     # 안 된다. 횟수는 안정성을, 시간은 손실 크기를 말한다.
     "observation_gap_minutes": 5.0,
+    # 마지막 봉 이후 마감까지의 공백 (2026-08-07 P0-2). `series_coverage`의
+    # `_TAIL_GAP_FLOOR_MINUTES`와 같은 20분을 쓴다 — 정상일이면 0이고(마지막 봉 15:34),
+    # 장 막판 한산으로 몇 분 비는 것까지 울면 늑대소년이 된다.
+    "bar_tail_gap_minutes": 20.0,
 }
 
 
@@ -117,6 +122,17 @@ class BarContinuity:
     missing_minutes: int
     longest_gap_minutes: int
     gaps: list[tuple[str, str, int]] = field(default_factory=list)
+    # 마지막 봉 이후 정규장 마감까지 몇 분이 **없는가** (2026-08-07 P0-2).
+    #
+    # 위 `missing_minutes`/`longest_gap_minutes`는 **관측 구간 안쪽** 구멍만 센다. 그래서
+    # 2026-08-07에 13:41 프로세스 사망으로 봉이 115분 잘렸는데 이 축은 `296개 08:45~13:40 ·
+    # 결손 0분 ✅`을 찍었다 — 있는 것들 사이엔 정말 구멍이 없었기 때문이다.
+    #
+    # 같은 날 거래량 대조도 `비율 0.998 · 전 구간 정상`(공통 296분만 비교), 관측 공백 축도
+    # `없음 ✅`(마지막 기동 이후 사라진 경우는 안 센다는 문서화된 한계)이었다. **네 축이
+    # 초록인 채로 1시간 54분이 날아갔고**, 잡은 것은 계열 커버리지의 꼬리 구멍 하나뿐인데
+    # 그 축은 봉을 안 본다. 이 필드가 그 빈자리다.
+    tail_gap_minutes: int = 0
 
 
 @dataclass
@@ -233,6 +249,11 @@ class IntegrityReport:
     # (2026-08-07에 실제로 그렇게 오판했다). 기본값이 있는 이유는 축이 없던 옛 리포트를
     # `IntegrityReport(**entry)`로 되읽는 경로가 있기 때문이다.
     series_contract: list[str] = field(default_factory=list)
+    # **비정상 종료** — 기동했는데 `SessionEnd` 마커가 없는 프로세스 (2026-08-07 P0-3).
+    # `restarts`가 "몇 번 다시 떴나"라면 이쪽은 "안 돌아왔다"를 센다. 2026-08-07엔
+    # l1_daily가 13:41에 죽고 안 돌아왔는데 `재기동 0회`였고 그게 사실이었다 — 재기동이
+    # 없었던 것이 문제였는데 그 축은 그것을 말할 수 없었다.
+    abnormal_exits: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -285,9 +306,25 @@ def analyze_bar_continuity(
                 missing_minutes=sum(g[2] for g in gaps),
                 longest_gap_minutes=max((g[2] for g in gaps), default=0),
                 gaps=gaps,
+                tail_gap_minutes=_tail_gap_minutes(stamps[-1], step),
             )
         )
     return out
+
+
+def _tail_gap_minutes(last_bar_open: datetime, step: int) -> int:
+    """마지막 봉 이후 정규장 마감까지 비어 있는 분 (2026-08-07 P0-2).
+
+    정상일의 마지막 M1 봉은 **15:34에 열린다**(마감 15:35 직전 한 봉) — 그래서 기대되는
+    마지막 봉의 시가는 `마감 − step`이고, 그보다 이르면 그 차이가 곧 잘린 길이다.
+
+    Horizon마다 step이 다르므로 같은 공식이 30m(마지막 15:05)에도 그대로 성립한다.
+    음수(마감 뒤 봉 — 재생·시뮬레이션)는 0으로 접는다.
+    """
+    expected_last = datetime.combine(
+        last_bar_open.date(), DEFAULT_SESSION.close_time, tzinfo=last_bar_open.tzinfo
+    ) - timedelta(minutes=step)
+    return max(0, int((expected_last - last_bar_open).total_seconds() // 60))
 
 
 def _horizon_minutes(horizon: Horizon) -> int:
@@ -388,6 +425,46 @@ def _legacy_refused_starts(paths: Iterable[Path]) -> list[str]:
     return out
 
 
+def _abnormal_exits(day: date, per_process: Mapping[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """기동했는데 `SessionEnd`가 없는 프로세스 — 죽은 것이다 (2026-08-07 P0-3).
+
+    판정: 유효 기동 수 > 정상 종료 수 이면 마지막 세션이 안 끝났다는 뜻이다. 그 프로세스의
+         **마지막 로그 시각**부터 정규장 마감까지가 죽어 있던 구간이다.
+
+    ## 아직 돌고 있는 프로세스를 사고로 읽지 않는다
+
+    장중에 리포트를 돌리면 당연히 `SessionEnd`가 없다. 그래서 **마지막 로그가 마감보다
+    한참 전일 때만** 사고로 본다 — 살아 있는 프로세스는 방금까지 로그를 냈으므로 그
+    간격이 작다. 임계는 `bar_tail_gap_minutes`와 같은 20분이다(같은 질문, 같은 값).
+
+    ## `SessionEnd`가 없던 시절의 로그
+
+    2026-08-07 이전 로그에는 이 마커가 아예 없어 **모든 날이 비정상 종료로 잡힌다.**
+    그래서 마커를 한 번이라도 낸 프로세스만 판정한다 — 옛 이력을 소급해 빨갛게 칠하면
+    등록부 채점이 통째로 무의미해진다(그날들은 이 축으로 판정된 적이 없다).
+    """
+    close = datetime.combine(day, DEFAULT_SESSION.close_time, tzinfo=KST)
+    out: list[dict[str, Any]] = []
+    for name, result in sorted(per_process.items()):
+        starts = result.get("session_starts") or []
+        ends = result.get("session_ends") or []
+        if not starts or not ends:
+            continue  # 마커를 한 번도 안 낸 프로세스는 판정 대상이 아니다(위 docstring)
+        if len(starts) <= len(ends):
+            continue
+        activity = result.get("activity_kst") or []
+        if not activity:
+            continue
+        # 시각만 있는 로그 문자열이라 naive로 파싱한 뒤 KST를 붙인다 — 날짜는 `day`가 준다.
+        clock = datetime.strptime(activity[-1], "%H:%M:%S").time()  # noqa: DTZ007
+        last = datetime.combine(day, clock, tzinfo=KST)
+        lost = int((close - last).total_seconds() // 60)
+        if lost <= DEFAULT_THRESHOLDS["bar_tail_gap_minutes"]:
+            continue
+        out.append({"process": name, "last_log_kst": activity[-1], "minutes_lost": lost})
+    return out
+
+
 def _drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[str]:
     """기동 창 가드가 거절한 기동을 `SessionStart` 목록에서 뺀다 (2026-08-07 P0-4).
 
@@ -415,6 +492,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     session_starts: list[str] = []
     # 기동 창 가드가 되돌려보낸 기동 (2026-08-07 P0-4) — `session_starts`에서 뺄 목록.
     refused_starts: list[str] = []
+    # 프로세스가 스스로 끝냈다는 마커 (2026-08-07 P0-3) — 기동 수와 비교해 비정상 종료를 센다.
+    session_ends: list[str] = []
     session_git_shas: list[str] = []
     clock_skews: list[float] = []
     delivery_latency: dict[str, float] | None = None
@@ -443,6 +522,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 session_git_shas.append(sha)
         elif tag == "LaunchWindowRefused":
             refused_starts.append(str(record.get("ts", ""))[11:19])
+        elif tag == "SessionEnd":
+            session_ends.append(str(record.get("ts", ""))[11:19])
         elif tag in ("ClockSkewMeasured", "ClockSkewExceeded"):
             skew = record.get("skew_seconds")
             if isinstance(skew, (int, float)):
@@ -494,6 +575,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "tag_counts": tag_counts,
         "session_starts": effective_starts,
         "refused_starts": all_refused,
+        "session_ends": sorted(session_ends),
         "activity_kst": sorted(activity),
         "session_git_shas": sorted(set(session_git_shas)),
         # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
@@ -857,9 +939,31 @@ def build_report(
         breaches.append(
             f"최장 공백 {m1.longest_gap_minutes}분 > 임계 {limits['longest_gap_minutes']:.0f}분"
         )
+    # **잘림**은 구멍과 다른 사고다 (2026-08-07 P0-2, `BarContinuity.tail_gap_minutes` 주석).
+    # 봉은 KIS 분봉 API로 되메울 수 있으므로 처방까지 문장에 넣는다 — 그날 이 한 줄이
+    # 없어서 "결손 0분 ✅"을 믿고 넘어갈 뻔했다.
+    if m1 is not None and m1.tail_gap_minutes > limits["bar_tail_gap_minutes"]:
+        breaches.append(
+            f"1분봉이 {m1.last_bar_kst}에 끊겼다 — 마감까지 {m1.tail_gap_minutes}분 미수집"
+            f"(수집 중단 의심 · 백필로 복구 가능: "
+            f"run_backfill.py --start {day} --end {day} --allow-today)"
+        )
     for name, count in sorted(restarts_by_process.items()):
         if count > limits["restarts"]:
             breaches.append(f"{name} 재기동 {count}회 > 임계 {limits['restarts']:.0f}회")
+    # **비정상 종료** (2026-08-07 P0-3) — 기동했는데 스스로 끝냈다는 마커가 없다.
+    #
+    # `observation_gaps`가 스스로 적어 둔 한계("마지막 기동 이후 조용히 사라진 경우는
+    # 정상 종료와 구분할 근거가 없어 안 센다")를 없앤다. 구분할 근거를 만들면 되는
+    # 일이었고, 그게 `SessionEnd` 마커다. 2026-08-07엔 그 한계 때문에 1시간 54분 유실이
+    # `관측 공백: 없음 ✅`으로 지나갔다.
+    abnormal_exits = _abnormal_exits(day, per_process)
+    for exit_info in abnormal_exits:
+        breaches.append(
+            f"{exit_info['process']}: 정상 종료 마커 없음 — 마지막 로그 "
+            f"{exit_info['last_log_kst']} 이후 {exit_info['minutes_lost']}분간 죽어 있었다"
+            f"(비정상 종료)"
+        )
     if crashes.available and crashes.count > limits["native_crashes"]:
         breaches.append(f"네이티브 크래시 {crashes.count}건")
     if critical_lines > limits["critical_log_lines"]:
@@ -924,11 +1028,20 @@ def build_report(
     volume_check = load_volume_check(day, resolved_log_dir)
     if volume_check is not None and not volume_check.get("ok"):
         ratio = volume_check.get("ratio")
-        breaches.append(
-            f"공식 분봉 대비 아카이브 거래량 비율 "
-            f"{'측정 불가' if ratio is None else f'{ratio:.3f}'} < "
-            f"{volume_check.get('warn_ratio', 0.95)} — 수집 당시 파서를 의심할 것"
-        )
+        # 두 축이 각각 다른 처방을 가리킨다 (2026-08-07 P0-4): 비율이 낮으면 **파서**를,
+        # 미수집이 많으면 **수집 중단**을 의심한다. 한 문장으로 뭉치면 엉뚱한 데를 판다.
+        missing = volume_check.get("missing_minutes")
+        if isinstance(missing, int) and missing > volume_check.get("missing_minutes_limit", 20):
+            breaches.append(
+                f"공식 분봉에는 있고 아카이브엔 없는 분 {missing}분 — 수집 중단 의심"
+                f"(백필로 복구 가능: run_backfill.py --start {day} --end {day} --allow-today)"
+            )
+        if ratio is None or ratio < volume_check.get("warn_ratio", 0.95):
+            breaches.append(
+                f"공식 분봉 대비 아카이브 거래량 비율 "
+                f"{'측정 불가' if ratio is None else f'{ratio:.3f}'} < "
+                f"{volume_check.get('warn_ratio', 0.95)} — 수집 당시 파서를 의심할 것"
+            )
 
     # ---- 고도화 5: 호스트 위생 ----
     from messiah.ops import host_health as host_health_module
@@ -1082,6 +1195,7 @@ def build_report(
         series_coverage=[item.to_dict() for item in coverages],
         series_findings=series_findings,
         series_contract=series_contract,
+        abnormal_exits=abnormal_exits,
         observation_gaps=[gap.to_dict() for gap in observation.gaps],
         host_events=[event.to_dict() for event in observation.events],
         breaches=breaches,
@@ -1126,6 +1240,11 @@ def format_summary(report: IntegrityReport) -> str:
         lines.append(
             f"  봉 {continuity.horizon}: {continuity.rows}개 {span} · "
             f"결손 {continuity.missing_minutes}분(최장 {continuity.longest_gap_minutes}분)"
+            + (
+                f" · 마감까지 {continuity.tail_gap_minutes}분 미수집 ❌"
+                if continuity.tail_gap_minutes > DEFAULT_THRESHOLDS["bar_tail_gap_minutes"]
+                else ""
+            )
         )
     for name, starts in sorted(report.starts_by_process.items()):
         # 기동과 재기동을 나눠 적는다 — 예전엔 "재기동 1회"가 정상일에도 찍혀서, 사람이
@@ -1190,6 +1309,11 @@ def format_summary(report: IntegrityReport) -> str:
     # 2026-08-06에 리포트가 조용했던 이유는 이 계열들을 "정상"으로 판정해서가 아니라
     # 아예 안 봐서였다. 목록 자체가 "무엇을 보고 있는가"의 증거다.
     # 계약을 커버리지 표 **앞**에 찍는다 — 표의 ⊘를 보기 전에 왜 ⊘인지를 먼저 읽게.
+    for item in report.abnormal_exits:
+        lines.append(
+            f"  ❌ 비정상 종료: {item['process']} — 마지막 로그 {item['last_log_kst']} 이후 "
+            f"{item['minutes_lost']}분 죽어 있었다"
+        )
     for item in report.series_contract:
         lines.append(f"  ⊘ 오늘 안 모으는 계열: {item}")
     if report.series_coverage:
@@ -1229,9 +1353,11 @@ def format_summary(report: IntegrityReport) -> str:
 
     if report.volume_check is not None:
         ratio = report.volume_check.get("ratio")
+        missing = report.volume_check.get("missing_minutes")
         lines.append(
             "  공식 분봉 대비 거래량: "
             + ("측정 불가" if ratio is None else f"{ratio:.3f}")
+            + (f" · 미수집 {missing}분" if isinstance(missing, int) and missing else "")
             + (" ✅" if report.volume_check.get("ok") else " ⚠")
         )
     for horizon, entry in sorted((report.vol_axis.get("horizons") or {}).items()):

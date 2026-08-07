@@ -998,6 +998,11 @@ async def main(cfg: InstanceConfig) -> None:
     _compact_archive(archiver, symbol, today)
     _recompose_today(archiver, symbol, today)
     _write_integrity_report(today, symbol, cfg.instance_id)
+    # 정상 종료를 **구조화 로그로** 남긴다 (2026-08-07 P0-3). 이 한 줄이 없으면 리포트가
+    # "정상 종료"와 "죽어서 사라짐"을 구분할 근거가 없다 — `ops/observation_gaps.py`가
+    # 스스로 적어 둔 한계("마지막 기동 이후 조용히 사라진 경우는 안 센다")가 정확히 그것이고,
+    # 2026-08-07에 그 한계 때문에 1시간 54분 유실이 `관측 공백: 없음 ✅`으로 지나갔다.
+    mlog.log("SessionEnd", "정상 종료", process="l1_daily")
     print("정상 종료.", flush=True)
 
 

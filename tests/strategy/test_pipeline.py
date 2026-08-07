@@ -751,3 +751,28 @@ async def test_kill_signal_failure_does_not_kill_the_subscription_loop():
 
     # 게이트 정지는 브로커 조회보다 **먼저** 일어난다 — 실패해도 신규 주문은 막힌 상태여야 한다.
     assert gateway.halted is True
+
+
+@pytest.mark.asyncio
+async def test_kill_signal_reentry_does_not_liquidate_twice():
+    """**비상 청산이 새 포지션을 만들면 안 된다** (2026-08-07, 카오스 점검이 잡은 결함).
+
+    `handle_kill`이 부르는 `evaluate(manual=True)`는 자기도 `sys.kill`을 발행한다. 그
+    발행이 버스를 돌아 핸들러로 되돌아오면, 두 번째 호출이 아직 체결 안 된 포지션을 다시
+    보고 반대매매를 **한 번 더** 낸다. 실측으로 보유 +1이 청산 뒤 **−1**이 됐다.
+    """
+    from messiah.core.messages import KillSignal
+
+    bus, broker, gateway, pipeline = await _make_pipeline()
+    await _warm_up(pipeline, broker)
+    await pipeline.start_day()
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+    assert len(await broker.positions()) == 1
+
+    signal = KillSignal(reason="테스트", triggered_by="manual")
+    await pipeline.handle_kill(signal)
+    await pipeline.handle_kill(signal)  # 되돌아온 자기 발행
+
+    positions = await broker.positions()
+    assert all(p.qty == 0 for p in positions), f"재청산으로 반대 포지션이 생겼다 — {positions}"
+    assert gateway.halted is True

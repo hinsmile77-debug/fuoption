@@ -42,6 +42,10 @@ class RegimeRuntime:
         self._history: deque[BarClosed] = deque(maxlen=history_limit)
 
     async def handle_bar(self, bar: BarClosed) -> None:
+        # 타입부터 본다 (2026-08-07 P0-1) — `features/engine.py handle_bar`와 같은 이유.
+        # 그날 같은 형태의 줄이 `KillSignal`을 받아 수집 프로세스를 통째로 죽였다.
+        if not isinstance(bar, BarClosed):
+            return
         if bar.symbol != self._symbol or bar.horizon != self._horizon:
             return
         self._history.append(bar)

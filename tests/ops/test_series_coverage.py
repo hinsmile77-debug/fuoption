@@ -86,11 +86,12 @@ def test_restart_destroyed_morning_shows_as_head_gap():
 
     assert coverage.rows > 0, "행은 많다 — 그래서 행수로는 안 보인다"
     assert coverage.head_gap_minutes == 115.0
-    assert len(findings) == 1
-    assert "115분간 적재 없음" in findings[0]
-    # 2026-08-07 고도화 4로 문구가 강해졌다("소급 불가" → "영구 소실(소급 경로 없음)").
+    # 2026-08-07 고도화 1로 판정이 하나 늘었다(세션 커버리지) — 건수가 아니라 **내용**을
+    # 못박는다. 건수로 고정하면 축이 늘 때마다 무관한 테스트가 깨진다.
+    assert any("115분간 적재 없음" in f for f in findings)
+    # 고도화 4로 문구가 강해졌다("소급 불가" → "영구 소실(소급 경로 없음)").
     # 검사하는 성질은 그대로다 — 이 계열의 공백이 되메울 수 없다는 사실이 문장에 남는가.
-    assert "영구 소실" in findings[0], "봉 결손과 같은 무게로 읽히면 안 된다"
+    assert all("영구 소실" in f for f in findings), "봉 결손과 같은 무게로 읽히면 안 된다"
 
 
 def test_reboot_hole_in_a_continuous_series_is_caught():
@@ -102,8 +103,7 @@ def test_reboot_hole_in_a_continuous_series_is_caught():
     findings = sc.findings_for(coverage)
 
     assert coverage.longest_gap_minutes == 22.0
-    assert len(findings) == 1
-    assert "10:03~10:25" in findings[0]
+    assert any("10:03~10:25" in f for f in findings)
 
 
 def test_two_cycles_do_not_calibrate_the_gap_away():

@@ -111,9 +111,45 @@ _IRRECOVERABLE_PREFIXES = ("option_chain/", "flow_intraday/", "ticks")
 _TAIL_GAP_FLOOR_MINUTES = 20.0
 
 
+# 세션 커버리지가 이 값을 밑돌면 **잘렸다**고 본다 (2026-08-07 고도화 1).
+#
+# 95%: 판정 창 7시간(08:35~15:35 = 420분) 기준 21분이다. `_HEAD_GAP_FLOOR_MINUTES`·
+# `_TAIL_GAP_FLOOR_MINUTES`·`bar_tail_gap_minutes`(20분)와 같은 크기를 비율로 옮긴 값 —
+# 네 곳이 같은 질문에 답하므로 임계도 같은 크기여야 한다.
+_COVERAGE_FLOOR_PCT = 95.0
+
+
 def _is_irrecoverable(name: str) -> bool:
     """이 계열의 공백이 **영구**인가 — 과거 조회 경로가 없는 계열인지."""
     return name.startswith(_IRRECOVERABLE_PREFIXES)
+
+
+def _coverage_pct(
+    minutes: Sequence[datetime], cadence: float, window: tuple[datetime, datetime]
+) -> float:
+    """판정 창 중 실제로 **관측된 비율**(0~100) — 고도화 1.
+
+    ## 분 수를 그대로 나누면 안 된다
+
+    간헐 폴러(옵션체인 10분 격자)는 창의 10%에만 행이 있다. 그걸 "커버리지 10%"로 읽으면
+    정상인 계열이 매일 빨갛게 된다. 그래서 **관측된 분이 아니라 관측된 구간**을 센다:
+    각 사이클이 자기 카덴스만큼의 시간을 대표한다고 보고, 그 합을 창 길이로 나눈다.
+
+    즉 10분 격자로 42사이클을 돈 계열은 420분을 덮은 것이고 커버리지 100%다. 13:40에
+    끊겼으면 그 뒤 카덴스만큼도 못 덮으므로 그만큼 떨어진다.
+
+    상한을 100으로 접는다 — 마지막 사이클이 창 끝을 넘어 대표할 수 있어서다.
+    """
+    start, end = window
+    span = (end - start).total_seconds() / 60.0
+    if span <= 0:
+        return 100.0
+    covered = 0.0
+    for begin, finish in _group_into_cycles(list(minutes)):
+        # 사이클 자체의 길이 + 그 사이클이 대표하는 카덴스 한 칸.
+        covered += (finish - begin).total_seconds() / 60.0 + max(cadence, 1.0)
+    # 머리·꼬리 구멍은 자동으로 빠진다 — 사이클이 없는 구간은 아무것도 안 더하기 때문이다.
+    return round(min(100.0, 100.0 * covered / span), 1)
 
 
 @dataclass
@@ -132,6 +168,16 @@ class SeriesCoverage:
     # **"없는 것이 정답이다"**. 셋을 한 축으로 접으면 규정상 미상장인 날마다 오탐이 난다
     # (2026-08-07 목위클리 — 그대로 뒀으면 8/13까지 5거래일 연속 ERROR였다).
     expected: bool = True
+    # 판정 창 대비 **관측된 분의 비율**(0~100) — 고도화 1 (2026-08-07).
+    #
+    # 이 저장소의 계측은 "구멍"은 보는데 "끊김"은 못 봤다. 봉 연속성·거래량 대조·관측 공백
+    # 세 축이 전부 *관측된 구간 안에서 무엇이 빠졌나*를 묻고, *관측이 언제 멈췄나*는 계열
+    # 커버리지 하나만 물었다(그리고 그 축은 봉을 안 본다). 2026-08-07에 네 축이 초록인 채로
+    # 1시간 54분이 날아간 이유가 그것이다.
+    #
+    # 이 한 값이 모든 계열에 같은 질문을 던진다: **"세션 중 몇 %를 실제로 봤나."**
+    # 그날 답은 봉 71% · 틱 71% · 옵션체인 71% · 수급 72%였는데, 세 축이 100%라고 답했다.
+    coverage_pct: float = 100.0
     # `expected=False`인 이유 + 복귀 예정일. `ops/series_expectation.Expectation.note` 원문
     # (계열 이름은 빼고 사유만 — 이 표는 이미 이름을 찍으므로 붙이면 두 번 나온다).
     expectation_note: str = ""
@@ -258,6 +304,7 @@ def measure(
             # `fix_verification`의 `series_head_gap_minutes_max` 지표가 그 값을 집어
             # 등록부 항목이 통째로 `재발`로 뒤집힌다(2026-08-07 발견).
             head_gap_minutes=round(span, 1) if expected else 0.0,
+            coverage_pct=0.0 if expected else 100.0,
             detail=(
                 "그날 한 행도 없다 — 결선이 끊겼거나 적재가 실패했다"
                 if expected
@@ -292,6 +339,7 @@ def measure(
         tail_gap_minutes=round(tail, 1),
         longest_gap_minutes=round(longest, 1),
         gaps=gaps,
+        coverage_pct=_coverage_pct(minutes, cadence, window),
         detail=f"{minutes[0]:%H:%M}~{minutes[-1]:%H:%M} · 카덴스 {cadence:.0f}분",
     )
 
@@ -329,6 +377,14 @@ def findings_for(coverage: SeriesCoverage) -> list[str]:
     scope = "그 구간은 영구 소실(소급 경로 없음)" if permanent else "소급 가능 — 재수집 대상"
 
     out: list[str] = []
+    # **세션 커버리지가 첫 줄이다** (고도화 1). 아래 머리/꼬리/구멍 판정은 "어디가"를
+    # 말하고 이 줄은 "얼마나"를 말한다. 사람이 먼저 알아야 하는 건 후자다 —
+    # 2026-08-07에 세 축이 100%라고 답하는 동안 실제는 71%였다.
+    if coverage.rows and coverage.coverage_pct < _COVERAGE_FLOOR_PCT:
+        out.append(
+            f"{coverage.name}: 세션 커버리지 {coverage.coverage_pct:.0f}% "
+            f"(< {_COVERAGE_FLOOR_PCT:.0f}%) — {scope}"
+        )
     if coverage.rows == 0:
         detail = "영구 소실 — 소급 경로 없음" if permanent else "재수집 가능"
         return [f"{coverage.name}: 그날 한 행도 없다 — 결선 확인 필요({detail})"]
@@ -463,7 +519,8 @@ def summarize(coverages: Sequence[SeriesCoverage]) -> list[str]:
             continue
         mark = "✅" if not findings_for(item) else "⚠"
         lines.append(
-            f"    {item.name}: {item.rows}분 {item.first_kst}~{item.last_kst} "
+            f"    {item.name}: 커버리지 {item.coverage_pct:.0f}% · "
+            f"{item.rows}분 {item.first_kst}~{item.last_kst} "
             f"(카덴스 {item.cadence_minutes:.0f}분 · 머리 {item.head_gap_minutes:.0f}분 · "
             f"최장 구멍 {item.longest_gap_minutes:.0f}분) {mark}"
         )

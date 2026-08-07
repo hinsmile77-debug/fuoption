@@ -80,9 +80,20 @@ def _cache_key_for(message: BusMessage) -> str:
     return type(message).__name__
 
 
+# heartbeat가 임계의 몇 배를 넘으면 **죽은 것**으로 보는가 (2026-08-07 고도화 2).
+#
+# `STALE`과 `DEAD`는 처방이 다르다: 전자는 "느려졌다, 지켜본다"이고 후자는 "프로세스를
+# 확인하라"다. 종전엔 둘이 같은 `STALE`이라, 2026-08-07 13:41에 수집기가 죽은 뒤에도
+# 화면·스냅샷은 "응답 없음(N초)"만 반복했다 — 그 숫자가 커지는 것을 사람이 세고 있어야 했다.
+#
+# 6배(=180초): heartbeat 주기 10초 기준 18회 연속 결번이다. 일시적 지연으로는 안 나오고,
+# G2의 CB가 `SUSPECTED`로 올라가는 180초와 같은 값이라 두 축이 같은 순간을 가리킨다.
+DEAD_AFTER_MULTIPLE = 6.0
+
+
 @dataclass(frozen=True)
 class _Freshness:
-    state: str  # "OK" / "STALE" / "NO_DATA"
+    state: str  # "OK" / "STALE" / "DEAD" / "NO_DATA"
     age_seconds: float | None
 
 
@@ -90,6 +101,8 @@ def _freshness(cache: StateCache, key: str, stale_after: float, now: datetime) -
     age = cache.age_seconds(key, now=now)
     if age is None:
         return _Freshness("NO_DATA", None)
+    if age > stale_after * DEAD_AFTER_MULTIPLE:
+        return _Freshness("DEAD", age)
     return _Freshness("STALE" if age > stale_after else "OK", age)
 
 

@@ -20,7 +20,7 @@ def test_half_lost_volume_is_flagged():
     archived = {"09:00": 250, "09:01": 240, "09:02": 260}
     official = {"09:00": 500, "09:01": 496, "09:02": 505}
 
-    ratio, common, mine, theirs = compare_day(archived, official)
+    ratio, common, mine, theirs, _missing = compare_day(archived, official)
 
     assert ratio is not None and ratio < WARN_RATIO
     assert round(ratio, 2) == 0.50
@@ -31,7 +31,7 @@ def test_matching_volume_passes():
     archived = {"09:00": 500, "09:01": 496}
     official = {"09:00": 500, "09:01": 496}
 
-    ratio, common, _, _ = compare_day(archived, official)
+    ratio, common, _, _, _missing = compare_day(archived, official)
 
     assert ratio == 1.0 >= WARN_RATIO
     assert common == 2
@@ -43,7 +43,7 @@ def test_only_common_minutes_are_compared():
     archived = {"08:45": 400, "09:00": 500}  # 장전 봉을 우리만 갖고 있다
     official = {"09:00": 500, "15:40": 300}  # 종가단일가를 저쪽만 갖고 있다
 
-    ratio, common, mine, theirs = compare_day(archived, official)
+    ratio, common, mine, theirs, _missing = compare_day(archived, official)
 
     assert ratio == 1.0
     assert (common, mine, theirs) == (1, 500, 500)
@@ -51,7 +51,7 @@ def test_only_common_minutes_are_compared():
 
 def test_no_overlap_is_undecidable_not_zero():
     """겹치는 분이 없으면 **판정 불가**다 — 0.0("전부 잃었다")으로 우기지 않는다(L18)."""
-    ratio, common, _, _ = compare_day({"08:45": 10}, {"09:00": 10})
+    ratio, common, _, _, _missing = compare_day({"08:45": 10}, {"09:00": 10})
 
     assert ratio is None
     assert common == 0

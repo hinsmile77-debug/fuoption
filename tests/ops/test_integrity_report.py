@@ -29,6 +29,25 @@ _DAY = date(2026, 7, 29)
 
 def _write_bars(bar_dir: Path, minutes: list[int], *, symbol: str = "A05608") -> None:
     archiver = ParquetArchiver(bar_dir)
+    bars = [
+        BarClosed(
+            symbol=symbol,
+            horizon=Horizon.M1,
+            bar_open_kst=datetime(2026, 7, 29, 9, 0, tzinfo=KST) + timedelta(minutes=minute),
+            o_ticks=100,
+            h_ticks=105,
+            l_ticks=95,
+            c_ticks=102,
+            volume=10,
+            quality_ok=True,
+        )
+        for minute in minutes
+    ]
+    # 395봉을 `append_bar`로 넣으면 조각 파일을 395번 읽고 쓴다 — 정상일 픽스처가
+    # 들어오면서 그 비용이 테스트마다 붙는다. 긴 목록은 대량 쓰기로 간다.
+    if len(bars) > 60:
+        archiver.write_day(symbol, Horizon.M1, bars)
+        return
     for minute in minutes:
         archiver.append_bar(
             BarClosed(
@@ -43,6 +62,17 @@ def _write_bars(bar_dir: Path, minutes: list[int], *, symbol: str = "A05608") ->
                 quality_ok=True,
             )
         )
+
+
+# 정규장을 **끝까지** 덮는 1분봉 (09:00~15:34 = 395봉).
+#
+# 2026-08-07 P0-2로 "마지막 봉 이후 마감까지의 공백"이 판정 축이 됐다. 종전 픽스처는
+# `range(30)`(09:00~09:29)이라, 정상일을 흉내내려던 테스트들이 전부 **365분 잘린 날**이
+# 되어 새 축에 걸렸다. 그 판정은 옳다 — 픽스처가 정상일이 아니었던 것이다.
+#
+# 다른 축(재기동·크래시·거래량 등)을 보는 테스트는 원래대로 짧은 목록을 쓴다. 여기서
+# 중요한 것은 **"위반 없음"을 주장하는 테스트만은 진짜 정상일이어야 한다**는 것이다.
+_FULL_SESSION = list(range(395))
 
 
 def _write_log(path: Path, records: list[dict]) -> None:
@@ -227,7 +257,7 @@ def _report(
 
 
 def test_clean_day_has_no_breaches(tmp_path: Path):
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     log = tmp_path / "l1.log"
     _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
 
@@ -322,7 +352,7 @@ def test_a_single_scheduled_start_is_not_called_a_restart(tmp_path: Path):
 
     사람이 매일 그 줄을 보고 무시하는 법을 배우면, 진짜 재기동이 났을 때도 똑같이 무시한다.
     """
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     log = tmp_path / "l1.log"
     _write_log(log, [{"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"}])
 
@@ -341,7 +371,7 @@ def test_uncountable_crashes_are_not_reported_as_zero(tmp_path: Path):
     이 플랫폼에서 **원래 못 세는 경우**(`supported=False`, 비Windows)는 위반이 아니다 —
     매일 울리면 늑대소년이 된다. 질의가 실패한 경우는 아래 별도 테스트가 본다.
     """
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     log = tmp_path / "l1.log"
     _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
 
@@ -893,7 +923,7 @@ def test_clock_skew_is_collected_from_logs_and_breaches_when_large(tmp_path: Pat
 
 def test_small_clock_skew_is_recorded_without_a_breach(tmp_path: Path):
     """2026-08-05 w32time 복구 후의 정상 상태 — 값은 남기되 경보는 안 한다."""
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     log = tmp_path / "l1.log"
     _write_log(
         log,
@@ -930,7 +960,7 @@ def test_session_git_sha_is_recorded_as_a_fact_not_a_breach(tmp_path: Path):
     """2026-08-04엔 수집 프로세스가 08:35에 뜬 옛 커밋으로 하루를 돌았고, 그 사이 12건이
     커밋됐다(WS 프레임 절반 유실 수정 포함). 사후 조사에 반드시 필요한 사실이라 기록하되,
     연구 커밋이 잦은 이 프로젝트에서 매일 울리면 늑대소년이 되므로 판정은 하지 않는다."""
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     log = tmp_path / "l1.log"
     _write_log(
         log,
@@ -1006,7 +1036,7 @@ def test_volume_check_artifact_becomes_a_first_class_axis(tmp_path: Path):
 
 
 def test_a_passing_volume_check_is_recorded_without_a_breach(tmp_path: Path):
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     (tmp_path / "volume_check_20260729.json").write_text(
         json.dumps({"ratio": 1.0, "warn_ratio": 0.95, "ok": True}), encoding="utf-8"
     )
@@ -1039,7 +1069,7 @@ def test_everything_unmeasured_is_collected_in_one_place(tmp_path: Path):
 
 def test_measured_axes_drop_out_of_unmeasured(tmp_path: Path):
     """반대 방향 — 실제로 잰 축은 목록에서 빠져야 한다(안 그러면 매일 다 뜬다)."""
-    _write_bars(tmp_path / "bars", list(range(30)))
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
     log = tmp_path / "l1.log"
     _write_log(
         log,

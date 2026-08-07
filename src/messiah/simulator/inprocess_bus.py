@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
+from messiah.core.bus import TOPIC_KILL
 from messiah.core.messages import BusMessage
 
 Handler = Callable[[BusMessage], Awaitable[None]]
@@ -30,6 +31,17 @@ class InProcessBus:
             if pattern == topic:
                 await handler(msg)
 
-    async def subscribe(self, patterns: list[str], handler: Handler) -> None:
+    async def subscribe(
+        self, patterns: list[str], handler: Handler, *, on_kill: Handler | None = None
+    ) -> None:
+        """`on_kill`은 `MessageBus`와 **같은 계약**이다 (2026-08-07 P0-1).
+
+        종전에 이 대역은 `on_kill`을 몰랐고 `TOPIC_KILL` 자동 구독도 안 했다 — 즉 재생·
+        스모크에서는 kill 경로가 아예 안 돌았고, 그래서 2026-08-07 사고가 테스트에서
+        재현되지 않았다. 두 버스가 다른 계약을 가지면 "재생에서 됐으니 라이브에서도
+        되겠지"가 거짓이 된다(Ver 1.0.1 §2.1 "동일 인터페이스"의 요점).
+        """
         for pattern in patterns:
             self._handlers.append((pattern, handler))
+        if on_kill is not None:
+            self._handlers.append((TOPIC_KILL, on_kill))

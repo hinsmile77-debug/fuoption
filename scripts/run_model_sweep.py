@@ -60,6 +60,8 @@ from messiah.core.messages import (  # noqa: E402
 )
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
+from messiah.features import sidecar  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models.threshold_report import ThresholdReport  # noqa: E402
 from messiah.models.trainer import build_feature_vectors, train_formal_expert  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
@@ -72,7 +74,13 @@ from messiah.strategy.regime.service import RegimeAI  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
 _SYMBOL = "K200MFC"
-_FEATURE_SET = "v2026.07"
+# 기본값은 현행 프로덕션. `--feature-set`으로 바꾼다 (2026-08-07 추가).
+#
+# 종전엔 이 상수가 하드코딩이라 **EV/FL 카테고리를 스윕으로 비교할 수 없었다.**
+# `dev_memory/NEXT_TODO.md`는 `run_model_sweep --feature-set v2026.08-ev`를 다음 절차로
+# 적어 두었는데 그 플래그가 존재하지 않았다 — 절차가 실행 불가인 채로 적혀 있던 셈이고,
+# 2026-08-07에 그것을 실행하려다 발견했다.
+_DEFAULT_FEATURE_SET = "v2026.07"
 
 # 탐색 예산 — "shallow"는 2026-08-04 G1 실행이 쓴 값(런타임 우선), "normal"은
 # `train_formal_expert()`의 프로덕션 기본값에 가깝다. 그날 "우위 없음" 판정이 예산 탓인지
@@ -136,6 +144,11 @@ def _parse_args() -> argparse.Namespace:
         help="임계값 후보가 남겨야 할 최소 신호 비율(0이면 하한 없음 — 종전 동작)",
     )
     p.add_argument("--out", default="logs/model_sweep_20260804.json")
+    p.add_argument(
+        "--feature-set",
+        default=_DEFAULT_FEATURE_SET,
+        help="`features/spec.FEATURE_SETS`의 키. EV/FL 카테고리 A/B의 유일한 축이다.",
+    )
     session_guard.add_force_intraday_argument(p)
     session_guard.add_force_corrupt_archive_argument(p)
     return p.parse_args()
@@ -150,11 +163,14 @@ async def _evaluate(
     regime_states: list[tuple[datetime, RegimeState]] | None,
     train_bars,
     test_bars,
+    feature_set: str,
+    sidecars,
 ) -> SweepRow:
     budget = _BUDGETS[budget_name]
     training = await train_formal_expert(
         train_bars,
-        feature_set=_FEATURE_SET,
+        feature_set=feature_set,
+        sidecars=sidecars,
         model_version=f"sweep-{horizon.value}-{budget_name}",
         meta_threshold_splits=5 if threshold_mode == "oof" else 1,
         meta_min_support_fraction=min_support,
@@ -162,7 +178,7 @@ async def _evaluate(
     )
     meta = training.meta_labeler
 
-    fvs = await build_feature_vectors(test_bars, feature_set=_FEATURE_SET)
+    fvs = await build_feature_vectors(test_bars, feature_set=feature_set, sidecars=sidecars)
     aggregator = Aggregator()
     inference_probs: list[float] = []
     passed = 0
@@ -283,6 +299,15 @@ async def main() -> int:
         return 2
     print(f"연속 시계열 {len(m1_bars)}봉  {start} ~ {end}")
 
+    # 사이드카는 **한 곳에서만** 만든다 (`features/sidecar.build()` docstring — 호출처가
+    # 넷이라 각자 조립하면 네 벌이 갈린다). 종전엔 이 스크립트가 그것을 안 불러서
+    # `--feature-set v2026.08-ev`가 "사이드카 ['calendar']가 주입되지 않았다"로 거부됐다 —
+    # `dev_memory/NEXT_TODO.md`에 적힌 절차가 실행 불가였던 두 번째 이유다(첫째는 플래그 부재).
+    spec = feature_spec.resolve(args.feature_set)
+    sidecars = sidecar.build(spec)
+    if sidecars:
+        print(f"사이드카 주입: {sorted(sidecars)}  (feature_set={args.feature_set})")
+
     regime_states: list[tuple[datetime, RegimeState]] | None = None
     if args.regime in ("on", "both"):
         regime_bars = aggregate_to_horizon(m1_bars, Horizon.M30)
@@ -330,6 +355,8 @@ async def main() -> int:
                             regime_states=ai,
                             train_bars=train_bars,
                             test_bars=test_bars,
+                            feature_set=args.feature_set,
+                            sidecars=sidecars,
                         )
                     except ValueError as exc:
                         print(f"    실패(정직 보고): {exc}")

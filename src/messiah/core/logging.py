@@ -34,6 +34,12 @@ TAG_LEVELS: dict[str, int] = {
     #
     # 이 태그가 그 `SessionStart`를 **무효화**한다 — 없던 기동으로 친다.
     "LaunchWindowRefused": logging.INFO,
+    # 프로세스가 **스스로** 끝났다 (2026-08-07 P0-3). 이 줄이 없으면 리포트는 "정상 종료"와
+    # "죽어서 사라짐"을 구분할 근거가 없다 — `ops/observation_gaps.py`가 스스로 적어 둔
+    # 한계("마지막 기동 이후 조용히 사라진 경우는 안 센다, 정상 종료와 구분할 근거가 없다")가
+    # 정확히 그것이고, 2026-08-07엔 그 때문에 1시간 54분 유실이 `관측 공백: 없음 ✅`으로
+    # 지나갔다. 구분할 근거를 **만들면** 되는 일이었다.
+    "SessionEnd": logging.INFO,
     "BarClosed": logging.DEBUG,
     "FeaturePublish": logging.DEBUG,
     "FeatureNaN": logging.WARNING,
@@ -80,6 +86,11 @@ TAG_LEVELS: dict[str, int] = {
     "DecisionEmitted": logging.INFO,  # Meta Decision — NO TRADE도 포함해 전부 기록(Ver 2.0 §3.2)
     "SizerZeroQty": logging.INFO,  # Sizer 계산 결과 0계약 — 주문 생성 안 함(정상 동작)
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
+    # 구독 루프가 메시지 하나를 처리하다 실패했다 (2026-08-07 P0-1). **루프는 살아 있다** —
+    # 그게 이 태그의 존재 이유다. 2026-08-07엔 이 격리가 없어 `KillSignal` 한 건이
+    # 수집 프로세스를 통째로 죽였다(1시간 54분 유실). 이제 살아남으므로 **로그가 유일한
+    # 증거**이고, 그래서 ERROR다 — 조용히 버려지는 메시지가 있다는 사실은 반드시 보여야 한다.
+    "SubscriberHandlerFailed": logging.ERROR,
     # 외부에서 발행된 `sys.kill` 수신 (2026-08-07 고도화 6) — 지금은 Command Center의
     # 수동 발동이 유일한 발행자다. `KillSwitch`(CRITICAL)와 나눠 둔 이유: 저쪽은 이 프로세스가
     # **스스로 판단해** 발동한 것이고, 이쪽은 **밖에서 받은** 것이다. 사후에 "누가 눌렀나"를

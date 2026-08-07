@@ -524,6 +524,17 @@ class CircuitBreakerStatus(BusMessage):
     phase: str  # CircuitBreakerPhase.value 그대로("normal"/"warning"/"suspected"/"confirmed")
     reentry_cooldown_until: datetime | None = None
     gateway_halted: bool = False
+    # 이 판정을 내릴 때 **수집기가 살아 있었는가** (2026-08-07 고도화 2).
+    #
+    # `None`은 "모른다"(heartbeat 없음 또는 끊긴 지 오래) — `strategy/pipeline.py`의
+    # `_collector_healthy()`가 내는 값 그대로다.
+    #
+    # 왜 배지에 실어 보내나: **"거래소가 멈춘 것"과 "우리가 죽은 것"은 완전히 다른 사건인데
+    # 화면에서 똑같이 보였다.** 2026-08-07 13:41에 수집 프로세스가 죽자 G2는 13:44에
+    # `CircuitBreakerSuspected`, 13:45에 `Confirmed`를 찍었다 — 시스템은 이상을 **알고
+    # 있었다**. 그런데 화면은 "CB 정지 추정"이라고만 말했고, 그건 거래소 얘기로 읽힌다.
+    # 사람이 봤어야 할 문장은 "수집기가 죽었다"였다.
+    collector_healthy: bool | None = None
 
 
 # ---------------------------------------------------------------- L6 Learning / Self Evolution
