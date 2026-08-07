@@ -106,6 +106,12 @@ def _parse_args() -> argparse.Namespace:
         help="통합본이 이미 있는 날은 건너뛴다(중단 후 재개용). 기본은 전부 덮어쓴다 — "
         "오염된 수집분을 갈아끼우는 것이 이 스크립트의 목적이기 때문.",
     )
+    p.add_argument(
+        "--allow-today",
+        action="store_true",
+        help="오늘을 백필 대상에 넣는다 — **수집 프로세스가 죽어 그날이 잘린 경우 전용**. "
+        "정규장 중에는 어차피 거부된다(refuse_if_regular_session).",
+    )
     session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
@@ -116,13 +122,32 @@ def main() -> int:
     today = now_kst().date()
     end = args.end or (today - timedelta(days=1))
 
-    if end >= today:
+    if end >= today and not args.allow_today:
         print(
             f"[run_backfill] 거부: --end({end})가 오늘 이후 — 오늘은 라이브 수집이 조각 파일을 "
-            f"쓰는 중이고 write_day()가 그 조각을 지운다(그날 수집분 소실).",
+            f"쓰는 중이고 write_day()가 그 조각을 지운다(그날 수집분 소실). "
+            f"수집이 이미 끝났거나 죽어서 그날이 잘린 경우에만 --allow-today.",
             file=sys.stderr,
         )
         return 2
+    if end >= today:
+        # 2026-08-07 신설. 그날 13:41에 수집 프로세스가 예외로 죽어 1시간 54분이 잘렸고,
+        # 1분봉만은 거래소 분봉 API로 되메울 수 있었는데 이 가드가 그것까지 막았다.
+        #
+        # 가드를 지우지 않고 **명시적 플래그**로 여는 이유: 원래 경고가 옳기 때문이다.
+        # `write_day()`는 병합이 아니라 교체이고 조각까지 지우므로, 수집이 **살아 있는 동안**
+        # 돌리면 그날치를 잃는다. 정규장 가드(`refuse_if_regular_session`)가 장중을 막고,
+        # 이 플래그가 "장 마감 후 잘린 날을 메운다"는 의도를 사람이 직접 적게 한다.
+        #
+        # **쓰기 전에 대조하라**: API 응답이 아카이브를 포함하는지 확인하지 않고 돌리면
+        # 교체가 곧 손실이다. 2026-08-07엔 API 410봉이 아카이브 296봉을 전부 포함했고
+        # (겹치는 구간 종가 불일치 0), 그 확인 뒤에 돌렸다.
+        print(
+            f"[run_backfill] --allow-today: 오늘({today})을 포함한다 — 수집이 잘린 날을 "
+            f"메우는 용도. write_day()는 교체이므로 API가 기존 아카이브를 포함하는지 "
+            f"먼저 확인했어야 한다.",
+            flush=True,
+        )
     if args.start < _EARLIEST_START:
         print(
             f"[run_backfill] 경고: --start({args.start})가 실측 소급 한계"
