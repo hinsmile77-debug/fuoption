@@ -69,6 +69,7 @@ import polars as pl
 
 from messiah.core.event_calendar import DEFAULT_SESSION
 from messiah.core.timeutil import KST
+from messiah.ops.series_expectation import Expectation
 
 # 정상 카덴스의 몇 배를 넘어야 "구멍"인가. 3배면 폴링 두 번을 연달아 놓친 상태다 —
 # 재시도(`OptionChainPollRetried`)가 사는 범위를 넘어선다.
@@ -93,9 +94,26 @@ _MAX_GAP_FINDINGS = 3
 # 머리 구멍의 하한 — 모듈 docstring "장전 구간에 대한 예외 하나".
 _HEAD_GAP_FLOOR_MINUTES = 20.0
 
+# 소급 불가 계열의 접두어 (2026-08-07 고도화 4).
+#
+# `findings_for()`는 이미 문장에 "소급 불가"를 적고 있었지만, **그게 다른 판정과 같은
+# 무게로 섞여 있었다.** 봉은 KIS 분봉 API로 되메울 수 있고 재합성이 자동이라 하루 뒤에
+# 고쳐진다. 옵션체인·수급·체결틱은 과거 조회 경로가 자체가 없어 **지금 없으면 영원히
+# 없다** — 급이 다른 사건인데 문구가 같으면 사람이 같은 무게로 읽는다.
+#
+# **순서가 중요하다**: 이 등급은 캘린더 계약(`expected`) **뒤에** 붙는다. 앞에 두면
+# 2026-08-07처럼 규정상 미상장인 날에 가장 크게 우는 오탐이 된다 — 묻고, 기대를 세우고,
+# 그 다음에 등급을 매긴다.
+_IRRECOVERABLE_PREFIXES = ("option_chain/", "flow_intraday/", "ticks")
+
 # 꼬리 구멍의 하한. 마지막 사이클과 15:35 사이는 카덴스만큼 비는 것이 정상이라
 # (먼쓰리 10분 격자면 15:30이 마지막) 머리보다 관대할 이유가 없다 — 같은 값을 쓴다.
 _TAIL_GAP_FLOOR_MINUTES = 20.0
+
+
+def _is_irrecoverable(name: str) -> bool:
+    """이 계열의 공백이 **영구**인가 — 과거 조회 경로가 없는 계열인지."""
+    return name.startswith(_IRRECOVERABLE_PREFIXES)
 
 
 @dataclass
@@ -109,6 +127,14 @@ class SeriesCoverage:
     name: str
     rows: int
     measured: bool
+    # 그날 이 계열이 **있어야 하는가** (2026-08-07 P0-3). `measured`/`rows`와 직교하는
+    # 세 번째 축이다: `measured=False`는 "못 읽었다", `rows=0`은 "없다", `expected=False`는
+    # **"없는 것이 정답이다"**. 셋을 한 축으로 접으면 규정상 미상장인 날마다 오탐이 난다
+    # (2026-08-07 목위클리 — 그대로 뒀으면 8/13까지 5거래일 연속 ERROR였다).
+    expected: bool = True
+    # `expected=False`인 이유 + 복귀 예정일. `ops/series_expectation.Expectation.note` 원문
+    # (계열 이름은 빼고 사유만 — 이 표는 이미 이름을 찍으므로 붙이면 두 번 나온다).
+    expectation_note: str = ""
     first_kst: str | None = None
     last_kst: str | None = None
     # 그날 데이터에서 뽑은 정상 간격(분) — 상수가 아니라 관측값이다(모듈 docstring).
@@ -201,6 +227,7 @@ def measure(
     timestamps: Iterable[datetime],
     *,
     window: tuple[datetime, datetime],
+    expectation: "Expectation | None" = None,
 ) -> SeriesCoverage:
     """타임스탬프 목록 → 커버리지 판정 (순수 함수).
 
@@ -208,7 +235,13 @@ def measure(
          머리 구멍 계산을 어지럽히지 않게 한다.
     계산: 분(分) 격자로 내림해 중복을 없앤 뒤 간격을 본다. 옵션체인처럼 한 사이클이 42행
          1초 간격으로 오는 계열도, 분으로 뭉치면 카덴스가 사이클 주기로 드러난다.
+
+    `expectation`을 주면 그날 계약(`ops/series_expectation.py`)을 판정에 실어 보낸다.
+    안 주면 **필수**로 본다 — 계약을 모르는 호출자가 조용히 면제받는 일이 없어야 한다.
     """
+    expected = expectation.required if expectation is not None else True
+    note = "" if expectation is None or expectation.required else expectation.note
+
     start, end = window
     minutes = sorted(
         {ts.replace(second=0, microsecond=0) for ts in timestamps if start <= ts <= end}
@@ -219,8 +252,17 @@ def measure(
             name=name,
             rows=0,
             measured=True,
-            head_gap_minutes=round(span, 1),
-            detail="그날 한 행도 없다 — 결선이 끊겼거나 적재가 실패했다",
+            expected=expected,
+            expectation_note=note,
+            # 미상장 계열의 머리 구멍은 0으로 둔다 — 창 전체가 구멍으로 잡히면
+            # `fix_verification`의 `series_head_gap_minutes_max` 지표가 그 값을 집어
+            # 등록부 항목이 통째로 `재발`로 뒤집힌다(2026-08-07 발견).
+            head_gap_minutes=round(span, 1) if expected else 0.0,
+            detail=(
+                "그날 한 행도 없다 — 결선이 끊겼거나 적재가 실패했다"
+                if expected
+                else f"미상장일이라 0행이 정상 — {note}"
+            ),
         )
 
     cycles = _group_into_cycles(minutes)
@@ -241,6 +283,8 @@ def measure(
         name=name,
         rows=len(minutes),
         measured=True,
+        expected=expected,
+        expectation_note=note,
         first_kst=f"{minutes[0]:%H:%M}",
         last_kst=f"{minutes[-1]:%H:%M}",
         cadence_minutes=round(cadence, 1),
@@ -261,21 +305,45 @@ def findings_for(coverage: SeriesCoverage) -> list[str]:
     """
     if not coverage.measured:
         return []
+
+    # ---- 캘린더 계약 (2026-08-07 P0-3 + 고도화 3) ----
+    #
+    # **양방향으로 단언한다.** 종전 검사는 "없으면 운다" 한 방향뿐이었고, 그래서 규정상
+    # 미상장인 날에 오탐을 내면서 동시에 **"있으면 안 되는데 있는 경우"는 못 봤다.**
+    # 후자가 더 위험하다 — 빈 파일은 눈에 띄지만 조용히 섞인 만기 하루짜리 체인은
+    # 그대로 모델에 들어간다(그릭스·IV 성질이 전혀 다르다).
+    if not coverage.expected:
+        if coverage.rows == 0:
+            return []  # 없는 것이 정답 — 조용한 것이 옳다
+        return [
+            f"{coverage.name}: 미상장으로 판정했는데 {coverage.rows}분치가 쌓였다 — "
+            f"규정 이해가 틀렸거나 계열 매핑이 어긋났다({coverage.expectation_note})"
+        ]
+
+    # ---- 소급 가능성 등급 (2026-08-07 고도화 4) ----
+    #
+    # 하드코딩된 "소급 불가"를 계열별 판정으로 바꾼다. 지금은 `collect()`가 발견하는 계열이
+    # 전부 소급 불가라 결과가 같지만, 봉처럼 되메울 수 있는 계열이 이 축에 붙는 순간
+    # 종전 문구는 **거짓말을 시작한다**. 그때 고치면 늦다.
+    permanent = _is_irrecoverable(coverage.name)
+    scope = "그 구간은 영구 소실(소급 경로 없음)" if permanent else "소급 가능 — 재수집 대상"
+
     out: list[str] = []
     if coverage.rows == 0:
-        return [f"{coverage.name}: 그날 한 행도 없다 — 결선 확인 필요(소급 불가 계열)"]
+        detail = "영구 소실 — 소급 경로 없음" if permanent else "재수집 가능"
+        return [f"{coverage.name}: 그날 한 행도 없다 — 결선 확인 필요({detail})"]
     if coverage.head_gap_minutes > _HEAD_GAP_FLOOR_MINUTES:
         out.append(
             f"{coverage.name}: 세션 시작 후 {coverage.head_gap_minutes:.0f}분간 적재 없음"
-            f"(첫 행 {coverage.first_kst}) — 그 구간은 소급 불가"
+            f"(첫 행 {coverage.first_kst}) — {scope}"
         )
     if coverage.tail_gap_minutes > _TAIL_GAP_FLOOR_MINUTES:
         out.append(
             f"{coverage.name}: 마지막 행({coverage.last_kst}) 이후 "
-            f"{coverage.tail_gap_minutes:.0f}분간 적재 없음"
+            f"{coverage.tail_gap_minutes:.0f}분간 적재 없음 — {scope}"
         )
     for begin, finish, span in coverage.gaps[:_MAX_GAP_FINDINGS]:
-        out.append(f"{coverage.name}: {begin}~{finish} {span}분 구멍 — 그 구간은 소급 불가")
+        out.append(f"{coverage.name}: {begin}~{finish} {span}분 구멍 — {scope}")
     if len(coverage.gaps) > _MAX_GAP_FINDINGS:
         hidden = len(coverage.gaps) - _MAX_GAP_FINDINGS
         total = sum(span for _, _, span in coverage.gaps)
@@ -321,13 +389,20 @@ def collect(
     flow_dir: Path = DEFAULT_FLOW_DIR,
     option_chain_dir: Path = DEFAULT_OPTION_CHAIN_DIR,
     tick_dir: Path = DEFAULT_TICK_DIR,
+    expectations: "dict[str, Expectation] | None" = None,
 ) -> list[SeriesCoverage]:
     """그날 적재된 **모든** 계열의 커버리지.
 
     계열 목록은 디렉터리에서 **발견**한다 — 하드코딩하면 새 계열이 붙을 때 리포트가
     조용히 그것만 안 본다(이 프로젝트가 반복한 실패 형태 그 자체다). 디렉터리가 있다는
     것은 언젠가 그 계열을 모았다는 뜻이고, 오늘 파일이 없으면 그게 곧 판정 대상이다.
+
+    `expectations`(`ops/series_expectation.for_day()`)를 주면 그날 계약을 실어 보낸다.
+    **발견은 그대로 하고 판정만 계약에 따른다** — 계약에 없는 계열도 계속 발견되고
+    필수로 판정된다. 계약을 발견의 필터로 쓰면 계약에서 빠뜨린 계열이 조용히 시야 밖으로
+    나가고, 그게 이 모듈이 애초에 막으려던 상태다.
     """
+    contract = expectations or {}
     out: list[SeriesCoverage] = []
 
     for base, label in ((flow_dir, "flow_intraday"), (option_chain_dir, "option_chain")):
@@ -335,11 +410,13 @@ def collect(
             continue
         for child in sorted(p for p in base.iterdir() if p.is_dir()):
             frame = _read_parquet_day(child, day)
+            name = f"{label}/{child.name}"
             out.append(
                 measure(
-                    f"{label}/{child.name}",
+                    name,
                     _timestamps_from(frame, "ts_kst"),
                     window=window,
+                    expectation=contract.get(name),
                 )
             )
 
@@ -351,7 +428,14 @@ def collect(
     except Exception:  # noqa: BLE001
         ticks = None
     if ticks is not None or (Path(tick_dir) / symbol).is_dir():
-        out.append(measure("ticks", _timestamps_from(ticks, "ts_kst"), window=window))
+        out.append(
+            measure(
+                "ticks",
+                _timestamps_from(ticks, "ts_kst"),
+                window=window,
+                expectation=contract.get("ticks"),
+            )
+        )
 
     return out
 
@@ -366,6 +450,13 @@ def summarize(coverages: Sequence[SeriesCoverage]) -> list[str]:
     for item in sorted(coverages, key=lambda c: c.name):
         if not item.measured:
             lines.append(f"    {item.name}: 판정 불가 — {item.detail}")
+            continue
+        # 미상장일은 ⊘ — ❌(사고)와도 ✅(정상 적재)와도 다르게 찍는다. 같은 기호를 쓰면
+        # "오늘 안 모으는 것을 알고 안 모았다"와 "모으려 했는데 못 모았다"가 섞인다.
+        if not item.expected:
+            mark = "⊘" if item.rows == 0 else "❗"
+            suffix = "" if item.rows == 0 else f" — 미상장인데 {item.rows}분치 수신"
+            lines.append(f"    {item.name}: {item.expectation_note} {mark}{suffix}")
             continue
         if item.rows == 0:
             lines.append(f"    {item.name}: 0분 ❌ {item.detail}")

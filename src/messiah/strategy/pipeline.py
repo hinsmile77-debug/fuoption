@@ -152,6 +152,7 @@ from messiah.core.messages import (
     Health,
     HealthLevel,
     Horizon,
+    KillSignal,
     Side,
     bar_confirm_time,
 )
@@ -524,3 +525,54 @@ class TradingPipeline:
             await self.handle_futures_view(msg)
         elif isinstance(msg, Health) and msg.component == COLLECTOR_COMPONENT:
             self._last_collector_health = msg
+        elif isinstance(msg, KillSignal):
+            await self.handle_kill(msg)
+
+    async def handle_kill(self, signal: KillSignal) -> None:
+        """`sys.kill` 수신 → 게이트 정지 + 전량 청산 (2026-08-07 고도화 6).
+
+        ## 이 분기가 없던 동안 무슨 일이 있었나
+
+        `core/bus.py`의 `subscribe()`는 **처음부터** `TOPIC_KILL`을 모든 패턴에 끼워 넣었다
+        (그쪽 docstring: "어떤 구독자도 kill을 놓치지 않는다"). 즉 이 파이프라인은 `KillSignal`을
+        **받고 있었고**, `_dispatch`에 분기가 없어 조용히 버렸다. 화면의 Kill Switch가
+        "미배선"이었던 진짜 이유는 발행자가 없어서였지만, 발행자를 붙였어도 수신측이 이 상태면
+        아무 일도 안 일어났을 것이다 — 양쪽을 같이 붙인다.
+
+        ## R2/R11 자동 발동과의 관계
+
+        `handle_futures_view()`의 `kill_switch.evaluate()`는 **판단이 돌 때만** 실행된다.
+        지금처럼 번들이 0개라 판단이 안 나오는 상태에서는 그 경로가 영영 안 돈다. 이 핸들러는
+        판단과 무관하게 도는 유일한 청산 경로이고, 그래서 수동 발동의 값이 여기 있다.
+
+        `KillSwitch._triggered`도 함께 세운다(`evaluate(manual=True)`) — 안 그러면 다음 판단이
+        `kill_active=False`로 돌아가 곧바로 신규 진입을 낸다.
+
+        실패해도 예외를 위로 안 던진다: `_dispatch`가 죽으면 구독 루프가 끊겨 **나머지 감시가
+        전부 멈춘다.** 대신 실패를 로그로 남긴다 — 비상 경로가 실패했다는 사실 자체가 가장
+        먼저 보여야 하는 정보다.
+        """
+        log(
+            "KillSignalReceived",
+            f"sys.kill 수신 — {signal.reason}",
+            triggered_by=signal.triggered_by,
+            reason=signal.reason,
+        )
+        try:
+            await self._gateway.halt(f"kill signal: {signal.reason}")
+            account = await self._broker.account()
+            positions = await self._broker.positions()
+            await self._kill_switch.evaluate(
+                account=account,
+                daily_start_equity=self._daily_start_equity or account.total_equity,
+                data_age_seconds=0.0,
+                manual=True,
+            )
+            for request in self._kill_switch.liquidate(positions):
+                await self._gateway.submit(request)
+        except Exception as exc:  # noqa: BLE001 — 구독 루프를 죽이면 나머지 감시가 멈춘다
+            log(
+                "KillSignalHandlingFailed",
+                f"sys.kill 처리 실패 — 브로커 화면에서 직접 청산 필요: {exc}",
+                triggered_by=signal.triggered_by,
+            )

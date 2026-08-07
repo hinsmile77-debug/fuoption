@@ -66,7 +66,7 @@ import numpy  # noqa: F401
 import plotly.graph_objects as go
 import streamlit as st
 
-from messiah.core.bus import MessageBus
+from messiah.core.bus import TOPIC_KILL, MessageBus
 from messiah.core.config import load_instance
 from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
 from messiah.core.messages import (
@@ -77,6 +77,7 @@ from messiah.core.messages import (
     FuturesView,
     Health,
     Horizon,
+    KillSignal,
     OptionsView,
     RegimeState,
 )
@@ -595,24 +596,64 @@ def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
 
 # ---------------------------------------------------------------- Kill Switch
 
-# `sys.kill` 발행 경로가 아직 없다(모듈 docstring "알려진 갭"). 배선되면 True로 바꾼다.
-_KILL_SWITCH_WIRED = False
+# `sys.kill` 발행 경로 결선 완료 (2026-08-07 고도화 6). LIVE 모드에서만 누를 수 있다 —
+# REPLAY 화면의 버튼이 실계좌를 청산하면 그건 이 화면이 만들 수 있는 최악의 사고다.
+_KILL_SWITCH_WIRED = True
 
 
-def _render_kill_switch() -> None:
-    """미배선 상태에서는 **누를 수 없다** (2026-08-05 3차, P2).
+def _publish_kill(redis_url: str, reason: str, *, bus_factory=MessageBus) -> None:
+    """`sys.kill`에 `KillSignal`을 발행한다 (2026-08-07 고도화 6).
+
+    `bus_factory`는 테스트 주입점이다. **이 인자가 없으면 단위 테스트가 운영 Redis
+    (`redis://localhost:6380/0`)에 진짜 kill을 쏜다** — 2026-08-07 구현 중 UI 스모크
+    테스트가 정확히 그 경로를 밟을 뻔했다(구동 중이던 G2가 수신 분기 없는 구버전이라
+    우연히 무해했을 뿐이다). `reference_price`·`listed`와 같은 주입 패턴.
+
+    Streamlit 콜백은 동기라 자기 이벤트 루프를 열고 닫는다 — 구독용 백그라운드 스레드의
+    버스를 재사용하지 않는 이유는 그쪽이 `pubsub.listen()`에 블록돼 있어서 같은 커넥션으로
+    발행을 끼워 넣을 수 없기 때문이다. 발동은 하루 0~1회라 커넥션 비용은 문제가 아니다.
+
+    **누가 받는가**: `core/bus.py`의 `subscribe()`가 `TOPIC_KILL`을 항상 패턴에 넣으므로
+    (그쪽 docstring "어떤 구독자도 kill을 놓치지 않는다") G2 러너의 `TradingPipeline`이
+    이미 이 메시지를 **받고 있었다** — 종전엔 `_dispatch`에 처리 분기가 없어 조용히
+    버려졌을 뿐이다. 그 분기가 이번에 붙었다(`strategy/pipeline.py handle_kill()`).
+    """
+
+    async def _send() -> None:
+        bus = bus_factory(redis_url, instance_id="command-center-ui")
+        await bus.connect()
+        try:
+            await bus.publish(TOPIC_KILL, KillSignal(reason=reason, triggered_by="manual"))
+        finally:
+            await bus.close()
+
+    asyncio.run(_send())
+
+
+def _render_kill_switch(source, redis_url: str | None) -> None:
+    """2단 확인 뒤 `sys.kill` 발행 (2026-08-07 결선, 종전 2026-08-05 3차 P2의 후속).
+
+    ## 못 하는 일은 못 하게 보인다 (2026-08-05의 규율, 그대로 유지)
 
     종전엔 화면에서 가장 강한 요소(적색 primary 버튼)가 멀쩡히 눌렸고, 2단 확인까지 통과하면
     "알려진 갭"이라는 에러가 떴다. 그런데 그 에러는 `st.session_state`에 남지 않아 **5초 뒤
     fragment 재실행에 사라졌다** — 비상시에 누르고, 사라진 문구를 못 본 채 "발동됐다"고 믿는
-    것이 안 눌리는 것보다 훨씬 위험하다. 못 하는 일은 못 하게 보여야 한다(L18의 조작 버전).
+    것이 안 눌리는 것보다 훨씬 위험하다.
 
-    2단 확인 흐름 자체는 그대로 둔다 — 배선되는 날 이 상수만 뒤집으면 되고, 그때 발동 사실이
-    화면에서 사라지지 않도록 표시를 세션 상태에 걸어뒀다.
+    이제 발행 경로가 생겼으므로 그 규율이 겨냥하는 대상만 바뀐다: **REPLAY에서는 여전히
+    누를 수 없다.** 재생 화면의 버튼이 살아 있는 계좌를 청산하는 것이 이 화면이 만들 수
+    있는 최악의 사고이고, 그건 "미배선"보다 나쁘다.
+
+    ## 발행 실패도 화면에 남는다
+
+    Redis가 끊겨 발행이 실패하면 그 사실이 세션 상태에 남는다. 비상시에 가장 나쁜 것은
+    "눌렀는데 아무 일도 안 일어났고 그것을 모르는 것"이다 — 그 경우 브로커 화면으로
+    가라는 문구가 그대로 필요하다.
     """
-    clicked = st.button("🛑 KILL SWITCH", type="primary", disabled=not _KILL_SWITCH_WIRED)
-    if not _KILL_SWITCH_WIRED:
-        st.caption("미배선 — sys.kill 발행 경로 없음(비상시 브로커 화면에서 직접 청산)")
+    live = source.mode == DataSourceMode.LIVE and bool(redis_url)
+    clicked = st.button("🛑 KILL SWITCH", type="primary", disabled=not live)
+    if not live:
+        st.caption("REPLAY 모드 — 발동 불가(LIVE에서만 sys.kill을 발행한다)")
 
     if clicked:
         st.session_state["kill_confirm_pending"] = True
@@ -620,10 +661,20 @@ def _render_kill_switch() -> None:
         st.warning("정말 전량 청산·주문 차단하시겠습니까? (2단 확인)")
         if st.button("확인 — 즉시 발동"):
             st.session_state["kill_confirm_pending"] = False
-            st.session_state["kill_requested"] = True
-    if st.session_state.get("kill_requested"):
-        # 한 번 뜨고 사라지지 않는다 — 발동 요청은 세션이 끝날 때까지 화면에 남는 사실이다.
-        st.error("Kill Switch 발동 요청됨 — 청산 완료 여부를 브로커 화면에서 직접 확인할 것")
+            try:
+                _publish_kill(redis_url or "", "Command Center 수동 발동")
+                st.session_state["kill_requested"] = "발행됨"
+            except Exception as exc:  # noqa: BLE001 — 실패도 화면에 남아야 한다
+                st.session_state["kill_requested"] = f"발행 실패: {exc}"
+    state = st.session_state.get("kill_requested")
+    if state == "발행됨":
+        # 한 번 뜨고 사라지지 않는다 — 발동은 세션이 끝날 때까지 화면에 남는 사실이다.
+        st.error(
+            "Kill Switch 발행됨(sys.kill) — 게이트 정지·청산 주문은 G2 러너가 수행한다. "
+            "**체결 완료 여부는 브로커 화면에서 직접 확인할 것**"
+        )
+    elif state:
+        st.error(f"Kill Switch {state} — 즉시 브로커 화면에서 직접 청산할 것")
 
 
 # ---------------------------------------------------------------- 코드 버전 스트립
@@ -671,7 +722,10 @@ def _render_version_strip(source) -> None:
 # ---------------------------------------------------------------- 존 렌더링
 
 
-def render_top_bar(source, symbol: str) -> None:
+def render_top_bar(source, symbol: str, redis_url: str | None = None) -> None:
+    """`redis_url`은 Kill Switch 발행에만 쓴다 (2026-08-07 고도화 6) — 없으면 버튼이
+    비활성이다. 기본값 None인 이유는 REPLAY 경로와 테스트가 이 인자를 안 주기 때문이고,
+    그 경우 **못 누르는 쪽으로** 실패하는 것이 맞다."""
     st.markdown(f"### MESSIAH Command Center — `{symbol}`")
     cols = st.columns([2, 2, 2, 2, 1])
     with cols[0]:
@@ -687,7 +741,7 @@ def render_top_bar(source, symbol: str) -> None:
     with cols[3]:
         _render_circuit_breaker_badge(source)
     with cols[4]:
-        _render_kill_switch()
+        _render_kill_switch(source, redis_url)
 
     # `_run_live_subscriber`가 예외를 삼키고 "LiveConnectionError" 키에 Health(CRITICAL)를
     # 남긴다(모듈 docstring) — 지금까지는 그 키를 읽는 render_* 함수가 하나도 없어서, 연결
@@ -817,11 +871,17 @@ _LIVE_REFRESH_SECONDS = 5
 
 
 def _render_dashboard_body(
-    source, *, symbol: str, horizon: str, bar_dir: Path, tick_size: float
+    source,
+    *,
+    symbol: str,
+    horizon: str,
+    bar_dir: Path,
+    tick_size: float,
+    redis_url: str | None = None,
 ) -> None:
     """`main()`에서 분리 — LIVE 모드에서만 `st.fragment(run_every=...)`로 감싸 이 부분만
     주기적으로 다시 그린다(전체 페이지 rerun은 사이드바 위젯 상태를 흔들 필요가 없어 과함)."""
-    render_top_bar(source, symbol)
+    render_top_bar(source, symbol, redis_url)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col1:
         render_ai_decision_panel(source)
@@ -850,6 +910,7 @@ def main() -> None:
     horizon = st.sidebar.selectbox("차트 Horizon", ["1m", "3m", "5m", "10m", "15m", "30m"], index=2)
     tick_size = st.sidebar.number_input("틱 크기", value=DEFAULT_TICK_SIZE, format="%.4f")
 
+    redis_url: str | None = None
     if mode_label == "LIVE":
         redis_url = st.sidebar.text_input("Redis URL", _default_redis_url())
         cache = _get_live_cache(redis_url, symbol)
@@ -862,7 +923,14 @@ def main() -> None:
         run_every = None
 
     body = st.fragment(run_every=run_every)(_render_dashboard_body)
-    body(source, symbol=symbol, horizon=horizon, bar_dir=DEFAULT_BAR_DIR, tick_size=tick_size)
+    body(
+        source,
+        symbol=symbol,
+        horizon=horizon,
+        bar_dir=DEFAULT_BAR_DIR,
+        tick_size=tick_size,
+        redis_url=redis_url,
+    )
 
 
 if __name__ == "__main__":

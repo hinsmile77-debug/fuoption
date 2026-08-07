@@ -88,7 +88,9 @@ def test_restart_destroyed_morning_shows_as_head_gap():
     assert coverage.head_gap_minutes == 115.0
     assert len(findings) == 1
     assert "115분간 적재 없음" in findings[0]
-    assert "소급 불가" in findings[0], "봉 결손과 같은 무게로 읽히면 안 된다"
+    # 2026-08-07 고도화 4로 문구가 강해졌다("소급 불가" → "영구 소실(소급 경로 없음)").
+    # 검사하는 성질은 그대로다 — 이 계열의 공백이 되메울 수 없다는 사실이 문장에 남는가.
+    assert "영구 소실" in findings[0], "봉 결손과 같은 무게로 읽히면 안 된다"
 
 
 def test_reboot_hole_in_a_continuous_series_is_caught():
@@ -229,3 +231,93 @@ def test_summarize_lists_healthy_series_too(tmp_path):
     assert len(lines) == 1
     assert "flow_intraday/K2I" in lines[0]
     assert "✅" in lines[0]
+
+
+# ---------------------------------------------------------------- 캘린더 계약 (2026-08-07 P0-3)
+
+
+def _contract_window():
+    from datetime import datetime
+
+    from messiah.core.timeutil import KST
+
+    return (
+        datetime(2026, 8, 7, 8, 35, tzinfo=KST),
+        datetime(2026, 8, 7, 15, 35, tzinfo=KST),
+    )
+
+
+def _unlisted(name="option_chain/weekly_thu"):
+    from datetime import date as _d
+
+    from messiah.ops.series_expectation import Expectation
+
+    return Expectation(
+        series=name,
+        required=False,
+        reason="먼슬리 만기 주(08-13 만기) — KRX 미상장",
+        resumes_on=_d(2026, 8, 14),
+    )
+
+
+def test_unlisted_series_with_no_rows_is_silent():
+    """2026-08-07의 그 자리 — 그대로 뒀으면 8/13까지 5거래일 연속 오탐 ERROR였다."""
+    coverage = sc.measure(
+        "option_chain/weekly_thu", [], window=_contract_window(), expectation=_unlisted()
+    )
+    assert coverage.rows == 0
+    assert coverage.expected is False
+    assert sc.findings_for(coverage) == []
+    # 세션 창 전체가 머리 구멍으로 잡히면 `series_head_gap_minutes_max` 지표가 오염된다.
+    assert coverage.head_gap_minutes == 0.0
+
+
+def test_unlisted_series_with_rows_is_a_violation():
+    """양방향 단언 — 미상장이라 판정했는데 쌓였으면 **규정 이해가 틀린 것**이다."""
+    from datetime import datetime, timedelta
+
+    from messiah.core.timeutil import KST
+
+    base = datetime(2026, 8, 7, 10, 0, tzinfo=KST)
+    stamps = [base + timedelta(minutes=i) for i in range(10)]
+    coverage = sc.measure(
+        "option_chain/weekly_thu", stamps, window=_contract_window(), expectation=_unlisted()
+    )
+    findings = sc.findings_for(coverage)
+    assert len(findings) == 1
+    assert "미상장으로 판정했는데" in findings[0]
+
+
+def test_no_expectation_means_required():
+    """계약을 모르는 호출자가 조용히 면제받으면 안 된다."""
+    coverage = sc.measure("option_chain/weekly_thu", [], window=_contract_window())
+    assert coverage.expected is True
+    assert sc.findings_for(coverage) != []
+
+
+def test_summarize_marks_unlisted_distinctly():
+    coverage = sc.measure(
+        "option_chain/weekly_thu", [], window=_contract_window(), expectation=_unlisted()
+    )
+    line = sc.summarize([coverage])[0]
+    assert "⊘" in line
+    assert "❌" not in line
+    # 계열 이름이 두 번 나오면 안 된다(2026-08-07 실측 표기 중복).
+    assert line.count("option_chain/weekly_thu") == 1
+
+
+def test_irrecoverable_grade_is_applied_after_the_calendar_gate():
+    """고도화 4 — 등급은 계약 **뒤에** 붙는다. 앞에 두면 미상장일에 가장 크게 운다."""
+    assert sc._is_irrecoverable("option_chain/weekly_mon")
+    assert sc._is_irrecoverable("flow_intraday/K2I")
+    assert sc._is_irrecoverable("ticks")
+    assert not sc._is_irrecoverable("bars/A05608")
+
+    silent = sc.measure(
+        "option_chain/weekly_thu", [], window=_contract_window(), expectation=_unlisted()
+    )
+    assert sc.findings_for(silent) == []  # 소급 불가 계열이어도 미상장이면 조용하다
+
+    loud = sc.measure("option_chain/weekly_thu", [], window=_contract_window())
+    assert "영구 소실" in loud[0] if isinstance(loud, list) else True
+    assert "영구 소실" in sc.findings_for(loud)[0]

@@ -678,3 +678,76 @@ async def test_unknown_is_folded_into_the_dont_know_branch_not_the_unhealthy_one
     )
 
     assert pipeline._collector_healthy(now_holder["t"]) is None  # noqa: SLF001
+
+
+# ------------------------------------------------- sys.kill 수신 (2026-08-07 고도화 6)
+#
+# `core/bus.py`의 `subscribe()`는 처음부터 `TOPIC_KILL`을 모든 패턴에 끼워 넣었다 — 즉 이
+# 파이프라인은 `KillSignal`을 **받고 있었고** `_dispatch`에 분기가 없어 조용히 버렸다.
+# 화면 버튼이 "미배선"이던 진짜 이유는 발행자 부재였지만, 발행자만 붙였다면 아무 일도
+# 일어나지 않았을 것이다.
+
+
+@pytest.mark.asyncio
+async def test_kill_signal_halts_gateway_and_liquidates():
+    from messiah.core.messages import KillSignal
+
+    bus, broker, gateway, pipeline = await _make_pipeline()
+    await _warm_up(pipeline, broker)
+    await pipeline.start_day()
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+    assert len(await broker.positions()) == 1
+
+    await pipeline.handle_kill(KillSignal(reason="Command Center 수동 발동", triggered_by="manual"))
+
+    assert gateway.halted is True
+    assert all(p.qty == 0 for p in await broker.positions()), "전량 청산돼야 한다"
+
+
+@pytest.mark.asyncio
+async def test_kill_signal_arrives_through_dispatch():
+    """구독 경로로 실제로 흘러 들어오는가 — 분기가 없으면 조용히 버려진다."""
+    from messiah.core.messages import KillSignal
+
+    bus, broker, gateway, pipeline = await _make_pipeline()
+    await _warm_up(pipeline, broker)
+    await pipeline.start_day()
+
+    await pipeline._dispatch(  # noqa: SLF001 — 구독 핸들러를 직접 부른다
+        KillSignal(reason="테스트", triggered_by="manual")
+    )
+
+    assert gateway.halted is True
+
+
+@pytest.mark.asyncio
+async def test_kill_signal_blocks_the_next_entry():
+    """`_triggered`를 안 세우면 다음 판단이 곧바로 신규 진입을 낸다."""
+    from messiah.core.messages import KillSignal
+
+    bus, broker, gateway, pipeline = await _make_pipeline()
+    await _warm_up(pipeline, broker)
+    await pipeline.start_day()
+
+    await pipeline.handle_kill(KillSignal(reason="테스트", triggered_by="manual"))
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+
+    assert all(p.qty == 0 for p in await broker.positions())
+
+
+@pytest.mark.asyncio
+async def test_kill_signal_failure_does_not_kill_the_subscription_loop():
+    """비상 경로가 실패해도 예외를 위로 안 던진다 — 구독 루프가 끊기면 나머지 감시가 멈춘다."""
+    from messiah.core.messages import KillSignal
+
+    bus, broker, gateway, pipeline = await _make_pipeline()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("브로커 응답 없음")
+
+    broker.positions = boom  # type: ignore[method-assign]
+
+    await pipeline.handle_kill(KillSignal(reason="테스트", triggered_by="manual"))
+
+    # 게이트 정지는 브로커 조회보다 **먼저** 일어난다 — 실패해도 신규 주문은 막힌 상태여야 한다.
+    assert gateway.halted is True

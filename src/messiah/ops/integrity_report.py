@@ -37,6 +37,7 @@ DEBUG 라인을 Horizon별로 집계해야 15m/30m가 하루 종일 NaN 2/3라�
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -47,10 +48,17 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import polars as pl
 
+from messiah.core import universe
+from messiah.core.event_calendar import EventCalendar
 from messiah.core.messages import BarSession, Horizon
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
-from messiah.ops import observation_gaps, series_coverage
+from messiah.ops import (
+    canonical_consumers,
+    observation_gaps,
+    series_coverage,
+    series_expectation,
+)
 from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
 _KST_ZONE_NAME = "Asia/Seoul"
@@ -218,6 +226,13 @@ class IntegrityReport:
     observation_gaps: list[dict[str, Any]]
     host_events: list[dict[str, Any]]
     breaches: list[str]
+    # **그날 계약 중 "일부러 안 모은 것"** (2026-08-07 P0-3, `ops/series_expectation.py`).
+    #
+    # 판정이 아니라 **전제**다. 커버리지 표의 ⊘가 왜 정상인지를 리포트가 스스로 말하게
+    # 한다 — 이 줄이 없으면 나중에 이력을 다시 읽는 사람이 그날의 0행을 또 사고로 읽는다
+    # (2026-08-07에 실제로 그렇게 오판했다). 기본값이 있는 이유는 축이 없던 옛 리포트를
+    # `IntegrityReport(**entry)`로 되읽는 경로가 있기 때문이다.
+    series_contract: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -350,10 +365,56 @@ def _iter_json_lines(paths: Iterable[Path]) -> Iterable[dict[str, Any]]:
                 continue
 
 
+# 기동 창 거절의 **평문** 줄 — 구조화 태그(`LaunchWindowRefused`, 2026-08-07 P0-4)가
+# 생기기 전에 쓰인 로그를 읽기 위한 하위호환 경로다. `ops/session_guard.py`가 찍는
+# "기동 창(08:30~15:35) 이전 07:23:31 — ..." 형태에서 시각만 뽑는다.
+#
+# 이 줄이 필요한 이유는 순전히 시점 때문이다: 2026-08-07 07:23의 거절은 **이 수정보다
+# 먼저** 로그에 쓰였고, 그날 15:45 리포트는 그 로그를 읽는다. 폴백이 없으면 고친 당일의
+# 리포트만 여전히 틀린 값을 낸다 — 그건 이 수정이 겨냥한 바로 그 리포트다.
+_LEGACY_LAUNCH_REFUSAL = re.compile(r"\[기동 창\].*?(?:이전|이후)\s+(\d{2}:\d{2}:\d{2})")
+
+
+def _legacy_refused_starts(paths: Iterable[Path]) -> list[str]:
+    """구조화 태그 없이 쓰인 기동 창 거절 시각들 — `_LEGACY_LAUNCH_REFUSAL` 참고."""
+    out: list[str] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            found = _LEGACY_LAUNCH_REFUSAL.search(line)
+            if found:
+                out.append(found.group(1))
+    return out
+
+
+def _drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[str]:
+    """기동 창 가드가 거절한 기동을 `SessionStart` 목록에서 뺀다 (2026-08-07 P0-4).
+
+    `HH:MM:SS` 문자열끼리 맞춘다. 거절 로그 하나마다 **그 시각 이하의 가장 늦은 기동**
+    하나를 지운다 — 가드 판정은 `SessionStart` 직후에 나오므로 그게 짝이다.
+
+    왜 개수만 빼면 안 되나: 2026-08-07은 `07:23:31 기동(거절)` → `08:35:34 기동(정상)`
+    순서였다. 앞에서부터 개수만큼 지우면 우연히 맞지만, 반대 순서(정상 기동 뒤 장 마감
+    직후 부팅 트리거가 한 번 더 발화)에서는 **살아 있어야 할 기동**이 지워진다.
+
+    짝을 못 찾은 거절은 무시한다 — `SessionStart`보다 거절이 많은 상태는 로그가 잘린
+    경우이고, 그때 남은 기동을 마저 지우면 "그날 아무도 안 떴다"가 되어 더 나쁘다.
+    """
+    remaining = sorted(starts)
+    for moment in sorted(refused):
+        candidates = [s for s in remaining if s <= moment]
+        if candidates:
+            remaining.remove(candidates[-1])
+    return remaining
+
+
 def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     level_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
     session_starts: list[str] = []
+    # 기동 창 가드가 되돌려보낸 기동 (2026-08-07 P0-4) — `session_starts`에서 뺄 목록.
+    refused_starts: list[str] = []
     session_git_shas: list[str] = []
     clock_skews: list[float] = []
     delivery_latency: dict[str, float] | None = None
@@ -380,6 +441,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             sha = record.get("git_sha")
             if isinstance(sha, str) and sha:
                 session_git_shas.append(sha)
+        elif tag == "LaunchWindowRefused":
+            refused_starts.append(str(record.get("ts", ""))[11:19])
         elif tag in ("ClockSkewMeasured", "ClockSkewExceeded"):
             skew = record.get("skew_seconds")
             if isinstance(skew, (int, float)):
@@ -417,10 +480,20 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         }
         for horizon, values in sorted(nan_by_horizon.items())
     }
+    # 기동 창 가드가 되돌려보낸 기동을 뺀다 (2026-08-07 P0-4).
+    #
+    # 짝짓기는 **시각 일치**로 한다 — 가드 판정은 `SessionStart` 직후(같은 초 또는 몇 초 뒤)
+    # 이므로 "가장 가까운 앞선 기동"을 찾는 것이 정확하다. 순진하게 개수만 빼면 정상 기동이
+    # 지워질 수 있다(거절이 먼저 오고 정상 기동이 뒤에 오는 오늘 같은 순서에서 특히).
+    # 구조화 태그가 없던 시절의 로그도 읽는다(`_legacy_refused_starts` 주석) — 중복은
+    # 집합으로 없앤다. 같은 거절이 두 경로로 잡히면 정상 기동까지 지워진다.
+    all_refused = sorted(set(refused_starts) | set(_legacy_refused_starts(log_paths)))
+    effective_starts = _drop_refused_starts(session_starts, all_refused)
     return {
         "level_counts": level_counts,
         "tag_counts": tag_counts,
-        "session_starts": session_starts,
+        "session_starts": effective_starts,
+        "refused_starts": all_refused,
         "activity_kst": sorted(activity),
         "session_git_shas": sorted(set(session_git_shas)),
         # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
@@ -737,6 +810,7 @@ def build_report(
     flow_dir: Path | None = None,
     option_chain_dir: Path | None = None,
     host_event_collector=observation_gaps.collect_host_events,
+    universe_tokens: Sequence[str] | None = None,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
 
@@ -917,6 +991,21 @@ def build_report(
     coverage_window = series_coverage.session_window(
         day, start=_first_session_start(day, session_starts)
     )
+    # 그날 계약(2026-08-07 P0-3·고도화 1) — "이 계열이 오늘 있어야 하는가".
+    #
+    # 계약을 못 만들면 **전 계열을 필수로 본다**(빈 dict). 조용히 면제하는 쪽이 아니라
+    # 시끄러운 쪽으로 실패해야 한다 — 그리고 못 만들었다는 사실 자체를 `unmeasured`에
+    # 남겨서, 그날 오탐이 났을 때 원인을 바로 찾을 수 있게 한다.
+    expectations: dict[str, series_expectation.Expectation] = {}
+    try:
+        expectations = series_expectation.for_day(
+            day,
+            list(universe_tokens if universe_tokens is not None else universe.DEFAULT_UNIVERSE),
+            EventCalendar.from_file(),
+        )
+    except Exception as exc:  # noqa: BLE001 — 계약 없이도 리포트는 나와야 한다
+        unmeasured.append(f"적재 계열 캘린더 계약(전 계열 필수로 판정) — {exc}")
+
     coverages = series_coverage.collect(
         day,
         symbol,
@@ -924,9 +1013,15 @@ def build_report(
         flow_dir=flow_dir or data_root / "flow_intraday",
         option_chain_dir=option_chain_dir or data_root / "option_chain",
         tick_dir=tick_dir or data_root / "ticks",
+        expectations=expectations,
     )
     series_findings = [f for item in coverages for f in series_coverage.findings_for(item)]
     breaches.extend(series_findings)
+    series_contract = series_expectation.summarize(expectations)
+    # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2) — 코드 구조 판정이라 그날 데이터와 무관하다.
+    # 그래도 여기 싣는 이유는 **매일 읽히는 문서가 이것 하나**이기 때문이다. 테스트로만
+    # 지키면 CI가 빨간 채로 며칠 가는 상황에서 아무도 안 본다.
+    breaches.extend(canonical_consumers.findings())
 
     # ---- P1-1·P1-2(2026-08-06): 관측 공백과 그 원인 ----
     #
@@ -986,6 +1081,7 @@ def build_report(
         tick_rows=tick_rows,
         series_coverage=[item.to_dict() for item in coverages],
         series_findings=series_findings,
+        series_contract=series_contract,
         observation_gaps=[gap.to_dict() for gap in observation.gaps],
         host_events=[event.to_dict() for event in observation.events],
         breaches=breaches,
@@ -1093,6 +1189,9 @@ def format_summary(report: IntegrityReport) -> str:
     # 적재 계열 커버리지 (2026-08-06 고도화 2) — **정상인 계열도 전부 찍는다.**
     # 2026-08-06에 리포트가 조용했던 이유는 이 계열들을 "정상"으로 판정해서가 아니라
     # 아예 안 봐서였다. 목록 자체가 "무엇을 보고 있는가"의 증거다.
+    # 계약을 커버리지 표 **앞**에 찍는다 — 표의 ⊘를 보기 전에 왜 ⊘인지를 먼저 읽게.
+    for item in report.series_contract:
+        lines.append(f"  ⊘ 오늘 안 모으는 계열: {item}")
     if report.series_coverage:
         lines.append(f"  적재 계열 커버리지 ({len(report.series_coverage)}개):")
         lines.extend(

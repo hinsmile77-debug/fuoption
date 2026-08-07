@@ -23,6 +23,17 @@ from messiah.core.version import PROCESS_GIT_SHA
 # 태그 등록부: 태그 = 심각도 1개 고정 (신규 태그는 여기 등록 후 사용)
 TAG_LEVELS: dict[str, int] = {
     "SessionStart": logging.INFO,
+    # 기동 창 가드가 이 프로세스를 **설계대로** 되돌려보냈다 (2026-08-07 P0-4).
+    #
+    # `SessionStart`는 이미 찍힌 뒤다(로깅 설정이 프로세스 최초에 일어나므로). 그래서
+    # 리포트는 그것을 "기동 1회"로 세고, 곧이어 프로세스가 사라지므로 정시 기동까지를
+    # **관측 공백**으로, 그 구간을 계열 **머리 구멍**으로 읽는다. 2026-08-07이 그랬다:
+    # 부팅 트리거가 07:23에 발화 → 가드가 정확히 거절 → 리포트는 `재기동 1회` +
+    # `관측 공백 73분(원인 불명)` + 전 계열 `머리 구멍 72~82분`을 찍었다. 전부 오탐이고,
+    # `observation_gap_minutes_max max: 5` 등록부 항목을 `재발`로 뒤집을 값이었다.
+    #
+    # 이 태그가 그 `SessionStart`를 **무효화**한다 — 없던 기동으로 친다.
+    "LaunchWindowRefused": logging.INFO,
     "BarClosed": logging.DEBUG,
     "FeaturePublish": logging.DEBUG,
     "FeatureNaN": logging.WARNING,
@@ -69,6 +80,13 @@ TAG_LEVELS: dict[str, int] = {
     "DecisionEmitted": logging.INFO,  # Meta Decision — NO TRADE도 포함해 전부 기록(Ver 2.0 §3.2)
     "SizerZeroQty": logging.INFO,  # Sizer 계산 결과 0계약 — 주문 생성 안 함(정상 동작)
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
+    # 외부에서 발행된 `sys.kill` 수신 (2026-08-07 고도화 6) — 지금은 Command Center의
+    # 수동 발동이 유일한 발행자다. `KillSwitch`(CRITICAL)와 나눠 둔 이유: 저쪽은 이 프로세스가
+    # **스스로 판단해** 발동한 것이고, 이쪽은 **밖에서 받은** 것이다. 사후에 "누가 눌렀나"를
+    # 가리려면 두 사건이 같은 태그면 안 된다.
+    "KillSignalReceived": logging.CRITICAL,
+    # 비상 경로가 실패했다는 사실 자체가 가장 먼저 보여야 하는 정보다.
+    "KillSignalHandlingFailed": logging.CRITICAL,
     "InvestorFlowPollError": logging.WARNING,
     # 수급 스냅샷 적재 실패 — 장중 수급은 **과거 조회가 없어** 놓치면 영원히 못 받는다
     # (`data/flow_archiver.py`). 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
@@ -85,7 +103,21 @@ TAG_LEVELS: dict[str, int] = {
     # 버퍼는 그대로 유실된다 — 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
     "TickArchiveError": logging.WARNING,
     "TickArchiveSummary": logging.INFO,  # 장후 적재 요약 — 결선만 하고 0행인 상태를 매일 드러낸다
-    "OptionChainPollEmpty": logging.WARNING,  # 근월물 체인이 비어있음 — 마스터파일 갱신 필요할 수도
+    # 빈 체인의 이유 3분화 (2026-08-07 P0-2, `data/option_chain_poller.py` 모듈 docstring).
+    # 종전엔 셋이 전부 아래 `OptionChainPollEmpty` 한 줄이었고, 그 문구가 가리킨 처방
+    # ("마스터파일 갱신 필요할 수 있음")은 2026-08-07에 22번 다 틀렸다.
+    #
+    # 규정상 미상장 — **정상**이라 DEBUG다. 하루 한 번 기동 로그에만 남는다.
+    "OptionChainSeriesNotListed": logging.DEBUG,
+    # 상장돼 있어야 하는데 체인이 비었다 — 진짜 사고. 3사이클 연속에서 딱 한 번.
+    "OptionChainSeriesMissing": logging.ERROR,
+    # 미상장이라 판정했는데 체인이 있다 — **규정 이해가 틀렸다.** 조용한 오수집이
+    # 빈 파일보다 나쁘다(만기 하루짜리 체인이 모델에 들어간다).
+    "OptionChainCalendarViolation": logging.ERROR,
+    # 빈 사이클의 **빵부스러기**. 2026-08-07까지 WARNING이었고 그날 22번 울었는데, 그 22줄이
+    # 하나같이 틀린 처방("마스터파일 갱신 필요")을 가리켰다. 판정은 위 3종이 하고 이 태그는
+    # "몇 시부터 비었나"를 로그에서 찾게 해 주는 흔적만 남긴다 — 그래서 DEBUG로 강등했다.
+    "OptionChainPollEmpty": logging.DEBUG,
     # 다리 1개가 **끝내** 실패 — 이 태그의 건수가 곧 그날 빈 다리 수다(2026-08-05 재시도 도입
     # 이후). 나머지 다리는 계속 시도한다(L22).
     "OptionChainPollError": logging.WARNING,

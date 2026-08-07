@@ -443,3 +443,143 @@ async def test_scheduler_drives_poll_once_repeatedly():
 
     assert len(rest.calls) == 6  # 2다리 × 3회
     assert len(bus.published) == 6
+
+
+# ---------------------------------------------------------------- 캘린더 게이트 (2026-08-07 P0-2)
+#
+# 2026-08-07 실측: `weekly_thu` 체인이 하루 종일 비었고 폴러는 `OptionChainPollEmpty`
+# (당시 WARNING)를 22회 찍었다. 원인은 KRX 규정상 미상장이었고, 그 22줄이 가리킨 처방
+# ("마스터파일 갱신 필요")은 전부 틀렸다. 아래 넷이 그날의 네 가지 경우다.
+
+
+async def test_not_listed_series_announces_once_and_stays_quiet(monkeypatch):
+    """캘린더=미상장 · 체인 없음 → 하루 한 번만 안내하고 조용하다."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    poller = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster([]),
+        FakeBus(),
+        series="weekly_thu",
+        reference_price=lambda: 100.0,
+        listed=lambda: False,
+    )
+
+    for _ in range(22):  # 그날 실제로 돈 사이클 수
+        await poller.poll_once()
+
+    assert logged == ["OptionChainSeriesNotListed"]
+    assert "OptionChainPollEmpty" not in logged
+    assert "OptionChainSeriesMissing" not in logged
+
+
+async def test_listed_but_empty_escalates_once_at_the_streak_threshold(monkeypatch):
+    """캘린더=상장 · 체인 없음 → 진짜 사고. 3사이클째에 **딱 한 번** ERROR."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    poller = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster([]),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        listed=lambda: True,
+    )
+
+    for _ in range(10):
+        await poller.poll_once()
+
+    assert logged.count("OptionChainSeriesMissing") == 1
+    # 빵부스러기는 매 사이클 남는다(DEBUG) — "몇 시부터 비었나"를 찾을 수 있어야 한다.
+    assert logged.count("OptionChainPollEmpty") == 10
+
+
+async def test_calendar_violation_still_collects(monkeypatch):
+    """캘린더=미상장 · 체인 **있음** → 운다. 그리고 **그래도 수집한다**.
+
+    양방향 단언의 핵심. 억제만 하면 규정이 바뀐 날 만기 하루짜리 체인을 조용히 받아
+    모델에 먹인다 — 빈 파일보다 나쁘다.
+    """
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    rest = FakeRestClient()
+    poller = OptionChainPoller(
+        rest,
+        FakeMaster(_chain([100.0])),
+        FakeBus(),
+        series="weekly_thu",
+        reference_price=lambda: 100.0,
+        listed=lambda: False,
+    )
+
+    await poller.poll_once()
+
+    assert "OptionChainCalendarViolation" in logged
+    assert rest.calls, "미상장 판정이 수집을 막으면 안 된다 — 받은 것은 버리지 않는다"
+
+
+async def test_recovery_resets_the_streak(monkeypatch):
+    """비었다가 돌아오면 streak이 풀린다 — 다음에 또 3사이클 비면 다시 운다."""
+    logged: list[str] = []
+    monkeypatch.setattr(
+        "messiah.data.option_chain_poller.mlog.log", lambda tag, msg, **f: logged.append(tag)
+    )
+    master = FakeMaster([])
+    poller = OptionChainPoller(
+        FakeRestClient(),
+        master,
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        listed=lambda: True,
+    )
+
+    for _ in range(3):
+        await poller.poll_once()
+    assert logged.count("OptionChainSeriesMissing") == 1
+
+    master._chain = _chain([100.0])  # 복구
+    await poller.poll_once()
+
+    master._chain = []  # 다시 끊김
+    for _ in range(3):
+        await poller.poll_once()
+    assert logged.count("OptionChainSeriesMissing") == 2
+
+
+async def test_expected_legs_is_zero_for_unlisted_series():
+    """유량 예산이 **선언이 아니라 오늘 실제 수요**를 세게 하는 값 (P1-1)."""
+    listed = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster([]),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+        listed=lambda: True,
+    )
+    unlisted = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster([]),
+        FakeBus(),
+        series="weekly_thu",
+        reference_price=lambda: 100.0,
+        listed=lambda: False,
+    )
+    unknown = OptionChainPoller(
+        FakeRestClient(),
+        FakeMaster([]),
+        FakeBus(),
+        series="regular",
+        reference_price=lambda: 100.0,
+    )
+
+    assert listed.expected_legs_per_cycle == listed.legs_per_cycle
+    assert unlisted.expected_legs_per_cycle == 0
+    # 캘린더를 안 준 호출자는 **면제받지 않는다**.
+    assert unknown.expected_legs_per_cycle == unknown.legs_per_cycle

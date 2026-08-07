@@ -73,7 +73,7 @@ import asyncio
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -124,7 +124,7 @@ from messiah.data.option_chain_archiver import OptionChainArchiver  # noqa: E402
 from messiah.data.option_chain_poller import OptionChainPoller  # noqa: E402
 from messiah.data.tick_archiver import TickArchiver  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
-from messiah.ops import session_guard  # noqa: E402
+from messiah.ops import series_expectation, session_guard  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 from messiah.ops.status_board import run_status_board_forever  # noqa: E402
 
@@ -371,6 +371,9 @@ class _RestCollection:
     chain_pollers: tuple[tuple[OptionChainPoller, float, float], ...] = ()  # (폴러, 주기, 위상)
     chain_archiver: OptionChainArchiver | None = None
     price_tracker: LastPriceTracker | None = None
+    # 시리즈 → 미상장 사유 문장 (2026-08-07 P0-2). 기동 로그가 "왜 안 모으는지"를 그대로
+    # 인용하게 하려는 것 — 사유 없는 부재는 사고와 구분이 안 된다.
+    contract_notes: dict[str, str] = field(default_factory=dict)
 
     @property
     def requests_per_second(self) -> float:
@@ -379,7 +382,9 @@ class _RestCollection:
         if self.flow_poller is not None:
             rps += 3 / _FLOW_POLL_SECONDS  # 3업종
         for poller, period, _ in self.chain_pollers:
-            rps += poller.legs_per_cycle / period
+            # **선언이 아니라 오늘 실제로 나갈 호출 수**를 센다 (2026-08-07 P1-1) —
+            # 미상장 시리즈는 0이다(`OptionChainPoller.expected_legs_per_cycle`).
+            rps += poller.expected_legs_per_cycle / period
         return rps
 
     @property
@@ -436,6 +441,7 @@ def _build_rest_collection(
     tick_size: Decimal,
     archiver: ParquetArchiver | None = None,
     today: date | None = None,
+    universe_tokens: list[str] | None = None,
 ) -> _RestCollection:
     """REST 폴러 묶음 — 만들다 실패해도 **수집 본 임무를 막지 않는다**.
 
@@ -461,7 +467,15 @@ def _build_rest_collection(
         tracker = LastPriceTracker(symbol, tick_size)
         if archiver is not None and today is not None:
             _seed_preopen_reference_price(tracker, archiver, symbol, today)
-        plan = _option_chain_plan(now_kst().date())
+        session_day = now_kst().date()
+        plan = _option_chain_plan(session_day)
+        # 그날 계약 (2026-08-07 P0-2·고도화 1) — 어느 시리즈가 오늘 상장돼 있는가.
+        # 폴러는 `EventCalendar`를 직접 열지 않고 이 술어를 주입받는다(그쪽 docstring).
+        contract = series_expectation.for_day(
+            session_day,
+            list(universe_tokens if universe_tokens is not None else universe.DEFAULT_UNIVERSE),
+            EventCalendar.from_file(),
+        )
         chain_pollers = tuple(
             (
                 OptionChainPoller(
@@ -471,6 +485,15 @@ def _build_rest_collection(
                     series=series,
                     reference_price=lambda: tracker.price_points(),
                     strike_window=_OPTION_STRIKE_WINDOW,
+                    # 기본 인자로 묶어 늦은 바인딩을 막는다 — 안 그러면 세 폴러가 전부
+                    # 마지막 `series`의 계약을 본다(전형적인 클로저 함정).
+                    listed=(
+                        lambda s=series: (
+                            contract[
+                                f"{series_expectation.ARCHIVE_PREFIX_OPTION_CHAIN}/{s}"
+                            ].required
+                        )
+                    ),
                 ),
                 period,
                 phase,
@@ -488,13 +511,24 @@ def _build_rest_collection(
         chain_pollers=chain_pollers,
         chain_archiver=chain_archiver,
         price_tracker=tracker,
+        contract_notes={
+            series: contract[f"{series_expectation.ARCHIVE_PREFIX_OPTION_CHAIN}/{series}"].note
+            for series, _, _ in plan
+        },
     )
     print(
         f"수급 수집 결선 — {tr_codes.FID_MRKT_DIV_DERIVATIVES} "
         f"3업종 / {_FLOW_POLL_SECONDS:.0f}초 격자 → {_FLOW_DIR}",
         flush=True,
     )
+    # 미상장 시리즈는 **다른 문장으로** 찍는다 (2026-08-07 P0-2). 같은 "결선 —" 줄을 쓰면
+    # "오늘 안 모으는 것을 알고 안 모은다"가 화면에서 안 보이고, 그러면 장후 리포트의 ⊘를
+    # 보고서야 알게 된다. 그때는 이미 하루가 끝나 있다.
     for poller, period, phase in chain_pollers:
+        if poller.expected_legs_per_cycle == 0:
+            note = collection.contract_notes.get(poller.series, "미상장")
+            print(f"옵션체인 — {poller.series} {note} · 단언 폴링만(수집 0)", flush=True)
+            continue
         print(
             f"옵션체인 결선 — {poller.series} ATM±{_OPTION_STRIKE_WINDOW} "
             f"({poller.legs_per_cycle}다리) / {period:.0f}초 격자 위상 {phase:.0f}초",
@@ -844,6 +878,9 @@ async def main(cfg: InstanceConfig) -> None:
     allowed, reason = session_guard.launch_window_verdict()
     if not allowed:
         print(f"[기동 창] {reason}", flush=True)
+        # 구조화 로그로도 남긴다 (2026-08-07 P0-4) — 무결성 리포트가 이 `SessionStart`를
+        # 기동으로 세지 않게 하는 유일한 근거다(`core/logging.py` 태그 주석).
+        mlog.log("LaunchWindowRefused", reason, process="l1_daily")
         return
 
     _launch_ui(today.strftime("%Y%m%d"))
@@ -899,7 +936,17 @@ async def main(cfg: InstanceConfig) -> None:
     # REST 폴링 3종 — 파생 장중 수급(1분 격자) + 옵션체인 시리즈별(주기·위상 분리).
     # 근거는 `_option_chain_plan()` 위 주석과 `_RestCollection` docstring. 클라이언트를
     # 하나만 만들어 공유하는 것이 핵심이다(페이서가 갈리면 실효 호출률이 배수로 뛴다).
-    rest = _build_rest_collection(creds, bus, symbol, tick_size, archiver=archiver, today=today)
+    rest = _build_rest_collection(
+        creds,
+        bus,
+        symbol,
+        tick_size,
+        archiver=archiver,
+        today=today,
+        # 그날 계약(2026-08-07 고도화 1)의 재료 — `universe:` 선언이 여기서 처음으로
+        # "오늘 이 계열이 있어야 하는가"에 실제로 쓰인다.
+        universe_tokens=list(cfg.universe),
+    )
 
     # 첫 틱이 들어오기 전에 끝내야 한다 — 웜업 구간(09:00 이전)에 부르는 이유가 그것이다.
     await asyncio.to_thread(_load_warmup_artifacts, engine, archiver, symbol, today)

@@ -1333,3 +1333,73 @@ def test_unreadable_host_events_land_in_unmeasured(tmp_path: Path):
     )
 
     assert any("관측 공백 원인" in item for item in report.unmeasured)
+
+
+# ------------------------------------------------- 기동 창 거절 (2026-08-07 P0-4)
+#
+# 2026-08-06에 붙인 at-startup 트리거가 2026-08-07 07:23에 처음 발화했고, 기동 창 가드가
+# 설계대로 거절했다. 그런데 `SessionStart`는 이미 찍힌 뒤라 리포트는 그것을 기동으로 세고
+# `재기동 1회` + `관측 공백 73분(원인 불명)` + 전 계열 `머리 구멍 72~82분`을 찍었다.
+# 전부 오탐이고, `observation_gap_minutes_max max: 5` 등록부 항목을 뒤집을 값이었다.
+
+
+def test_refused_launch_is_not_counted_as_a_session_start(tmp_path):
+    from messiah.ops.integrity_report import analyze_logs
+
+    log = tmp_path / "l1_daily_20260807.log"
+    log.write_text(
+        "\n".join(
+            [
+                '{"ts": "2026-08-07T07:23:31+09:00", "level": "INFO", "tag": "SessionStart"}',
+                '{"ts": "2026-08-07T07:23:31+09:00", "level": "INFO", '
+                '"tag": "LaunchWindowRefused", "msg": "기동 창 이전"}',
+                '{"ts": "2026-08-07T08:35:34+09:00", "level": "INFO", "tag": "SessionStart"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = analyze_logs([log])
+
+    assert result["session_starts"] == ["08:35:34"], "거절된 기동은 없던 것으로 친다"
+    assert result["refused_starts"] == ["07:23:31"]
+
+
+def test_legacy_plaintext_refusal_is_also_recognised(tmp_path):
+    """구조화 태그가 생기기 **전에** 쓰인 로그도 읽는다.
+
+    2026-08-07 07:23의 거절은 이 수정보다 먼저 로그에 쓰였고, 그날 15:45 리포트가 그 로그를
+    읽는다. 폴백이 없으면 고친 당일의 리포트만 여전히 틀린 값을 낸다.
+    """
+    from messiah.ops.integrity_report import analyze_logs
+
+    log = tmp_path / "l1_daily_20260807.log"
+    log.write_text(
+        "\n".join(
+            [
+                '{"ts": "2026-08-07T07:23:31+09:00", "level": "INFO", "tag": "SessionStart"}',
+                "[기동 창] 기동 창(08:30~15:35) 이전 07:23:31 — 정시 트리거(08:35)에 맡긴다",
+                '{"ts": "2026-08-07T08:35:34+09:00", "level": "INFO", "tag": "SessionStart"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = analyze_logs([log])
+
+    assert result["session_starts"] == ["08:35:34"]
+
+
+def test_refusal_after_a_real_start_does_not_erase_the_real_one():
+    """개수만 빼면 살아 있어야 할 기동이 지워진다 — 시각으로 짝짓는 이유."""
+    from messiah.ops.integrity_report import _drop_refused_starts
+
+    # 08:35 정상 기동 → 15:50 부팅 트리거 발화 → 창 이후라 거절.
+    assert _drop_refused_starts(["08:35:34", "15:50:02"], ["15:50:02"]) == ["08:35:34"]
+
+
+def test_unmatched_refusal_is_ignored():
+    """거절이 기동보다 많으면(로그가 잘림) 남은 기동을 마저 지우지 않는다."""
+    from messiah.ops.integrity_report import _drop_refused_starts
+
+    assert _drop_refused_starts(["09:00:00"], ["07:00:00", "08:00:00"]) == ["09:00:00"]

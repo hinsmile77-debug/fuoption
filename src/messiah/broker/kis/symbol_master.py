@@ -34,12 +34,16 @@ weekly_mon 근월 만기 20260727=월요일, weekly_thu 근월 만기 20260723=�
 from __future__ import annotations
 
 import io
+import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from zipfile import ZipFile
 
 import httpx
 import polars as pl
+
+from messiah.core.event_calendar import EventCalendar, monthly_expiry, weekly_expiry
 
 MASTER_FILE_URL = "https://new.real.download.dws.co.kr/common/master/fo_idx_code_mts.mst.zip"
 MASTER_FILE_NAME = "fo_idx_code_mts.mst"
@@ -83,6 +87,55 @@ _SERIES_PRODUCT_TYPES = {
 # ..."(목) 형식(YYMM+주차) — 접두어의 "M" 유무와 무관하게 마지막 C/P + 공백 + YYMM+주차만 잡는다.
 _EXPIRY_FROM_NAME = r"^[CP]\s*(\d{6})"
 _WEEKLY_EXPIRY_FROM_NAME = r"[CP]\s+(\d{4}W\d)"
+
+# 위클리 시리즈 → 만기 요일(`date.weekday()` 규약). 위 `_SERIES_PRODUCT_TYPES`의
+# N/O=월요일·L/M=목요일 매핑과 같은 실측(2026-07-22 재검증)에서 나온 값이다.
+_WEEKLY_EXPIRY_WEEKDAY = {"weekly_mon": 0, "weekly_thu": 3}
+
+
+def expiry_date_from_label(
+    label: str, series: str, calendar: "EventCalendar | None" = None
+) -> "date | None":
+    """한글종목명 원문 → 실제 만기 **날짜** (2026-08-07 P2).
+
+    입력: `label`은 `OptionLeg.month_label`(= 마스터파일 한글종목명) 원문.
+         예) 먼쓰리 `"C 202608   545.0"` · 위클리 `"위클리C 2608W1   952.5"`.
+    계산: 만기 규칙 자체는 **여기서 만들지 않는다** — `core/event_calendar.py`의
+         `monthly_expiry()`/`weekly_expiry()`를 부른다. 이 함수가 하는 일은 라벨에서
+         (연,월[,주차])를 뽑는 것뿐이다. 2026-08-04에 만기 규칙 사본 두 벌을 하나로
+         합친 규율 그대로 — 여기에 요일 계산을 적으면 그게 세 번째 사본이 된다.
+    실패 조건: 형식이 안 맞으면 None. **예외를 던지지 않는다** — 이 값은 아카이브의
+         부가 컬럼이라, 새 형식 하나 때문에 그날 옵션체인 적재가 통째로 멈추면 안 된다.
+
+    ## 왜 필요한가
+
+    아카이브의 `expiry` 컬럼에는 이 라벨 **원문**이 들어간다(`messages.py`
+    `OptionQuoteSnapshot.expiry` — "정형 파싱은 소비측 몫"). 의도된 설계지만, 그 결과
+    **아카이브만 보고 "이 행의 만기가 캘린더 예측과 같은가"를 물을 수 없었다.**
+    2026-08-07에 `OptionChainCalendarViolation`(미상장인데 수신) 단언을 붙이면서 그
+    단언을 장후에 재확인할 방법이 필요해졌고, 이 함수가 그 자리다.
+    """
+    weekday = _WEEKLY_EXPIRY_WEEKDAY.get(series)
+    if weekday is not None:
+        found = re.search(_WEEKLY_EXPIRY_FROM_NAME, label)
+        if not found:
+            return None
+        token = found.group(1)  # "2608W1"
+        try:
+            return weekly_expiry(
+                2000 + int(token[:2]), int(token[2:4]), int(token[5]), weekday, calendar
+            )
+        except ValueError:
+            return None
+
+    found = re.match(_EXPIRY_FROM_NAME, label.strip())
+    if not found:
+        return None
+    token = found.group(1)  # "202608"
+    try:
+        return monthly_expiry(int(token[:4]), int(token[4:]), calendar)
+    except ValueError:
+        return None
 
 
 def download_master_zip(dest_dir: Path, client: httpx.Client | None = None) -> Path:

@@ -382,6 +382,9 @@ async def main(cfg: InstanceConfig) -> None:
     allowed, reason = session_guard.launch_window_verdict()
     if not allowed:
         print(f"[기동 창] {reason}", flush=True)
+        # 구조화 로그로도 남긴다 (2026-08-07 P0-4) — 무결성 리포트가 이 `SessionStart`를
+        # 기동으로 세지 않게 하는 유일한 근거다(`core/logging.py` 태그 주석).
+        mlog.log("LaunchWindowRefused", reason, process="g2_paper")
         return
 
     _launch_ui(today.strftime("%Y%m%d"))

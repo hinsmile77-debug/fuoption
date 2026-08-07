@@ -56,6 +56,7 @@ from pathlib import Path
 
 import polars as pl
 
+from messiah.broker.kis import symbol_master
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_RAW, BusLike
 from messiah.core.messages import OptionQuoteSnapshot
@@ -129,6 +130,10 @@ class OptionChainArchiver:
             "option_type": snapshot.option_type,
             "strike": float(snapshot.strike),
             "expiry": snapshot.expiry,
+            # 파싱된 만기 날짜 (2026-08-07 P2) — `expiry`는 한글종목명 원문이라 아카이브만
+            # 보고 "이 행이 캘린더 예측과 같은 만기인가"를 물을 수 없었다. 파싱 실패는 None
+            # (그 자체가 관측 대상이다 — 새 형식이 들어왔다는 신호).
+            "expiry_date": symbol_master.expiry_date_from_label(snapshot.expiry, snapshot.series),
         }
         row.update(_flatten_quote(snapshot.raw))
 

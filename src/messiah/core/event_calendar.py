@@ -94,6 +94,33 @@ def monthly_expiry(year: int, month: int, calendar: "EventCalendar | None" = Non
     return expiry
 
 
+def weekly_expiry(
+    year: int, month: int, week: int, weekday: int, calendar: "EventCalendar | None" = None
+) -> date:
+    """위클리 만기일 — 그 달의 `week`번째 `weekday`요일, 휴장이면 직전 거래일 (2026-08-07 P2).
+
+    입력: `week`는 1부터. `weekday`는 `date.weekday()` 규약(월=0 … 목=3).
+    계산: `monthly_expiry()`와 **같은 관례**로 휴장을 보정한다 — 위클리에 다른 관례를 새로
+         만드는 것보다 KRX 실측으로 검증된 쪽(2026-08-04, A05601~A05607 7개 월물)에 맞추는
+         편이 근거가 있다(`next_weekly_expiry()` docstring의 같은 판단).
+
+    옵션체인 아카이브의 종목명(`2608W1` 등)을 실제 날짜로 되돌리는 데 쓴다. 그 전에는
+    아카이브에 만기가 **한글종목명 원문**으로만 있어서, "이 행이 캘린더 예측과 같은
+    만기인가"를 사후에 물을 수 없었다 — `OptionChainCalendarViolation`을 장후에 재확인할
+    방법이 없다는 뜻이다.
+    """
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    expiry = first + timedelta(days=offset + 7 * (week - 1))
+    if expiry.month != month:
+        raise ValueError(f"{year}-{month:02d}에 {week}번째 요일{weekday}이 없다")
+    if calendar is None:
+        return expiry
+    while not calendar.is_trading_day(expiry):
+        expiry -= timedelta(days=1)
+    return expiry
+
+
 class EventCalendar:
     """휴장일 인식 + 세션 판정. 순수 계산(주입된 휴장일 집합 + 세션 시각) — 네트워크
     호출도 전역 상태도 없다(`risk/cost_model.py`·`risk/risk_engine.py`와 동일한 "주입된
@@ -219,8 +246,76 @@ class EventCalendar:
 
         판정은 마흐디 패널과 같은 기준(ISO 주 일치)을 쓴다. 먼슬리 만기가 휴장으로 당겨져
         수요일이 되는 경우에도 **그 주 전체**가 먼슬리 만기 주이므로 같은 판정이 맞는다.
+
+        ## 인자는 **목요일**이어야 뜻이 맞는다 (2026-08-07 정정)
+
+        이 함수가 답하는 것은 "`d`가 속한 주에 목위클리 만기가 있나"다. 유일한 호출처
+        (`next_weekly_expiry`)가 **후보 목요일**을 넘기므로 지금까지 문제가 없었다.
+
+        그런데 "**오늘 폴링하면 받을 목위클리 체인이 있나**"는 다른 질문이다 — 만기 다음날
+        (금)에는 이번 주 물이 이미 소멸했고 다음 주 물이 상장되기 때문이다. 2026-08-07(금)에
+        이 함수는 `True`(그 주=32주차에 8/6 만기가 있었다)를 답하지만 실제 마스터파일의
+        목위클리는 0행이었다. 그 질문은 `thursday_weekly_listed()`가 답한다.
         """
         return d.isocalendar()[:2] != self.monthly_expiry(d.year, d.month).isocalendar()[:2]
+
+    def thursday_weekly_listed(self, d: date) -> bool:
+        """`d` 시점에 목위클리(L/M)가 **상장돼 있는가** — 수집 계획이 물어야 할 질문.
+
+        `has_thursday_weekly()`와 다른 질문이다(그쪽 docstring "인자는 목요일이어야" 참고):
+        그쪽은 "이 주에 목위클리 만기가 있나", 이쪽은 "오늘 폴링하면 받을 체인이 있나".
+
+        ## 왜 "d 이후 첫 목요일"인가
+
+        목위클리는 상장~결제가 최장 1주라 **만기 다음날 다음 주물 하나만** 신규 상장된다.
+        따라서 어느 날 `d`에 상장돼 있는 목위클리는 `d` 이후(당일 포함) 첫 목요일이 만기다.
+        그 목요일이 먼슬리 만기 주에 속하면 그 물은 애초에 상장되지 않으므로(위 실측),
+        `d`에는 목위클리가 **하나도 없다**.
+
+        ## 2026-08-07 실측 — 이 함수가 생긴 이유
+
+        그날 `OptionChainPollEmpty`(weekly_thu)가 22회 찍혔고 `data/option_chain/weekly_thu/`에
+        파일이 아예 안 생겼다. 처음엔 하루치 유실로 판정했으나 마스터파일 실측(당일 08:36
+        자동 갱신본 + 12:2x 수동 재다운로드 둘 다 상품종류 L/M **0행**)으로 규정상 미상장이
+        확인됐다. 8월 둘째 목요일 = 8/13 = 먼슬리(코스피200옵션 8월물) 최종거래일이라
+        8/13 만기 목위클리는 상장되지 않고, 그 물이 상장될 차례이던 8/7(금)부터 8/13까지
+        **5거래일간 목위클리가 존재하지 않는다**. 8/14(금)에 8/20 만기물로 재개된다.
+
+        아카이브 3일치와 대조 검증: 08-05 True/파일있음 · 08-06 True/파일있음 ·
+        08-07 False/파일없음 — 전부 일치.
+
+        ## 이 규칙을 이미 알고 있었다는 사실
+
+        `has_thursday_weekly()`는 2026-07-10 마흐디 실측을 이식해 **7월부터 있었고**
+        `tests/features/test_ev_core.py`가 `2026-08-13 → False`를 못박아 두었다. 그런데
+        옵션체인 수집 경로가 그 정본을 안 물어봐서 8/7 조사에서 오탐 22건 + 사고 오판이
+        났다. 정본을 안 쓰는 소비자를 찾는 검사는 `ops/canonical_consumers.py`에 있다.
+        """
+        next_thursday = d + timedelta(days=(_WEEKLY_THURSDAY_WEEKDAY - d.weekday()) % 7)
+        return self.has_thursday_weekly(next_thursday)
+
+    def thursday_weekly_listing_resumes(self, d: date, *, max_scan_days: int = 28) -> date | None:
+        """`d` 이후(당일 포함) 목위클리가 다시 상장되는 첫 **거래일** — 미상장 구간의 끝.
+
+        운영 화면·로그에 "언제 돌아오는가"를 같이 찍기 위한 것이다. 부재를 알리면서 복귀
+        시점을 안 알리면 사람이 매일 다시 확인해야 하고, 그러면 결국 아무도 안 본다.
+
+        **이 값은 예측이지 관측이 아니다.** 그날 실제로 안 돌아오면 요일 규칙 쪽이 틀린
+        것이고, 그건 `OptionChainSeriesMissing`(ERROR)으로 잡힌다 — 그게 이 예측의 채점이다.
+
+        `max_scan_days` 안에 못 찾으면 None. 스캔이 **휴장일 데이터가 없는 연도로 넘어가도**
+        None이다 — `is_trading_day()`는 그 경우 예외를 던지지만(L3 침묵 실패 금지), 여기서는
+        그 예외를 삼킨다. 이 값은 로그에 붙는 부가 정보라, 연말에 이것 하나 때문에 무결성
+        리포트 전체가 죽는 것이 훨씬 나쁘다. **부재 판정 자체는 이 함수에 의존하지 않는다.**
+        """
+        for offset in range(max_scan_days):
+            cur = d + timedelta(days=offset)
+            try:
+                if self.is_trading_day(cur) and self.thursday_weekly_listed(cur):
+                    return cur
+            except ValueError:
+                return None  # 휴장일 데이터 없는 연도 — 복귀 시점은 "모름"이다
+        return None
 
     def next_weekly_expiry(self, d: date, *, max_scan_days: int = 28) -> date | None:
         """`d` 이상인 첫 위클리 만기 후보 — 월위클리(월)·목위클리(목) 중 **먼저 오는 쪽**.
