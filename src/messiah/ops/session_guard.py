@@ -170,6 +170,28 @@ def launch_window_verdict(
 SCHEDULED_LAUNCH_TOLERANCE_MINUTES = 5
 
 
+def minutes_since_scheduled_trigger(*, now: datetime | None = None) -> float | None:
+    """지금이 **가장 이른 수집 트리거**보다 몇 분 늦었나 — 판정 불가면 None (2026-08-10 B-2).
+
+    수집 프로세스가 기동 직후 한 번 부른다. 이 값은 그 순간 **이미 확정된 손실**이다 —
+    그 구간의 체결틱·수급·옵션체인은 과거 조회 경로가 없어 영원히 없다.
+
+    `ops/integrity_report.py`의 `_collection_start_lag_minutes()`가 장후에 로그로 재는 값과
+    **같은 뜻·같은 기준점**이다. 둘을 나눠 둔 이유는 시점뿐이다: 이쪽은 장중에 화면이 쓰고,
+    그쪽은 장후에 리포트가 쓴다. 기준점(등록 정본)이 하나라 두 값이 어긋날 수 없다.
+
+    음수(트리거보다 이르게 손으로 띄운 날)도 그대로 돌려준다 — 0으로 접으면 "오늘 스케줄러가
+    안 떴을 수 있다"는 신호가 사라진다.
+    """
+    moment = now or now_kst()
+    try:
+        trigger = task_schedule.earliest_collection_trigger()
+    except task_schedule.ScheduleUnreadable:
+        return None
+    scheduled = moment.replace(hour=trigger.hour, minute=trigger.minute, second=0, microsecond=0)
+    return round((moment - scheduled).total_seconds() / 60.0, 1)
+
+
 def refused_a_scheduled_launch(*, now: datetime | None = None) -> bool:
     """이번 거부가 **정시 트리거로 뜬 기동**을 거부한 것인가 (2026-08-10 P0).
 

@@ -278,6 +278,10 @@ class IntegrityReport:
     # **진입점의 종료 코드** (2026-08-10 A-2, `ops/task_exit_codes.py`). 로그가 아니라 OS가
     # 기록한 그날의 결말이다 — 그 둘이 어긋난 날이 있었고 아무 축도 그것을 몰랐다.
     task_exit_codes: dict[str, Any] = field(default_factory=dict)
+    # **그날 소급 경로 없이 잃은 시간**(분) — 손실 예산의 일일 값 (2026-08-10 G-6).
+    # `ops/loss_budget.py`가 이 값들을 5거래일 이동합으로 묶는다: 하루짜리 사고는 늘 "이번
+    # 한 번"으로 읽히는데, 08-06 21분 + 08-07 114분 + 08-10 38분을 합산하는 축이 없었다.
+    irrecoverable_loss_minutes: float | None = None
     # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2). `breaches`에도 들어가지만 **따로 남긴다**
     # (2026-08-10 A-1). 등록부 `canonical-consumers-wired`가 그동안 넓은 그물(`breaches`)로
     # 채점했고, 그 항목 주석이 이미 예고했다 — *"남의 사고로 두 번 이상 뒤집히면 그때
@@ -760,6 +764,107 @@ def _collection_start_lag_minutes(
     return round((first.replace(tzinfo=KST) - trigger).total_seconds() / 60.0, 1)
 
 
+def cross_check_head_truncation(
+    *,
+    start_lag_minutes: float | None,
+    series_head_gap_minutes: float | None,
+    volume_head_missing_minutes: int | None,
+) -> list[str]:
+    """**아침이 잘렸는가**를 세 축이 각각 답하게 하고, 갈리면 그 자체를 판정으로 올린다
+    (2026-08-10 G-2).
+
+    ## 왜 필요한가 — 같은 질문에 세 축이 다른 답을 했다
+
+    2026-08-10에 38분을 잃었다. 그날 세 축의 답은 이랬다:
+
+        계열 커버리지    0분   ("안 잘렸다")   ← 창이 기동에 앵커링돼 있었다
+        거래량 대조     13분   ("잘렸다")     ← 임계 20분 아래라 ok=true
+        기동 지연       38분   ("잘렸다")     ← 이 축이 아예 없었다
+
+    A-1이 첫 줄을 고쳤지만, **고쳤다는 것을 무엇이 보증하나**가 남는다. 축 하나가 다시
+    조용해져도 나머지 둘이 우는 한 그 불일치는 관측 가능하다 — 어느 축이 옳은지 몰라도
+    "셋이 어긋난다"는 사실만으로 조사가 시작된다.
+
+    ## 판정 방법
+
+    축마다 임계가 다르므로 값을 비교하지 않는다(38 vs 13 vs 0을 같다/다르다로 볼 수 없다).
+    대신 **각 축이 자기 임계로 내린 예/아니오**를 비교한다. 셋이 같은 답이면 조용하고,
+    갈리면 세 값을 나란히 적어 사람이 어느 쪽을 믿을지 판단하게 한다.
+
+    판정 불가(None)인 축은 **투표에서 뺀다** — 못 잰 것을 "아니오"로 세면 그 축이 죽은 날
+    나머지 둘이 우는 것을 불일치로 오인한다(L18).
+
+    ## 이 판정이 잡는 진짜 사건
+
+    2026-08-06형: 기동은 정시(0.4분)였는데 재부팅으로 계열 머리가 111분 비었다 → 두 축이
+    갈린다. 그 갈림이 곧 **"늦게 뜬 게 아니라 뜬 뒤에 잃었다"**는 진단이고, 그건
+    `archiver-restart-restore`의 전제가 묻는 것과 정확히 같은 구분이다.
+    """
+    votes: list[tuple[str, bool, str]] = []
+    if start_lag_minutes is not None:
+        votes.append(
+            (
+                "기동 지연",
+                start_lag_minutes > DEFAULT_THRESHOLDS["collection_start_lag_minutes"],
+                f"{start_lag_minutes:+.1f}분",
+            )
+        )
+    if series_head_gap_minutes is not None:
+        votes.append(
+            (
+                "계열 머리 구멍",
+                series_head_gap_minutes > series_coverage._HEAD_GAP_FLOOR_MINUTES,
+                f"{series_head_gap_minutes:.0f}분",
+            )
+        )
+    if volume_head_missing_minutes is not None:
+        votes.append(
+            (
+                "거래량 아침 미수집",
+                volume_head_missing_minutes > 0,
+                f"{volume_head_missing_minutes}분",
+            )
+        )
+
+    if len({verdict for _, verdict, _ in votes}) < 2:
+        return []  # 전원 같은 답(또는 잴 수 있는 축이 하나뿐) — 조용한 것이 옳다
+    said_yes = " · ".join(f"{name} {value}" for name, verdict, value in votes if verdict)
+    said_no = " · ".join(f"{name} {value}" for name, verdict, value in votes if not verdict)
+    return [
+        f"아침 잘림 판정이 축마다 다르다 — 잘렸다: {said_yes} / 아니다: {said_no}. "
+        "어느 축이 옳은지 모르는 상태 자체가 볼 것이다"
+        "(한 축이 조용해진 날 나머지가 그 사실을 말한다)"
+    ]
+
+
+def irrecoverable_loss_minutes(
+    *,
+    start_lag_minutes: float | None,
+    coverages: Sequence[series_coverage.SeriesCoverage],
+) -> float:
+    """그날 **소급 경로 없이 잃은 시간**(분) — 손실 예산(`ops/loss_budget.py`)의 일일 값.
+
+    소급 불가 계열(옵션체인·수급·틱)의 **머리 구멍 최댓값**과 기동 지연 중 큰 쪽을 쓴다.
+    더하지 않는 이유: 둘은 대개 **같은 사건**이다(늦게 떠서 머리가 비었다). 더하면 하루
+    38분짜리 사고가 77분으로 부풀고, 그러면 예산이라는 축을 아무도 못 믿는다.
+
+    계열 사이에서도 합이 아니라 최댓값이다 — 세 계열이 동시에 39·40·41분 비었다면
+    잃은 **시간**은 41분이지 120분이 아니다. 이 축이 세는 것은 "몇 분 동안 못 봤나"다.
+
+    장중 구멍(`gaps`)은 여기 안 넣는다. 그건 `series_findings`가 따로 세고, 이 값은
+    **아침 잘림**이라는 한 사건의 크기를 재는 자리다 — 섞으면 5거래일 이동합의 뜻이 흐려진다.
+    """
+    head = max(
+        (
+            item.head_gap_minutes
+            for item in coverages
+            if item.measured and item.expected and series_coverage._is_irrecoverable(item.name)
+        ),
+        default=0.0,
+    )
+    return round(max(head, start_lag_minutes or 0.0), 1)
+
+
 # ---------------------------------------------------------------- 네이티브 크래시
 
 
@@ -1220,6 +1325,26 @@ def build_report(
     breaches.extend(task_exit_codes.findings_for(task_exits, session_ends=exited_cleanly))
     if not task_exits.available:
         unmeasured.append(f"진입점 종료 코드({task_exits.detail})")
+
+    # ---- G-2(2026-08-10): 세 축이 같은 질문에 같은 답을 하는가 ----
+    irrecoverable_heads = [
+        item.head_gap_minutes
+        for item in coverages
+        if item.measured and item.expected and series_coverage._is_irrecoverable(item.name)
+    ]
+    breaches.extend(
+        cross_check_head_truncation(
+            start_lag_minutes=start_lag,
+            series_head_gap_minutes=max(irrecoverable_heads, default=None),
+            volume_head_missing_minutes=(
+                (volume_check or {}).get("head_missing_minutes")
+                if isinstance((volume_check or {}).get("head_missing_minutes"), int)
+                else None
+            ),
+        )
+    )
+    # ---- G-6(2026-08-10): 손실 예산의 일일 값 ----
+    daily_loss = irrecoverable_loss_minutes(start_lag_minutes=start_lag, coverages=coverages)
     series_contract = series_expectation.summarize(expectations)
     # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2) — 코드 구조 판정이라 그날 데이터와 무관하다.
     # 그래도 여기 싣는 이유는 **매일 읽히는 문서가 이것 하나**이기 때문이다. 테스트로만
@@ -1289,6 +1414,7 @@ def build_report(
         collection_start_lag_minutes=start_lag,
         task_exit_codes=task_exits.to_dict(),
         canonical_consumer_findings=consumer_findings,
+        irrecoverable_loss_minutes=daily_loss,
         abnormal_exits=abnormal_exits,
         observation_gaps=[gap.to_dict() for gap in observation.gaps],
         host_events=[event.to_dict() for event in observation.events],
@@ -1419,6 +1545,10 @@ def format_summary(report: IntegrityReport) -> str:
         lag = report.collection_start_lag_minutes
         mark = "✅" if lag <= DEFAULT_THRESHOLDS["collection_start_lag_minutes"] else "❌"
         lines.append(f"  수집 기동 지연(정시 트리거 대비): {lag:+.1f}분 {mark}")
+    if report.irrecoverable_loss_minutes is not None:
+        # 0분도 찍는다 — "봤는데 없다"와 "이 축이 없다"가 구분돼야 한다(G-6).
+        loss = report.irrecoverable_loss_minutes
+        lines.append(f"  소급 불가 손실(오늘): {loss:.0f}분 " + ("✅" if loss == 0 else "❌"))
     if report.task_exit_codes:
         lines.extend(
             task_exit_codes.summarize(
@@ -1429,6 +1559,15 @@ def format_summary(report: IntegrityReport) -> str:
                     ],
                     available=bool(report.task_exit_codes.get("available")),
                     detail=str(report.task_exit_codes.get("detail", "")),
+                    # 옛 리포트에는 이 축이 없다 — `reason`은 파생 속성이라 넘기지 않는다.
+                    launches=[
+                        task_exit_codes.TaskLaunch(
+                            task=entry["task"],
+                            at_kst=entry["at_kst"],
+                            event_id=int(entry["event_id"]),
+                        )
+                        for entry in report.task_exit_codes.get("launches", [])
+                    ],
                 )
             )
         )
@@ -1571,8 +1710,32 @@ def generate_and_write(
     for breach in report.breaches:
         mlog.log("IntegrityThresholdBreached", breach, date=report.date, symbol=symbol)
 
+    _report_loss_budget(log_dir)
     _report_fix_verifications(day, log_dir)
     return report
+
+
+def _report_loss_budget(log_dir: Path) -> None:
+    """최근 5거래일의 소급 불가 손실 합 (2026-08-10 G-6).
+
+    **오늘 리포트를 쓴 뒤에** 부른다 — 오늘치를 포함한 이력을 읽으므로 `build_report()`
+    안에서 하면 자기 자신을 읽어야 하는 순환이 된다(`_report_fix_verifications`와 같은 이유).
+
+    집계 실패가 장후 절차를 막지 않는다. 다만 조용히 넘기지도 않는다(L18).
+    """
+    from messiah.core import logging as mlog
+    from messiah.ops import loss_budget
+
+    try:
+        budget = loss_budget.summarize(log_dir)
+    except Exception as exc:  # noqa: BLE001 — 장후 절차를 막지 않는다
+        print(f"손실 예산 집계 실패(장후 절차는 계속): {exc}", flush=True)
+        return
+
+    mark = "❌" if budget.over_budget else "✅"
+    print(f"{mark} {budget.describe()}", flush=True)
+    for line in budget.finding():
+        mlog.log("IrrecoverableLossBudgetExceeded", line, minutes=budget.total_minutes)
 
 
 def _report_fix_verifications(day: date, log_dir: Path) -> None:

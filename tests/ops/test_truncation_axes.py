@@ -124,3 +124,107 @@ def test_unlisted_series_is_not_dragged_down_by_coverage():
     )
     coverage = sc.measure("option_chain/weekly_thu", [], window=_WINDOW, expectation=unlisted)
     assert sc.findings_for(coverage) == []
+
+
+# ------------------------- G-2(2026-08-10): 세 축이 같은 답을 하는가
+
+
+def _cross(**kwargs):
+    from messiah.ops.integrity_report import cross_check_head_truncation
+
+    base = dict(
+        start_lag_minutes=None, series_head_gap_minutes=None, volume_head_missing_minutes=None
+    )
+    base.update(kwargs)
+    return cross_check_head_truncation(**base)
+
+
+def test_all_three_axes_agreeing_is_silent():
+    """2026-08-10을 A-1 적용 뒤로 재산출한 상태 — 셋 다 "잘렸다"고 말한다."""
+    assert (
+        _cross(start_lag_minutes=38.5, series_head_gap_minutes=41.0, volume_head_missing_minutes=13)
+        == []
+    )
+
+
+def test_a_normal_day_is_silent_too():
+    assert (
+        _cross(start_lag_minutes=0.4, series_head_gap_minutes=2.0, volume_head_missing_minutes=0)
+        == []
+    )
+
+
+def test_the_2026_08_10_bug_would_have_been_caught():
+    """그날 실제로 나온 값들이다 — 커버리지 0분(안 잘렸다) vs 거래량 13분(잘렸다).
+
+    A-1이 커버리지를 고쳤지만, **고쳤다는 것을 무엇이 보증하나**가 남는다. 축 하나가 다시
+    조용해져도 나머지가 우는 한 그 불일치는 관측 가능해야 한다.
+    """
+    (finding,) = _cross(
+        start_lag_minutes=38.5, series_head_gap_minutes=0.0, volume_head_missing_minutes=13
+    )
+
+    assert "축마다 다르다" in finding
+    assert "계열 머리 구멍 0분" in finding, "조용한 축이 무엇인지 이름이 나와야 한다"
+    assert "기동 지연 +38.5분" in finding
+
+
+def test_a_reboot_day_splits_the_axes_and_that_is_the_diagnosis():
+    """2026-08-06형 — 기동은 정시였는데 재부팅으로 계열 머리가 111분 비었다.
+
+    그 갈림이 곧 **"늦게 뜬 게 아니라 뜬 뒤에 잃었다"**는 진단이다.
+    """
+    (finding,) = _cross(
+        start_lag_minutes=0.4, series_head_gap_minutes=111.0, volume_head_missing_minutes=21
+    )
+
+    assert "잘렸다: 계열 머리 구멍 111분" in finding
+    assert "아니다: 기동 지연 +0.4분" in finding
+
+
+def test_an_unmeasurable_axis_does_not_vote():
+    """못 잰 것을 "아니오"로 세면 그 축이 죽은 날 나머지가 우는 것을 불일치로 오인한다(L18)."""
+    assert _cross(start_lag_minutes=38.5, series_head_gap_minutes=41.0) == []
+    assert _cross(start_lag_minutes=38.5) == [], "잴 수 있는 축이 하나뿐이면 비교 자체가 없다"
+
+
+# ------------------------- G-6(2026-08-10): 하루치 손실
+
+
+def _loss(**kwargs):
+    from messiah.ops.integrity_report import irrecoverable_loss_minutes
+
+    return irrecoverable_loss_minutes(**kwargs)
+
+
+def _cov(name: str, head: float) -> sc.SeriesCoverage:
+    return sc.SeriesCoverage(name=name, rows=100, measured=True, head_gap_minutes=head)
+
+
+def test_the_daily_loss_is_the_worst_axis_not_the_sum():
+    """더하면 38분짜리 사고가 77분이 되고, 그러면 예산이라는 축을 아무도 못 믿는다.
+
+    세 계열이 동시에 39·40·41분 비었다면 잃은 **시간**은 41분이지 120분이 아니다.
+    """
+    coverages = [
+        _cov("flow_intraday/K2I", 39.0),
+        _cov("option_chain/regular", 40.0),
+        _cov("option_chain/weekly_mon", 41.0),
+    ]
+
+    assert _loss(start_lag_minutes=38.5, coverages=coverages) == 41.0
+
+
+def test_a_late_launch_alone_still_counts():
+    """계열이 아직 아무것도 안 쌓인 시점에도 기동 지연은 이미 확정된 손실이다."""
+    assert _loss(start_lag_minutes=38.5, coverages=[]) == 38.5
+
+
+def test_recoverable_series_do_not_inflate_the_loss():
+    """봉은 백필로 되메울 수 있다 — 이 축이 세는 것은 **영원히 없는 것**뿐이다."""
+    assert _loss(start_lag_minutes=None, coverages=[_cov("bars/A05608", 120.0)]) == 0.0
+
+
+def test_a_clean_day_is_zero_not_none():
+    """0분도 기록해야 5거래일 이동합이 성립한다 — None이면 그날이 창에서 빠진다."""
+    assert _loss(start_lag_minutes=0.4, coverages=[_cov("ticks", 0.0)]) == 0.4

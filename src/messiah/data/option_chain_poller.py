@@ -316,6 +316,9 @@ class OptionChainPoller:
             ),
             retried_tag="OptionChainPollRetried",
             error_tag="OptionChainPollError",
+            # 계열 이름은 아카이브·커버리지 축과 **같은 어휘**를 쓴다 — 장중 장부와 장후
+            # 커버리지를 나란히 놓고 검산하려면 이름이 같아야 한다.
+            loss_series=f"option_chain/{self._series}",
             retry_attempts=self._retry_attempts,
             retry_delay_seconds=self._retry_delay_seconds,
             sleep=self._sleep,

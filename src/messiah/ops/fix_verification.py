@@ -306,6 +306,15 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
         if isinstance((r.get("volume_check") or {}).get("head_missing_minutes"), int)
         else None
     ),
+    # 그날 소급 경로 없이 잃은 시간(분) — 2026-08-10 G-6. 개별 원인(기동 지연·재부팅·
+    # 프로세스 사망)이 날마다 달라도 **잃은 것은 같은 종류**라, 이 한 축이 그 종류의 크기를
+    # 잰다. 5거래일 이동합은 `ops/loss_budget.py`가 따로 본다.
+    # 축이 없던 옛 리포트는 None(판정 불가)이지 0이 아니다(L18).
+    "irrecoverable_loss_minutes": lambda r: (
+        float(r["irrecoverable_loss_minutes"])
+        if isinstance(r.get("irrecoverable_loss_minutes"), (int, float))
+        else None
+    ),
     # 옵션 상장 판정이 틀린 건수 — 양방향 (2026-08-10 A-1 후속, `_option_calendar_violations`).
     "option_calendar_violations": _option_calendar_violations,
     # 정본을 안 쓰는 소비자 수 (2026-08-10 A-1 후속). `canonical-consumers-wired` 항목의

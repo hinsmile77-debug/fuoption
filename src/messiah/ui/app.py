@@ -91,7 +91,7 @@ from messiah.core.version import (
     uptime_text,
 )
 from messiah.data import bar_paths
-from messiah.ops.status_board import DEAD_AFTER_MULTIPLE
+from messiah.ops.status_board import DEAD_AFTER_MULTIPLE, load_snapshot
 from messiah.ui.bar_reader import BarExportError, read_day_series
 from messiah.ui.bar_series import BarSeries
 from messiah.ui.data_source import (
@@ -736,6 +736,42 @@ def _render_version_strip(source) -> None:
         st.caption("재기동해야 최신 코드가 적재된다 — 지금 화면의 판정은 옛 규칙의 결과다")
 
 
+def _render_irrecoverable_loss_strip() -> None:
+    """**오늘 이미 잃은 것** (2026-08-10 B-2).
+
+    바로 위 컴포넌트 신호등은 *"지금 살아 있나"*에 답한다. 2026-08-10에 그 넷이 종일
+    초록이었고, 그날 아침 38분의 체결틱·수급·옵션체인은 이미 영원히 사라진 뒤였다 —
+    화면이 틀린 게 아니라 **아무 자리도 그 질문을 안 했다.**
+
+    출처는 수집 프로세스가 쓰는 `logs/status_snapshot.json`이다(`ops/loss_ledger.py`).
+    버스가 아니라 파일을 읽는 이유: 이 값은 수집 프로세스 안에서만 셀 수 있고(폴러의 최종
+    실패는 버스에 안 실린다), 그 파일은 화면이 죽어도 계속 쓰인다.
+
+    **못 읽으면 조용히 넘어가지 않는다.** 손실 축이 비어 있는 것과 손실이 없는 것은 다르고,
+    전자를 초록으로 칠하는 것이 이 화면이 2026-08-10에 한 일이다.
+    """
+    snapshot = load_snapshot()
+    if snapshot is None:
+        st.markdown(
+            "<span style='color:#8A8F98'>● 오늘 손실 — 상태 스냅샷 없음(수집 프로세스 확인)</span>",
+            unsafe_allow_html=True,
+        )
+        return
+    loss = snapshot.get("irrecoverable_loss") or {}
+    summary = loss.get("summary")
+    if not summary:
+        st.markdown(
+            "<span style='color:#8A8F98'>● 오늘 손실 — 이 축이 없는 구버전 스냅샷</span>",
+            unsafe_allow_html=True,
+        )
+        return
+    clean = bool(loss.get("clean"))
+    color = "#22C55E" if clean else "#FF5C7A"
+    st.markdown(f"<span style='color:{color}'>● {summary}</span>", unsafe_allow_html=True)
+    if not clean:
+        st.caption("소급 경로가 없는 계열이다 — 지금 없는 것은 나중에도 없다")
+
+
 # ---------------------------------------------------------------- 존 렌더링
 
 
@@ -770,6 +806,7 @@ def render_top_bar(source, symbol: str, redis_url: str | None = None) -> None:
         st.error(f"LIVE 연결 실패: {conn_error.message.detail}")
 
     _render_health_strip(source)
+    _render_irrecoverable_loss_strip()
     _render_version_strip(source)
     st.divider()
 

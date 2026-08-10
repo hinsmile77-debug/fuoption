@@ -37,6 +37,7 @@ import asyncio
 from typing import Awaitable, Callable, TypeVar
 
 from messiah.core import logging as mlog
+from messiah.ops import loss_ledger
 
 T = TypeVar("T")
 
@@ -63,6 +64,7 @@ async def fetch_with_retry(
     retry_attempts: int = RETRY_ATTEMPTS,
     retry_delay_seconds: float = RETRY_DELAY_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    loss_series: str | None = None,
     **context: object,
 ) -> T | None:
     """항목 하나를 조회한다. 실패하면 같은 사이클 안에서 `retry_attempts`번 더 시도한다.
@@ -70,6 +72,8 @@ async def fetch_with_retry(
     입력: `call`은 **무인자 코루틴 팩토리**다 — 시도마다 새 어웨이터블이 필요하므로
          코루틴 객체가 아니라 그것을 만드는 콜러블을 받는다(`lambda: asyncio.to_thread(...)`).
          `context`는 로그에 그대로 실린다(계열·심볼·업종 등 호출자의 어휘).
+         `loss_series`를 주면 **끝내 실패했을 때만** 그 이름으로 손실 장부에 적는다
+         (`ops/loss_ledger.py`) — 소급 경로가 없는 계열의 호출자만 준다.
     반환: 성공한 결과, 끝내 실패하면 None.
     실패 조건: 없다 — 예외를 밖으로 내보내지 않는다. 항목 하나의 실패가 폴링 루프를
          죽이면 안 된다(L22).
@@ -98,4 +102,8 @@ async def fetch_with_retry(
         attempts=1 + retry_attempts,
         **context,
     )
+    # **여기서만** 장부에 적는다 (2026-08-10 B-2). 위 `Retried` 경로는 살아난 것이라
+    # 손실이 아니다 — 둘을 같이 세면 이 숫자가 "오늘 잃은 것"을 더 이상 뜻하지 않는다.
+    if loss_series is not None:
+        loss_ledger.record_lost(loss_series)
     return None

@@ -127,7 +127,7 @@ from messiah.data.option_chain_archiver import OptionChainArchiver  # noqa: E402
 from messiah.data.option_chain_poller import OptionChainPoller  # noqa: E402
 from messiah.data.tick_archiver import TickArchiver  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
-from messiah.ops import series_expectation, session_guard  # noqa: E402
+from messiah.ops import loss_ledger, series_expectation, session_guard  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 from messiah.ops.status_board import run_status_board_forever  # noqa: E402
 
@@ -146,6 +146,11 @@ _TICK_DIR = Path("data") / "ticks"
 # 수급 폴링 격자 — 1분봉과 같은 주기. 3업종 순차 조회라 유량(모의투자 1건/초)에
 # 여유가 크고, 이보다 촘촘히 받아도 원천이 "당일 누적"이라 정보가 늘지 않는다.
 _FLOW_POLL_SECONDS = 60.0
+
+# 기동 지연을 기동 로그에 한 줄 찍는 하한 (2026-08-10 B-2). `ops/loss_ledger._LAG_FLOOR_MINUTES`·
+# `integrity_report.DEFAULT_THRESHOLDS["collection_start_lag_minutes"]`와 **같은 값**이다 —
+# 세 자리가 같은 질문에 답하는데 임계가 다르면 화면·로그·리포트가 다른 말을 하게 된다.
+_START_LAG_ALERT_MINUTES = 5.0
 
 # ---------------------------------------------------------------- 옵션체인 폴링 계획
 #
@@ -899,6 +904,19 @@ async def main(cfg: InstanceConfig) -> None:
             )
             raise SystemExit(session_guard.REFUSED_EXIT_CODE)
         return
+
+    # **오늘 이미 잃은 것**의 첫 항목을 여기서 적는다 (2026-08-10 B-2). 기동 지연은 프로세스가
+    # 뜨는 순간 이미 확정된 손실이고(그 구간의 틱·수급·옵션체인은 소급 경로가 없다), 대개
+    # 그날 손실 중 가장 큰 덩어리다 — 08-10에 38분이었다. 이 한 줄이 없어서 그 사실이
+    # 사람 눈에 닿은 것이 15:45 장후 리포트였다.
+    lag = session_guard.minutes_since_scheduled_trigger()
+    loss_ledger.record_start_lag(lag)
+    if lag is not None and lag > _START_LAG_ALERT_MINUTES:
+        print(
+            f"[손실] 수집 기동이 정시 트리거보다 {lag:.0f}분 늦었다 — "
+            "그 구간의 체결틱·수급·옵션체인은 영구 소실(소급 경로 없음)",
+            flush=True,
+        )
 
     _launch_ui(today.strftime("%Y%m%d"))
 

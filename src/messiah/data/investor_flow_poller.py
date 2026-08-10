@@ -87,6 +87,7 @@ class InvestorFlowPoller:
             ),
             retried_tag="InvestorFlowPollRetried",
             error_tag="InvestorFlowPollError",
+            loss_series=f"flow_intraday/{self._market_code}",
             retry_attempts=self._retry_attempts,
             retry_delay_seconds=self._retry_delay_seconds,
             sleep=self._sleep,

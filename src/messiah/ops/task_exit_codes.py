@@ -59,6 +59,13 @@ TASK_TO_PROCESS: dict[str, str] = {
 _COMPLETED_EVENT_ID = 201
 """작업 인스턴스가 끝날 때의 이벤트. 반환 코드가 실린 유일한 이벤트다."""
 
+# **왜 떴나** (2026-08-10 G-3). 종료 코드가 "어떻게 끝났나"라면 이 둘은 "어떻게 시작했나"다.
+#   107  정시(시간) 트리거로 떴다
+#   110  **사람이** 손으로 실행했다 ← 종전엔 로그 어디에도 안 남던 사실
+_LAUNCH_EVENT_IDS = (107, 110)
+
+LAUNCH_REASON = {107: "정시 트리거", 110: "사람이 실행"}
+
 
 def _watched_tasks() -> set[str] | None:
     """채점할 작업 이름 — 정본(`configs/scheduled_tasks.json`)에서 온다. 못 읽으면 None.
@@ -98,16 +105,47 @@ class TaskExit:
 
 
 @dataclass
+class TaskLaunch:
+    """작업이 **왜** 떴나 — 정시 트리거인가 사람이 눌렀나 (2026-08-10 G-3)."""
+
+    task: str
+    at_kst: str
+    event_id: int
+
+    @property
+    def reason(self) -> str:
+        return LAUNCH_REASON.get(self.event_id, f"이벤트 {self.event_id}")
+
+    @property
+    def by_hand(self) -> bool:
+        return self.event_id == 110
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task": self.task,
+            "at_kst": self.at_kst,
+            "event_id": self.event_id,
+            "reason": self.reason,
+        }
+
+    def describe(self) -> str:
+        return f"{self.at_kst} {self.task} — {self.reason}"
+
+
+@dataclass
 class TaskExitReport:
     exits: list[TaskExit] = field(default_factory=list)
     available: bool = False
     detail: str = ""
+    # 그날 기동 이력 — 시간순 (2026-08-10 G-3).
+    launches: list[TaskLaunch] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "exits": [item.to_dict() for item in self.exits],
             "available": self.available,
             "detail": self.detail,
+            "launches": [item.to_dict() for item in self.launches],
         }
 
 
@@ -130,25 +168,33 @@ def _query_script(start: datetime, end: datetime) -> str:
     판정하면 "이벤트 0건"과 "질의 실패"가 구분되지 않는다(2026-08-04에 그 혼동으로 등록부가
     영원히 판정 불가였다).
 
-    `Message`(로캘 문장)는 안 쓰고 `Properties`만 읽는다. 이벤트 201의 실측 배치:
-    `[0]` 작업 경로(`\\Messiah-G2`) · `[1]` 인스턴스 GUID · `[2]` 액션 · `[3]` 반환 코드.
+    `Message`(로캘 문장)는 안 쓰고 `Properties`만 읽는다. 실측 배치:
+    - **201**(완료): `[0]` 작업 경로(`\\Messiah-G2`) · `[1]` 인스턴스 GUID · `[2]` 액션 ·
+      `[3]` 반환 코드.
+    - **107/110**(기동): `[0]` 작업 경로. 107은 시간 트리거, 110은 사람이 실행.
+
+    한 번의 질의로 셋을 다 가져온다 (2026-08-10 G-3) — 같은 로그를 두 번 열면 PowerShell
+    호출이 두 배가 되고(장후 절차에 10초씩 붙는다) 무엇보다 두 결과의 시각이 어긋난다.
+    줄머리에 이벤트 번호를 붙여 파이썬 쪽에서 가른다.
     """
+    ids = ",".join(str(i) for i in (_COMPLETED_EVENT_ID, *_LAUNCH_EVENT_IDS))
     return (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
         "$ErrorActionPreference='Stop'; $events=@(); "
         "try { $events=@(Get-WinEvent -FilterHashtable @{"
         "LogName='Microsoft-Windows-TaskScheduler/Operational';"
-        f"Id={_COMPLETED_EVENT_ID};"
+        f"Id={ids};"
         f"StartTime='{start:%Y-%m-%d %H:%M:%S}';EndTime='{end:%Y-%m-%d %H:%M:%S}'"
         "} -ErrorAction Stop) } "
         "catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $events=@() } "
         "else { Write-Output ('ERR ' + $_.Exception.GetType().Name); exit 0 } } "
         "Write-Output ('OK ' + $events.Count); "
         "$events | Sort-Object TimeCreated | ForEach-Object { "
-        "if ($_.Properties.Count -ge 4) { "
+        "if ($_.Properties.Count -ge 1) { "
         "$name = ([string]$_.Properties[0].Value).TrimStart('\\'); "
-        "$name + ' ' + $_.TimeCreated.ToString('HH:mm:ss') + ' ' "
-        "+ [string]$_.Properties[3].Value } }; "
+        "$code = if ($_.Properties.Count -ge 4) { [string]$_.Properties[3].Value } else { '-' }; "
+        "[string]$_.Id + ' ' + $name + ' ' + $_.TimeCreated.ToString('HH:mm:ss') + ' ' "
+        "+ $code } }; "
         "exit 0"
     )
 
@@ -184,22 +230,30 @@ def collect(day: date, *, runner=subprocess.run) -> TaskExitReport:
     # **마지막 것**만 남긴다 — 그게 스케줄러의 `LastTaskResult`이고 사람이 보는 값이다.
     watched = _watched_tasks()
     latest: dict[str, TaskExit] = {}
+    launches: list[TaskLaunch] = []
     for line in lines[1:]:
         parts = line.split()
-        if len(parts) != 3:
+        if len(parts) != 4 or not parts[0].isdigit():
             continue
-        if not (parts[0] in watched if watched is not None else parts[0].startswith(TASK_PREFIX)):
+        event_id, task, at_kst, code_text = int(parts[0]), parts[1], parts[2], parts[3]
+        if not (task in watched if watched is not None else task.startswith(TASK_PREFIX)):
+            continue
+        if event_id in _LAUNCH_EVENT_IDS:
+            launches.append(TaskLaunch(task=task, at_kst=at_kst, event_id=event_id))
             continue
         try:
-            code = int(parts[2])
+            code = int(code_text)
         except ValueError:
             continue
-        latest[parts[0]] = TaskExit(
-            task=parts[0], at_kst=parts[1], code=code, win32_code=_win32_code(code)
-        )
+        latest[task] = TaskExit(task=task, at_kst=at_kst, code=code, win32_code=_win32_code(code))
 
     exits = [latest[name] for name in sorted(latest)]
-    return TaskExitReport(exits=exits, available=True, detail=f"작업 {len(exits)}개")
+    return TaskExitReport(
+        exits=exits,
+        available=True,
+        detail=f"작업 {len(exits)}개 · 기동 {len(launches)}회",
+        launches=launches,
+    )
 
 
 def findings_for(report: TaskExitReport, *, session_ends: set[str] | None = None) -> list[str]:
@@ -232,10 +286,27 @@ def summarize(report: TaskExitReport) -> list[str]:
     """
     if not report.available:
         return [f"  작업 종료 코드: 판정 불가 — {report.detail}"]
-    if not report.exits:
-        return ["  작업 종료 코드: 그날 끝난 Messiah 작업이 없다"]
-    parts = [
-        f"{item.task}={item.win32_code}" + ("" if item.win32_code == 0 else " ❌")
-        for item in report.exits
-    ]
-    return ["  작업 종료 코드: " + " · ".join(parts)]
+
+    lines: list[str] = []
+    if report.exits:
+        parts = [
+            f"{item.task}={item.win32_code}" + ("" if item.win32_code == 0 else " ❌")
+            for item in report.exits
+        ]
+        lines.append("  작업 종료 코드: " + " · ".join(parts))
+    else:
+        lines.append("  작업 종료 코드: 그날 끝난 Messiah 작업이 없다")
+
+    # **기동 이력** (2026-08-10 G-3) — 종료 코드가 "어떻게 끝났나"라면 이쪽은 "어떻게
+    # 시작했나"다. 2026-08-10의 결정적 사실 셋(08:20 정시 트리거가 떴다는 것 · 08:50에
+    # 사람이 손으로 살리려다 18초 만에 끊겼다는 것 · 08:58에 다시 사람이 띄웠다는 것)이
+    # 전부 여기에만 있었고 앱 로그에는 한 줄도 없었다.
+    if report.launches:
+        lines.append(f"  기동 이력({len(report.launches)}회):")
+        lines.extend(f"    {item.describe()}" for item in report.launches)
+        by_hand = sum(1 for item in report.launches if item.by_hand)
+        if by_hand:
+            # 사람이 손으로 띄웠다는 것은 **그날 무언가 정상이 아니었다**는 뜻이다.
+            # 정상일이면 정시 트리거만으로 하루가 돈다.
+            lines.append(f"    ↳ 그중 {by_hand}회는 사람이 손으로 띄웠다 — 그날의 이유를 찾을 것")
+    return lines

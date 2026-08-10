@@ -52,6 +52,7 @@ from messiah.core.messages import BusMessage, CircuitBreakerStatus, Health
 from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
 from messiah.core.version import PROCESS_GIT_SHA, assess_version_drift, head_git_sha
+from messiah.ops import loss_ledger
 
 DEFAULT_SNAPSHOT_PATH = Path("logs") / "status_snapshot.json"
 DEFAULT_INTERVAL_SECONDS = 15.0
@@ -176,6 +177,11 @@ class StatusBoard:
             },
             "components": components,
             "circuit_breaker": circuit_breaker,
+            # **오늘 이미 잃은 것** (2026-08-10 B-2, `ops/loss_ledger.py`). 위 컴포넌트 넷은
+            # *"지금 살아 있나"*에 답하고, 이 줄은 *"오늘 이미 잃은 것이 있나"*에 답한다.
+            # 2026-08-10에 넷이 종일 초록인 채로 38분이 사라졌고, 그 사실이 사람 눈에 닿은
+            # 것은 15:45 장후 리포트였다 — 둘은 다른 질문이고 화면에 둘 다 있어야 한다.
+            "irrecoverable_loss": loss_ledger.current().to_dict(),
         }
         if self._ui_probe is not None:
             # **화면 없이 화면의 생사를 안다** — 이 한 줄이 07-30의 32분·07-31의 3시간
@@ -265,6 +271,13 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
     ui = snapshot.get("command_center_ui")
     if ui is not None:
         lines.append(f"  Command Center UI: {'정상' if ui == 'UP' else '응답 없음'}")
+
+    # 컴포넌트 목록 **위**에 둔다 (2026-08-10 B-2). 아래 줄들은 "지금 살아 있나"에 답하고
+    # 이 줄은 "오늘 이미 잃은 것이 있나"에 답하는데, 후자가 사람이 먼저 알아야 하는 것이다 —
+    # 2026-08-10엔 넷이 전부 초록인 채로 38분이 이미 사라진 뒤였다.
+    loss = snapshot.get("irrecoverable_loss") or {}
+    if loss.get("summary"):
+        lines.append(f"  {'✅' if loss.get('clean') else '❌'} {loss['summary']}")
 
     for name, info in sorted((snapshot.get("components") or {}).items()):
         state = info.get("state")
