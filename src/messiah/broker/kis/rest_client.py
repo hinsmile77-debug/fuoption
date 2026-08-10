@@ -47,6 +47,15 @@ class RateLimiterProtocol(Protocol):
 # 1건/초(1.0초 간격)로 상향한다.
 DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 1.0
 
+# **시세 조회를 실전 도메인으로 보내는가** (2026-08-10 C-1). 되돌리려면 이 한 줄을 False로.
+#
+# 근거와 실측은 `KISRestClient._quote_domain` docstring에 있다. 요약: 시세는 계좌와 무관한
+# 공개 데이터라 모의 앱키로도 실전 도메인이 200 OK이고(2026-07-21 `get_investor_flow` 실측),
+# 모의 도메인은 같은 날 같은 앱키로 실패율이 4배 높았다(1.05% vs 0.25%).
+#
+# 이 상수는 **시세 경로에만** 닿는다 — 주문·잔고는 `_domain`을 그대로 쓴다.
+QUOTE_ON_REAL_DOMAIN = True
+
 
 class _RateLimiter:
     """여러 스레드(asyncio.to_thread)가 공유하는 최소 호출 간격 페이서.
@@ -152,6 +161,33 @@ class KISRestClient:
         return tr_codes.VPS_REST_DOMAIN if self._creds.is_mock else tr_codes.REAL_REST_DOMAIN
 
     @property
+    def _quote_domain(self) -> str:
+        """**시세 조회 전용 도메인** (2026-08-10 C-1) — `QUOTE_ON_REAL_DOMAIN` 하나로 되돌린다.
+
+        시세는 계좌와 무관한 공개 데이터라 모의투자 앱키로도 실전 도메인이 200 OK다.
+        `get_investor_flow()`가 2026-07-21에 이미 그것을 실측하고 `REAL_REST_DOMAIN`을
+        고정 사용해 왔다(그쪽 docstring) — **같은 처방을 옵션 시세만 못 받고 있었다.**
+
+        대가는 2026-08-10에 실측됐다:
+
+            옵션체인(모의 도메인)  실패 53건 / 약 5,050건 = 1.05%
+            수급     (실전 도메인)  실패  3건 / 약 1,188건 = 0.25%
+
+        같은 앱키·같은 시각·같은 종류의 조회인데 실패율이 **4배** 차이났다. 옵션체인 쪽은
+        재시도 계층이 52건을 살려서 손실이 1다리로 끝났을 뿐이고, 그건 서버가 나아진 것이
+        아니라 우리가 두 번 물어본 것이다.
+
+        **TR ID는 안 바뀐다** — `TR_OPTION_QUOTE`가 real/vps 둘 다 `FHMIF10000000`이다.
+        즉 이 전환은 호스트만 바꾸는 것이고, 그래서 되돌리기도 상수 하나다.
+
+        주문·계좌 경로는 이 속성을 **쓰지 않는다**(`_domain` 그대로). 모의 계좌의 주문이
+        실전으로 나가는 것은 이 변경이 절대 만들면 안 되는 사고다.
+        """
+        if QUOTE_ON_REAL_DOMAIN:
+            return tr_codes.REAL_REST_DOMAIN
+        return self._domain
+
+    @property
     def _env_key(self) -> str:
         return "vps" if self._creds.is_mock else "real"
 
@@ -206,7 +242,7 @@ class KISRestClient:
         """
         tr_id = tr_codes.TR_OPTION_QUOTE[self._env_key]
         return self._get(
-            f"{self._domain}{tr_codes.PATH_FUTUREOPTION_QUOTE}",
+            f"{self._quote_domain}{tr_codes.PATH_FUTUREOPTION_QUOTE}",
             headers=self._headers(tr_id),
             params={"FID_COND_MRKT_DIV_CODE": market_div_code, "FID_INPUT_ISCD": symbol},
         )
@@ -217,7 +253,7 @@ class KISRestClient:
         """단일 종목 시세호가(5단계 매도/매수 호가) — "선물옵션 시세호가"(inquire-asking-price)."""
         tr_id = tr_codes.TR_OPTION_ASKING_PRICE[self._env_key]
         return self._get(
-            f"{self._domain}{tr_codes.PATH_FUTUREOPTION_ASKING_PRICE}",
+            f"{self._quote_domain}{tr_codes.PATH_FUTUREOPTION_ASKING_PRICE}",
             headers=self._headers(tr_id),
             params={"FID_COND_MRKT_DIV_CODE": market_div_code, "FID_INPUT_ISCD": symbol},
         )
@@ -245,6 +281,10 @@ class KISRestClient:
              08-03 14:17까지 이어짐). 페이징 커서 이동은 `data/backfill.py`가 담당한다.
         실패 조건: 4xx/5xx면 httpx.HTTPStatusError 그대로 전파.
         """
+        # **분봉 차트는 도메인을 안 바꾼다** (2026-08-10 C-1 스코프). 시세성 조회라 같은
+        # 논리가 적용될 여지는 있지만 이쪽은 실패율을 잰 적이 없고, 무엇보다 **백필은
+        # 잃은 봉을 되찾는 복구 경로**다. 근거 없이 건드려서 그 경로가 깨지면 사고를 복구할
+        # 수단이 함께 사라진다. 옵션 시세 쪽 3거래일 관측 뒤 같은 근거가 생기면 그때 옮긴다.
         return self._get(
             f"{self._domain}{tr_codes.PATH_FUTUREOPTION_TIME_CHART}",
             headers=self._headers(tr_codes.TR_FUTUREOPTION_TIME_CHART),

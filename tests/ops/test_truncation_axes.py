@@ -56,9 +56,12 @@ def test_volume_compare_counts_minutes_the_archive_never_got():
     official = {f"{h:02d}:{m:02d}": 100 for h in range(9, 16) for m in range(60)}
     archived = {f"{h:02d}:{m:02d}": 100 for h in range(9, 14) for m in range(60)}
 
-    ratio, common, mine, theirs, missing = compare_day(archived, official)
-    assert ratio == 1.0, "받은 것은 정확했다 — 그래서 비율만으로는 안 보인다"
-    assert missing == 120, "받아야 할 것을 다 받았는지는 별개 축이다"
+    result = compare_day(archived, official)
+    assert result.ratio == 1.0, "받은 것은 정확했다 — 그래서 비율만으로는 안 보인다"
+    assert result.missing_minutes == 120, "받아야 할 것을 다 받았는지는 별개 축이다"
+    # 그리고 그 120분이 **어디였는지**까지 말한다 (2026-08-10 B-1) — 이 경우는 꼬리다.
+    assert result.tail_missing_minutes == 120
+    assert result.head_missing_minutes == 0
 
 
 def test_volume_compare_ignores_archive_only_minutes():
@@ -68,8 +71,7 @@ def test_volume_compare_ignores_archive_only_minutes():
     official = {"09:00": 10, "09:01": 10}
     archived = {"08:45": 5, "09:00": 10, "09:01": 10}
 
-    _ratio, _common, _mine, _theirs, missing = compare_day(archived, official)
-    assert missing == 0
+    assert compare_day(archived, official).missing_minutes == 0
 
 
 # ---------------------------------------------------------------- 고도화 1 세션 커버리지

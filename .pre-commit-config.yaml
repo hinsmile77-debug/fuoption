@@ -15,3 +15,17 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+
+  # 코드만 고치고 판단을 안 남긴 커밋을 눈앞에 띄운다 (2026-08-10 C-2).
+  # 2026-08-10 ce91b08이 그날 오전을 잃은 사고를 고치고도 dev_memory를 안 남겼다.
+  # **경고만 한다** — 막으면 `--no-verify`가 습관이 되고 그러면 위 검사들까지 함께 꺼진다.
+  # `pass_filenames: false`인 이유: 판정 대상이 "dev_memory가 **안** 바뀐 상태"라
+  # 파일 목록 인자로는 볼 수 없고 스테이징 전체를 봐야 한다.
+  - repo: local
+    hooks:
+      - id: dev-memory-updated
+        name: dev_memory 갱신 확인(경고만)
+        entry: python scripts/check_dev_memory_updated.py
+        language: system
+        pass_filenames: false
+        always_run: true

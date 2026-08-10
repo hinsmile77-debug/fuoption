@@ -297,6 +297,15 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
         if any("short_cycles" in e for e in (r.get("series_coverage") or []))
         else None
     ),
+    # 공식 분봉의 **아침**이 아카이브에 없는 분 수 (2026-08-10 B-1). `missing_minutes`가
+    # "얼마나 없나"라면 이쪽은 **"어디가 없나"**의 한 조각이다 — 머리가 비는 것은 스케줄러
+    # 사건이고 중간이 비는 것은 회선 사건이라 처방이 다르다. 대조를 안 돌린 날이나 이 필드
+    # 이전의 옛 산출물은 None(판정 불가)이지 0이 아니다(L18).
+    "head_missing_minutes": lambda r: (
+        float((r.get("volume_check") or {})["head_missing_minutes"])
+        if isinstance((r.get("volume_check") or {}).get("head_missing_minutes"), int)
+        else None
+    ),
     # 옵션 상장 판정이 틀린 건수 — 양방향 (2026-08-10 A-1 후속, `_option_calendar_violations`).
     "option_calendar_violations": _option_calendar_violations,
     # 정본을 안 쓰는 소비자 수 (2026-08-10 A-1 후속). `canonical-consumers-wired` 항목의
@@ -403,6 +412,19 @@ class PendingVerification:
     metric: str
     consecutive_days: int
     deadline: date | None = None
+    # **채점 시작점을 뒤로 미는 날짜** (2026-08-10 B-3). `registered`를 고쳐 쓰지 않는
+    # 이유는 그 값이 **수정이 들어간 날**이라는 사실 기록이기 때문이다 — 그걸 덮으면
+    # 이력에서 "언제 고쳤나"가 사라진다. `since`는 "언제 다시 세기 시작했나"를 따로 적는다.
+    #
+    # 왜 필요한가: 한 번 위반하면 이 등록부는 **영원히 재발**이다. 그게 이 모듈의 취지지만
+    # (2026-08-05 "한 번이라도 위반하면 즉시 재발"), 부작용으로 **3거래일 전 위반과 오늘
+    # 새로 생긴 위반이 화면에서 구분되지 않는다.** 2026-08-10에 `daily-axes-measured`와
+    # `archiver-restart-restore`가 08-07 위반을 매일 다시 보고하고 있었고, 그 두 줄이
+    # 그날 새로 생겼을 재발을 가릴 수 있는 상태였다.
+    #
+    # `registered`와 **같은 규율**로 다룬다: 그날 장 마감 뒤에 조치가 들어가므로 그날은
+    # 채점하지 않고 다음 거래일부터 센다(`scored_after`).
+    since: date | None = None
     max_value: float | None = None
     min_value: float | None = None
     # 이 수정이 성립하려면 참이어야 하는 조건. 지표 이름은 `metric`과 같은 등록부를 쓴다.
@@ -410,6 +432,11 @@ class PendingVerification:
     premise_max: float | None = None
     premise_min: float | None = None
     premise_summary: str = ""
+
+    @property
+    def scored_after(self) -> date:
+        """이 날짜 **다음** 리포트부터 채점한다 — 등록일과 재설정일 중 늦은 쪽."""
+        return self.registered if self.since is None else max(self.registered, self.since)
 
     def satisfied_by(self, value: float) -> bool:
         if self.max_value is not None and value > self.max_value:
@@ -514,6 +541,7 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
                 metric=metric,
                 consecutive_days=int(entry.get("consecutive_days", 1)),
                 deadline=_as_date(entry["deadline"]) if entry.get("deadline") else None,
+                since=_as_date(entry["since"]) if entry.get("since") else None,
                 max_value=None if entry.get("max") is None else float(entry["max"]),
                 min_value=None if entry.get("min") is None else float(entry["min"]),
                 premise_metric=premise_metric,
@@ -555,7 +583,8 @@ def evaluate(
     verdicts: list[VerificationVerdict] = []
     for item in registry:
         extractor = METRIC_EXTRACTORS[item.metric]
-        judged_days = sorted(day for day in reports if day > item.registered)
+        # `since`가 있으면 채점 시작점이 그만큼 뒤로 밀린다 (2026-08-10 B-3).
+        judged_days = sorted(day for day in reports if day > item.scored_after)
 
         clean = 0
         violated_on: date | None = None
@@ -572,9 +601,34 @@ def evaluate(
                 break
 
         verdicts.append(
-            _verdict_for(item, clean, violated_on, unjudged, today, _latest_premise(item, reports))
+            _verdict_for(
+                item,
+                clean,
+                violated_on,
+                unjudged,
+                today,
+                _latest_premise(item, reports),
+                _trading_days_since(violated_on, reports, today),
+            )
         )
     return verdicts
+
+
+def _trading_days_since(
+    violated_on: date | None, reports: dict[date, dict[str, Any]], today: date
+) -> int | None:
+    """위반일과 오늘 사이의 **거래일 수** — 위반이 없으면 None (2026-08-10 B-3).
+
+    달력 일수가 아니라 리포트가 있는 날을 센다. 주말·휴장을 세면 "5일 전"이 실제로는 지난
+    거래일이 되어 급한 정도를 거꾸로 읽게 된다.
+
+    왜 필요한가: 한 번 위반하면 이 등록부는 영원히 재발이고 그게 맞다. 그런데 문구가
+    `2026-08-07에 기준 위반`뿐이면 **오늘 새로 생긴 재발과 3거래일 전 것이 같은 무게로
+    읽힌다.** 2026-08-10에 그런 줄이 둘 있었고, 그 사이에 새 재발이 섞였으면 못 봤을 것이다.
+    """
+    if violated_on is None:
+        return None
+    return sum(1 for day in reports if violated_on < day <= today)
 
 
 def _latest_premise(
@@ -602,6 +656,7 @@ def _verdict_for(
     unjudged: list[date],
     today: date,
     premise: tuple[date, float] | None = None,
+    days_since_violation: int | None = None,
 ) -> VerificationVerdict:
     note = f"({item.criterion_text()}"
     if unjudged:
@@ -609,13 +664,20 @@ def _verdict_for(
     note += ")"
 
     if violated_on is not None:
+        # **언제 위반했는지만큼 "얼마나 오래됐는지"가 중요하다** (2026-08-10 B-3). 오늘 새로
+        # 생긴 재발과 며칠 묵은 재발이 같은 문장이면 급한 것이 묻힌다.
+        when = f"{violated_on.isoformat()}에 기준 위반"
+        if days_since_violation:
+            when += f"({days_since_violation}거래일 전)"
+        elif days_since_violation == 0:
+            when += "(오늘)"
         return VerificationVerdict(
             item.id,
             item.summary,
             VerificationStatus.RECURRED,
             clean,
             item.consecutive_days,
-            f"{violated_on.isoformat()}에 기준 위반 — 수정이 듣지 않았다 {note}",
+            f"{when} — 수정이 듣지 않았다 {note}",
         )
 
     # **재발 다음으로 이른 신호** (2026-08-05 2차, 고도화 4). 결과 지표는 아직 깨끗한데

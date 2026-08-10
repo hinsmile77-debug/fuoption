@@ -695,3 +695,117 @@ def test_nonzero_task_exit_metric_is_unjudged_when_the_query_failed():
 
     assert extract({"task_exit_codes": {"available": False, "exits": []}}) is None
     assert extract({}) is None
+
+
+# ------------------------- B-3(2026-08-10): 재발의 나이
+
+
+def _restarts_item(**overrides) -> PendingVerification:
+    base = dict(
+        id="x",
+        summary="s",
+        registered=date(2026, 8, 3),
+        metric="restarts",
+        consecutive_days=3,
+        max_value=0.0,
+    )
+    base.update(overrides)
+    return PendingVerification(**base)
+
+
+def _days(*specs: tuple[int, int]) -> dict[date, dict]:
+    return {date(2026, 8, d): _report(date(2026, 8, d), restarts=n) for d, n in specs}
+
+
+def test_since_moves_the_scoring_start_without_erasing_when_it_was_fixed():
+    """`registered`는 "언제 고쳤나"의 기록이라 덮어쓰지 않는다 — `since`가 따로 센다."""
+    item = _restarts_item(since=date(2026, 8, 10))
+
+    assert item.registered == date(2026, 8, 3)
+    assert item.scored_after == date(2026, 8, 10)
+
+
+def test_an_old_violation_stops_being_reported_after_since():
+    """2026-08-10의 그 자리 — 08-07 위반이 사흘째 매일 다시 보고되고 있었다.
+
+    그 한 줄이 상단에 계속 있으면 **그날 새로 생긴 재발이 옆에 묻힌다.**
+    """
+    reports = _days((5, 0), (6, 0), (7, 3), (10, 0), (11, 0), (12, 0))
+
+    before = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
+    after = evaluate([_restarts_item(since=date(2026, 8, 7))], reports, today=date(2026, 8, 12))[0]
+
+    assert before.status == VerificationStatus.RECURRED
+    assert after.status == VerificationStatus.VERIFIED, "재설정 뒤 3거래일이 깨끗하다"
+
+
+def test_since_does_not_forgive_a_violation_after_it():
+    """재설정은 면제가 아니다 — 그 뒤에 또 위반하면 그대로 재발이다."""
+    reports = _days((7, 3), (10, 0), (11, 2), (12, 0))
+
+    item = _restarts_item(since=date(2026, 8, 7))
+    verdict = evaluate([item], reports, today=date(2026, 8, 12))[0]
+
+    assert verdict.status == VerificationStatus.RECURRED
+    assert "2026-08-11" in verdict.detail
+
+
+def test_since_earlier_than_registered_cannot_widen_the_window():
+    """`since`로 등록일 이전까지 채점을 넓히면 수정 이전의 세계를 채점하게 된다."""
+    item = _restarts_item(since=date(2026, 7, 1))
+
+    assert item.scored_after == date(2026, 8, 3)
+
+
+def test_a_recurrence_says_how_old_it_is_in_trading_days():
+    """`2026-08-07에 기준 위반`만으로는 오늘 난 것과 사흘 묵은 것이 같은 무게로 읽힌다."""
+    reports = _days((5, 0), (6, 0), (7, 3), (10, 0), (11, 0), (12, 0))
+
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
+
+    assert "2026-08-07에 기준 위반(3거래일 전)" in verdict.detail
+
+
+def test_a_recurrence_that_happened_today_says_so():
+    """오늘 난 재발은 **오늘**이라고 말해야 급한 정도가 바로 읽힌다."""
+    reports = _days((10, 0), (11, 0), (12, 4))
+
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
+
+    assert "2026-08-12에 기준 위반(오늘)" in verdict.detail
+
+
+def test_the_age_counts_trading_days_not_calendar_days():
+    """주말·휴장을 세면 "5일 전"이 실제로는 지난 거래일이 되어 급한 정도를 거꾸로 읽는다."""
+    # 08-07(금) 위반 → 08-10(월)·08-11(화)만 리포트가 있다. 달력으로는 5일 전이다.
+    reports = _days((7, 3), (10, 0), (11, 0))
+
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
+
+    assert "(2거래일 전)" in verdict.detail
+
+
+def test_registry_reads_since_from_yaml(tmp_path: Path):
+    path = tmp_path / "reg.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "verifications": [
+                    {
+                        "id": "x",
+                        "registered": "2026-08-03",
+                        "since": "2026-08-10",
+                        "metric": "restarts",
+                        "max": 0,
+                        "consecutive_days": 3,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (item,) = load_registry(path)
+
+    assert item.since == date(2026, 8, 10)
+    assert item.scored_after == date(2026, 8, 10)

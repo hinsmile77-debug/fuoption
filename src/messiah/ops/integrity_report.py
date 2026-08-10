@@ -1085,6 +1085,17 @@ def build_report(
         # 두 축이 각각 다른 처방을 가리킨다 (2026-08-07 P0-4): 비율이 낮으면 **파서**를,
         # 미수집이 많으면 **수집 중단**을 의심한다. 한 문장으로 뭉치면 엉뚱한 데를 판다.
         missing = volume_check.get("missing_minutes")
+        # 미수집 안에서도 **머리와 나머지가 다른 사고**다 (2026-08-10 B-1). 2026-08-10에
+        # 13분이 전부 아침(08:45~08:58)이었는데 임계 20분 아래라 조용했다 — 그날 이 축이
+        # 잘림을 본 유일한 축이었다. 머리는 스케줄러를, 중간·꼬리는 회선을 의심하게 한다.
+        head_missing = volume_check.get("head_missing_minutes")
+        if isinstance(head_missing, int) and head_missing > volume_check.get(
+            "head_missing_minutes_limit", 0
+        ):
+            breaches.append(
+                f"공식 분봉의 아침 {head_missing}분이 아카이브에 없다 — 수집 기동을 의심할 것"
+                f"(같은 사건을 `collection_start_lag_minutes`가 원인 쪽에서 잰다)"
+            )
         if isinstance(missing, int) and missing > volume_check.get("missing_minutes_limit", 20):
             breaches.append(
                 f"공식 분봉에는 있고 아카이브엔 없는 분 {missing}분 — 수집 중단 의심"
@@ -1459,10 +1470,19 @@ def format_summary(report: IntegrityReport) -> str:
     if report.volume_check is not None:
         ratio = report.volume_check.get("ratio")
         missing = report.volume_check.get("missing_minutes")
+        # 미수집이 있으면 **어디가 비었는지**까지 한 줄에 싣는다 (2026-08-10 B-1) — 숫자
+        # 하나만 보면 "장중에 빠진 날"과 "아침에 늦게 뜬 날"이 같은 문장이 된다.
+        head = report.volume_check.get("head_missing_minutes")
+        where = (
+            f"(머리 {head}/중간 {report.volume_check.get('middle_missing_minutes')}"
+            f"/꼬리 {report.volume_check.get('tail_missing_minutes')})"
+            if isinstance(head, int)
+            else ""
+        )
         lines.append(
             "  공식 분봉 대비 거래량: "
             + ("측정 불가" if ratio is None else f"{ratio:.3f}")
-            + (f" · 미수집 {missing}분" if isinstance(missing, int) and missing else "")
+            + (f" · 미수집 {missing}분{where}" if isinstance(missing, int) and missing else "")
             + (" ✅" if report.volume_check.get("ok") else " ⚠")
         )
     for horizon, entry in sorted((report.vol_axis.get("horizons") or {}).items()):
