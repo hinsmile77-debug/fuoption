@@ -57,6 +57,8 @@ from messiah.core.timeutil import now_utc
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.bar_composer import MultiHorizonBarComposer
 from messiah.execution.order_gateway import OrderGateway
+from messiah.features import sidecar
+from messiah.features import spec as feature_spec
 from messiah.features.engine import FeatureEngine
 from messiah.models.cv import WalkForwardSplitter
 from messiah.models.labeling import triple_barrier_labels
@@ -250,7 +252,15 @@ async def run_walk_forward_backtest(
             bus = InProcessBus(instance_id="messiah-backtest-harness")
             archiver = ParquetArchiver(Path(tmp))
             composer = MultiHorizonBarComposer(symbol, archiver, bus)
-            feature_engine = FeatureEngine(symbol, bus, feature_set)
+            # 사이드카 정본(`features/sidecar.build()`) — 학습 쪽(`models/trainer.py`)은
+            # 이미 이걸 쓴다. 여기가 안 쓰면 **같은 feature_set으로 학습한 모델을 사이드카
+            # 없는 벡터로 백테스트하게 되고**, 그 차이는 성과 숫자로만 흐릿하게 드러난다.
+            feature_engine = FeatureEngine(
+                symbol,
+                bus,
+                feature_set,
+                sidecars=sidecar.build(feature_spec.resolve(feature_set)),
+            )
             futures_service = FuturesAIService(
                 symbol,
                 {train_horizon: training.expert},

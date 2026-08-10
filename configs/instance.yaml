@@ -35,7 +35,21 @@ universe:
   - K200_OPT_WEEKLY_THU  # 목위클리
 model_bundle: "none"                       # live 모드는 지정 필수 (자가 점검)
 redis_url: "redis://localhost:6380/0"
-feature_set: "v2026.07"                    # FeatureVector.feature_set (Ver 1.4 §5.2, W6~8 PX 핵심 30개)
+# FeatureVector.feature_set — 정본은 `src/messiah/features/spec.py`의 FEATURE_SETS.
+#
+# 2026-08-10 B-4: v2026.07(PX+VL, 121개) → v2026.08-ev(PX+VL+EV, 133개).
+# EV 계산기 12종은 2026-08-04부터 있었고 `v2026.08-ev`도 그때 정의됐는데, 여섯 거래일간
+# 이 줄이 v2026.07이라 **한 번도 계산되지 않았다.** 그 사이 변동성 축 채점은 3개 Horizon
+# 전부에서 `ev_tod_cos 미측정 — 피처셋에 없음`을 찍고 있었다(등록부 `ev-features-measured`).
+#
+# EV는 `calendar` 사이드카(참조 사이드카 — 미리 공표된 휴장일·만기)를 요구한다. 그것을
+# 조립하는 정본은 `features/sidecar.build()`이고, 이 전환과 같은 커밋에서 진입점 셋
+# (run_l1_daily·run_replay·backtest/harness)이 그것을 부르게 했다 — 안 그러면 수집기가
+# "사이드카 ['calendar']가 주입되지 않았다"로 기동을 거부한다.
+#
+# **되돌리려면 이 줄만 v2026.07로.** 사이드카 주입은 그때도 무해하다(스펙이 안 요구하면
+# `build()`가 아무것도 안 만든다).
+feature_set: "v2026.08-ev"
 futures_tick_size: "0.02"                  # 미니선물(A05608) 실측값 — 다른 상품엔 그대로 쓰지 말 것
 
 # 1분봉 확정 방식 (2026-08-05 고도화 1) — tick | timer

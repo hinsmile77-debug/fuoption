@@ -126,6 +126,8 @@ from messiah.data.normalizer import parse_futures_ticks  # noqa: E402
 from messiah.data.option_chain_archiver import OptionChainArchiver  # noqa: E402
 from messiah.data.option_chain_poller import OptionChainPoller  # noqa: E402
 from messiah.data.tick_archiver import TickArchiver  # noqa: E402
+from messiah.features import sidecar  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.ops import loss_ledger, series_expectation, session_guard  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
@@ -957,7 +959,17 @@ async def main(cfg: InstanceConfig) -> None:
         # (2026-08-05) — 수집기가 매 프레임 재는 값을 그대로 본다.
         clock_skew_seconds=collector.clock_skew_seconds,
     )
-    engine = FeatureEngine(symbol, bus, feature_set=cfg.feature_set)
+    # 사이드카는 **한 곳에서만** 만든다 (`features/sidecar.build()` docstring이 호출처 넷을
+    # 이름으로 적어 뒀고 그중 하나가 여기다). 이 줄이 없던 동안 `feature_set`을
+    # `v2026.08-ev`로 올리면 엔진이 "사이드카 ['calendar']가 주입되지 않았다"로 **기동을
+    # 거부**했다 — EV 계산기도 피처셋 정의도 이미 다 있었는데, 정본을 안 부르는 소비자
+    # 하나가 그 전환을 막고 있었다(2026-08-10 B-4).
+    engine = FeatureEngine(
+        symbol,
+        bus,
+        feature_set=cfg.feature_set,
+        sidecars=sidecar.build(feature_spec.resolve(cfg.feature_set)),
+    )
     # 체결틱 원본 적재 (2026-08-04, F2). 지금까지 이 프로젝트는 틱을 한 번도 저장한 적이
     # 없다 — 받아서 분봉으로 집계하고 버렸다. 그래서 MS(마이크로구조) 30개가 통째로
     # 미착수였는데, 정작 호가는 매 틱 프레임(idx34~37)에 실려 오고 있었다.

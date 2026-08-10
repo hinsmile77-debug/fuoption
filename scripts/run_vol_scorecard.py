@@ -48,6 +48,8 @@ from messiah.core.event_calendar import EventCalendar  # noqa: E402
 from messiah.core.messages import BarClosed, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
+from messiah.features import sidecar  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models import vol_scorecard  # noqa: E402
 from messiah.models.trainer import build_feature_vectors  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
@@ -150,12 +152,18 @@ async def score_day(
     if not scored_days:
         return []
 
+    # 사이드카 정본(`features/sidecar.build()`) — **이 스크립트가 채점하는 것이 바로
+    # "관심 피처가 실제로 측정되는가"**(`absent_features`)라, 정본을 안 부르면 EV 같은
+    # 사이드카 카테고리를 영원히 "없다"고 채점하거나(v2026.07 시절) 기동조차 못 한다
+    # (v2026.08-ev 전환 뒤). 2026-08-10 B-4에서 이 자리가 여섯 번째 미사용 소비자였다.
+    sidecars = sidecar.build(feature_spec.resolve(feature_set))
+
     cards: list[vol_scorecard.VolScorecard] = []
     for horizon in _HORIZONS:
         bars = aggregate_to_horizon(window, horizon)
         if not bars:
             continue
-        vectors = await build_feature_vectors(bars, feature_set=feature_set)
+        vectors = await build_feature_vectors(bars, feature_set=feature_set, sidecars=sidecars)
         # **채점 구간만** 남긴다 — 워밍업은 엔진을 데우는 용도지 성적이 아니다.
         sliced = [(b, v) for b, v in zip(bars, vectors) if b.bar_open_kst.date() in scored_days]
         if not sliced:

@@ -112,6 +112,34 @@ CANONICAL: tuple[Canon, ...] = (
             "어긋나 있던 것을 하나로 합쳤다 — 세 번째 사본이 생기지 않게 한다."
         ),
     ),
+    Canon(
+        symbol="sidecar.build",
+        home="src/messiah/features/sidecar.py",
+        expected_consumers=(
+            # 학습 — 벡터를 만드는 쪽.
+            "src/messiah/models/trainer.py",
+            # 백테스트 — 학습과 **같은 모양**의 벡터여야 성과가 성과다.
+            "src/messiah/backtest/harness.py",
+            # 장중 수집 — 운영 `feature_set`이 실제로 도는 자리.
+            "scripts/run_l1_daily.py",
+            # 재생 — 운영과 같은 설정을 읽으므로 같이 안 고치면 재생만 깨진다.
+            "scripts/run_replay.py",
+            # 피처 관문 — 어떤 피처가 살아 있는지 채점하는 쪽.
+            "scripts/run_feature_gate.py",
+            # 변동성 축 채점 — **"관심 피처가 실제로 측정되는가"를 채점하는 자리 자신**이라
+            # 여기가 정본을 안 부르면 EV를 영원히 "없다"고 채점한다(2026-08-10 실측).
+            "scripts/run_vol_scorecard.py",
+            # 설정 스윕 — 조합별 비교라 조합마다 사이드카가 달라진다.
+            "scripts/run_model_sweep.py",
+        ),
+        why=(
+            "feature_set이 요구하는 사이드카 조립. 정본을 안 부르는 소비자가 있으면 "
+            "그 자리는 **카테고리가 통째로 빠진 벡터**를 같은 feature_set 이름으로 내보내거나 "
+            "(사이드카 없는 카테고리) 기동 자체가 깨진다. 2026-08-10에 EV 계산기도 "
+            "피처셋 정의도 다 있었는데 run_l1_daily가 이걸 안 불러서 `v2026.08-ev` 전환이 "
+            "막혀 있었다 — 그 모듈 docstring은 호출처 넷을 이름으로 적어 두고도 그랬다."
+        ),
+    ),
 )
 
 

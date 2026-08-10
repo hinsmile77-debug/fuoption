@@ -40,6 +40,8 @@ import numpy as np  # noqa: E402
 
 from messiah.core.messages import BarClosed, Horizon  # noqa: E402
 from messiah.core.timeutil import KST  # noqa: E402
+from messiah.features import sidecar  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models.trainer import build_feature_vectors, train_formal_expert  # noqa: E402
 from messiah.simulator.replay import ParquetBarReplaySource  # noqa: E402
 from messiah.strategy.futures.meta_labeler import build_meta_features  # noqa: E402
@@ -82,10 +84,14 @@ async def _try_real_archive(args: argparse.Namespace) -> None:
     if not bars:
         print("[실제 아카이브] 봉이 없음 — 건너뜀")
         return
+    # `try` 밖에서 만든다 — 학습이 실패해도 아래 시연 구간이 이 값을 쓰기 때문이다.
+    # 안에 두면 그때 `NameError`가 나서 **진짜 실패 원인이 가려진다**.
+    sidecars = sidecar.build(feature_spec.resolve(args.feature_set))
     try:
         result = await train_formal_expert(
             bars,
             feature_set=args.feature_set,
+            sidecars=sidecars,
             model_version=f"{args.horizon}_formal_smoke",
             atr_window=2,
             n_splits=2,
@@ -108,9 +114,13 @@ async def _run_synthetic(args: argparse.Namespace) -> None:
     bars = _synthetic_bars(args.synthetic_bars, horizon)
     print(f"\n[합성 데이터] 입력 봉: {len(bars)}건 — 실제 시장 데이터 아님, 배관 검증 전용")
 
+    # 합성 구간도 같은 사이드카를 쓴다 — EV는 참조 사이드카(공표된 휴장일·만기)라 합성 봉의
+    # 날짜에도 정상 동작한다. 여기만 빼면 `--feature-set v2026.08-ev`에서 이 단계가 깨진다.
+    sidecars = sidecar.build(feature_spec.resolve(args.feature_set))
     result = await train_formal_expert(
         bars,
         feature_set=args.feature_set,
+        sidecars=sidecars,
         model_version=f"{args.horizon}_formal_smoke_synthetic",
         atr_window=args.atr_window,
         n_splits=args.n_splits,
@@ -133,7 +143,9 @@ async def _run_synthetic(args: argparse.Namespace) -> None:
     )
 
     # 예측 → Meta-Labeler 통과 판정까지 실제로 이어지는지 마지막 봉으로 한 번 더 시연.
-    feature_vectors = await build_feature_vectors(bars, feature_set=args.feature_set)
+    feature_vectors = await build_feature_vectors(
+        bars, feature_set=args.feature_set, sidecars=sidecars
+    )
     sample_bar, sample_fv = bars[-1], feature_vectors[-1]
     view = result.expert.predict(sample_fv)
     meta_features = build_meta_features(

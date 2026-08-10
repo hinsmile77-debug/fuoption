@@ -30,6 +30,8 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.core.messages import Horizon  # noqa: E402
+from messiah.features import sidecar  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models.trainer import build_feature_vectors, train_prototype_expert  # noqa: E402
 from messiah.models.validator import Validator  # noqa: E402
 from messiah.risk.cost_model import CostModel  # noqa: E402
@@ -50,9 +52,11 @@ async def main(args: argparse.Namespace) -> None:
     print(f"입력 봉: {len(bars)}건 ({args.symbol}, {args.horizon}, {args.start}~{args.end})")
 
     cost_model = CostModel()
+    sidecars = sidecar.build(feature_spec.resolve(args.feature_set))
     expert = await train_prototype_expert(
         bars,
         feature_set=args.feature_set,
+        sidecars=sidecars,
         model_version=f"{args.horizon}_prototype1_smoke",
         cost_model=cost_model,
         atr_window=args.atr_window,
@@ -60,7 +64,9 @@ async def main(args: argparse.Namespace) -> None:
     print(f"학습 완료: horizon={expert.horizon.value} model_version={expert.model_version}")
     print(f"Feature 개수: {len(expert.feature_names)}")
 
-    feature_vectors = await build_feature_vectors(bars, feature_set=args.feature_set)
+    feature_vectors = await build_feature_vectors(
+        bars, feature_set=args.feature_set, sidecars=sidecars
+    )
     views = [expert.predict(fv) for fv in feature_vectors]
     argmax_dist = Counter(
         "up"

@@ -26,6 +26,8 @@ from messiah.broker.simulator.adapter import SimBroker  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.messages import Horizon, OrderKind, OrderRequest, Side  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
+from messiah.features import sidecar  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.simulator.engine import DigitalTwinEngine  # noqa: E402
 from messiah.simulator.inprocess_bus import InProcessBus  # noqa: E402
@@ -53,7 +55,15 @@ async def main(args: argparse.Namespace) -> None:
     async def _count_feature(horizon: Horizon, _vector) -> None:
         feature_counts[horizon] += 1
 
-    feature_engine = FeatureEngine(args.symbol, bus, feature_set=cfg.feature_set)
+    # 재생은 **운영과 같은 `feature_set`**을 쓴다 — 사이드카를 안 주면 그 순간 재생이
+    # 기동조차 못 하거나(EV) 카테고리가 통째로 빠진 벡터가 같은 이름을 달고 나간다.
+    # 정본은 `features/sidecar.build()` 하나다(2026-08-10 B-4).
+    feature_engine = FeatureEngine(
+        args.symbol,
+        bus,
+        feature_set=cfg.feature_set,
+        sidecars=sidecar.build(feature_spec.resolve(cfg.feature_set)),
+    )
     await feature_engine.run_forever()
     for horizon in Horizon:
         await bus.subscribe(
