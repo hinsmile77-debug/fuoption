@@ -58,7 +58,11 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import time
 from pathlib import Path
+from typing import Sequence
+
+from messiah.ops import task_schedule
 
 # 아카이브가 쌓이는 속도 실측(2026-08-04): 봉 Parquet 하루 ~60KB, 체결틱 하루 ~0.3MB,
 # 옵션체인 하루 ~3,276행. 합쳐도 하루 1MB 남짓이라 5GB면 수년치다 — 이 임계는
@@ -386,6 +390,158 @@ def check_boot_recovery(*, runner=subprocess.run) -> HostCheck:
     )
 
 
+def _weekly_trigger_query(names: Sequence[str]) -> str:
+    """등록된 **평일 정시 트리거 시각**을 작업별로 뽑는 PowerShell 한 줄.
+
+    부팅 트리거(`MSFT_TaskBootTrigger`)는 시각이 없으므로 제외한다 — 그건 `check_boot_recovery`가
+    따로 본다. 한 작업에 정시 트리거가 여럿이면 전부 찍는다(쉼표 구분): 하나라도 기동 창보다
+    이르면 그 트리거가 뜬 날은 아무것도 안 뜬 날이 되기 때문이다.
+    """
+    listed = ", ".join(f"'{name}'" for name in names)
+    return (
+        "$ErrorActionPreference='SilentlyContinue';"
+        f"foreach ($n in @({listed})) {{"
+        "  $t = Get-ScheduledTask -TaskName $n;"
+        '  if (-not $t) { "$n=missing"; continue }'
+        "  $w = @($t.Triggers"
+        "    | Where-Object { $_.CimClass.CimClassName -ne 'MSFT_TaskBootTrigger' }"
+        "    | ForEach-Object { ([datetime]$_.StartBoundary).ToString('HH:mm') });"
+        '  if ($w.Count -eq 0) { "$n=none" } else { "$n=" + ($w -join \',\') }'
+        "}"
+    )
+
+
+def check_schedule_drift(
+    *, runner=subprocess.run, schedule_path: Path | str = task_schedule.DEFAULT_SCHEDULE_PATH
+) -> HostCheck:
+    """**등록된** 정시 트리거가 정본·기동 창과 맞는가 (2026-08-10 신설, P0).
+
+    ## 왜 이 항목이 생겼나 — 그날 아침
+
+    08:20(Messiah)과 08:25(Messiah-G2) 트리거가 정확히 제 시각에 떴고, self-check도 PASS였고,
+    두 프로세스 모두 그 자리에서 종료했다 — `LAUNCH_WINDOW_START`가 08:30에 하드코딩돼 있었기
+    때문이다. 트리거는 2026-08-08 12:00에 손으로 08:35→08:20으로 옮겨져 있었다.
+
+    **종료 코드가 0이었다.** 스케줄러에는 `LastTaskResult=0`, 즉 성공으로 남았다. "매일 아침
+    아무것도 안 뜨는데 모든 계기가 정상이라고 말하는" 상태가 만들어졌고, 사람이 08:56에
+    알아챌 때까지 그대로였다.
+
+    ## 왜 코드가 아니라 실측인가
+
+    `ops/task_schedule.py`가 기동 창을 정본에서 파생하게 만들면서, "정시 트리거가 자기 기동 창에
+    막히는" 조합은 구조적으로 불가능해졌다. 남는 것은 **정본과 실제 등록이 어긋나는 것**뿐이다.
+    그리고 그건 정확히 08-08에 일어난 일이다 — 사람이 스케줄러 GUI를 열어 시각을 바꿨고, 그
+    사실은 어느 파일에도 안 남았다. 등록 상태는 코드가 아니라 OS 상태라 테스트로는 못 잡는다.
+    `check_boot_recovery`가 부팅 트리거에 대해 하는 일을, 이 항목이 시각에 대해 한다.
+
+    판정은 두 가지를 나눠 본다. **기동 창보다 이른 트리거**는 그날 수집이 통째로 없어진다는
+    뜻이라 확정적 결함이고, **정본과 다르지만 창 안인 시각**은 그날은 돌지만 정본이 거짓말을
+    하고 있다는 뜻이다. 둘 다 finding이되 문구로 구분한다 — 급한 정도가 다르다.
+    """
+    if sys.platform != "win32":
+        return HostCheck("schedule_drift", available=False, ok=True, detail="Windows 전용 — 건너뜀")
+
+    try:
+        expected = {
+            task.name: task.weekly for task in task_schedule.collection_tasks(schedule_path)
+        }
+    except task_schedule.ScheduleUnreadable as exc:
+        # 정본을 못 읽으면 기동 창도 폴백을 쓰고 있다는 뜻이다 — 그 사실 자체가 알려야 할 상태다.
+        return HostCheck(
+            "schedule_drift", available=False, ok=True, detail=f"정본 읽기 실패({exc})"
+        )
+    if not expected:
+        return HostCheck(
+            "schedule_drift", available=False, ok=True, detail="정본에 수집 계열 작업이 없다"
+        )
+
+    window_start = task_schedule.launch_window_start(schedule_path)
+    try:
+        result = runner(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                _weekly_trigger_query(sorted(expected)),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 — 못 재는 것과 정상은 다르다
+        return HostCheck(
+            "schedule_drift", available=False, ok=True, detail=f"측정 실패({type(exc).__name__})"
+        )
+
+    registered: dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        name, _, value = line.strip().partition("=")
+        if name and value:
+            registered[name] = value
+    if result.returncode != 0 or set(registered) != set(expected):
+        return HostCheck(
+            "schedule_drift", available=False, ok=True, detail="측정 실패(작업 조회 출력 불일치)"
+        )
+
+    findings: list[str] = []
+    shown: list[str] = []
+    for name in sorted(expected):
+        want = expected[name]
+        value = registered[name]
+        if value in ("missing", "none"):
+            findings.append(
+                f"{name}: 평일 정시 트리거 없음({value}) — 정본은 {want:%H:%M}"
+                if value == "none"
+                else f"{name}: 작업 자체가 없음 — 정본은 평일 {want:%H:%M}"
+            )
+            shown.append(f"{name}={value}")
+            continue
+
+        times: list[time] = []
+        for token in value.split(","):
+            hour, _, minute = token.partition(":")
+            try:
+                times.append(time(int(hour), int(minute)))
+            except ValueError:
+                pass
+        if not times:
+            return HostCheck(
+                "schedule_drift",
+                available=False,
+                ok=True,
+                detail="측정 실패(트리거 시각 해석 불가)",
+            )
+
+        shown.append(f"{name}={value}")
+        early = [t for t in times if t < window_start]
+        if early:
+            findings.append(
+                f"{name}: 등록 트리거 {', '.join(f'{t:%H:%M}' for t in early)}가 "
+                f"기동 창 시작({window_start:%H:%M})보다 이르다 — 그 시각에 뜬 프로세스는 "
+                "self-check까지 통과한 뒤 '기동 창 이전'으로 즉시 종료하고, 종료 코드 0이라 "
+                "스케줄러에는 성공으로 남는다(2026-08-10에 그렇게 오전을 잃었다). "
+                "configs/scheduled_tasks.json을 고치고 "
+                "scripts/install_scheduled_tasks.ps1을 다시 돌릴 것"
+            )
+        elif want not in times:
+            findings.append(
+                f"{name}: 등록 {value} ≠ 정본 {want:%H:%M} — 오늘은 돌지만 정본이 실제와 다르다. "
+                "둘 중 맞는 쪽으로 맞출 것(configs/scheduled_tasks.json 또는 재등록)"
+            )
+
+    if findings:
+        return HostCheck("schedule_drift", available=True, ok=False, detail=" · ".join(findings))
+    return HostCheck(
+        "schedule_drift",
+        available=True,
+        ok=True,
+        detail=f"정본 일치 {', '.join(shown)} (기동 창 {window_start:%H:%M}~)",
+    )
+
+
 def collect(
     *,
     path: Path | str = ".",
@@ -401,5 +557,6 @@ def collect(
             check_docker(runner=runner),
             check_cpu_contention(runner=runner, project_root=project_root),
             check_boot_recovery(runner=runner),
+            check_schedule_drift(runner=runner),
         ]
     )

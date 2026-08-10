@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -69,6 +69,7 @@ import polars as pl
 
 from messiah.core.event_calendar import DEFAULT_SESSION
 from messiah.core.timeutil import KST
+from messiah.ops import task_schedule
 from messiah.ops.series_expectation import Expectation
 
 # 정상 카덴스의 몇 배를 넘어야 "구멍"인가. 3배면 폴링 두 번을 연달아 놓친 상태다 —
@@ -209,9 +210,15 @@ def session_window(day: date, *, start: datetime | None = None) -> tuple[datetim
     """
     close = datetime.combine(day, DEFAULT_SESSION.close_time, tzinfo=KST)
     if start is None:
-        start = datetime.combine(day, DEFAULT_SESSION.open_time, tzinfo=KST) - timedelta(
-            minutes=25
-        )  # 08:35 — 정시 기동 시각. 기동 로그가 없는 날의 최선 추정치다.
+        # 기동 로그가 없는 날의 최선 추정치 = **등록된** 정시 트리거 시각. 종전에는
+        # `open_time - 25분`(=08:35)이라는 세 번째 하드코딩 사본이었고, 2026-08-08에 트리거가
+        # 08:20으로 옮겨진 뒤로는 15분씩 늦게 잡혀 머리쪽 공백을 그만큼 덜 세고 있었다
+        # (`ops/task_schedule.py` 참고 — 같은 숫자를 여러 곳에 적어 둔 것이 문제의 뿌리였다).
+        try:
+            trigger = task_schedule.earliest_collection_trigger()
+        except task_schedule.ScheduleUnreadable:
+            trigger = task_schedule.FALLBACK_LAUNCH_WINDOW_START
+        start = datetime.combine(day, trigger, tzinfo=KST)
     elif start.tzinfo is None:
         start = start.replace(tzinfo=KST)
     return min(start, close), close

@@ -1,0 +1,48 @@
+{
+  "_why": [
+    "Windows 작업 스케줄러 등록의 정본이자, 진입점 기동 창(session_guard.LAUNCH_WINDOW_START)의",
+    "단일 소스다. 2026-08-10에 이 파일이 없어서 사고가 났다 — 스케줄러 트리거는 08:20/08:25로",
+    "손수 옮겨졌는데 코드의 기동 창은 08:30에 하드코딩돼 있어, 두 작업이 정시에 떠서 self-check까지",
+    "통과한 뒤 '기동 창 이전'으로 즉시 종료했다. 종료 코드가 0이라 스케줄러에는 성공으로 남았고,",
+    "사람이 알아챈 08:56까지 관측이 죽어 있었다.",
+    "",
+    "읽는 쪽: scripts/install_scheduled_tasks.ps1 (등록), src/messiah/ops/task_schedule.py (기동 창),",
+    "src/messiah/ops/host_health.py check_schedule_drift (매일 실측 대조).",
+    "시각을 바꿀 때는 여기만 고치고 install_scheduled_tasks.ps1을 다시 돌린다."
+  ],
+  "launch_window_margin_minutes": 5,
+  "tasks": [
+    {
+      "name": "Messiah",
+      "bat": "scripts\\run_l1_daily.bat",
+      "weekly": "08:20",
+      "at_boot": true,
+      "restart": true,
+      "collection": true
+    },
+    {
+      "name": "Messiah-G2",
+      "bat": "scripts\\run_g2_paper_trading.bat",
+      "weekly": "08:25",
+      "at_boot": true,
+      "restart": true,
+      "collection": true
+    },
+    {
+      "name": "Messiah-Shutdown",
+      "bat": "scripts\\stop_l1_daily.bat",
+      "weekly": "15:40",
+      "at_boot": false,
+      "restart": false,
+      "collection": false
+    },
+    {
+      "name": "Messiah-Postmarket",
+      "bat": "scripts\\run_postmarket.bat",
+      "weekly": "15:45",
+      "at_boot": false,
+      "restart": false,
+      "collection": false
+    }
+  ]
+}

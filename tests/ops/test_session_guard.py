@@ -173,6 +173,7 @@ def test_a_broken_report_does_not_block_the_guard(tmp_path: Path, capsys):
 from datetime import date as _date  # noqa: E402
 
 from messiah.core.timeutil import KST as _KST  # noqa: E402
+from messiah.ops import task_schedule  # noqa: E402
 
 
 class _Cal:
@@ -194,9 +195,60 @@ def test_reboot_during_the_session_may_relaunch():
     assert allowed, reason
 
 
-def test_scheduled_start_time_is_inside_the_window():
-    """정시 트리거(08:35)가 자기 가드에 막히면 매일 아침 아무것도 안 뜬다."""
-    assert session_guard.launch_window_verdict(now=_at(8, 35), calendar=_Cal())[0]
+def test_every_registered_trigger_is_inside_the_window():
+    """정시 트리거가 자기 가드에 막히면 매일 아침 아무것도 안 뜬다.
+
+    **종전 이 테스트는 `_at(8, 35)`를 단언했고, 그래서 2026-08-10을 못 잡았다.** 그날 트리거는
+    이미 08:20이었고(2026-08-08에 사람이 옮겼다) 기동 창은 08:30이었다 — 두 프로세스가 정시에
+    떠서 self-check까지 통과한 뒤 즉시 종료했는데, 이 테스트는 *기억된* 08:35만 확인하느라
+    초록불이었다. 하드코딩된 시각을 단언하는 테스트는 그 시각이 바뀌는 순간 거짓 안심이 된다.
+
+    이제 `configs/scheduled_tasks.json`의 **모든** 수집 트리거를 실제로 읽어 하나씩 확인한다.
+    시각을 어디로 옮기든 이 테스트가 따라온다.
+    """
+    triggers = [task.weekly for task in task_schedule.collection_tasks()]
+    assert triggers, "수집 계열 작업이 정본에 하나도 없다 — 등록 정본이 비었다는 뜻이다"
+
+    for trigger in triggers:
+        allowed, reason = session_guard.launch_window_verdict(
+            now=_at(trigger.hour, trigger.minute), calendar=_Cal()
+        )
+        assert allowed, f"등록 트리거 {trigger:%H:%M}가 기동 창 밖이다 — {reason}"
+
+
+def test_a_refused_scheduled_launch_is_distinguishable(monkeypatch):
+    """정시 트리거 거부는 조용한 0으로 끝나면 안 된다 (2026-08-10 P0).
+
+    그날 두 프로세스가 정시에 떠서 거부되고 종료 코드 0으로 끝났다 — 스케줄러 기록은
+    `LastTaskResult=0`(성공)이었다. 같은 아침 `boot_recovery` 경고도 이미 로그에 찍혀 있었지만
+    아무도 못 봤다. 경고만 하는 채널은 이미 한 번 실패한 채널이라, 이 경우는 종료 코드를 가른다.
+    """
+    trigger = task_schedule.earliest_collection_trigger()
+
+    assert session_guard.refused_a_scheduled_launch(
+        now=_at(trigger.hour, trigger.minute)
+    ), "정시 트리거 시각의 거부를 못 알아보면 스케줄러가 계속 성공이라고 기록한다"
+
+
+def test_a_boot_time_refusal_stays_quiet():
+    """새벽 재부팅의 거부는 실패가 아니다 — 여기서 실패로 만들면 매 재부팅이 거짓 경보다."""
+    assert not session_guard.refused_a_scheduled_launch(now=_at(3, 0))
+
+
+def test_a_refusal_well_after_the_trigger_is_not_a_scheduled_launch():
+    """트리거보다 한참 뒤(장 마감 후 부팅 등)는 정시 기동이 아니다."""
+    trigger = task_schedule.earliest_collection_trigger()
+
+    assert not session_guard.refused_a_scheduled_launch(now=_at(trigger.hour + 2, trigger.minute))
+
+
+def test_window_start_follows_the_registered_trigger():
+    """창은 트리거에서 파생된다 — 트리거를 옮기면 창이 따라 움직여야 한다."""
+    earliest = task_schedule.earliest_collection_trigger()
+
+    assert (
+        session_guard.LAUNCH_WINDOW_START < earliest
+    ), "기동 창이 가장 이른 트리거보다 이르지 않으면 그 트리거는 매일 거부된다"
 
 
 def test_boot_before_the_window_does_not_launch():

@@ -1,11 +1,15 @@
 @echo off
 REM G2 paper trading daily entrypoint - wraps scripts\run_g2_paper_trading.py.
-REM Registered in Task Scheduler as "Messiah-G2" (weekday 08:36 KST, one minute after
-REM "Messiah"/run_l1_daily.bat's 08:35 - see run_g2_paper_trading.py module docstring: this
-REM script has no TickCollector of its own, it only subscribes to the bar.*/feat.* that
-REM run_l1_daily.py already publishes to the shared bus, so the 1-minute gap is just to avoid
-REM both scripts' startup work (self_check, Docker bootstrap, symbol master download) landing
-REM in the exact same instant - it is not required for correctness).
+REM Registered in Task Scheduler as "Messiah-G2", shortly after "Messiah"/run_l1_daily.bat -
+REM see run_g2_paper_trading.py module docstring: this script has no TickCollector of its own,
+REM it only subscribes to the bar.*/feat.* that run_l1_daily.py already publishes to the shared
+REM bus, so the gap is just to avoid both scripts' startup work (self_check, Docker bootstrap,
+REM symbol master download) landing in the exact same instant - it is not required for
+REM correctness.
+REM
+REM DO NOT write the trigger time here - configs\scheduled_tasks.json is the source of truth.
+REM See the same note in run_l1_daily.bat for what a stale time in this comment cost on
+REM 2026-08-10.
 REM
 REM NOTE: keep this file ASCII-only. cmd.exe interprets .bat files using the system ANSI
 REM codepage (CP949 on Korean Windows), not UTF-8 - a UTF-8-saved file with non-ASCII comments

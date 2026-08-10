@@ -70,11 +70,13 @@ Position Reconciler 부재로 거래별 실현손익을 매칭할 수 없다 —
 스스로 Docker Desktop을 띄운 뒤 진행한다.
 
 사용: python scripts/run_g2_paper_trading.py [--configs configs]
-Windows 작업 스케줄러에 "Messiah-G2"(평일 08:36, `run_g2_paper_trading.bat`)로 등록해
-`run_l1_daily.py`("Messiah", 08:35)와 나란히 돈다(2026-07-29 [MW0601] — 1분 차이는 엄격한
-순서 보장이 필요해서가 아니라 두 프로세스의 동시 기동 부하를 살짝 어긋내기 위한 것뿐,
-WS 연결을 더는 안 열게 된 이후로는 순서 자체는 무관해졌다). `stop_l1_daily.bat`(15:40
-워치독)도 이 스크립트의 명령줄 패턴을 함께 정리한다.
+Windows 작업 스케줄러에 "Messiah-G2"(`run_g2_paper_trading.bat`)로 등록해 `run_l1_daily.py`
+("Messiah")보다 몇 분 뒤에 나란히 돈다(2026-07-29 [MW0601] — 시차는 엄격한 순서 보장이
+필요해서가 아니라 두 프로세스의 동시 기동 부하를 살짝 어긋내기 위한 것뿐, WS 연결을 더는
+안 열게 된 이후로는 순서 자체는 무관해졌다). **두 시각을 여기 적지 않는다** — 정본은
+`configs/scheduled_tasks.json`이고, 2026-08-10에 이런 주석의 시각이 실제 등록과 어긋난 채로
+기동 창 가드와 충돌해 오전을 잃었다. `stop_l1_daily.bat`(15:40 워치독)도 이 스크립트의
+명령줄 패턴을 함께 정리한다.
 """
 
 from __future__ import annotations
@@ -385,6 +387,18 @@ async def main(cfg: InstanceConfig) -> None:
         # 구조화 로그로도 남긴다 (2026-08-07 P0-4) — 무결성 리포트가 이 `SessionStart`를
         # 기동으로 세지 않게 하는 유일한 근거다(`core/logging.py` 태그 주석).
         mlog.log("LaunchWindowRefused", reason, process="g2_paper")
+        # 정시 트리거 거부는 종료 코드를 가른다 — 근거는 `run_l1_daily.py`의 같은 자리 주석
+        # (2026-08-10: 조용한 0 때문에 스케줄러가 오전 내내 성공이라고 기록했다).
+        if session_guard.refused_a_scheduled_launch():
+            print(
+                "[기동 창] 정시 트리거로 뜬 기동을 거부했다 — 오늘 G2 운영이 통째로 없어진다. "
+                "configs/scheduled_tasks.json의 시각과 실제 등록이 어긋났을 가능성이 크다"
+                "(자가 점검 schedule_drift 항목 확인 → "
+                "scripts/install_scheduled_tasks.ps1 재실행).",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise SystemExit(session_guard.REFUSED_EXIT_CODE)
         return
 
     _launch_ui(today.strftime("%Y%m%d"))

@@ -6,7 +6,9 @@ FeatureEngine)을 실제 매매일 하루 동안 무인으로 돌리기 위한 �
 흐름 자체는 없었다 — 이 스크립트가 그 자리를 채운다.
 
 시간대(KST, 전부 하드코딩 아님 — 아래 상수만 바꾸면 됨):
-- 08:35(작업 스케줄러 "Messiah" 실제 트리거 시각) ~ 09:00: 웜업 — **Docker Desktop 응답
+- 정시 트리거(작업 스케줄러 "Messiah" — 시각은 `configs/scheduled_tasks.json`이 정본이다.
+  여기 적지 않는다: 2026-08-10에 이 줄이 "08:35"라고 말하는 동안 실제 등록은 08:20이었고,
+  기동 창 가드가 정시 기동을 거부해 오전을 잃었다) ~ 09:00: 웜업 — **Docker Desktop 응답
   확인/자동 기동**(아래 항목), self_check, 근월물 심볼 확인, Redis 연결, Collector/Composer/
   Engine 구성, **피처 웜스타트**(아래 `_load_warmup_artifacts()`), **WS는 이 시점에 이미
   연결·구독까지 끝내 둔다**(9시 정각에 연결부터 새로 맺느라 첫 틱을 놓치지 않도록 — "첫봉
@@ -61,9 +63,10 @@ WS 구독(같은 계좌 WS 연결 2개는 서로 끊긴다 — 단일 연결·�
 별도 작업. 위 체인 시세 폴링과는 무관한 과제다).
 
 사용: python scripts/run_l1_daily.py [--configs configs]
-Windows 작업 스케줄러에 "Messiah"(평일 08:35, `run_l1_daily.bat`)로 실제 등록·가동 중
-(2026-07-29 감사로 확인 — 등록 시점 자체는 불명확하나 로그상 최소 2026-07-27부터 매 거래일
-정상 트리거·CRITICAL 0건·정상 종료 확인됨).
+Windows 작업 스케줄러에 "Messiah"(평일 정시 + 부팅 시, `run_l1_daily.bat`)로 실제 등록·가동 중.
+등록 시각의 정본은 `configs/scheduled_tasks.json`이고 `scripts/install_scheduled_tasks.ps1`이
+그대로 등록한다 — 실제 등록 상태와 어긋나면 `ops/host_health.py`의 `schedule_drift` 항목이
+매일 아침 자가 점검에서 잡는다(2026-08-10 신설).
 """
 
 from __future__ import annotations
@@ -881,6 +884,20 @@ async def main(cfg: InstanceConfig) -> None:
         # 구조화 로그로도 남긴다 (2026-08-07 P0-4) — 무결성 리포트가 이 `SessionStart`를
         # 기동으로 세지 않게 하는 유일한 근거다(`core/logging.py` 태그 주석).
         mlog.log("LaunchWindowRefused", reason, process="l1_daily")
+        # 정시 트리거를 거부한 것이면 **종료 코드를 가른다** (2026-08-10 P0). 2026-08-10에
+        # 이 경로가 조용히 0으로 끝나 스케줄러에 `LastTaskResult=0`(성공)으로 남았고, 그날
+        # 오전이 통째로 사라지는 동안 모든 계기가 정상이라고 말했다. 부팅 트리거로 온 거부는
+        # 종전대로 0이다 — 그건 실패가 아니다.
+        if session_guard.refused_a_scheduled_launch():
+            print(
+                "[기동 창] 정시 트리거로 뜬 기동을 거부했다 — 오늘 수집이 통째로 없어진다. "
+                "configs/scheduled_tasks.json의 시각과 실제 등록이 어긋났을 가능성이 크다"
+                "(자가 점검 schedule_drift 항목 확인 → "
+                "scripts/install_scheduled_tasks.ps1 재실행).",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise SystemExit(session_guard.REFUSED_EXIT_CODE)
         return
 
     _launch_ui(today.strftime("%Y%m%d"))

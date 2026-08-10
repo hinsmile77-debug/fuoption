@@ -32,12 +32,13 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime
 from pathlib import Path
 from typing import Sequence
 
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.timeutil import now_kst
+from messiah.ops import task_schedule
 
 # 거부 시 종료 코드 — 0(성공)·1(일반 실패)과 구분해 자동화가 "규칙에 막혔다"를 식별할 수 있게.
 REFUSED_EXIT_CODE = 2
@@ -96,10 +97,16 @@ def refuse_if_regular_session(
 
 # ------------------------------------------------ 기동 창 (2026-08-06 P0-2, 부팅 자동 복구)
 
-# 정시 기동(08:35)보다 5분 이르다 — 부팅이 08:32에 끝난 날 "5분 뒤 스케줄러가 부를 테니까"
-# 하고 거절하면 그 5분을 사람이 지켜봐야 한다. 앞으로 당기되, 장 시작 훨씬 전에 켜진 PC가
-# 하루 종일 빈 프로세스를 물고 있지는 않게 한다.
-LAUNCH_WINDOW_START = time(8, 30)
+# 정시 기동보다 몇 분 이르다 — 부팅이 트리거 직전에 끝난 날 "곧 스케줄러가 부를 테니까" 하고
+# 거절하면 그 몇 분을 사람이 지켜봐야 한다. 앞으로 당기되, 장 시작 훨씬 전에 켜진 PC가 하루
+# 종일 빈 프로세스를 물고 있지는 않게 한다.
+#
+# **이 값을 여기 적지 않는다** (2026-08-10 P0). 종전에는 `time(8, 30)`이 하드코딩돼 있었고,
+# 그 근거는 "정시 트리거 08:35보다 5분 이르게"였다. 2026-08-08에 트리거가 08:20/08:25로
+# 옮겨지자 전제가 조용히 무효가 됐고, 08-10 아침 두 프로세스가 정시에 떠서 self-check까지
+# 통과한 뒤 "기동 창 이전"으로 즉시 종료했다 — 종료 코드 0이라 스케줄러에는 성공으로 남았다.
+# 이제 `configs/scheduled_tasks.json`의 등록 정본에서 파생한다(`ops/task_schedule.py` 참고).
+LAUNCH_WINDOW_START = task_schedule.launch_window_start()
 
 # 끝은 정규장 종료와 같다 — 그 뒤에 뜨는 것은 수집할 것이 없다. `run_l1_daily.py`의
 # 종료 절차(통합·재합성·리포트)를 소급해 돌리고 싶으면 그건 `run_postmarket.py`의 일이다.
@@ -137,9 +144,16 @@ def launch_window_verdict(
     if not trading_day:
         return False, f"{moment.date().isoformat()}은 거래일이 아니다 — 기동 생략"
     if clock < LAUNCH_WINDOW_START:
+        # 정시 트리거 시각을 문장에 박아 넣지 않는다 (2026-08-10) — 종전 문구는 "정시
+        # 트리거(08:35)에 맡기고"라고 단언했는데, 그 시각이 이미 08:20으로 바뀐 뒤였다.
+        # 사람을 향한 안내문이 틀린 시각을 가리키면 원인 추적이 그만큼 늦어진다.
+        try:
+            nudge = f"정시 트리거({task_schedule.earliest_collection_trigger():%H:%M})에 맡기고"
+        except task_schedule.ScheduleUnreadable:
+            nudge = "정시 트리거에 맡기고"
         return False, (
             f"기동 창({LAUNCH_WINDOW_START:%H:%M}~{LAUNCH_WINDOW_END:%H:%M}) 이전 "
-            f"{clock:%H:%M:%S} — 정시 트리거(08:35)에 맡기고 지금은 뜨지 않는다"
+            f"{clock:%H:%M:%S} — {nudge} 지금은 뜨지 않는다"
         )
     if clock >= LAUNCH_WINDOW_END:
         return False, (
@@ -148,6 +162,49 @@ def launch_window_verdict(
             " (장후 절차는 scripts/run_postmarket.py)"
         )
     return True, f"기동 허용 — 정규장 종료까지 {clock:%H:%M:%S} 시점 기준 남은 구간 있음"
+
+
+# 거부 시각이 등록 트리거와 이만큼 안쪽이면 "정시 기동이 거부된 것"으로 본다. self_check +
+# Docker 기동에 실측 20~30초가 걸리므로(2026-08-10 로그: 08:20:00 트리거 → 08:20:27 거부)
+# 넉넉히 잡되, 부팅 트리거가 우연히 이 창에 걸리는 일은 드물게 유지되는 폭이다.
+SCHEDULED_LAUNCH_TOLERANCE_MINUTES = 5
+
+
+def refused_a_scheduled_launch(*, now: datetime | None = None) -> bool:
+    """이번 거부가 **정시 트리거로 뜬 기동**을 거부한 것인가 (2026-08-10 P0).
+
+    ## 왜 이걸 구분하나
+
+    거부 자체는 정상 동작이다 — 새벽 3시 재부팅에 at-startup 트리거가 부르면 거부하는 것이
+    맞고, 그건 실패가 아니므로 종료 코드 0이 옳다.
+
+    그런데 **정시 트리거가 거부되는 것은 절대 정상이 아니다.** 그날 수집이 통째로 없어진다는
+    뜻이기 때문이다. 2026-08-10에 정확히 그 일이 일어났고, 두 프로세스 모두 종료 코드 0으로
+    끝나 스케줄러에는 `LastTaskResult=0`(성공)으로 남았다. 스케줄러 기록·자가 점검 경고·
+    로그가 전부 "정상"이라고 말하는 동안 오전이 사라졌다.
+
+    같은 아침 `boot_recovery` 항목은 이미 경고를 찍고 있었다(부팅 트리거가 08-08에 지워졌다).
+    아무도 못 봤다 — **경고만 하는 채널은 이미 한 번 실패한 채널이다.** 그래서 이 경우만은
+    종료 코드를 갈라, 사람이 아니라 스케줄러가 실패로 기록하게 한다.
+
+    실패 조건: 없다. 정본을 못 읽으면 `False`(평소대로 조용히 종료) — 판정 불가를 이유로
+              거짓 실패를 만들지는 않는다.
+    """
+    moment = now or now_kst()
+    try:
+        triggers = [task.weekly for task in task_schedule.collection_tasks()]
+    except task_schedule.ScheduleUnreadable:
+        return False
+
+    # 벽시계 초로 내려서 비교한다 — 날짜는 필요 없고, `datetime`에 얹으면 tz 없는 연산이라
+    # 정적 검사(DTZ001)에 걸린다(`ops/task_schedule.py`의 같은 자리와 같은 이유).
+    clock = moment.timetz().replace(tzinfo=None)
+    here = clock.hour * 3600 + clock.minute * 60 + clock.second
+    for trigger in triggers:
+        gap = here - (trigger.hour * 3600 + trigger.minute * 60)
+        if 0 <= gap <= SCHEDULED_LAUNCH_TOLERANCE_MINUTES * 60:
+            return True
+    return False
 
 
 def add_force_intraday_argument(parser) -> None:  # type: ignore[no-untyped-def]

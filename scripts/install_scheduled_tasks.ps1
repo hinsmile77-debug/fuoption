@@ -76,44 +76,35 @@ if (-not $BackupDir) {
 # 여기서 길게 잡을 이유는 없다. 1분은 "네트워크 스택이 올라올 시간"이다.
 $bootDelay = 'PT1M'
 
+# 등록 계획은 **여기 없다** (2026-08-10 P0). 종전에는 이 배열에 시각이 박혀 있었고, 같은
+# 숫자가 `src/messiah/ops/session_guard.py`의 기동 창에도 따로 박혀 있었다. 2026-08-08에
+# 스케줄러 GUI로 08:35→08:20을 옮기자 두 곳이 어긋났고, 08-10 아침 두 작업이 정시에 떠서
+# self-check까지 통과한 뒤 "기동 창 이전"으로 즉시 종료했다 — 종료 코드 0이라 스케줄러에는
+# 성공으로 남았다. 이제 정본은 configs\scheduled_tasks.json 하나뿐이고, 등록하는 이 스크립트와
+# 판정하는 session_guard가 둘 다 그것을 읽는다.
+$schedulePath = Join-Path $repo 'configs\scheduled_tasks.json'
+if (-not (Test-Path $schedulePath)) {
+    throw "등록 정본이 없다: $schedulePath"
+}
+$schedule = Get-Content -Path $schedulePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $plan = @(
-    @{
-        Name    = 'Messiah'
-        Bat     = 'scripts\run_l1_daily.bat'
-        Weekly  = '08:35'
-        AtBoot  = $true
-        Restart = $true
-    },
-    @{
-        Name    = 'Messiah-G2'
-        Bat     = 'scripts\run_g2_paper_trading.bat'
-        Weekly  = '08:36'
-        AtBoot  = $true
-        Restart = $true
-    },
-    @{
-        # 안전망은 부팅 트리거가 필요 없다 — 정리할 프로세스가 애초에 없다.
-        Name    = 'Messiah-Shutdown'
-        Bat     = 'scripts\stop_l1_daily.bat'
-        Weekly  = '15:40'
-        AtBoot  = $false
-        Restart = $false
-    },
-    @{
-        # 2026-08-06 신설 — 장후 절차가 이틀 연속 사람 손에서 빠졌다(P0-3b).
-        # Messiah-Shutdown(15:40)보다 뒤여야 한다: 수집 프로세스가 완전히 내려간 뒤에 돈다.
-        Name    = 'Messiah-Postmarket'
-        Bat     = 'scripts\run_postmarket.bat'
-        Weekly  = '15:45'
-        AtBoot  = $false
-        Restart = $false
+    foreach ($entry in $schedule.tasks) {
+        @{
+            Name    = $entry.name
+            Bat     = $entry.bat
+            Weekly  = $entry.weekly
+            AtBoot  = [bool]$entry.at_boot
+            Restart = [bool]$entry.restart
+        }
     }
 )
+if ($plan.Count -eq 0) { throw "등록 정본에 작업이 없다: $schedulePath" }
 
 $weekdays = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday')
 
 Write-Host "=== MESSIAH 작업 스케줄러 등록 ===" -ForegroundColor Cyan
 Write-Host "  저장소 : $repo"
+Write-Host "  정본   : $schedulePath"
 Write-Host "  백업   : $BackupDir"
 if ($DryRun) { Write-Host "  모드   : DryRun (아무것도 바꾸지 않는다)" -ForegroundColor Yellow }
 Write-Host ""

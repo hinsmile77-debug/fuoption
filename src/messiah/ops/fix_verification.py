@@ -128,19 +128,31 @@ def _native_crashes_measurable(report: dict[str, Any]) -> float | None:
     return 1.0 if crashes.get("available") else 0.0
 
 
-def _boot_recovery_armed(report: dict[str, Any]) -> float | None:
-    """수집 작업의 부팅 트리거 무장 여부 — `host_health`의 `boot_recovery` 항목에서 읽는다.
+def _host_check_ok(name: str):
+    """`host_health`의 이름 붙은 항목을 1.0(정상)/0.0(결함)/None(못 잼)으로 읽는 추출기.
 
-    항목이 없는 옛 리포트(2026-08-06 이전)는 None이다 — 모르는 것을 좋은 쪽으로도 나쁜
-    쪽으로도 가정하지 않는다(`_native_crashes_measurable`과 같은 규율).
+    항목이 없는 옛 리포트는 None이다 — 모르는 것을 좋은 쪽으로도 나쁜 쪽으로도 가정하지
+    않는다(`_native_crashes_measurable`과 같은 규율). **min 기준으로 쓰는 "정상인가" 지표**를
+    만드는 자리라, 못 잰 날을 0으로 세면 늑대소년이 되고 1로 세면 검사가 없느니만 못하다.
     """
-    for check in (report.get("host_health") or {}).get("checks") or []:
-        if not isinstance(check, dict) or check.get("name") != "boot_recovery":
-            continue
-        if not check.get("available"):
-            return None  # 못 쟀다 — 0(무장 안 됨)과 구분한다(L18)
-        return 1.0 if check.get("ok") else 0.0
-    return None
+
+    def extract(report: dict[str, Any]) -> float | None:
+        for check in (report.get("host_health") or {}).get("checks") or []:
+            if not isinstance(check, dict) or check.get("name") != name:
+                continue
+            if not check.get("available"):
+                return None  # 못 쟀다 — 0(결함)과 구분한다(L18)
+            return 1.0 if check.get("ok") else 0.0
+        return None
+
+    return extract
+
+
+# 수집 작업의 부팅 트리거 무장 여부 (2026-08-06).
+_boot_recovery_armed = _host_check_ok("boot_recovery")
+
+# 등록 정본(`configs/scheduled_tasks.json`)과 실제 스케줄러 등록이 맞는가 (2026-08-10).
+_schedule_matches_registration = _host_check_ok("schedule_drift")
 
 
 # 등록부에서 쓸 수 있는 지표 — **무결성 리포트에 실제로 있는 필드만** 연다. 임의 표현식을
@@ -261,6 +273,12 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # 동작하는지는 다음 재부팅까지 모르지만, 무장 여부는 매일 알 수 있다 — 2026-08-06 이전
     # 상태(트리거 없음)로 조용히 돌아가는 것을 잡는 자리다.
     "boot_recovery_armed": _boot_recovery_armed,
+    # 등록 정본과 실제 스케줄러 등록이 맞는가 — 1.0(일치) / 0.0(어긋남) / None(못 잼).
+    # **min 기준 "존재하는가" 지표다**(`boot_recovery_armed`와 같은 계열). 2026-08-10에
+    # 트리거가 08:20인데 기동 창이 08:30이라 두 프로세스가 정시에 떠서 즉시 종료했고,
+    # 종료 코드 0이라 스케줄러에는 성공으로 남았다 — 그 상태로 오전이 사라졌다.
+    # 이 축이 없던 그날의 리포트는 어긋남을 말할 수단 자체가 없었다.
+    "schedule_matches_registration": _schedule_matches_registration,
     # 그날 못 잰 축의 수 (2026-08-05 고도화 2). **이 지표가 이 등록부의 메타 지표다** —
     # 다른 항목들이 "판정 불가"로 정체되는 근본 원인이 여기 모여 있다.
     "unmeasured_count": lambda r: float(len(r.get("unmeasured") or [])),

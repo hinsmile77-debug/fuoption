@@ -1,8 +1,16 @@
 @echo off
 REM L1 data pipeline daily entrypoint - wraps scripts\run_l1_daily.py.
-REM Registered in Task Scheduler as "Messiah" (weekday 08:35 KST trigger, confirmed by audit
-REM 2026-07-29 - see run_l1_daily.py module docstring for the full warmup -> collect ->
-REM daily_close lifecycle). "Messiah-G2" (run_g2_paper_trading.bat, 08:36) runs alongside it.
+REM Registered in Task Scheduler as "Messiah" - see run_l1_daily.py module docstring for the
+REM full warmup -> collect -> daily_close lifecycle. "Messiah-G2" (run_g2_paper_trading.bat)
+REM runs alongside it.
+REM
+REM DO NOT write the trigger time here. The source of truth is configs\scheduled_tasks.json,
+REM read by both scripts\install_scheduled_tasks.ps1 (registration) and
+REM src\messiah\ops\session_guard.py (the launch-window guard). On 2026-08-10 this comment said
+REM "08:35" while the registered trigger was already 08:20 - the guard refused the on-time
+REM launch, exited 0, and the scheduler logged success. Stale times in comments are what sent
+REM the investigation down the wrong path first. Run install_scheduled_tasks.ps1 to see or
+REM change the registered times.
 REM
 REM NOTE: keep this file ASCII-only. cmd.exe interprets .bat files using the system ANSI
 REM codepage (CP949 on Korean Windows), not UTF-8 - a UTF-8-saved file with non-ASCII comments

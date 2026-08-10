@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -28,6 +29,10 @@ class _FakeRun:
         if key == "powershell":
             if "Win32_Process" in cmd[-1]:
                 key = "cpu"
+            elif "StartBoundary" in cmd[-1]:
+                # 2026-08-10 신설 — 트리거 **시각**을 읽는 네 번째 검사. `Get-ScheduledTask`를
+                # 쓴다는 점이 부팅 트리거 검사와 같아서, 시각을 뽑는 표지로 한 번 더 나눈다.
+                key = "schedule"
             elif "Get-ScheduledTask" in cmd[-1]:
                 key = "boot"  # 2026-08-06 신설 — PowerShell을 쓰는 세 번째 검사
             else:
@@ -215,6 +220,7 @@ def test_collect_includes_the_cpu_axis(tmp_path: Path, monkeypatch):
         "docker",
         "cpu",
         "boot_recovery",
+        "schedule_drift",
     ]
 
 
@@ -271,6 +277,140 @@ def test_non_windows_is_skipped_not_failed(monkeypatch):
     monkeypatch.setattr(host_health.sys, "platform", "linux")
 
     check = host_health.check_boot_recovery(runner=_boot_run(""))
+
+    assert not check.available
+    assert "Windows 전용" in check.detail
+
+
+# ------------------------- 등록 시각 드리프트 (2026-08-10 P0 검증용)
+#
+# 그날 아침 08:20/08:25 트리거가 정시에 떴고, self-check도 PASS였고, 두 프로세스 모두 그 자리에서
+# 종료했다 — 기동 창이 08:30에 하드코딩돼 있었기 때문이다. **종료 코드가 0이라 스케줄러에는
+# 성공으로 남았다.** 등록 시각은 OS 상태라 테스트로는 못 잡는다. 매일 실측하는 이 항목만이 잡는다.
+
+
+def _schedule_file(tmp_path, entries, margin=5):
+    path = tmp_path / "scheduled_tasks.json"
+    path.write_text(
+        json.dumps(
+            {
+                "launch_window_margin_minutes": margin,
+                "tasks": [
+                    {
+                        "name": name,
+                        "bat": f"scripts\\{name}.bat",
+                        "weekly": weekly,
+                        "at_boot": True,
+                        "restart": True,
+                        "collection": True,
+                    }
+                    for name, weekly in entries
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _sched_run(output: str, code: int = 0):
+    return _FakeRun({"schedule": (code, output)})
+
+
+def test_registered_time_matching_the_source_of_truth_is_ok(monkeypatch, tmp_path):
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    path = _schedule_file(tmp_path, [("Messiah", "08:20"), ("Messiah-G2", "08:25")])
+
+    check = host_health.check_schedule_drift(
+        runner=_sched_run("Messiah=08:20\nMessiah-G2=08:25\n"), schedule_path=path
+    )
+
+    assert check.available and check.ok
+    assert "08:15" in check.detail, "판정에 쓴 기동 창을 안 보여주면 사람이 재확인할 수 없다"
+
+
+def test_a_trigger_earlier_than_the_window_is_a_finding(monkeypatch, tmp_path):
+    """2026-08-10 그 자체 — 정본은 08:35인데 등록은 08:20이라 창(08:30) 밖으로 나갔다.
+
+    이 조합이 그날 오전을 통째로 날렸고, 모든 계기는 정상이라고 말하고 있었다.
+    """
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    path = _schedule_file(tmp_path, [("Messiah", "08:35"), ("Messiah-G2", "08:36")])
+
+    check = host_health.check_schedule_drift(
+        runner=_sched_run("Messiah=08:20\nMessiah-G2=08:25\n"), schedule_path=path
+    )
+
+    assert check.available and not check.ok
+    assert "Messiah" in check.detail
+    assert "기동 창" in check.detail
+    assert "install_scheduled_tasks.ps1" in check.detail, "고치는 법을 안 알려주면 사람이 헤맨다"
+
+
+def test_drift_inside_the_window_is_still_a_finding(monkeypatch, tmp_path):
+    """오늘은 돌지만 정본이 실제와 다르다 — 다음에 재등록하면 조용히 되돌아간다."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    path = _schedule_file(tmp_path, [("Messiah", "08:20")], margin=60)
+
+    check = host_health.check_schedule_drift(
+        runner=_sched_run("Messiah=08:25\n"), schedule_path=path
+    )
+
+    assert check.available and not check.ok
+    assert "정본" in check.detail
+
+
+def test_a_task_with_no_weekly_trigger_is_a_finding(monkeypatch, tmp_path):
+    """부팅 트리거만 남고 정시 트리거가 지워지면 아침에 아무것도 안 뜬다."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    path = _schedule_file(tmp_path, [("Messiah", "08:20")])
+
+    check = host_health.check_schedule_drift(
+        runner=_sched_run("Messiah=none\n"), schedule_path=path
+    )
+
+    assert check.available and not check.ok
+    assert "트리거 없음" in check.detail
+
+
+def test_a_missing_task_is_a_finding_for_drift_too(monkeypatch, tmp_path):
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    path = _schedule_file(tmp_path, [("Messiah", "08:20")])
+
+    check = host_health.check_schedule_drift(
+        runner=_sched_run("Messiah=missing\n"), schedule_path=path
+    )
+
+    assert check.available and not check.ok
+    assert "작업 자체가 없음" in check.detail
+
+
+def test_unreadable_scheduler_is_unmeasured_not_ok(monkeypatch, tmp_path):
+    """못 잰 것을 "일치"로 세면 이 검사가 있으나 마나다(L18)."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    path = _schedule_file(tmp_path, [("Messiah", "08:20")])
+
+    check = host_health.check_schedule_drift(runner=_sched_run("", code=1), schedule_path=path)
+
+    assert not check.available
+
+
+def test_unreadable_source_of_truth_is_unmeasured(monkeypatch, tmp_path):
+    """정본을 못 읽으면 기동 창도 폴백으로 돌고 있다 — 그 사실 자체가 알려야 할 상태다."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_schedule_drift(
+        runner=_sched_run("Messiah=08:20\n"), schedule_path=tmp_path / "없다.json"
+    )
+
+    assert not check.available
+    assert "정본" in check.detail
+
+
+def test_drift_check_is_skipped_off_windows(monkeypatch):
+    monkeypatch.setattr(host_health.sys, "platform", "linux")
+
+    check = host_health.check_schedule_drift(runner=_sched_run(""))
 
     assert not check.available
     assert "Windows 전용" in check.detail

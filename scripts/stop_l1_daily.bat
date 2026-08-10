@@ -14,7 +14,7 @@ REM _launch_ui()) - the UI is independent of the collection process and would ot
 REM running forever with no matching shutdown trigger of its own.
 REM
 REM Also matches scripts\run_g2_paper_trading.py (2026-07-29 addition, "Messiah-G2" Task
-REM Scheduler entry, 08:36) - it has its own internal daily_close()/hard-deadline logic
+REM Scheduler entry) - it has its own internal daily_close()/hard-deadline logic
 REM identical in shape to run_l1_daily.py's, so this is purely the same safety-net role for
 REM the second process, not a primary shutdown mechanism.
 REM

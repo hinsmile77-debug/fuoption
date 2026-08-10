@@ -595,6 +595,36 @@ def test_boot_recovery_metric_reads_the_host_check():
     assert extract(unarmed) == 0.0
 
 
+def test_schedule_drift_metric_reads_the_host_check():
+    """2026-08-10 — 등록 정본과 실제 스케줄러 등록이 어긋난 날을 리포트가 말할 수 있는가.
+
+    그날은 이 축 자체가 없어서, 트리거(08:20)와 기동 창(08:30)이 어긋난 채 오전이 사라지는
+    동안 리포트에 그것을 적을 자리가 하나도 없었다.
+    """
+    extract = METRIC_EXTRACTORS["schedule_matches_registration"]
+
+    matched = {
+        "host_health": {"checks": [{"name": "schedule_drift", "available": True, "ok": True}]}
+    }
+    drifted = {
+        "host_health": {"checks": [{"name": "schedule_drift", "available": True, "ok": False}]}
+    }
+    assert extract(matched) == 1.0
+    assert extract(drifted) == 0.0
+
+
+def test_schedule_drift_metric_separates_unmeasured_from_drifted():
+    """못 잰 날을 "어긋남"으로 세면 늑대소년, "일치"로 세면 검사가 없느니만 못하다(L18)."""
+    extract = METRIC_EXTRACTORS["schedule_matches_registration"]
+    unmeasured = {
+        "host_health": {"checks": [{"name": "schedule_drift", "available": False, "ok": True}]}
+    }
+
+    assert extract(unmeasured) is None
+    assert extract({"host_health": {"checks": []}}) is None
+    assert extract({}) is None, "축이 없던 2026-08-10 이전 리포트를 통과로 세면 안 된다"
+
+
 def test_boot_recovery_metric_separates_unmeasured_from_unarmed():
     """못 잰 날을 "무장 안 됨"으로 세면 늑대소년이고, "무장됨"으로 세면 검사가 없느니만
     못하다 — 둘 다 아닌 **판정 불가**여야 한다(L18)."""
