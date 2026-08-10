@@ -99,6 +99,10 @@ TAG_LEVELS: dict[str, int] = {
     # 비상 경로가 실패했다는 사실 자체가 가장 먼저 보여야 하는 정보다.
     "KillSignalHandlingFailed": logging.CRITICAL,
     "InvestorFlowPollError": logging.WARNING,
+    # 재시도로 살아난 조회 (2026-08-10 A-4). `OptionChainPollRetried`와 같은 이유로 태그를
+    # 가른다 — 둘을 같은 태그로 남기면 `InvestorFlowPollError` 건수가 "잃은 행 수"를 더 이상
+    # 뜻하지 않게 된다. 2026-08-10에 이 폴러엔 재시도가 아예 없어 3행을 그대로 잃었다.
+    "InvestorFlowPollRetried": logging.INFO,
     # 수급 스냅샷 적재 실패 — 장중 수급은 **과거 조회가 없어** 놓치면 영원히 못 받는다
     # (`data/flow_archiver.py`). 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
     "InvestorFlowArchiveError": logging.WARNING,  # REST 폴링 1회 실패 — 다음 틱에 자연 재시도(L22)

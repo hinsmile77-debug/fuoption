@@ -46,6 +46,12 @@ powershell -NoProfile -Command ^
     "& cmd /c '.venv\Scripts\python.exe -u scripts\run_g2_paper_trading.py 2>&1' | ForEach-Object { $_ | Out-File -FilePath '%LOGFILE%' -Append -Encoding utf8; $_ }; exit $LASTEXITCODE"
 set EXITCODE=%ERRORLEVEL%
 
+REM Record the exit code IN THE LOG (2026-08-10 A-2) - see the same line in run_l1_daily.bat.
+REM This entrypoint is the one that made the axis necessary: on 2026-08-10 it logged a clean
+REM SessionEnd at 15:35:00 and the scheduler recorded return code 2147942655 (= Win32 255)
+REM two seconds later. Nothing in the daily report read that number.
+echo [exit] run_g2_paper_trading.py code=%EXITCODE%>>"%LOGFILE%"
+
 if not %EXITCODE%==0 (
     echo [run_g2_paper_trading.bat] exit code %EXITCODE% - check %LOGFILE% >&2
 )

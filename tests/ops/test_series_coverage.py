@@ -7,11 +7,13 @@
 """
 
 from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 
 import polars as pl
 
 from messiah.core.timeutil import KST
 from messiah.ops import series_coverage as sc
+from messiah.ops.series_expectation import Expectation
 
 _DAY = date(2026, 8, 6)
 
@@ -21,7 +23,14 @@ def _at(hour: int, minute: int) -> datetime:
 
 
 def _window(start_hour: int = 8, start_minute: int = 35):
-    return sc.session_window(_DAY, start=_at(start_hour, start_minute))
+    """판정 창을 손으로 만든다.
+
+    2026-08-10 A-1부터 `session_window()`는 시작을 **등록 정본**에서만 가져온다(인자로 못
+    바꾼다). 아래 테스트들은 "창 시작이 X일 때 무엇이 구멍인가"를 재는 것이 목적이므로
+    창을 직접 만든다 — 정본 앵커링 자체는 `test_window_starts_at_the_registered_trigger`가
+    따로 본다.
+    """
+    return (_at(start_hour, start_minute), datetime(2026, 8, 6, 15, 35, tzinfo=KST))
 
 
 def _cycles(first: datetime, *, count: int, period_minutes: int, legs_minutes: int = 3):
@@ -321,3 +330,223 @@ def test_irrecoverable_grade_is_applied_after_the_calendar_gate():
     loud = sc.measure("option_chain/weekly_thu", [], window=_contract_window())
     assert "영구 소실" in loud[0] if isinstance(loud, list) else True
     assert "영구 소실" in sc.findings_for(loud)[0]
+
+
+# ------------------------------------------------- A-1: 판정 창 정본 앵커링 (2026-08-10)
+#
+# 이 절의 기준점은 2026-08-10 실측이다. 08:20 정시 트리거가 기동 창 가드에 막혀 두
+# 프로세스가 종료했고 사람이 08:58에야 손으로 띄웠다 — 38분. 그날 15:45 리포트는
+# 이렇게 말했다:
+#
+#     ticks: 커버리지 100% · 머리 -0분 ✅
+#     series_findings: []
+#
+# 판정 창의 시작이 **첫 SessionStart**였기 때문이다. 창이 기동을 따라 같이 늦어지면
+# "늦게 뜬 날"과 "제때 떠서 다 본 날"이 구조적으로 구분되지 않는다.
+
+
+def test_window_starts_at_the_registered_trigger_not_at_process_start(monkeypatch):
+    """창의 시작은 정본에서 온다 — 호출자가 바꿀 수 있으면 그 순간 다시 기동에 묶인다."""
+    monkeypatch.setattr(
+        sc.task_schedule, "earliest_collection_trigger", lambda *a, **k: dt_time(8, 20)
+    )
+
+    start, end = sc.session_window(_DAY)
+
+    assert start == _at(8, 20)
+    assert end == _at(15, 35)
+
+
+def test_window_end_is_clamped_to_now_during_the_session(monkeypatch):
+    """장중 실행에서 아직 안 온 시간이 꼬리 구멍이 되면 안 된다.
+
+    2026-08-10 15:00에 리포트를 손으로 돌렸더니 전 계열이 `마지막 행 이후 39분간 적재
+    없음`을 찍었다 — 장이 안 끝났다는 뜻일 뿐이었다.
+    """
+    monkeypatch.setattr(
+        sc.task_schedule, "earliest_collection_trigger", lambda *a, **k: dt_time(8, 20)
+    )
+
+    assert sc.session_window(_DAY, now=_at(13, 0))[1] == _at(13, 0)
+    # 지난 날짜를 재산출할 때는 오늘 시각이 창을 자르면 안 된다.
+    other_day = datetime(2026, 8, 20, 11, 0, tzinfo=KST)
+    assert sc.session_window(_DAY, now=other_day)[1] == _at(15, 35)
+
+
+def test_a_late_launch_can_no_longer_hide_behind_the_window():
+    """2026-08-10의 회귀 테스트 — **이 테스트가 통과하려면 그날이 사고로 보여야 한다.**
+
+    창 08:20, 첫 행 08:59(그날 수급 실측)를 넣는다. 종전 앵커링에서는 창도 08:58에서
+    시작해 커버리지가 100%였다.
+    """
+    window = (_at(8, 20), _at(15, 35))
+    stamps = [_at(8, 59) + timedelta(minutes=i) for i in range(396)]
+
+    coverage = sc.measure("flow_intraday/K2I", stamps, window=window)
+
+    assert coverage.head_gap_minutes == 39.0
+    assert coverage.coverage_pct < sc._COVERAGE_FLOOR_PCT
+    findings = sc.findings_for(coverage)
+    assert any("세션 커버리지" in line for line in findings)
+    assert any("39분간 적재 없음" in line for line in findings)
+    assert all("영구 소실" in line for line in findings), "수급은 소급 경로가 없다"
+
+
+def test_head_gap_is_never_negative_now_that_the_window_is_canonical():
+    """머리 구멍이 **음수**인 것이 2026-08-10 결함의 지문이었다 — 첫 행이 창보다 일렀다."""
+    window = (_at(8, 20), _at(15, 35))
+    stamps = [_at(8, 30) + timedelta(minutes=i) for i in range(400)]
+
+    assert sc.measure("flow_intraday/K2I", stamps, window=window).head_gap_minutes == 10.0
+
+
+def test_ticks_baseline_defers_the_window_to_when_the_market_starts_ticking():
+    """계열마다 "볼 수 있었던 시작"이 다르다 (2026-08-07 실측).
+
+    그날 기동은 08:35:34였는데 수급 첫 행은 08:36, 옵션은 08:40, **체결틱은 08:45**였다.
+    기동을 08:20으로 당긴 날도 틱은 08:45다 — 시장 사정이기 때문이다. 이 축이 없으면
+    창을 정본으로 옮기는 순간 틱이 매일 25분짜리 머리 구멍을 갖는다.
+    """
+    window = (_at(8, 20), _at(15, 35))
+    stamps = [_at(8, 45) + timedelta(minutes=i) for i in range(410)]
+    ticks = Expectation(series="ticks", required=True, first_data_kst=dt_time(8, 45))
+
+    with_baseline = sc.measure("ticks", stamps, window=window, expectation=ticks)
+    without = sc.measure("ticks", stamps, window=window)
+
+    assert with_baseline.head_gap_minutes == 0.0
+    assert with_baseline.window_start_kst == "08:45"
+    assert sc.findings_for(with_baseline) == []
+    assert without.head_gap_minutes == 25.0, "기준선이 없으면 매일 25분이 구멍으로 잡힌다"
+
+
+def test_the_ticks_baseline_is_not_an_exemption():
+    """08:45 뒤로 잘린 것은 그대로 잡혀야 한다 — 2026-08-06 재부팅(10:26 첫 행)."""
+    window = (_at(8, 20), _at(15, 35))
+    stamps = [_at(10, 26) + timedelta(minutes=i) for i in range(309)]
+    ticks = Expectation(series="ticks", required=True, first_data_kst=dt_time(8, 45))
+
+    coverage = sc.measure("ticks", stamps, window=window, expectation=ticks)
+
+    assert coverage.head_gap_minutes == 101.0
+    assert any("적재 없음" in line for line in sc.findings_for(coverage))
+
+
+# ------------------------------------------------- A-3: 사이클 다리 완전성 (2026-08-10)
+
+
+def _legged(first: datetime, *, cycles: int, period_minutes: int, legs: int, short: dict[int, int]):
+    """폴링 사이클 흉내 — `short`에 적힌 사이클만 다리를 덜 채운다.
+
+    한 사이클이 여러 분에 걸치게 만든다(옵션체인 42다리는 실제로 2~3분에 걸쳐 온다).
+    """
+    stamps: list[datetime] = []
+    keys: list[str] = []
+    for index in range(cycles):
+        base = first + timedelta(minutes=index * period_minutes)
+        for leg in range(short.get(index, legs)):
+            stamps.append(base + timedelta(minutes=leg // 20))
+            keys.append(f"LEG{leg:02d}")
+    return stamps, keys
+
+
+def test_a_short_cycle_is_caught_even_when_the_time_axis_is_perfect():
+    """2026-08-10 14:30 `option_chain/regular`가 41/42였고 커버리지는 100%였다.
+
+    시간 축이 **구조적으로 못 보는** 자리다 — 사이클은 제때 돌았기 때문이다.
+    """
+    window = (_at(8, 20), _at(15, 35))
+    stamps, keys = _legged(_at(9, 0), cycles=40, period_minutes=10, legs=42, short={25: 41})
+
+    coverage = sc.measure("option_chain/regular", stamps, window=window, leg_keys=keys)
+
+    assert coverage.expected_legs == 42
+    assert coverage.short_cycles == [("13:10", 41)]
+    assert coverage.longest_gap_minutes <= 10.0, "시간 축은 정상이다 — 그게 이 축이 필요한 이유"
+    assert any("41/42다리" in line for line in sc.findings_for(coverage))
+
+
+def test_a_healthy_option_chain_day_says_nothing_about_legs():
+    """정상일에 한 줄도 안 나와야 한다 — 매일 우는 축은 한 달이면 안 읽힌다.
+
+    첫 사이클을 08:30에 두는 이유: 창이 08:20이므로 09:00에서 시작하면 **머리 구멍 40분**이
+    같이 잡힌다. 그건 이 테스트가 볼 것이 아니다(정시 기동일의 첫 격자는 08:30 언저리다).
+    """
+    window = (_at(8, 20), _at(15, 35))
+    stamps, keys = _legged(_at(8, 30), cycles=43, period_minutes=10, legs=42, short={})
+
+    coverage = sc.measure("option_chain/regular", stamps, window=window, leg_keys=keys)
+
+    assert coverage.expected_legs == 42
+    assert coverage.short_cycles == []
+    assert sc.findings_for(coverage) == []
+
+
+def test_a_missing_sector_in_one_minute_is_caught_for_a_continuous_series():
+    """수급은 1분 격자라 `_group_into_cycles()`가 하루를 한 덩어리로 만든다 — 분으로 묶는다.
+
+    2026-08-10 실측: 396분 중 3분이 3업종 대신 2업종이었고 그 3행은 영구 소실이다.
+    그날 커버리지는 100%였다.
+    """
+    window = (_at(8, 20), _at(15, 35))
+    stamps: list[datetime] = []
+    keys: list[str] = []
+    for index in range(396):
+        minute = _at(8, 59) + timedelta(minutes=index)
+        sectors = ["F001", "OC01"] if index in (107, 380) else ["F001", "OC01", "OP01"]
+        stamps.extend([minute] * len(sectors))
+        keys.extend(sectors)
+
+    coverage = sc.measure("flow_intraday/K2I", stamps, window=window, leg_keys=keys)
+
+    assert coverage.expected_legs == 3
+    assert [when for when, _ in coverage.short_cycles] == ["10:46", "15:19"]
+    assert any("2/3다리" in line for line in sc.findings_for(coverage))
+
+
+def test_the_last_bucket_is_never_judged_because_it_may_still_be_running():
+    """장중 실행에서 도는 중인 사이클과 잘린 사이클을 이 함수가 구분할 근거가 없다."""
+    window = (_at(8, 20), _at(15, 35))
+    stamps, keys = _legged(_at(9, 0), cycles=40, period_minutes=10, legs=42, short={39: 7})
+
+    coverage = sc.measure("option_chain/regular", stamps, window=window, leg_keys=keys)
+
+    assert coverage.short_cycles == []
+
+
+def test_the_leg_axis_stays_silent_when_it_cannot_judge():
+    """키가 없거나·표본이 모자라거나·짝이 어긋나면 판정하지 않는다.
+
+    표본이 적으면 최빈값이 결손 쪽으로 뒤집혀 **검사가 거꾸로 선다** — 카덴스 추정이
+    `_MIN_CYCLES_FOR_CADENCE`를 두는 이유와 같다.
+    """
+    window = (_at(8, 20), _at(15, 35))
+    stamps, keys = _legged(_at(9, 0), cycles=40, period_minutes=10, legs=42, short={25: 41})
+    few, few_keys = _legged(_at(9, 0), cycles=3, period_minutes=10, legs=42, short={1: 41})
+
+    no_keys = sc.measure("option_chain/regular", stamps, window=window)
+    too_few = sc.measure("option_chain/regular", few, window=window, leg_keys=few_keys)
+    mismatched = sc.measure("option_chain/regular", stamps, window=window, leg_keys=keys[:5])
+
+    assert no_keys.expected_legs is None
+    assert too_few.expected_legs is None
+    assert mismatched.expected_legs is None
+
+
+def test_collect_passes_row_identifiers_so_the_leg_axis_works_on_disk(tmp_path):
+    """`collect()`가 식별자 열을 안 넘기면 이 축은 디스크 경로에서 통째로 죽는다."""
+    path = tmp_path / "oc" / "regular" / "2026-08-06.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamps, keys = _legged(_at(9, 0), cycles=40, period_minutes=10, legs=42, short={25: 41})
+    pl.DataFrame({"ts_kst": stamps, "symbol": keys}).write_parquet(path)
+
+    covers = sc.collect(
+        _DAY,
+        "A05608",
+        window=(_at(8, 20), _at(15, 35)),
+        flow_dir=tmp_path / "flow",
+        option_chain_dir=tmp_path / "oc",
+        tick_dir=tmp_path / "ticks",
+    )
+
+    assert covers[0].short_cycles == [("13:10", 41)]

@@ -128,6 +128,39 @@ def _native_crashes_measurable(report: dict[str, Any]) -> float | None:
     return 1.0 if crashes.get("available") else 0.0
 
 
+def _option_calendar_violations(report: dict[str, Any]) -> float | None:
+    """옵션 시리즈의 **상장 판정이 틀린 건수** — 양방향으로 센다 (2026-08-10 A-1 후속).
+
+    `thursday-weekly-listing-calendar` 항목이 그동안 `series_gap_findings`(넓은 그물)로
+    채점됐는데, A-1~A-3이 진짜 결손을 findings로 올리기 시작하자 **목위클리와 아무 상관
+    없는 수급 머리 구멍 때문에 "재발"로 뒤집혔다**(2026-08-10 실측). 이 등록부가 가장
+    경계하는 늑대소년이 그 형태다.
+
+    그래서 이 항목이 실제로 묻는 것만 센다:
+    - 있어야 하는 시리즈가 0행 → 규정 판정이 느슨했거나 수집이 끊겼다
+    - 없어야 하는 시리즈에 행이 있다 → 규정 이해가 틀렸다(`OptionChainCalendarViolation`)
+
+    축이 없던 옛 리포트는 None(판정 불가)이다.
+    """
+    rows = [
+        entry
+        for entry in (report.get("series_coverage") or [])
+        if str(entry.get("name", "")).startswith("option_chain/")
+    ]
+    if not rows:
+        return None
+    violations = 0
+    for entry in rows:
+        if not entry.get("measured", True):
+            continue
+        count = int(entry.get("rows") or 0)
+        if entry.get("expected", True):
+            violations += 1 if count == 0 else 0
+        else:
+            violations += 1 if count > 0 else 0
+    return float(violations)
+
+
 def _host_check_ok(name: str):
     """`host_health`의 이름 붙은 항목을 1.0(정상)/0.0(결함)/None(못 잼)으로 읽는 추출기.
 
@@ -253,6 +286,52 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     "series_head_gap_minutes_max": lambda r: (
         max((float(e.get("head_gap_minutes") or 0.0) for e in (r.get("series_coverage") or [])))
         if (r.get("series_coverage") or [])
+        else None
+    ),
+    # 사이클 안이 덜 찬 사이클의 수 (2026-08-10 A-3). 시간 축이 **구조적으로 못 보는**
+    # 결손이다 — 사이클은 제때 돌았는데 그 안의 다리가 빠지면 커버리지는 100%다.
+    # 2026-08-10 14:30 `option_chain/regular`가 41/42였고 리포트는 조용했다.
+    # 축이 없던 옛 리포트는 None(판정 불가)이지 0이 아니다(L18).
+    "series_leg_shortfall": lambda r: (
+        float(sum(len(e.get("short_cycles") or []) for e in (r.get("series_coverage") or [])))
+        if any("short_cycles" in e for e in (r.get("series_coverage") or []))
+        else None
+    ),
+    # 옵션 상장 판정이 틀린 건수 — 양방향 (2026-08-10 A-1 후속, `_option_calendar_violations`).
+    "option_calendar_violations": _option_calendar_violations,
+    # 정본을 안 쓰는 소비자 수 (2026-08-10 A-1 후속). `canonical-consumers-wired` 항목의
+    # 주석이 예고한 전용 지표다 — *"남의 사고로 두 번 이상 뒤집히면 그때 판다."*
+    # 코드 구조 판정이라 그날 데이터와 무관해야 하는데, `breaches`로 채점하는 한 무관할 수
+    # 없었다. 축이 없던 옛 리포트는 None.
+    "canonical_consumer_gaps": lambda r: (
+        float(len(r["canonical_consumer_findings"]))
+        if isinstance(r.get("canonical_consumer_findings"), list)
+        else None
+    ),
+    # 기동했는데 `SessionEnd` 마커가 없는 프로세스 수 (2026-08-10 A-1 후속).
+    # `no-silent-process-death`도 같은 이유로 `breaches`에서 이 좁은 그물로 옮긴다.
+    "abnormal_exits": lambda r: (
+        float(len(r["abnormal_exits"])) if isinstance(r.get("abnormal_exits"), list) else None
+    ),
+    # 첫 기동이 정시 트리거보다 몇 분 늦었나 (2026-08-10 A-1). 커버리지가 "얼마나 못
+    # 봤나"를 답한다면 이쪽은 **"왜 못 봤나"**다. 음수(트리거보다 이르게 뜬 날)는 지연이
+    # 아니므로 0으로 접는다 — max 기준 지표에 음수가 섞이면 통과가 쉬워진다.
+    "collection_start_lag_minutes": lambda r: (
+        None
+        if r.get("collection_start_lag_minutes") is None
+        else max(0.0, float(r["collection_start_lag_minutes"]))
+    ),
+    # 0이 아닌 종료 코드로 끝난 진입점의 수 (2026-08-10 A-2). 로그가 "정상 종료"라 말해도
+    # OS가 실패라 말하면 이 값이 오른다 — 2026-08-10 G2가 255였고 아무 축도 몰랐다.
+    "nonzero_task_exits": lambda r: (
+        float(
+            sum(
+                1
+                for e in ((r.get("task_exit_codes") or {}).get("exits") or [])
+                if int(e.get("win32_code", 0)) != 0
+            )
+        )
+        if (r.get("task_exit_codes") or {}).get("available")
         else None
     ),
     # 가장 긴 **관측 공백**(분) — 프로세스가 죽어 아무것도 못 본 구간 (2026-08-06 P1-1).

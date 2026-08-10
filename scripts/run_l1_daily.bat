@@ -55,6 +55,14 @@ powershell -NoProfile -Command ^
     "& cmd /c '.venv\Scripts\python.exe -u scripts\run_l1_daily.py 2>&1' | ForEach-Object { $_ | Out-File -FilePath '%LOGFILE%' -Append -Encoding utf8; $_ }; exit $LASTEXITCODE"
 set EXITCODE=%ERRORLEVEL%
 
+REM Record the exit code IN THE LOG, not only on stderr (2026-08-10 A-2). The stderr echo
+REM below goes to the Task Scheduler console, which nobody reads and nothing archives - so on
+REM 2026-08-10 the G2 entrypoint ended with code 255 while its own log said it exited normally,
+REM and the only place that fact existed was the Windows event log.
+REM src\messiah\ops\task_exit_codes.py reads that event log; this line makes the same fact
+REM greppable in the daily log too. (ASCII only here - see the header note.)
+echo [exit] run_l1_daily.py code=%EXITCODE%>>"%LOGFILE%"
+
 if not %EXITCODE%==0 (
     echo [run_l1_daily.bat] exit code %EXITCODE% - check %LOGFILE% >&2
 )

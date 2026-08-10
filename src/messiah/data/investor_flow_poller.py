@@ -19,17 +19,30 @@ FL Feature(`fl_frgn_cum` 등)로 이어지는 정규화는 그 근거가 생긴 
 `KISRestClient`가 이미 내부적으로 `_RateLimiter`(또는 주입된 `RedisRateLimiter`)로
 페이싱하므로 이 폴러는 별도 유량 제어를 하지 않는다 — `sector_codes`를 순차 조회할
 때마다 그 페이싱이 자연히 적용된다(공유 자원 재사용, 중복 구현 없음).
+
+## 재시도 (2026-08-10 A-4)
+
+2026-08-05부터 `OptionChainPoller`에는 재시도 계층이 있었는데 **이쪽엔 없었다.** 두 폴러가
+같은 KIS REST의 같은 `500 Internal Server Error`를 받는데 한쪽만 처방을 받고 있었던 셈이다.
+
+대가는 실측됐다 — 2026-08-10에 옵션체인은 52건을 재시도로 살리고 1건만 잃었고, 이 폴러는
+3건을 실패해 **3행을 그대로 잃었다**(그날 아카이브 1,185행 = 396분 × 3업종 − 3). 2026-08-06엔
+같은 이유로 4행이 사라졌다. 수급은 과거 조회 경로가 없어 **지금 없으면 영원히 없다.**
+
+정본은 `data/poll_retry.py`다. 옮기면서 복사하지 않았다 — 같은 코드가 두 곳에 있으면
+한쪽만 고쳐지고, 그게 이 저장소가 반복한 실패 형태다.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Sequence
+from typing import Awaitable, Callable, Sequence
 
 from messiah.broker.kis.rest_client import KISRestClient
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_RAW, BusLike
 from messiah.core.messages import InvestorFlowSnapshot
+from messiah.data import poll_retry
 
 
 class InvestorFlowPoller:
@@ -42,13 +55,24 @@ class InvestorFlowPoller:
         market_code: str,
         sector_codes: Sequence[str],
         bus: BusLike,
+        *,
+        retry_attempts: int = poll_retry.RETRY_ATTEMPTS,
+        retry_delay_seconds: float = poll_retry.RETRY_DELAY_SECONDS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        """`sleep`을 주입받는 이유는 `OptionChainPoller`와 같다 — 테스트가 재시도 지연을
+        실제로 기다리면 스위트가 초 단위로 느려진다."""
         if not sector_codes:
             raise ValueError("sector_codes가 비어 있음 — 폴링할 업종 최소 1개 필요")
+        if retry_attempts < 0:
+            raise ValueError("retry_attempts는 0 이상이어야 한다")
         self._rest_client = rest_client
         self._market_code = market_code
         self._sector_codes = list(sector_codes)
         self._bus = bus
+        self._retry_attempts = retry_attempts
+        self._retry_delay_seconds = retry_delay_seconds
+        self._sleep = sleep
 
     async def poll_once(self) -> None:
         """등록된 sector_code 전부를 순차 조회·발행한다. 하나가 실패해도 나머지는
@@ -57,17 +81,19 @@ class InvestorFlowPoller:
             await self._poll_one(sector_code)
 
     async def _poll_one(self, sector_code: str) -> None:
-        try:
-            raw = await asyncio.to_thread(
+        raw = await poll_retry.fetch_with_retry(
+            lambda: asyncio.to_thread(
                 self._rest_client.get_investor_flow, self._market_code, sector_code
-            )
-        except Exception as exc:  # noqa: BLE001 — REST 실패로 폴링 루프가 죽으면 안 됨
-            mlog.log(
-                "InvestorFlowPollError",
-                f"조회 실패: {exc}",
-                market_code=self._market_code,
-                sector_code=sector_code,
-            )
+            ),
+            retried_tag="InvestorFlowPollRetried",
+            error_tag="InvestorFlowPollError",
+            retry_attempts=self._retry_attempts,
+            retry_delay_seconds=self._retry_delay_seconds,
+            sleep=self._sleep,
+            market_code=self._market_code,
+            sector_code=sector_code,
+        )
+        if raw is None:
             return
 
         snapshot = InvestorFlowSnapshot(

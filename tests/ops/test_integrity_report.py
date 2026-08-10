@@ -8,12 +8,15 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+
+import pytest
 
 from messiah.core.messages import BarClosed, BarSession, Horizon
 from messiah.core.timeutil import KST
 from messiah.data.archiver import ParquetArchiver
+from messiah.ops import series_coverage, task_exit_codes
 from messiah.ops.integrity_report import (
     NativeCrashes,
     analyze_bar_continuity,
@@ -25,6 +28,37 @@ from messiah.ops.integrity_report import (
 )
 
 _DAY = date(2026, 7, 29)
+
+
+@pytest.fixture(autouse=True)
+def _pin_environment(monkeypatch):
+    """이 파일의 픽스처가 사는 **환경 두 가지**를 고정한다.
+
+    1. **정시 트리거 08:35** — 아래 로그 픽스처는 전부 트리거가 08:35이던 시절
+       (2026-07-29~08-07)의 것이다. 2026-08-10 A-1이 판정 창과 기동 지연을 등록 정본에서
+       가져오게 하면서, 고정하지 않으면 이 테스트들이 **운영 PC의
+       `configs/scheduled_tasks.json`을 읽는다** — 그 파일을 고치는 순간 무관한 테스트
+       수십 개가 깨지고, 반대로 그 파일이 틀려도 테스트는 조용하다.
+
+       **`task_schedule`이 아니라 `series_coverage.collection_trigger`를 갈아끼운다.**
+       앞쪽을 덮으면 `host_health.check_schedule_drift`가 같은 정본을 읽어 "등록 트리거가
+       기동 창보다 이르다"는 **진짜 판정**을 내고, 이 파일의 픽스처와 무관한 곳이 깨진다
+       (한 번 그렇게 만들어 봤다). 덮는 범위는 이 리포트가 쓰는 자리 하나로 좁힌다.
+    2. **작업 종료 코드 = 측정했고 0건** — 기본 수집기는 이 PC의 Windows 이벤트 로그를
+       읽는다(`ops/task_exit_codes.py`). `host_collector`를 주입하는 이유와 같다: 테스트가
+       그 기계의 상태를 타면 다른 기계에서 다르게 깨진다. 게다가 PowerShell 호출이
+       테스트마다 10초씩 붙는다.
+    """
+    monkeypatch.setattr(
+        series_coverage,
+        "collection_trigger",
+        lambda day: datetime.combine(day, time(8, 35), tzinfo=KST),
+    )
+    monkeypatch.setattr(
+        task_exit_codes,
+        "collect",
+        lambda day, **kwargs: task_exit_codes.TaskExitReport(available=True, detail="작업 0개"),
+    )
 
 
 def _write_bars(bar_dir: Path, minutes: list[int], *, symbol: str = "A05608") -> None:
@@ -1433,3 +1467,143 @@ def test_unmatched_refusal_is_ignored():
     from messiah.ops.integrity_report import _drop_refused_starts
 
     assert _drop_refused_starts(["09:00:00"], ["07:00:00", "08:00:00"]) == ["09:00:00"]
+
+
+# ------------------------------------------------- A-1(2026-08-10): 수집 기동 지연
+#
+# 이 축이 없어서 2026-08-10의 38분이 어느 줄에도 안 나왔다. 기동 창 거절은 재기동 계상에서
+# 정당하게 빠지고(2026-08-07 P0-4), 관측 공백은 기동 **사이**를 보므로 아침에 아예 안 뜬
+# 시간을 셀 근거가 없다. 남은 축이 없었다.
+
+
+def _late_log(tmp_path: Path, clock: str) -> Path:
+    log = tmp_path / "late.log"
+    _write_log(log, [{"ts": f"2026-07-29T{clock}+09:00", "level": "INFO", "tag": "SessionStart"}])
+    return log
+
+
+def test_a_late_collection_start_is_a_breach(tmp_path: Path):
+    """08:35 트리거에 09:13 기동 = 38분 — 2026-08-10과 같은 크기다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_late_log(tmp_path, "09:13:00")]})
+
+    assert report.collection_start_lag_minutes == 38.0
+    assert any("정시 트리거보다 38분 늦었다" in item for item in report.breaches)
+    assert any("영구 소실" in item for item in report.breaches)
+    assert "수집 기동 지연(정시 트리거 대비): +38.0분 ❌" in format_summary(report)
+
+
+def test_an_on_time_start_is_recorded_without_a_breach(tmp_path: Path):
+    """정상일에도 값을 찍는다 — 0.2분이 매일 보여야 38분이 눈에 띈다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_late_log(tmp_path, "08:35:10")]})
+
+    assert report.collection_start_lag_minutes == 0.2
+    assert not any("기동" in item and "늦었다" in item for item in report.breaches)
+    assert "수집 기동 지연(정시 트리거 대비): +0.2분 ✅" in format_summary(report)
+
+
+def test_no_session_start_makes_the_lag_unmeasured_not_zero(tmp_path: Path):
+    """L18 — 못 잰 것을 0으로 접으면 "제때 떴다"가 되어 거짓 통과다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "empty.log"
+    _write_log(log, [{"ts": "2026-07-29T09:00:00+09:00", "level": "INFO", "tag": "FeaturePublish"}])
+
+    report = _report2(tmp_path, logs={"l1_daily": [log]})
+
+    assert report.collection_start_lag_minutes is None
+    assert any("수집 기동 지연" in item for item in report.unmeasured)
+
+
+# ------------------------------------------------- A-2(2026-08-10): 진입점 종료 코드
+
+
+def _exits(*rows: tuple[str, str, int]):
+    """`task_exit_collector` 자리에 끼우는 가짜 — 실제 이벤트 로그를 안 읽는다."""
+    report = task_exit_codes.TaskExitReport(
+        exits=[
+            task_exit_codes.TaskExit(
+                task=task, at_kst=at, code=code, win32_code=task_exit_codes._win32_code(code)
+            )
+            for task, at, code in rows
+        ],
+        available=True,
+        detail=f"작업 {len(rows)}개",
+    )
+    return lambda day, **kwargs: report
+
+
+def test_a_nonzero_exit_with_a_clean_session_end_becomes_a_breach(tmp_path: Path):
+    """2026-08-10 G2 — 로그는 `SessionEnd`, 작업은 255. 그 불일치를 아는 축이 없었다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "g2.log"
+    _write_log(
+        log,
+        [
+            {"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"ts": "2026-07-29T15:35:00+09:00", "level": "INFO", "tag": "SessionEnd"},
+        ],
+    )
+
+    report = build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths={"g2_paper": [log]},
+        crash_collector=_no_crashes,
+        tick_dir=_write_ticks(tmp_path, 5000),
+        log_dir=tmp_path,
+        host_collector=_healthy_host(),
+        task_exit_collector=_exits(("Messiah-G2", "15:35:02", 2147942655)),
+    )
+
+    assert any("SessionEnd" in item and "255" in item for item in report.breaches)
+    assert report.task_exit_codes["exits"][0]["win32_code"] == 255
+    assert "작업 종료 코드: Messiah-G2=255 ❌" in format_summary(report)
+
+
+def test_all_zero_exits_are_recorded_without_a_breach(tmp_path: Path):
+    """0으로 끝난 날도 표에 남긴다 — "봤는데 0"과 "이 축이 없다"가 갈려야 한다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths={"l1_daily": [_clean_log(tmp_path)]},
+        crash_collector=_no_crashes,
+        tick_dir=_write_ticks(tmp_path, 5000),
+        log_dir=tmp_path,
+        host_collector=_healthy_host(),
+        task_exit_collector=_exits(("Messiah", "15:36:12", 0)),
+    )
+
+    assert not any("종료 코드" in item for item in report.breaches)
+    assert "작업 종료 코드: Messiah=0" in format_summary(report)
+
+
+def test_an_unreadable_exit_log_lands_in_unmeasured(tmp_path: Path):
+    """관측 도구가 못 읽었다는 사실 자체가 한자리에 모여야 한다(고도화 2와 같은 규율)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = build_report(
+        day=_DAY,
+        symbol="A05608",
+        instance_id="messiah-dev-01",
+        bar_dir=tmp_path / "bars",
+        log_paths={"l1_daily": [_clean_log(tmp_path)]},
+        crash_collector=_no_crashes,
+        tick_dir=_write_ticks(tmp_path, 5000),
+        log_dir=tmp_path,
+        host_collector=_healthy_host(),
+        task_exit_collector=lambda day, **kwargs: task_exit_codes.TaskExitReport(
+            available=False, detail="Get-WinEvent 실패"
+        ),
+    )
+
+    assert any("진입점 종료 코드" in item for item in report.unmeasured)
+    assert not any("종료 코드" in item for item in report.breaches)

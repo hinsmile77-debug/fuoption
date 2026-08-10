@@ -36,7 +36,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 
 from messiah.core import universe
 from messiah.core.event_calendar import EventCalendar
@@ -48,6 +48,24 @@ ARCHIVE_PREFIX_OPTION_CHAIN = "option_chain"
 
 # 유니버스 토큰이 아니지만 매 거래일 필수인 계열 — 모듈 docstring "수급은 토큰이 아니다".
 BASELINE_SERIES: tuple[str, ...] = ("flow_intraday/K2I", "ticks")
+
+# 계열별 **데이터가 존재할 수 있는 가장 이른 시각** (2026-08-10 A-1). None이면 판정 창
+# 시작(= 등록된 정시 트리거)이 곧 기준선이다 — 그 계열은 프로세스가 뜨는 즉시 자기 격자로
+# 폴링을 시작하므로 "언제부터 볼 수 있었나"가 곧 "언제 떴나"다.
+#
+# ## 왜 이 축이 필요한가 — 계열마다 "볼 수 있었던 시작"이 다르다
+#
+# 2026-08-07(정상 기동 08:35:34) 실측: 수급 첫 행 **08:36**(1분 뒤) · 옵션 regular
+# **08:40** · weekly_mon **08:41** — 셋 다 기동 시각에 따라온다. 그런데 체결틱은 그날도
+# **08:45**였고, 기동을 10분 앞당긴 날도 08:45였다. 시장이 그 시각부터 틱을 내기 때문이다
+# (3거래일 실측, `scripts/run_l1_daily.py` 모듈 docstring).
+#
+# 판정 창을 정본(08:20)으로 옮기면서 이 차이를 안 실으면 **틱은 매일 25분짜리 머리 구멍을
+# 갖게 된다** — 아무도 못 고치는 오탐이고, 그런 축은 한 달 안에 안 읽히게 된다.
+FIRST_DATA_KST: dict[str, time] = {
+    # 체결틱은 시장 사정이라 기동 시각과 무관하다.
+    "ticks": time(8, 45),
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +82,9 @@ class Expectation:
     # 미상장 계열이 다시 돌아오는 첫 거래일 — 부재만 알리고 복귀 시점을 안 알리면
     # 사람이 매일 다시 확인해야 하고, 그러면 결국 아무도 안 본다.
     resumes_on: date | None = None
+    # 이 계열의 데이터가 존재할 수 있는 가장 이른 시각 — `FIRST_DATA_KST` 참고.
+    # None이면 판정 창 시작이 그대로 기준선이다.
+    first_data_kst: time | None = None
 
     @property
     def note(self) -> str:
@@ -117,12 +138,19 @@ def for_day(day: date, tokens: list[str], calendar: EventCalendar) -> dict[str, 
          (미니선물 체결틱이 곧 그 토큰의 적재 증거다). 기준선 계열은 무조건 필수.
     """
     out: dict[str, Expectation] = {
-        name: Expectation(series=name, required=True) for name in BASELINE_SERIES
+        name: Expectation(series=name, required=True, first_data_kst=FIRST_DATA_KST.get(name))
+        for name in BASELINE_SERIES
     }
     for series in universe.option_series(tokens):
         name = f"{ARCHIVE_PREFIX_OPTION_CHAIN}/{series}"
         listed, reason, resumes = option_series_expectation(series, day, calendar)
-        out[name] = Expectation(series=name, required=listed, reason=reason, resumes_on=resumes)
+        out[name] = Expectation(
+            series=name,
+            required=listed,
+            reason=reason,
+            resumes_on=resumes,
+            first_data_kst=FIRST_DATA_KST.get(name),
+        )
     return out
 
 

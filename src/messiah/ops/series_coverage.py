@@ -55,11 +55,53 @@
 
 그래서 머리 구멍은 `_HEAD_GAP_FLOOR_MINUTES` 미만이면 안 센다. 20분은 위 편차(최대 10분)를
 넉넉히 덮으면서, 실제 소실(2026-08-06 기준 111~115분)과는 5배 이상 떨어져 있다.
+
+## 판정 창은 **정본**에서 온다 — 프로세스 기동이 아니라 (2026-08-10 A-1)
+
+종전에는 창의 시작이 그날 **첫 `SessionStart`**였다. 이유는 타당해 보였다 — 재기동으로 늦게
+뜬 공백을 `restarts`와 두 번 세지 않으려는 것이었다. 그런데 그 앵커링은 **"늦게 뜬 날"과
+"제때 떠서 다 본 날"을 구조적으로 구분할 수 없게 만든다.** 창이 기동을 따라 같이 늦어지기
+때문이다.
+
+2026-08-10에 그 대가를 실측했다. 08:20 정시 트리거가 기동 창 가드에 막혀 종료했고 사람이
+08:58에야 손으로 띄웠다 — **38분**. 그날 15:45 리포트는 이렇게 말했다:
+
+    ticks: 커버리지 100% · 머리 -0분 ✅        ← 첫 행이 창 시작보다 **이르다**
+    flow_intraday/K2I: 커버리지 100% ✅
+    series_findings: []
+
+머리 구멍이 **음수**인 것이 이 결함의 지문이다. 그리고 이 축을 만든 이유였던 등록부 항목
+`truncation-is-visible`(**잘림이 보이는가**)이 그날 **통과**로 채점됐다.
+
+그래서 창의 시작은 `ops/task_schedule.earliest_collection_trigger()` 하나에서 온다 —
+`ce91b08`이 기동 창에 한 일을 판정 창에 그대로 한다. 이중 계상 우려는 축을 나눠서 푼다:
+창은 **"얼마나 못 봤나"**, `IntegrityReport.collection_start_lag_minutes`는 **"왜 못
+봤나"**(첫 기동 − 정시 트리거)를 답한다. 한 축에 두 질문을 얹은 것이 애초의 잘못이었다.
+
+계열별 기준선은 `ops/series_expectation.FIRST_DATA_KST`가 준다 — 창을 08:20으로 옮기면서
+그 축을 안 실으면 체결틱이 매일 25분짜리 머리 구멍을 갖게 된다(그쪽 주석 참고).
+
+## 사이클 안이 다 찼는가 — 다리 완전성 (2026-08-10 A-3)
+
+커버리지는 **사이클이 있었는가**만 센다. 사이클은 제때 돌았는데 그 안의 다리 하나가 빠진
+경우는 시간 축에 아무 흔적이 없다. 2026-08-10 14:30 `option_chain/regular`가 정확히 그
+모양이었다 — `OptionChainPollError` 한 건으로 42다리 중 **41다리**만 남았고, 커버리지는
+100%였다. 같은 날 수급도 3분에서 3업종 중 2업종만 들어왔다.
+
+그래서 사이클마다 **서로 다른 키의 개수**를 세고, 그날 최빈값을 그 계열의 정상 다리 수로
+본다. 카덴스와 같은 규율이다 — 42나 3 같은 상수를 여기 적으면 창 크기(`strike_window`)나
+업종 목록이 바뀌는 순간 이 검사가 조용히 거짓말을 시작한다.
+
+**한계 둘**(정직하게): 마지막 묶음은 진행 중일 수 있어 판정에서 뺀다(장중 실행 대비).
+그리고 사이클 두 개가 붙어 한 묶음이 되면(2026-08-10 weekly_mon에서 1회) 그 안의 결손은
+합집합에 묻힌다 — 과소 계상이지 오탐은 아니다.
 """
 
 from __future__ import annotations
 
+import bisect
 import statistics
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -118,6 +160,14 @@ _TAIL_GAP_FLOOR_MINUTES = 20.0
 # `_TAIL_GAP_FLOOR_MINUTES`·`bar_tail_gap_minutes`(20분)와 같은 크기를 비율로 옮긴 값 —
 # 네 곳이 같은 질문에 답하므로 임계도 같은 크기여야 한다.
 _COVERAGE_FLOOR_PCT = 95.0
+
+# 다리 완전성을 판정하려면 묶음이 최소 이만큼 필요하다 — 카덴스 추정과 같은 이유
+# (`_MIN_CYCLES_FOR_CADENCE`). 표본 두셋으로 최빈값을 내면 그중 하나가 결손이어도
+# 그것이 곧 "정상 다리 수"가 되어 아무것도 못 잡는다.
+_MIN_CYCLES_FOR_LEGS = 5
+
+# 사람에게 보여줄 결손 사이클의 최대 개수 — `_MAX_GAP_FINDINGS`와 같은 이유(늑대소년).
+_MAX_LEG_FINDINGS = 3
 
 
 def _is_irrecoverable(name: str) -> bool:
@@ -192,35 +242,51 @@ class SeriesCoverage:
     # 구멍으로 판정된 구간 [시작, 끝, 분] — 사람이 로그에서 그 시각을 바로 찾을 수 있게.
     gaps: list[tuple[str, str, int]] = field(default_factory=list)
     detail: str = ""
+    # 이 계열에 실제로 적용된 판정 창의 시작 — 창 정본과 `first_data_kst` 중 늦은 쪽
+    # (모듈 docstring "판정 창은 정본에서 온다"). 표에 안 찍지만 리포트 JSON에는 남긴다:
+    # 머리 구멍이 왜 그 값인지를 나중에 되읽을 근거가 이 한 칸이다.
+    window_start_kst: str | None = None
+    # 한 사이클의 **정상** 다리 수 — 그날 최빈값이다(상수가 아니다). 표본이 모자라거나
+    # 키를 안 받은 계열은 None(판정 안 함).
+    expected_legs: int | None = None
+    # 정상보다 적게 들어온 사이클 [시각, 실제 다리 수] (2026-08-10 A-3).
+    short_cycles: list[tuple[str, int]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
-def session_window(day: date, *, start: datetime | None = None) -> tuple[datetime, datetime]:
+def collection_trigger(day: date) -> datetime:
+    """그날 **등록된** 가장 이른 수집 트리거 시각 — 판정 창과 기동 지연의 공통 기준점.
+
+    정본은 `configs/scheduled_tasks.json` 하나다(`ops/task_schedule.py`). 종전에 이 자리엔
+    `open_time - 25분`(=08:35)이라는 세 번째 하드코딩 사본이 있었고, 2026-08-08에 트리거가
+    08:20으로 옮겨진 뒤로 머리쪽 공백을 매일 15분씩 덜 세고 있었다.
+    """
+    try:
+        trigger = task_schedule.earliest_collection_trigger()
+    except task_schedule.ScheduleUnreadable:
+        trigger = task_schedule.FALLBACK_LAUNCH_WINDOW_START
+    return datetime.combine(day, trigger, tzinfo=KST)
+
+
+def session_window(day: date, *, now: datetime | None = None) -> tuple[datetime, datetime]:
     """그날의 판정 창 — (시작, 끝).
 
-    시작은 **첫 프로세스 기동 시각**이다(호출측이 `_first_session_start()`로 넘긴다).
-    08:35 고정값을 쓰지 않는 이유: 재기동으로 늦게 뜬 날 그 공백까지 이 검사가 다시
-    세면, 이미 `restarts`가 재고 있는 사건을 두 번 세는 것이 된다.
+    시작은 **등록된 정시 트리거**다. 프로세스 기동 시각이 아니다 — 그 이유 전부가
+    모듈 docstring "판정 창은 정본에서 온다"에 있다(2026-08-10에 창이 기동을 따라가는
+    바람에 38분 잘린 날이 커버리지 100%로 나왔다).
 
-    `start`가 naive면 KST로 읽는다 — 유일한 생산자인 `_first_session_start()`가
-    **의도적으로 naive**를 돌려주기 때문이다(그쪽 docstring: 소비처가 `Get-WinEvent`의
-    로컬 시각 문자열이라 tz를 붙이면 오프셋 변환이 끼어든다). 그 값은 KST 벽시계다.
+    `now`를 주면 끝을 거기서 자른다. 장중에 리포트를 돌리면(`--force-intraday`) 아직 오지
+    않은 시간이 전부 꼬리 구멍으로 잡히기 때문이다 — 2026-08-10 15:00에 전 계열이
+    `마지막 행 이후 39분간 적재 없음`을 찍었고, 그건 장이 안 끝났다는 뜻일 뿐이었다.
     """
     close = datetime.combine(day, DEFAULT_SESSION.close_time, tzinfo=KST)
-    if start is None:
-        # 기동 로그가 없는 날의 최선 추정치 = **등록된** 정시 트리거 시각. 종전에는
-        # `open_time - 25분`(=08:35)이라는 세 번째 하드코딩 사본이었고, 2026-08-08에 트리거가
-        # 08:20으로 옮겨진 뒤로는 15분씩 늦게 잡혀 머리쪽 공백을 그만큼 덜 세고 있었다
-        # (`ops/task_schedule.py` 참고 — 같은 숫자를 여러 곳에 적어 둔 것이 문제의 뿌리였다).
-        try:
-            trigger = task_schedule.earliest_collection_trigger()
-        except task_schedule.ScheduleUnreadable:
-            trigger = task_schedule.FALLBACK_LAUNCH_WINDOW_START
-        start = datetime.combine(day, trigger, tzinfo=KST)
-    elif start.tzinfo is None:
-        start = start.replace(tzinfo=KST)
+    start = collection_trigger(day)
+    if now is not None:
+        moment = now.astimezone(KST) if now.tzinfo is not None else now.replace(tzinfo=KST)
+        if moment.date() == day:
+            close = min(close, moment)
     return min(start, close), close
 
 
@@ -275,12 +341,72 @@ def _estimate_cadence(cycles: Sequence[tuple[datetime, datetime]]) -> float:
     return cadence
 
 
+def _leg_completeness(
+    pairs: Sequence[tuple[datetime, str]],
+    cycles: Sequence[tuple[datetime, datetime]],
+) -> tuple[int | None, list[tuple[str, int]]]:
+    """사이클마다 다리가 다 찼는가 → (정상 다리 수, [(시각, 부족한 사이클의 다리 수)]).
+
+    ## 묶는 단위는 **사이클 개수**가 정한다 — 카덴스가 아니라
+
+    옵션체인(10분 격자)은 한 사이클이 42다리를 2~3분에 걸쳐 받으므로 **사이클**로 묶는다.
+    수급(60초 격자)은 3업종이 같은 분에 오고 `_group_into_cycles()`가 연속 분을 통째로 한
+    덩어리로 만들므로 **분**으로 묶는다.
+
+    처음엔 이 분기를 카덴스로 했는데 틀렸다. `_estimate_cadence()`는 "연속 계열"과 "표본이
+    모자라 못 재겠다"를 **둘 다 1.0으로** 돌려주기 때문이다. 그래서 사이클이 3개뿐인
+    옵션체인이 분 단위로 묶여 09:02가 2다리, 09:12가 1다리인 것처럼 보였다(테스트가 잡았다).
+
+    - 사이클 `_MIN_CYCLES_FOR_LEGS`개 이상 → 폴링 격자다. 사이클로 묶는다.
+    - 사이클이 정확히 1개 → 끊김 없는 연속 계열이다. 분으로 묶는다.
+    - 그 사이(2~4개) → **판정하지 않는다.** 어느 쪽인지 가릴 근거가 없다.
+
+    정상 다리 수는 그날 묶음들의 **최빈값**이다. 상수(42·3)를 적지 않는 이유는 카덴스와
+    같다 — `strike_window`나 업종 목록이 바뀌면 그 상수가 조용히 거짓이 된다. 동수면 큰
+    쪽을 택한다: 결손이 절반인 날에 결손 쪽을 정상으로 삼으면 검사가 뒤집힌다.
+
+    마지막 묶음은 제외한다 — 장중 실행에서는 그 사이클이 아직 도는 중이고, 진행 중인 것과
+    잘린 것을 이 함수가 구분할 근거가 없다.
+
+    **알려진 과소 계상**: 연속 계열이 구멍으로 여러 블록이 되면 블록이 곧 사이클로 잡혀
+    분 단위 결손이 합집합에 묻힌다. 그런 날은 시간 축이 이미 크게 울고 있다.
+    """
+    if not pairs:
+        return None, []
+
+    buckets: dict[datetime, set[str]] = {}
+    if len(cycles) >= _MIN_CYCLES_FOR_LEGS:
+        starts = [begin for begin, _ in cycles]
+        for begin in starts:
+            buckets[begin] = set()
+        for minute, key in pairs:
+            index = bisect.bisect_right(starts, minute) - 1
+            if index >= 0:
+                buckets[starts[index]].add(key)
+    elif len(cycles) == 1:
+        for minute, key in pairs:
+            buckets.setdefault(minute, set()).add(key)
+    else:
+        return None, []
+
+    ordered = sorted(buckets.items())
+    counts = [len(keys) for _, keys in ordered]
+    if len(counts) < _MIN_CYCLES_FOR_LEGS:
+        return None, []
+
+    tally = Counter(counts)
+    expected = max(tally.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    short = [(f"{when:%H:%M}", len(keys)) for when, keys in ordered[:-1] if len(keys) < expected]
+    return expected, short
+
+
 def measure(
     name: str,
     timestamps: Iterable[datetime],
     *,
     window: tuple[datetime, datetime],
     expectation: "Expectation | None" = None,
+    leg_keys: Sequence[str] | None = None,
 ) -> SeriesCoverage:
     """타임스탬프 목록 → 커버리지 판정 (순수 함수).
 
@@ -291,14 +417,36 @@ def measure(
 
     `expectation`을 주면 그날 계약(`ops/series_expectation.py`)을 판정에 실어 보낸다.
     안 주면 **필수**로 본다 — 계약을 모르는 호출자가 조용히 면제받는 일이 없어야 한다.
+    계약의 `first_data_kst`는 이 계열의 판정 창 시작을 그 시각까지 늦춘다(모듈 docstring).
+
+    `leg_keys`는 `timestamps`와 **같은 길이·같은 순서**의 행 식별자다(옵션체인은 다리 종목
+    코드, 수급은 업종 코드). 주면 사이클 안이 다 찼는지까지 본다 — 안 주면 시간 축만 본다.
     """
     expected = expectation.required if expectation is not None else True
     note = "" if expectation is None or expectation.required else expectation.note
 
     start, end = window
-    minutes = sorted(
-        {ts.replace(second=0, microsecond=0) for ts in timestamps if start <= ts <= end}
+    if expectation is not None and expectation.first_data_kst is not None:
+        # 계열별 기준선 — 창 정본과 "볼 수 있었던 시작" 중 늦은 쪽. 창 끝을 넘지 않게 접는다
+        # (장중 실행이 08:45 이전이면 시작이 끝보다 늦어질 수 있다).
+        floor = datetime.combine(start.date(), expectation.first_data_kst, tzinfo=start.tzinfo)
+        start = min(max(start, floor), end)
+
+    stamps = list(timestamps)
+    keys = list(leg_keys) if leg_keys is not None else None
+    if keys is not None and len(keys) != len(stamps):
+        keys = None  # 길이가 어긋나면 짝을 신뢰할 수 없다 — 시간 축만 본다
+    pairs = (
+        sorted(
+            (ts.replace(second=0, microsecond=0), key)
+            for ts, key in zip(stamps, keys)
+            if start <= ts <= end
+        )
+        if keys is not None
+        else []
     )
+
+    minutes = sorted({ts.replace(second=0, microsecond=0) for ts in stamps if start <= ts <= end})
     if not minutes:
         span = max((end - start).total_seconds() / 60.0, 0.0)
         return SeriesCoverage(
@@ -312,6 +460,7 @@ def measure(
             # 등록부 항목이 통째로 `재발`로 뒤집힌다(2026-08-07 발견).
             head_gap_minutes=round(span, 1) if expected else 0.0,
             coverage_pct=0.0 if expected else 100.0,
+            window_start_kst=f"{start:%H:%M}",
             detail=(
                 "그날 한 행도 없다 — 결선이 끊겼거나 적재가 실패했다"
                 if expected
@@ -333,6 +482,7 @@ def measure(
 
     head = (minutes[0] - start).total_seconds() / 60.0
     tail = (end - minutes[-1]).total_seconds() / 60.0
+    expected_legs, short_cycles = _leg_completeness(pairs, cycles)
     return SeriesCoverage(
         name=name,
         rows=len(minutes),
@@ -346,7 +496,12 @@ def measure(
         tail_gap_minutes=round(tail, 1),
         longest_gap_minutes=round(longest, 1),
         gaps=gaps,
-        coverage_pct=_coverage_pct(minutes, cadence, window),
+        # 창은 계열별로 잘린 것을 쓴다 — `first_data_kst`가 있는 계열에서 전역 창으로
+        # 나누면 그 계열만 매일 낮은 비율이 나온다(체결틱 08:20~08:45가 그 자리다).
+        coverage_pct=_coverage_pct(minutes, cadence, (start, end)),
+        window_start_kst=f"{start:%H:%M}",
+        expected_legs=expected_legs,
+        short_cycles=short_cycles,
         detail=f"{minutes[0]:%H:%M}~{minutes[-1]:%H:%M} · 카덴스 {cadence:.0f}분",
     )
 
@@ -405,6 +560,23 @@ def findings_for(coverage: SeriesCoverage) -> list[str]:
             f"{coverage.name}: 마지막 행({coverage.last_kst}) 이후 "
             f"{coverage.tail_gap_minutes:.0f}분간 적재 없음 — {scope}"
         )
+    # ---- 사이클 안의 결손 (2026-08-10 A-3) ----
+    #
+    # 시간 축이 구조적으로 못 보는 자리다. 사이클은 제때 돌았는데 그 안의 다리가 빠지면
+    # 커버리지는 100%다 — 2026-08-10 14:30 regular가 41/42였고 리포트는 조용했다.
+    if coverage.expected_legs and coverage.short_cycles:
+        lost = sum(coverage.expected_legs - got for _, got in coverage.short_cycles)
+        for when, got in coverage.short_cycles[:_MAX_LEG_FINDINGS]:
+            out.append(
+                f"{coverage.name}: {when} 사이클 {got}/{coverage.expected_legs}다리 — {scope}"
+            )
+        if len(coverage.short_cycles) > _MAX_LEG_FINDINGS:
+            hidden = len(coverage.short_cycles) - _MAX_LEG_FINDINGS
+            out.append(
+                f"{coverage.name}: 결손 사이클 {len(coverage.short_cycles)}건"
+                f"(잃은 다리 합 {lost}개) — 위 {_MAX_LEG_FINDINGS}건 외 {hidden}건은 "
+                "리포트 JSON의 series_coverage 참조"
+            )
     for begin, finish, span in coverage.gaps[:_MAX_GAP_FINDINGS]:
         out.append(f"{coverage.name}: {begin}~{finish} {span}분 구멍 — {scope}")
     if len(coverage.gaps) > _MAX_GAP_FINDINGS:
@@ -428,6 +600,25 @@ def _timestamps_from(frame: pl.DataFrame | None, column: str) -> list[datetime]:
     if frame is None or frame.height == 0 or column not in frame.columns:
         return []
     return [ts for ts in frame[column].to_list() if isinstance(ts, datetime)]
+
+
+def _rows_from(
+    frame: pl.DataFrame | None, column: str, key_column: str
+) -> tuple[list[datetime], list[str] | None]:
+    """(타임스탬프, 행 식별자) — 식별자 열이 없으면 두 번째가 None(시간 축만 본다).
+
+    `_timestamps_from()`이 비-datetime을 걸러내므로 **여기서도 같은 필터를 써야** 두 목록의
+    길이와 순서가 맞는다. 어긋나면 `measure()`가 짝을 버린다(그쪽 가드).
+    """
+    stamps = _timestamps_from(frame, column)
+    if frame is None or frame.height == 0 or key_column not in frame.columns:
+        return stamps, None
+    keys = [
+        str(key)
+        for ts, key in zip(frame[column].to_list(), frame[key_column].to_list())
+        if isinstance(ts, datetime)
+    ]
+    return stamps, keys
 
 
 def _read_parquet_day(directory: Path, day: date) -> pl.DataFrame | None:
@@ -468,18 +659,25 @@ def collect(
     contract = expectations or {}
     out: list[SeriesCoverage] = []
 
-    for base, label in ((flow_dir, "flow_intraday"), (option_chain_dir, "option_chain")):
+    # 행 식별자 열 이름이 계열마다 다르다 — 옵션체인은 다리 종목코드, 수급은 업종코드.
+    # 없는 계열은 시간 축만 본다(`_rows_from`).
+    for base, label, key_column in (
+        (flow_dir, "flow_intraday", "sector_code"),
+        (option_chain_dir, "option_chain", "symbol"),
+    ):
         if not base.is_dir():
             continue
         for child in sorted(p for p in base.iterdir() if p.is_dir()):
             frame = _read_parquet_day(child, day)
             name = f"{label}/{child.name}"
+            stamps, keys = _rows_from(frame, "ts_kst", key_column)
             out.append(
                 measure(
                     name,
-                    _timestamps_from(frame, "ts_kst"),
+                    stamps,
                     window=window,
                     expectation=contract.get(name),
+                    leg_keys=keys,
                 )
             )
 
@@ -525,10 +723,17 @@ def summarize(coverages: Sequence[SeriesCoverage]) -> list[str]:
             lines.append(f"    {item.name}: 0분 ❌ {item.detail}")
             continue
         mark = "✅" if not findings_for(item) else "⚠"
+        # 다리 결손은 있을 때만 찍는다 — 정상인 날 매 줄에 "42/42"가 붙으면 그 줄이 길어져
+        # 정작 봐야 할 커버리지·머리 숫자가 묻힌다.
+        legs = (
+            f" · 결손 사이클 {len(item.short_cycles)}건(/{item.expected_legs}다리)"
+            if item.short_cycles and item.expected_legs
+            else ""
+        )
         lines.append(
             f"    {item.name}: 커버리지 {item.coverage_pct:.0f}% · "
             f"{item.rows}분 {item.first_kst}~{item.last_kst} "
             f"(카덴스 {item.cadence_minutes:.0f}분 · 머리 {item.head_gap_minutes:.0f}분 · "
-            f"최장 구멍 {item.longest_gap_minutes:.0f}분) {mark}"
+            f"최장 구멍 {item.longest_gap_minutes:.0f}분{legs}) {mark}"
         )
     return lines

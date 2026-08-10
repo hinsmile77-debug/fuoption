@@ -51,7 +51,7 @@ import polars as pl
 from messiah.core import universe
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.messages import BarSession, Horizon
-from messiah.core.timeutil import KST
+from messiah.core.timeutil import KST, now_kst
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
 from messiah.ops import (
@@ -59,6 +59,7 @@ from messiah.ops import (
     observation_gaps,
     series_coverage,
     series_expectation,
+    task_exit_codes,
 )
 from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
@@ -110,6 +111,17 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # `_TAIL_GAP_FLOOR_MINUTES`와 같은 20분을 쓴다 — 정상일이면 0이고(마지막 봉 15:34),
     # 장 막판 한산으로 몇 분 비는 것까지 울면 늑대소년이 된다.
     "bar_tail_gap_minutes": 20.0,
+    # **첫 기동이 정시 트리거보다 얼마나 늦었나**(분) — 2026-08-10 A-1.
+    #
+    # `observation_gap_minutes`가 "떠 있다가 사라진 시간"을 재는 자리라면 이쪽은 **"애초에
+    # 안 떴던 시간"**을 잰다. 그 둘은 같은 축으로 못 센다: 관측 공백은 기동 사이의 간격을
+    # 보므로, 아침에 아예 안 뜬 시간은 셀 근거가 없다(그리고 기동 창 거절은 2026-08-07
+    # P0-4로 재기동 계상에서 정당하게 빠졌다 — 그러면서 증거도 같이 빠졌다).
+    #
+    # **5분인 이유**: `observation_gap_minutes`와 같은 크기다. 두 축이 같은 질문("관측이
+    # 몇 분 없었나")에 답하는데 임계가 다르면 어느 축은 울고 어느 축은 조용한 날이 생긴다.
+    # 2026-08-10은 38분이었고 정상일(08-07)은 0.6분이었다.
+    "collection_start_lag_minutes": 5.0,
 }
 
 
@@ -254,6 +266,24 @@ class IntegrityReport:
     # l1_daily가 13:41에 죽고 안 돌아왔는데 `재기동 0회`였고 그게 사실이었다 — 재기동이
     # 없었던 것이 문제였는데 그 축은 그것을 말할 수 없었다.
     abnormal_exits: list[dict[str, Any]] = field(default_factory=list)
+    # **첫 기동이 정시 트리거보다 몇 분 늦었나** (2026-08-10 A-1).
+    #
+    # 계열 커버리지가 "얼마나 못 봤나"를 답한다면 이 값은 **"왜 못 봤나"**를 답한다. 종전엔
+    # 커버리지 창 자체가 첫 기동에 앵커링돼 있어서 두 질문이 한 축에 얹혀 있었고, 그 결과
+    # 늦게 뜬 날과 제때 떠서 다 본 날이 **구조적으로 구분되지 않았다** — 2026-08-10에 38분을
+    # 잃고도 전 계열이 `커버리지 100% ✅`였다.
+    #
+    # None은 판정 불가다(기동 로그가 없거나 등록 정본을 못 읽음) — 0이 아니다(L18).
+    collection_start_lag_minutes: float | None = None
+    # **진입점의 종료 코드** (2026-08-10 A-2, `ops/task_exit_codes.py`). 로그가 아니라 OS가
+    # 기록한 그날의 결말이다 — 그 둘이 어긋난 날이 있었고 아무 축도 그것을 몰랐다.
+    task_exit_codes: dict[str, Any] = field(default_factory=dict)
+    # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2). `breaches`에도 들어가지만 **따로 남긴다**
+    # (2026-08-10 A-1). 등록부 `canonical-consumers-wired`가 그동안 넓은 그물(`breaches`)로
+    # 채점했고, 그 항목 주석이 이미 예고했다 — *"남의 사고로 두 번 이상 뒤집히면 그때
+    # `canonical_consumer_gaps`를 판다."* A-1~A-3이 진짜 결손을 breach로 올리기 시작하면서
+    # 그날이 왔다. 이 판정은 **코드 구조**라 그날 데이터와 무관해야 한다.
+    canonical_consumer_findings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -710,6 +740,26 @@ def _first_session_start(day: date, session_starts: Mapping[str, Sequence[str]])
     return datetime.combine(day, earliest)
 
 
+def _collection_start_lag_minutes(
+    day: date, session_starts: Mapping[str, Sequence[str]]
+) -> float | None:
+    """첫 기동 − 등록된 정시 트리거(분). 판정 불가면 None (2026-08-10 A-1).
+
+    **음수도 그대로 돌려준다.** 트리거보다 이르게 뜬 날(사람이 손으로 먼저 띄운 날)은
+    지연이 아니지만, 그 사실 자체가 "오늘 스케줄러가 안 떴을 수 있다"는 신호다 — 0으로
+    접으면 그 신호가 사라진다.
+
+    `session_starts`에 기동 창 거절은 안 들어온다(2026-08-07 P0-4). 그게 이 축이 필요한
+    이유이기도 하다: 거절된 기동은 관측이 아니므로 재기동으로 세면 안 되지만, **그날
+    관측이 늦게 시작됐다는 사실**은 어딘가에 남아야 한다.
+    """
+    first = _first_session_start(day, session_starts)
+    if first is None:
+        return None
+    trigger = series_coverage.collection_trigger(day)
+    return round((first.replace(tzinfo=KST) - trigger).total_seconds() / 60.0, 1)
+
+
 # ---------------------------------------------------------------- 네이티브 크래시
 
 
@@ -892,6 +942,10 @@ def build_report(
     flow_dir: Path | None = None,
     option_chain_dir: Path | None = None,
     host_event_collector=observation_gaps.collect_host_events,
+    # 기본값을 함수가 아니라 None으로 두는 이유: 기본 인자는 `def` 시점에 묶이므로
+    # 모듈 속성을 나중에 갈아끼워도 이 자리엔 안 닿는다(테스트가 실제 이벤트 로그를 읽게
+    # 된다). 늦게 묶어야 `monkeypatch.setattr(task_exit_codes, "collect", ...)`가 먹는다.
+    task_exit_collector=None,
     universe_tokens: Sequence[str] | None = None,
 ) -> IntegrityReport:
     """`log_paths`는 프로세스 이름 → 로그 파일 목록이다.
@@ -1093,17 +1147,18 @@ def build_report(
 
     # ---- 고도화 2(2026-08-06): 적재 계열 전수 커버리지 ----
     #
-    # 봉·틱 말고 **나머지 전부**를 본다. 판정 창의 시작을 첫 프로세스 기동으로 잡는 이유는
-    # `series_coverage.session_window()` docstring 참고 — 재기동으로 늦게 뜬 공백을
-    # `restarts`와 두 번 세지 않기 위해서다.
+    # 봉·틱 말고 **나머지 전부**를 본다. 판정 창의 시작은 **등록된 정시 트리거**다
+    # (2026-08-10 A-1) — 종전엔 첫 프로세스 기동이었고, 그래서 늦게 뜬 날은 창도 같이
+    # 늦어져 38분 잘린 날이 `커버리지 100%`로 나왔다(`series_coverage` 모듈 docstring).
     # 계열 경로는 **`bar_dir`의 부모에서 파생**한다. 다섯 계열이 전부 같은 `data/` 아래
     # 형제라서(`data/bars` · `data/ticks` · `data/flow_intraday` · `data/option_chain`)
     # 한 인자로 묶이는 것이 실제 배치와 맞고, 무엇보다 **테스트가 자동으로 격리된다** —
     # 모듈 기본값을 쓰면 tmp 디렉터리로 만든 리포트가 저장소의 진짜 `data/`를 집어 든다.
     data_root = Path(bar_dir).parent
-    coverage_window = series_coverage.session_window(
-        day, start=_first_session_start(day, session_starts)
-    )
+    # 장중 실행(`--force-intraday`)에서는 아직 오지 않은 시간이 꼬리 구멍으로 잡히므로
+    # 창 끝을 지금으로 자른다. 지난 날짜를 재산출할 때는 `now_kst()`가 그날이 아니라
+    # `session_window()`가 알아서 무시한다(그쪽 가드).
+    coverage_window = series_coverage.session_window(day, now=now_kst())
     # 그날 계약(2026-08-07 P0-3·고도화 1) — "이 계열이 오늘 있어야 하는가".
     #
     # 계약을 못 만들면 **전 계열을 필수로 본다**(빈 dict). 조용히 면제하는 쪽이 아니라
@@ -1130,11 +1185,36 @@ def build_report(
     )
     series_findings = [f for item in coverages for f in series_coverage.findings_for(item)]
     breaches.extend(series_findings)
+
+    # 왜 늦게 봤는가 (2026-08-10 A-1). 커버리지 판정 **바로 뒤**에 두는 이유는 읽는 순서
+    # 때문이다 — 계열이 줄줄이 우는 날, 그 원인이 한 줄 아래 붙어 있어야 사람이 아침
+    # 기동을 의심한다. 2026-08-10엔 이 줄이 없어서 사고가 오후 늦게까지 안 보였다.
+    start_lag = _collection_start_lag_minutes(day, session_starts)
+    if start_lag is None:
+        unmeasured.append("수집 기동 지연(기동 로그 또는 등록 정본 없음)")
+    elif start_lag > limits["collection_start_lag_minutes"]:
+        breaches.append(
+            f"수집 기동이 정시 트리거보다 {start_lag:.0f}분 늦었다 "
+            f"(> 임계 {limits['collection_start_lag_minutes']:.0f}분) — "
+            "그 시간의 옵션체인·수급·체결틱은 영구 소실(소급 경로 없음)"
+        )
+
+    # ---- A-2(2026-08-10): 진입점 종료 코드 ----
+    #
+    # `abnormal_exits`가 **로그**를 보는 자리라면 이쪽은 **OS**를 본다. 둘이 어긋나는 날이
+    # 가장 위험하고(2026-08-10 G2: 로그는 `SessionEnd` 정상 종료, 작업은 255), 그 불일치는
+    # 두 축을 나란히 둬야만 보인다.
+    task_exits = (task_exit_collector or task_exit_codes.collect)(day)
+    exited_cleanly = {name for name, result in per_process.items() if result.get("session_ends")}
+    breaches.extend(task_exit_codes.findings_for(task_exits, session_ends=exited_cleanly))
+    if not task_exits.available:
+        unmeasured.append(f"진입점 종료 코드({task_exits.detail})")
     series_contract = series_expectation.summarize(expectations)
     # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2) — 코드 구조 판정이라 그날 데이터와 무관하다.
     # 그래도 여기 싣는 이유는 **매일 읽히는 문서가 이것 하나**이기 때문이다. 테스트로만
     # 지키면 CI가 빨간 채로 며칠 가는 상황에서 아무도 안 본다.
-    breaches.extend(canonical_consumers.findings())
+    consumer_findings = canonical_consumers.findings()
+    breaches.extend(consumer_findings)
 
     # ---- P1-1·P1-2(2026-08-06): 관측 공백과 그 원인 ----
     #
@@ -1195,6 +1275,9 @@ def build_report(
         series_coverage=[item.to_dict() for item in coverages],
         series_findings=series_findings,
         series_contract=series_contract,
+        collection_start_lag_minutes=start_lag,
+        task_exit_codes=task_exits.to_dict(),
+        canonical_consumer_findings=consumer_findings,
         abnormal_exits=abnormal_exits,
         observation_gaps=[gap.to_dict() for gap in observation.gaps],
         host_events=[event.to_dict() for event in observation.events],
@@ -1316,6 +1399,28 @@ def format_summary(report: IntegrityReport) -> str:
         )
     for item in report.series_contract:
         lines.append(f"  ⊘ 오늘 안 모으는 계열: {item}")
+    # 커버리지 표 **바로 위**에 기동 지연을 찍는다 (2026-08-10 A-1) — 계열이 줄줄이 우는
+    # 날 그 원인을 같은 화면에서 읽게 하려는 것이다. 정상일에도 찍는다: 0.6분이라는 값이
+    # 매일 보여야 38분이 눈에 띈다.
+    if report.collection_start_lag_minutes is None:
+        lines.append("  수집 기동 지연: 판정 불가(기동 로그 또는 등록 정본 없음)")
+    else:
+        lag = report.collection_start_lag_minutes
+        mark = "✅" if lag <= DEFAULT_THRESHOLDS["collection_start_lag_minutes"] else "❌"
+        lines.append(f"  수집 기동 지연(정시 트리거 대비): {lag:+.1f}분 {mark}")
+    if report.task_exit_codes:
+        lines.extend(
+            task_exit_codes.summarize(
+                task_exit_codes.TaskExitReport(
+                    exits=[
+                        task_exit_codes.TaskExit(**entry)
+                        for entry in report.task_exit_codes.get("exits", [])
+                    ],
+                    available=bool(report.task_exit_codes.get("available")),
+                    detail=str(report.task_exit_codes.get("detail", "")),
+                )
+            )
+        )
     if report.series_coverage:
         lines.append(f"  적재 계열 커버리지 ({len(report.series_coverage)}개):")
         lines.extend(

@@ -635,3 +635,63 @@ def test_boot_recovery_metric_separates_unmeasured_from_unarmed():
 
     assert extract(unmeasured) is None
     assert extract({"host_health": {"checks": []}}) is None
+
+
+# ------------------------------------------------- 2026-08-10 A-1~A-3 신설 지표
+
+
+def test_leg_shortfall_metric_counts_cycles_that_came_up_short():
+    """2026-08-10 14:30 regular가 41/42였고 시간 축은 100%였다 — 그 자리를 세는 지표."""
+    extract = METRIC_EXTRACTORS["series_leg_shortfall"]
+    report = {
+        "series_coverage": [
+            {"name": "option_chain/regular", "short_cycles": [["14:30", 41]]},
+            {"name": "flow_intraday/K2I", "short_cycles": [["10:46", 2], ["15:19", 2]]},
+        ]
+    }
+
+    assert extract(report) == 3.0
+
+
+def test_leg_shortfall_metric_is_unjudged_without_the_axis():
+    """축이 없던 옛 리포트를 0으로 세면 "결손이 없었다"가 되어 거짓 통과다(L18)."""
+    extract = METRIC_EXTRACTORS["series_leg_shortfall"]
+
+    assert extract({}) is None
+    assert extract({"series_coverage": [{"name": "ticks"}]}) is None
+    assert extract({"series_coverage": [{"name": "ticks", "short_cycles": []}]}) == 0.0
+
+
+def test_collection_start_lag_metric_folds_negative_values_to_zero():
+    """트리거보다 이르게 뜬 날은 지연이 아니다 — max 기준 지표에 음수가 섞이면 통과가 쉬워진다."""
+    extract = METRIC_EXTRACTORS["collection_start_lag_minutes"]
+
+    assert extract({"collection_start_lag_minutes": 38.0}) == 38.0
+    assert extract({"collection_start_lag_minutes": -12.0}) == 0.0
+    assert extract({"collection_start_lag_minutes": None}) is None
+    assert extract({}) is None
+
+
+def test_nonzero_task_exit_metric_reads_the_os_not_the_log():
+    """2026-08-10 G2가 255였다 — 로그는 정상 종료라 말했고 아무 지표도 그것을 몰랐다."""
+    extract = METRIC_EXTRACTORS["nonzero_task_exits"]
+    report = {
+        "task_exit_codes": {
+            "available": True,
+            "exits": [
+                {"task": "Messiah", "win32_code": 0},
+                {"task": "Messiah-G2", "win32_code": 255},
+            ],
+        }
+    }
+
+    assert extract(report) == 1.0
+    assert extract({"task_exit_codes": {"available": True, "exits": []}}) == 0.0
+
+
+def test_nonzero_task_exit_metric_is_unjudged_when_the_query_failed():
+    """이벤트 로그를 못 읽은 날을 "실패 0건"으로 세면 검사가 없느니만 못하다(L18)."""
+    extract = METRIC_EXTRACTORS["nonzero_task_exits"]
+
+    assert extract({"task_exit_codes": {"available": False, "exits": []}}) is None
+    assert extract({}) is None
