@@ -154,6 +154,10 @@ TAG_LEVELS: dict[str, int] = {
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired
     "ShadowFillRecorded": logging.DEBUG,  # Shadow 가상 체결 — 고빈도, 정상 동작
     "ShadowPromotionProposed": logging.INFO,  # 승격 제안 발행 — 자동 승격 아님(사람 승인 전제)
+    # 저장된 RegimeAI를 못 읽음 — 국면 없이 기동한다(그날 판단은 전부 NO_TRADE가 된다).
+    # ERROR인 이유: 사슬 두 마디 중 하나가 조용히 빠진 상태이고, 그걸 모르면 "번들을 붙였는데
+    # 왜 판단이 0건인가"를 처음부터 다시 조사하게 된다(2026-08-11 ④-c).
+    "RegimeModelLoadFailed": logging.ERROR,
     "SelfEvalReportGenerated": logging.INFO,  # 일일 자가평가 리포트 발행
     "CircuitBreakerSuspected": logging.WARNING,  # 거래소 CB 의심 — WSDisconnected와 동급
     "CircuitBreakerConfirmed": logging.WARNING,  # 거래소 CB 추정 확정 — 신규진입 차단

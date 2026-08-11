@@ -131,6 +131,11 @@ CANONICAL: tuple[Canon, ...] = (
             "scripts/run_vol_scorecard.py",
             # 설정 스윕 — 조합별 비교라 조합마다 사이드카가 달라진다.
             "scripts/run_model_sweep.py",
+            # 번들 생산 (2026-08-11 ④-b) — **여기가 빠지면 그 실수가 가장 오래 산다.**
+            # 위 소비자들은 틀리면 그 실행이 깨지지만, 번들은 한 번 잘못 만들어져 Registry에
+            # 들어가면 매일 그 모양으로 추론한다. 매니페스트의 `feature_set` 이름은 맞는데
+            # 실제 학습 벡터에 카테고리가 빠진 번들은 화면 어디에도 안 보인다.
+            "scripts/build_bundles.py",
         ),
         why=(
             "feature_set이 요구하는 사이드카 조립. 정본을 안 부르는 소비자가 있으면 "

@@ -3291,3 +3291,56 @@ v2026.08-ev (08-07)  37/842        0.147         804      ← 7.4배
       `core/bus.py` 모듈 docstring에도 한 줄 남길 것.
 - [ ] **F-6 한계** — 마커는 "우리가 이 포트에 띄운 적이 있다"만 증명한다. 우리 UI가 죽고
       그 자리를 남이 차지한 경우는 못 잡는다(워치독이 별도로 다루지만 그쪽도 포트 응답만 본다).
+
+
+---
+
+## 2026-08-11 고도화 — G2 사슬 두 마디 ([MW0601], 2026-08-11)
+
+상세는 `DECISION_LOG.md` 2026-08-11 고도화 항목.
+
+- [x] **④-c 상** `scripts/train_regime_ai.py` — 30m 실데이터 HMM 학습 + 홀드아웃 국면 분포.
+      판정은 UNKNOWN 비율 하나(`MAX_UNKNOWN_RATIO=0.5`, **미검증 초기값**)
+- [x] **④-c 하** `run_g2_paper_trading.py`에 `RegimeRuntime` 결선 — 저장본이 없으면
+      "오늘 판단은 번들과 무관하게 0건"이라고 기동 로그가 말한다
+- [x] **④-b** `scripts/build_bundles.py` — 학습→홀드아웃 관문 4종→pack→register→
+      shadow(기본)/부트스트랩 live. 성과 관문 3종은 `passed=False·미측정`으로 **명시 기록**
+- [x] `build_bundles.py`를 `sidecar.build` 정본 소비자로 등록
+
+검증 — 신규 13건 포함 전 테스트 통과 · ruff 통과. **실제 학습은 안 돌렸다**(R11, 아래).
+
+### 오늘 15:35 이후에 할 것 — Q-1~Q-5 (순서가 중요하다)
+
+```
+1) run_postmarket.py 완료 확인   ← 재합성 전에 학습하면 손상된 상위 봉으로 학습한다
+2) python scripts/train_regime_ai.py
+3) python scripts/build_bundles.py --horizons 30m --promote live --operator MW0601
+4) G2 재기동(또는 내일 08:25 정시)  ← 저장본은 기동 시점에만 읽는다
+```
+
+- [ ] **Q-1** `train_regime_ai.py`의 홀드아웃 UNKNOWN 비율이 **50% 이하인가**.
+      넘으면 결선해도 판단이 안 난다 — 그때 볼 것은 관측 윈도우(20봉=10시간)가 30m에
+      맞는지와 `n_states_candidates`(4~6)다. 두 축 다 미검증 초기값이다.
+- [ ] **Q-2** `build_bundles.py`의 모델 관문 넷이 통과하는가. 특히 **교정(Brier < 0.5)** —
+      홀드아웃에서 재는 것은 이번이 처음이다. `feature_dependency`(단일 피처 40%)가
+      걸리면 EV 요일 더미가 원인일 수 있다(하루 안에서 상수).
+- [ ] **Q-3** 등록 뒤 G2 기동 로그가 `live 번들 결선: ['30m']`인가. `[]`면 승격이 안 된 것이고,
+      `--promote live`가 챔피언 존재로 거부됐는지부터 볼 것.
+- [ ] **Q-4** 기동 로그에 `국면 결선 — RegimeAI 상태 N개`가 뜨는가. `국면 미배선`이면
+      저장 경로(`data/models/regime_ai.json`)를 확인할 것.
+- [ ] **Q-5** 그 다음 거래일에 **`decisions_emitted`가 0을 벗어나는가**. 이것이 11거래일간
+      막혀 있던 사슬의 진짜 채점이다. 여전히 0이면 셋 중 하나다:
+      국면이 UNKNOWN · Meta-Labeler가 전건 거부(`threshold_report`) · `|S| < 0.20`.
+      **어느 쪽인지 `MetaDecisionEngine`의 사유별 카운트로 갈라볼 것**(run_model_sweep가
+      이미 그 형태로 센다).
+
+### 남은 고도화 (미착수)
+
+- [ ] **G-4** `minute_bar_close: timer` 승격 — p99 4거래일치 확보(08-10 1.0353초, 최대 1.3964초).
+      발행 타이밍을 바꾸는 변경이라 **단독 커밋**으로.
+- [ ] **G-5** 아침 복구 자동화(`recover_now.bat` + 09:00까지 첫 틱 없으면 알림)
+- [ ] **C-1 후속** 분봉 차트도 실전 도메인으로 옮길지 — 옵션 시세 3거래일 관측(08-13) 뒤
+- [ ] **성과 관문 결선** — G1 walk-forward 산출물을 `validate_performance()`에 흘려
+      넣어 번들의 성과 3종을 "미측정"에서 실제 값으로 바꾼다. 지금은 `build_bundles.py`가
+      그 자리를 비워 두고 그 사실을 리포트에 적는다.
+- [ ] **수동 kill 뒤 재가동 수단**(`sys.resume`) — 08-11 09:27 사고가 드러낸 자리

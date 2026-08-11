@@ -122,6 +122,8 @@ from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor  # noqa: 
 from messiah.simulator.engine import LiveSimBrokerFeed  # noqa: E402
 from messiah.strategy.futures.service import FuturesAIService  # noqa: E402
 from messiah.strategy.pipeline import TradingPipeline  # noqa: E402
+from messiah.strategy.regime.runtime import RegimeRuntime  # noqa: E402
+from messiah.strategy.regime.service import RegimeAI  # noqa: E402
 
 REGULAR_SESSION_STOP = (DEFAULT_SESSION.close_time.hour, DEFAULT_SESSION.close_time.minute)
 HARD_SHUTDOWN_DEADLINE = (15, 40)
@@ -129,6 +131,10 @@ HARD_SHUTDOWN_DEADLINE = (15, 40)
 _MASTER_CACHE_DIR = Path(".cache/kis_symbol_master")
 _LOG_DIR = Path("logs")
 _REGISTRY_DB = Path("data/models/registry.db")
+# 학습된 RegimeAI 저장 위치 — `scripts/train_regime_ai.py`가 쓰고 여기서 읽는다.
+# Registry(번들 상태기계)에 안 얹는 이유는 그쪽 단위가 Horizon당 하나인데 RegimeAI는
+# 프로세스당 하나라서다(`train_regime_ai.py` 모듈 docstring).
+_REGIME_MODEL_PATH = Path("data/models/regime_ai")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -210,6 +216,55 @@ def _load_futures_service(
     return FuturesAIService(symbol, experts, bus, meta_labelers=meta_labelers)
 
 
+def _load_regime_runtime(symbol: str, bus: MessageBus) -> RegimeRuntime | None:
+    """저장된 `RegimeAI`가 있으면 `intel.regime` 발행을 결선한다 (2026-08-11 ④-c).
+
+    ## 이 배선이 없던 동안 무슨 일이 있었나
+
+    `RegimeRuntime`은 W24~26에 만들어졌고 테스트도 있었지만 **어떤 운영 루프에도 안 붙어
+    있었다.** 그래서 `intel.regime`은 한 번도 발행된 적이 없고, `FuturesAIService`는 국면을
+    영원히 `UNKNOWN`으로 봤다 — `MetaDecisionEngine` 규칙 ②가 UNKNOWN을 무조건 `NO_TRADE`로
+    보내므로, 번들을 붙여도 판단은 0건이 될 상태였다(커밋 ④-a의 정정 참고).
+
+    **없으면 조용히 넘어가지 않는다.** 저장본이 없다는 것은 "국면 입력이 없다"는 뜻이고,
+    그건 오늘 하루의 판단이 전부 NO_TRADE가 된다는 예고다 — `live 번들 결선: []`이 이미
+    같은 역할을 하는 줄이고, 이 줄이 그 옆에 나란히 있어야 사슬 두 마디가 화면 없이도 보인다.
+    """
+    if not _REGIME_MODEL_PATH.with_suffix(".json").exists():
+        print(
+            f"국면 미배선 — 학습된 RegimeAI가 없다({_REGIME_MODEL_PATH}). "
+            "MetaDecisionEngine 규칙 ②가 UNKNOWN을 NO_TRADE로 보내므로 오늘 판단은 "
+            "번들과 무관하게 0건이다 (scripts/train_regime_ai.py를 장후에 실행할 것)",
+            flush=True,
+        )
+        return None
+    try:
+        regime_ai = RegimeAI.load(_REGIME_MODEL_PATH)
+    except (OSError, ValueError, KeyError) as exc:
+        # 저장본이 **반쪽**인 경우(메타데이터 json은 있는데 `*_hmm.pkl`이 없거나 깨졌다).
+        # 여기서 예외를 올리면 G2가 통째로 안 뜨고, 그러면 국면 하나 때문에 그날의
+        # 페이퍼 운영·shadow 관측·장후 Self-Eval까지 전부 사라진다 — 국면은 부가 입력이지
+        # 이 프로세스의 전제조건이 아니다(`core/ui_launcher.py`와 같은 원칙).
+        mlog.log(
+            "RegimeModelLoadFailed",
+            f"저장된 RegimeAI를 못 읽어 국면 없이 기동한다 — {exc}",
+            path=str(_REGIME_MODEL_PATH),
+        )
+        print(
+            f"국면 미배선 — 저장본을 못 읽었다({exc}). 오늘 판단은 번들과 무관하게 0건이다 "
+            "(scripts/train_regime_ai.py를 장후에 다시 실행할 것)",
+            flush=True,
+        )
+        return None
+    print(
+        f"국면 결선 — RegimeAI 상태 {regime_ai.n_states}개 · "
+        f"명명 {{{', '.join(f'{s}:{r.value}' for s, r in sorted(regime_ai.labels.items()))}}} "
+        f"· 구동 {Horizon.M30.value}",
+        flush=True,
+    )
+    return RegimeRuntime(symbol, regime_ai, bus)
+
+
 def _load_shadow_manager(registry: ModelRegistry, symbol: str, bus: MessageBus) -> ShadowManager:
     manager = ShadowManager(symbol, bus)
     for record in registry.list_by_status(BundleStatus.SHADOW):
@@ -229,6 +284,7 @@ async def _run_regular_session(
     sim_feed: LiveSimBrokerFeed,
     shadow_manager: ShadowManager,
     bus: MessageBus,
+    regime_runtime: RegimeRuntime | None = None,
 ) -> None:
     """이 스크립트의 데이터 소스는 `run_l1_daily.py`가 같은 버스에 이미 발행 중인 `bar.*`/
     `feat.*`뿐이다 — 여기엔 자체 TickCollector가 없다(모듈 docstring 참고, WS 이중 연결
@@ -247,6 +303,9 @@ async def _run_regular_session(
         pipeline.watch_circuit_breaker_forever(),
         sim_feed.run_forever(),
         shadow_manager.run_forever(),
+        # 국면 발행 (2026-08-11 ④-c). 저장된 RegimeAI가 없으면 이 자리는 비고, 그 사실은
+        # `_load_regime_runtime()`이 기동 로그에 이미 말했다 — 여기서 다시 말하지 않는다.
+        *([regime_runtime.run_forever()] if regime_runtime is not None else []),
         HealthReporter(bus, "g2.pipeline").run_forever(),
     )
 
@@ -421,6 +480,7 @@ async def main(cfg: InstanceConfig) -> None:
 
     futures_service = _load_futures_service(registry, symbol, bus, cfg.feature_set)
     shadow_manager = _load_shadow_manager(registry, symbol, bus)
+    regime_runtime = _load_regime_runtime(symbol, bus)
 
     broker = SimBroker(cash=cfg.capital.total)
     await broker.connect()
@@ -447,7 +507,9 @@ async def main(cfg: InstanceConfig) -> None:
         )
         try:
             await asyncio.wait_for(
-                _run_regular_session(futures_service, pipeline, sim_feed, shadow_manager, bus),
+                _run_regular_session(
+                    futures_service, pipeline, sim_feed, shadow_manager, bus, regime_runtime
+                ),
                 timeout=remaining,
             )
         except TimeoutError:
