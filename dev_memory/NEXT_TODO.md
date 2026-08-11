@@ -3399,3 +3399,57 @@ v2026.08-ev (08-07)  37/842        0.147         804      ← 7.4배
       (오늘 1일째: 재시도 0건, 기준선 52건)
 - [ ] **성과 관문 결선** — G1 walk-forward 산출물을 `validate_performance()`에 흘려 번들의
       성과 3종을 "미측정"에서 실제 값으로
+
+
+---
+
+## 2026-08-11 장후 실행 — 사슬 결선 완료 ([MW0601], 2026-08-11)
+
+상세는 `DECISION_LOG.md` 2026-08-11 장후 항목.
+
+- [x] 장후 절차 5/5 완료(15:45 자동) — 오늘 관측 축 만점(봉 결손 0 · 커버리지 100% ×5 ·
+      거래량 1.000 · `OptionChainPollRetried` **0건**, 기준선 52건)
+- [x] **G-4 승격** `minute_bar_close: tick → timer` — 4일째 max 1.129, 4일 최악 1.3964 ≤ 유예 2.0
+- [x] **session_guard 버그** 보관본(`*_pre_recompose`)을 판정으로 읽던 것 — 정본 파일명만 읽는다
+- [x] **RegimeAI classify() 결함** 길이-1 시퀀스 → 최근 60관측 forward filtering
+- [x] **assess() 상수 관문** `MAX_SINGLE_REGIME_RATIO = 0.8`
+- [x] **부적합본은 `.rejected`로** — 저장 위치가 곧 결선 여부
+- [x] **④-c** `data/models/regime_ai` 저장 (RANGE 40% · HIGH_VOL 25% · TREND_DOWN 18% · TREND_UP 17%)
+- [x] **④-b** `real-20260811-1604-30m` → **live** (bundles 0행 → 1행)
+
+### 2026-08-12(수) 아침에 볼 것 — S-1~S-6 (오늘 결선의 채점)
+
+- [ ] **S-1** G2 기동 로그에 두 줄이 **나란히** 뜨는가:
+      `live 번들 결선: ['30m']` + `국면 결선 — RegimeAI 상태 5개`.
+      하나라도 빠지면 그 마디가 다시 끊긴 것이다.
+- [ ] **S-2 ★ 오늘의 진짜 채점** `decisions_emitted`가 **0을 벗어나는가**(장후 self-eval의
+      `wiring_stage`가 `번들 미결선`에서 바뀌는가). 여전히 0이면 셋 중 하나다:
+      국면이 실시간에서 UNKNOWN · Meta-Labeler 전건 거부 · `|S| < 0.20`.
+      **사유별로 갈라볼 것** — `MetaDecisionEngine`이 이미 그 형태로 센다.
+- [ ] **S-3** 실시간 국면 분포가 홀드아웃과 비슷한가. `RegimeRuntime`은 30m 봉 하나당 한 번
+      부르므로 하루 13판정뿐이다 — 하루치로 단정하지 말고 사흘을 볼 것.
+      **한 국면이 하루 종일 하나면** 그건 `.rejected`로 갔어야 할 모델이 통과한 것이다.
+- [ ] **S-4 (G-4 채점)** `late_bar_drops`가 **0인가**. 0이 아니면 그 건수만큼 유예 뒤 도착한
+      틱을 버린 것 — 즉시 `minute_bar_close: "tick"`으로 되돌린다.
+- [ ] **S-5** `봉 1m` 커버리지·거래량 대조가 오늘(만점)과 같은가. `timer`는 **틱이 늦는
+      구간에서만** 동작이 달라지므로 정상 구간 수치는 안 바뀌어야 한다.
+- [ ] **S-6** 등록부 재발이 **2건으로 줄었는가**. 오늘 5건 중 3건(`exit-code-matches-log`,
+      `ui-restart-observability`, `launch-window-refusal-not-counted`)은 이 세션의 kill 검증과
+      G2 재기동 탓이라 내일은 안 나야 한다. 남는 2건(`no-degenerate-features`,
+      `daily-axes-measured`)이 진짜 남은 것이다.
+
+### 오늘 드러난 구조적 오탐 — 다음 fix 후보
+
+- [ ] **`no-degenerate-features`가 EV 상수를 오탐한다** — `ev_dow_*` 5개 + `ev_dte_*` 3개는
+      **하루 안에서 상수인 것이 정상**이다(요일·잔존일). 퇴화 판정 창이 하루 단위라 매일 운다.
+      O-3가 예측한 그대로였다. 처방 후보: (a) 판정 창을 며칠로 넓힌다 (b) 카테고리별로
+      "하루 안 상수 허용" 화이트리스트를 둔다. **(b)는 늑대소년을 만든다** — 화이트리스트가
+      길어지면 그 축이 아무것도 안 잡는다. (a)가 낫다고 본다.
+- [ ] **`observation_gap`이 UI 침묵을 공백으로 센다** — Streamlit은 정상 동작 중 로그를 거의
+      안 쓴다. 오늘 `ui: 08:20:33~09:40:20 80분 공백`이 그것이고 실제로는 살아 있었다
+      (`command_center_ui: UP`이 15:34까지 찍혔다). 프로세스 생사는 이미 상태판이 아는데
+      로그 침묵으로 또 판정하니 두 축이 어긋난다.
+- [ ] **resume 실동작 검증** — 아직 한 번도 안 눌러봤다(격리 Redis로 kill→resume 왕복)
+- [ ] **C-1 후속** 분봉 차트 실전 도메인 — 08-13 관측 뒤(오늘 1일째: 재시도 0건)
+- [ ] **성과 관문 결선** — G1 walk-forward → `validate_performance()`. 지금 번들의 성과 3종은
+      `passed=False · 미측정`이다

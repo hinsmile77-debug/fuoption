@@ -54,6 +54,13 @@ futures_tick_size: "0.02"                  # 미니선물(A05608) 실측값 — 
 
 # 1분봉 확정 방식 (2026-08-05 고도화 1) — tick | timer
 #   tick  : 다음 분의 첫 틱이 도착하면 닫는다(종전 동작)
-#   timer : 거래소 시각이 경계+유예를 지나면 닫는다(근본 처방, 승격 대기)
-# 승격 조건: `TickDeliveryLatency` p99를 며칠 보고 MINUTE_CLOSE_GRACE_SECONDS 확정 후.
-minute_bar_close: "tick"
+#   timer : 거래소 시각이 경계+유예를 지나면 닫는다(근본 처방)
+#
+# **2026-08-11 승격.** 조건이던 "며칠 p99를 보고 MINUTE_CLOSE_GRACE_SECONDS 확정"이 4거래일
+# 실측으로 끝났다(그 상수 위 주석의 표). 4일 중 최악의 최대가 1.3964초(08-10)이고 유예는
+# 2.0초 — 43% 여유. 같은 4일간 `late_bar_drops`가 연속 0이었다
+# (등록부 `composer-bucket-completeness` 검증 완료).
+#
+# **되돌리려면 이 줄만 "tick"으로.** 채점은 다음 거래일 리포트의 `late_bar_drops`다 —
+# 0이 아니면 그 건수만큼 유예 뒤 도착한 틱을 버린 것이고, 즉시 되돌린다.
+minute_bar_close: "timer"

@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -42,6 +43,11 @@ from messiah.ops import task_schedule
 
 # 거부 시 종료 코드 — 0(성공)·1(일반 실패)과 구분해 자동화가 "규칙에 막혔다"를 식별할 수 있게.
 REFUSED_EXIT_CODE = 2
+
+# 무결성 리포트의 **정본 파일명**. `daily_integrity_report.py`가 쓰는 이름은 정확히 이 모양이고,
+# 사람이 남긴 보관본(`*_pre_recompose.json` 등)은 같은 `date`를 담고 있어도 판정이 아니다
+# (`corrupt_archive_days()` docstring "보관본을 판정으로 읽고 있었다").
+_CANONICAL_REPORT_NAME = re.compile(r"daily_integrity_(\d{8})\.json")
 
 
 def is_regular_session_now(
@@ -256,15 +262,35 @@ def corrupt_archive_days(
     리포트가 없는 날은 목록에 넣지 않는다 — 리포트는 2026-07-27부터 있고 학습 구간은 보통
     수개월이라, 없는 날을 전부 막으면 아무것도 학습할 수 없다. 대신 호출측이 "몇 날을 못
     봤는지"를 함께 알리도록 `unjudged_days()`를 따로 둔다.
+
+    ## **보관본을 판정으로 읽고 있었다** (2026-08-11 실측)
+
+    종전 glob은 `daily_integrity_*.json`이라 `daily_integrity_20260805_pre_recompose.json`도
+    함께 읽었다. 그 파일은 재합성 **직전** 상태를 남겨 둔 보관본인데 `date` 필드가 같아서,
+    정렬상 뒤에 오는 그것이 **재합성 후의 깨끗한 판정을 덮어썼다.** 결과는 이 함수의
+    docstring이 약속한 것의 정반대다: *"이 목록이 비면 재합성이 끝났다는 뜻"*이라고 적어
+    두고, 정작 재합성이 끝난 2026-08-05를 **영원히 손상으로** 판정하고 있었다.
+
+    2026-08-11에 RegimeAI 실학습을 돌리려다 그 거부에 막혀 발견했다. 6일간 아무도 그 경로를
+    안 밟아서 안 드러난 것이고, 밟았다면 `--force-corrupt-archive`로 넘겼을 것이다 —
+    가드가 오탐하면 사람은 가드를 끄는 법을 배운다.
+
+    이제 **정본 파일명만** 읽는다(`daily_integrity_YYYYMMDD.json`). 파일명의 날짜와 내용의
+    `date`가 다르면 그것도 버린다 — 손으로 복사한 파일이 남의 날짜를 주장하는 경우다.
     """
     findings: dict[date, list[str]] = {}
     wanted = set(days)
     for path in sorted(log_dir.glob("daily_integrity_*.json")):
+        stamp = _CANONICAL_REPORT_NAME.fullmatch(path.name)
+        if stamp is None:
+            continue  # 보관본(`*_pre_recompose` 등) — 판정이 아니라 기록이다
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
             day = date.fromisoformat(report["date"])
         except (OSError, ValueError, KeyError):
             continue  # 깨진 리포트 하나가 가드 전체를 막지 않는다
+        if day.strftime("%Y%m%d") != stamp.group(1):
+            continue  # 파일명과 내용이 다른 날을 말한다 — 어느 쪽도 못 믿는다
         if day not in wanted:
             continue
         items = [str(item) for item in (report.get("horizon_findings") or [])]

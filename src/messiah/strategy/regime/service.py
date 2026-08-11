@@ -37,6 +37,14 @@ from messiah.strategy.regime.hmm_model import (
 from messiah.strategy.regime.naming import label_states
 from messiah.strategy.regime.rules import DEFAULT_RULE_CHAIN, Rule, RuleContext, apply_rules
 
+# `classify()`가 사후분포를 낼 때 forward로 훑는 최근 관측 수 (2026-08-11).
+#
+# 클수록 startprob의 영향이 줄지만 그만큼 봉 이력이 필요하다(관측 하나에 봉 하나).
+# 60은 30분봉 기준 약 4.6거래일 — `RegimeRuntime`의 이력 버퍼(200봉) 안에 넉넉히 들어가고,
+# 끈적한 전이행렬에서도 초기분포의 영향이 사실상 사라지는 길이다. 실측 근거는
+# `classify()` docstring: 60으로 홀드아웃 국면 분포가 한 상태 100%에서 다섯 상태로 갈라졌다.
+_FILTER_OBSERVATIONS = 60
+
 
 class RegimeAI:
     def __init__(
@@ -104,6 +112,22 @@ class RegimeAI:
         계산: 통계층(HMM 상태·확신도·명명) → 규칙층(오버라이드 검사) 순. `rule_context`를
              생략하면 vol_ratio만 자동으로 채우고 economic/expiry는 미구현이라 None으로
              둔다(rules.py 모듈 docstring).
+
+        ## 관측 **하나**만 넘기면 전이행렬이 죽는다 (2026-08-11 실측 수정)
+
+        종전엔 `bars[-(window+2):]`로 잘라 관측 1~3개를 만든 뒤 `predict_proba(obs[-1:])`,
+        즉 **길이 1짜리 시퀀스**를 HMM에 넘겼다. 길이 1의 사후분포는
+        `startprob × emission`뿐이라 전이행렬도 이력도 전혀 안 쓰인다.
+
+        2026-08-11 실데이터 학습에서 그 결과가 드러났다. 학습된 `startprob_`이
+        `[0, 0, 0, 0, 1.0]`(원-핫)이었고 — 단일 시퀀스로 적합하면 흔하다, 첫 관측이 어느
+        상태였는지를 그대로 배운다 — 그래서 다른 상태의 사후확률이 **항상 0**이 됐다.
+        홀드아웃 437봉이 전부 같은 국면(`TREND_DOWN`)으로 나왔다. 같은 관측을 전 구간
+        Viterbi로 풀면 5개 상태가 73~100개씩 골고루 나온다: **모델이 아니라 추론이 틀렸다.**
+
+        이제 최근 `_FILTER_OBSERVATIONS`개 관측을 **시퀀스로** 넘기고 마지막 시점의 사후분포를
+        쓴다(forward filtering). 전이행렬을 타고 오면서 startprob의 지배력이 지수적으로
+        사라진다. 미래 참조는 없다 — 전부 판정 시점까지의 과거 관측이다.
         """
         symbol = bars[-1].symbol if bars else "UNKNOWN"
         min_length = self._window + 2
@@ -117,7 +141,9 @@ class RegimeAI:
                 bars=bars,
             )
 
-        tail = bars[-min_length:]
+        # 필터 길이만큼 **더** 가져온다 — 관측 하나당 봉 하나가 더 필요하다.
+        # `bars`가 짧으면 있는 만큼만 쓰고, 그 경우 startprob의 영향이 남는다(줄어들 뿐이다).
+        tail = bars[-(min_length + _FILTER_OBSERVATIONS) :]
         observations, _ = build_observations(tail, self._window)
         if observations.shape[0] == 0:
             return self._emit(
@@ -129,7 +155,8 @@ class RegimeAI:
                 bars=bars,
             )
 
-        proba = self._model.predict_proba(observations[-1:])[0]
+        # **시퀀스 전체**를 넘기고 마지막 시점을 읽는다(위 docstring "관측 하나만 넘기면").
+        proba = self._model.predict_proba(observations)[-1]
         state = int(np.argmax(proba))
         confidence = float(proba[state])
         statistical_regime = self._labels.get(state, Regime.UNKNOWN)

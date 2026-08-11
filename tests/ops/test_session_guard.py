@@ -143,6 +143,44 @@ def test_late_bar_drops_alone_do_not_block_training(tmp_path: Path):
     session_guard.refuse_if_archive_corrupt("모델 스윕", [day], log_dir=tmp_path)  # 통과
 
 
+def test_a_pre_recompose_snapshot_is_not_a_verdict(tmp_path: Path):
+    """**2026-08-11 실측 회귀 — 재합성이 끝난 날이 영원히 손상으로 판정되고 있었다.**
+
+    `daily_integrity_20260805_pre_recompose.json`은 재합성 **직전** 상태를 남겨 둔 보관본인데
+    `date` 필드가 같고 정렬상 정본 뒤에 와서, 깨끗해진 판정을 덮어썼다. 이 함수의 docstring이
+    *"이 목록이 비면 재합성이 끝났다는 뜻"*이라고 약속한 것의 정반대였다.
+
+    RegimeAI 실학습을 돌리려다 그 거부에 막혀 발견했다 — 6일간 아무도 그 경로를 안 밟았고,
+    밟았다면 `--force-corrupt-archive`로 넘겼을 것이다. **가드가 오탐하면 사람은 가드를 끄는
+    법을 배운다.**
+    """
+    day = date(2026, 8, 5)
+    _write_report(tmp_path, day, horizon_findings=[])  # 재합성 후 — 깨끗하다
+    (tmp_path / f"daily_integrity_{day:%Y%m%d}_pre_recompose.json").write_text(
+        json.dumps(
+            {"date": day.isoformat(), "horizon_findings": ["3m 거래량 합 104,082 ≠ 119,846"]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    session_guard.refuse_if_archive_corrupt("RegimeAI 학습", [day], log_dir=tmp_path)  # 통과
+
+
+def test_a_report_whose_name_and_content_disagree_is_ignored(tmp_path: Path):
+    """손으로 복사한 파일이 남의 날짜를 주장하면 어느 쪽도 못 믿는다 — 그런 파일로 학습을
+    막지도, 통과시키지도 않는다."""
+    (tmp_path / "daily_integrity_20260805.json").write_text(
+        json.dumps({"date": "2026-08-06", "horizon_findings": ["엉뚱한 날 판정"]}),
+        encoding="utf-8",
+    )
+
+    assert (
+        session_guard.corrupt_archive_days([date(2026, 8, 5), date(2026, 8, 6)], log_dir=tmp_path)
+        == {}
+    )
+
+
 def test_days_without_a_report_do_not_block(tmp_path: Path):
     """리포트는 2026-07-27부터 있고 학습 구간은 보통 수개월이다 — 없는 날을 전부 막으면
     아무것도 학습할 수 없다."""

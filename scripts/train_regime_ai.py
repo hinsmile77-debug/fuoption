@@ -75,6 +75,12 @@ _REPORT_DIR = Path("logs")
 # 국면 입력이라 부를 수 없다"는 상식선이고, 첫 실측 뒤 재조정 대상이다.
 MAX_UNKNOWN_RATIO = 0.5
 
+# 한 국면이 홀드아웃에서 이 비율을 넘게 차지하면 상수 분류기로 본다 (2026-08-11 추가).
+# 0.8도 미검증 초기값이다. 실제 시장에 한 국면이 오래 이어지는 구간은 있으므로 낮게 잡으면
+# 정상 모델을 막는다 — 잡으려는 것은 "80% 넘게 한 상태"가 아니라 첫 실행에서 관측된
+# **100%**다. 상한을 낮출 근거는 실측이 쌓인 뒤에 생긴다.
+MAX_SINGLE_REGIME_RATIO = 0.8
+
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="RegimeAI 실데이터 학습(장후용)")
@@ -106,11 +112,27 @@ def holdout_regime_distribution(regime_ai: RegimeAI, bars, split: int) -> Counte
 
 
 def assess(counts: Counter) -> tuple[bool, str]:
-    """홀드아웃 분포 → (결선해도 되는가, 사유). 판정은 UNKNOWN 비율 하나로 한다.
+    """홀드아웃 분포 → (결선해도 되는가, 사유). 관문은 둘이다: **모름**과 **한결같음**.
 
-    다른 축(국면이 골고루 나오는가, 너무 자주 바뀌는가)도 볼 수는 있지만, **결선 여부를
-    가르는 것은 UNKNOWN뿐**이다 — 나머지는 붙인 뒤 관측할 수 있고 이건 붙이기 전에 알아야
-    한다(붙여도 판단이 0건이면 관측할 것 자체가 안 생긴다).
+    ## UNKNOWN 비율
+
+    결선 뒤 실제로 달라지는 것은 엔진이 UNKNOWN에서 벗어나는가뿐이다. 절반 넘게 모르면
+    붙여도 대부분 NO_TRADE다.
+
+    ## 그리고 상수 (2026-08-11 추가 — 첫 실행이 이 관문을 요구했다)
+
+    처음엔 UNKNOWN 하나만 봤다. *"나머지는 붙인 뒤 관측할 수 있다"*고 적었는데 **틀렸다**:
+    첫 실학습이 홀드아웃 437봉을 **전부 `TREND_DOWN` 하나**로 분류하면서 UNKNOWN 0%로
+    관문을 통과했다. 상수 국면은 정보가 0인데 UNKNOWN보다 **나쁘다** — UNKNOWN은 "모른다"고
+    정직하게 말하고 하위 AI를 보수 모드로 보내지만, 상수 `TREND_DOWN`은 재지 않은 사실을
+    단언하고 가중치 매트릭스가 그것을 믿는다.
+
+    같은 저장소가 피처에 대해 이미 아는 규율이다(`no-degenerate-features` — "세션 내내
+    상수인 입력은 죽은 입력이다"). 국면도 모델의 입력이므로 같은 잣대를 쓴다.
+
+    한 국면이 홀드아웃의 `MAX_SINGLE_REGIME_RATIO`를 넘게 차지하면 거부한다. UNKNOWN도
+    이 검사의 대상이다 — "전부 모름"은 위 관문이 먼저 잡지만, 두 관문의 뜻이 겹치는 것이
+    비어 있는 것보다 낫다.
     """
     total = sum(counts.values())
     if total == 0:
@@ -121,7 +143,17 @@ def assess(counts: Counter) -> tuple[bool, str]:
             f"홀드아웃 UNKNOWN {unknown:.1%}(한도 {MAX_UNKNOWN_RATIO:.0%}) — 결선해도 "
             "MetaDecisionEngine 규칙 ②가 대부분 NO_TRADE를 낸다"
         )
-    return True, f"홀드아웃 UNKNOWN {unknown:.1%} — 결선 가능"
+    top_regime, top_count = counts.most_common(1)[0]
+    top_ratio = top_count / total
+    if top_ratio > MAX_SINGLE_REGIME_RATIO:
+        return False, (
+            f"홀드아웃의 {top_ratio:.1%}가 `{top_regime}` 하나다"
+            f"(한도 {MAX_SINGLE_REGIME_RATIO:.0%}) — 상수 국면은 정보가 0이면서 "
+            "재지 않은 사실을 단언한다(UNKNOWN보다 나쁘다)"
+        )
+    return True, (
+        f"홀드아웃 UNKNOWN {unknown:.1%} · 최빈 `{top_regime}` {top_ratio:.1%} — 결선 가능"
+    )
 
 
 def main() -> int:
@@ -191,11 +223,27 @@ def main() -> int:
         print(f"--dry-run — 저장 생략 (리포트: {report_path})")
         return 0 if ok else 1
 
-    # **부적합이어도 저장한다.** 저장은 결선이 아니다 — 운영이 읽는 것은 맞지만, 다음 실행이
-    # 무엇을 개선했는지 비교할 기준선이 없으면 "나아졌나"를 영영 못 잰다. 결선해도 되는지는
-    # 리포트의 `wireable`과 종료 코드가 말한다.
-    regime_ai.save(Path(args.out))
-    print(f"저장 — {args.out} (리포트: {report_path})")
+    # **저장 위치가 곧 결선 여부다** (2026-08-11 수정).
+    #
+    # 처음엔 "부적합이어도 운영 경로에 저장한다 — 저장은 결선이 아니다"라고 적었다. 그게
+    # 거짓이었다: `run_g2_paper_trading._load_regime_runtime()`은 그 경로에 **파일이 있으면**
+    # 붙인다. 리포트의 `wireable`을 아무도 안 읽으므로, 부적합 판정을 내리고도 다음 날 아침
+    # 그것이 결선됐을 것이다 — 그리고 상수 국면은 UNKNOWN보다 나쁘다(`assess()` docstring).
+    #
+    # 그래서 부적합본은 `.rejected` 접미로 남긴다. 비교 기준선은 그대로 보존되고(다음 실행이
+    # "나아졌나"를 잴 수 있다), 운영은 못 읽는다.
+    out = Path(args.out) if ok else Path(f"{args.out}.rejected")
+    regime_ai.save(out)
+    report["saved_to"] = str(out)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if ok:
+        print(f"저장(운영 경로) — {out} (리포트: {report_path})")
+    else:
+        print(
+            f"저장(보류) — {out} · **운영 경로가 아니다**. 결선하려면 판정을 통과해야 한다 "
+            f"(리포트: {report_path})",
+            flush=True,
+        )
     return 0 if ok else 1
 
 

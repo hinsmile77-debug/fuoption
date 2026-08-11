@@ -98,6 +98,32 @@ def test_a_mostly_unknown_holdout_is_not_wireable():
     assert "UNKNOWN" in verdict
 
 
+def test_a_constant_regime_is_not_wireable():
+    """**첫 실학습이 이 관문을 요구했다** (2026-08-11). 홀드아웃 437봉이 전부 `TREND_DOWN`
+    하나로 나왔는데 UNKNOWN이 0%라 종전 판정을 통과했다.
+
+    상수 국면은 정보가 0인데 UNKNOWN보다 **나쁘다** — UNKNOWN은 "모른다"고 정직하게 말하고
+    하위 AI를 보수 모드로 보내지만, 상수 `TREND_DOWN`은 재지 않은 사실을 단언하고 가중치
+    매트릭스가 그것을 믿는다. 피처의 `no-degenerate-features`와 같은 잣대다.
+    """
+    counts = Counter({Regime.TREND_DOWN.value: 437})
+
+    ok, verdict = assess(counts)
+
+    assert ok is False
+    assert "상수" in verdict
+
+
+def test_a_dominant_but_not_constant_regime_is_still_wireable():
+    """실제 시장에 한 국면이 오래 이어지는 구간은 있다 — 상한을 낮게 잡으면 정상 모델을
+    막는다. 잡으려는 것은 "많다"가 아니라 첫 실행에서 관측된 **100%**다."""
+    counts = Counter({Regime.RANGE.value: 70, Regime.HIGH_VOL.value: 30})
+
+    ok, _verdict = assess(counts)
+
+    assert ok is True
+
+
 def test_a_mostly_known_holdout_is_wireable():
     counts = Counter({Regime.UNKNOWN.value: 10, Regime.TREND_UP.value: 50, Regime.RANGE.value: 40})
 
@@ -113,6 +139,31 @@ def test_an_empty_holdout_is_not_silently_wireable():
     ok, _verdict = assess(Counter())
 
     assert ok is False
+
+
+def test_classification_uses_the_transition_matrix_not_just_the_prior():
+    """**2026-08-11 실측 회귀.** `classify()`가 관측 **하나**만 `predict_proba`에 넘기던
+    동안 길이-1 사후분포 = `startprob × emission`이라 전이행렬도 이력도 안 쓰였다.
+    학습된 `startprob_`이 원-핫이면(단일 시퀀스 적합에서 흔하다) 다른 상태의 확률이 항상
+    0이 되어 **모든 봉이 같은 국면**으로 나온다 — 실데이터에서 437봉 전부 그랬다.
+
+    같은 관측을 전 구간 Viterbi로 풀면 다섯 상태가 골고루 나왔다: 모델이 아니라 추론이
+    틀렸다. 이 테스트는 startprob을 원-핫으로 **강제로** 만들어 그 상황을 재현한다.
+    """
+    import numpy as np
+
+    bars = _bars(300)
+    regime_ai = RegimeAI.fit(bars[:200], n_states_candidates=(3, 4))
+    model = regime_ai.hmm_model._model
+    forced = np.zeros_like(model.startprob_)
+    forced[0] = 1.0
+    model.startprob_ = forced  # 첫 관측이 상태 0이었던 학습 결과를 극단으로 재현
+
+    seen = {regime_ai.classify(bars[: i + 1]).regime for i in range(200, 300)}
+
+    assert (
+        len(seen) > 1
+    ), "원-핫 startprob 아래서도 국면이 갈려야 한다 — 하나면 길이-1 사후분포로 되돌아간 것이다"
 
 
 def test_the_unknown_threshold_is_a_declared_constant():
