@@ -162,9 +162,19 @@ TAG_LEVELS: dict[str, int] = {
     "CircuitBreakerSuspected": logging.WARNING,  # 거래소 CB 의심 — WSDisconnected와 동급
     "CircuitBreakerConfirmed": logging.WARNING,  # 거래소 CB 추정 확정 — 신규진입 차단
     "CircuitBreakerResumed": logging.INFO,  # CB 해제 추정(데이터 재수신) — WSReconnected와 동급
+    # 수동 재가동 3종 (2026-08-11). `Resumed`가 CRITICAL인 이유는 KillSwitch 발동과 같다 —
+    # 주문 게이트의 개폐는 그 방향이 어느 쪽이든 사후에 반드시 찾을 수 있어야 하는 사실이다.
+    # 거부는 WARNING: 정상적으로 막은 것이지 사고가 아니지만, 사람이 눌렀는데 안 열린 것을
+    # 모르면 "왜 주문이 안 나가지"로 하루를 쓴다.
+    "Resumed": logging.CRITICAL,
+    "ResumeRefused": logging.WARNING,
+    "ResumeFailed": logging.ERROR,
     "CircuitBreakerLiquidating": logging.WARNING,  # CB 재개 직후 자동 강제청산 — KillSwitch와 동급
     "CollectorTickStall": logging.WARNING,  # 소켓은 살아있는데 틱이 끊김 — 강제 재연결
     "CollectorFirstTick": logging.INFO,  # 세션 첫 틱 수신 시각 — 장전 구간 유입 여부 진단용
+    # 정규장 개시까지 첫 틱 0건 (2026-08-11 G-5). ERROR인 이유: 그 시점까지의 체결틱·수급·
+    # 옵션체인은 **소급 경로가 없어** 이미 영구 소실이고, 남은 하루도 같은 상태일 가능성이 크다.
+    "CollectorFirstTickOverdue": logging.ERROR,
     "CommandCenterUIDown": logging.WARNING,  # UI 프로세스 사망 감지 — 자동 재기동 시도
     "CommandCenterUIRestarted": logging.INFO,  # UI 자동 재기동 성공
     "CommandCenterUIRestartGaveUp": logging.ERROR,  # 재기동 한도 소진 — 사람이 봐야 함

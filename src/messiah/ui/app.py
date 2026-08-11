@@ -67,7 +67,7 @@ import numpy  # noqa: F401
 import plotly.graph_objects as go
 import streamlit as st
 
-from messiah.core.bus import TOPIC_KILL, MessageBus
+from messiah.core.bus import TOPIC_KILL, TOPIC_RESUME, MessageBus
 from messiah.core.config import load_instance
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
@@ -83,6 +83,7 @@ from messiah.core.messages import (
     KillSignal,
     OptionsView,
     RegimeState,
+    ResumeSignal,
 )
 from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
@@ -740,6 +741,77 @@ def _render_kill_switch(source, redis_url: str | None) -> None:
         )
     elif state:
         st.error(f"Kill Switch {state} — 즉시 브로커 화면에서 직접 청산할 것")
+
+    _render_resume(source, redis_url)
+
+
+def _publish_resume(redis_url: str, operator: str, reason: str, *, bus_factory=MessageBus) -> None:
+    """`sys.resume` 발행 — `_publish_kill()`과 같은 구조·같은 주입점(그쪽 docstring 참고)."""
+
+    async def _send() -> None:
+        bus = bus_factory(redis_url, instance_id="command-center-ui")
+        await bus.connect()
+        try:
+            await bus.publish(TOPIC_RESUME, ResumeSignal(operator=operator, reason=reason))
+        finally:
+            await bus.close()
+
+    asyncio.run(_send())
+
+
+def _render_resume(source, redis_url: str | None) -> None:
+    """Kill의 반대편 — 닫힌 게이트를 사람이 다시 연다 (2026-08-11).
+
+    ## 왜 빨간 버튼만 있었나
+
+    `sys.kill`은 2026-08-07에 결선됐는데 되돌리는 경로가 같이 안 붙었다. `KillSwitch`가
+    한 번 발동하면 `handle_kill()`이 재진입 가드에 걸려 게이트만 다시 닫으므로, 푸는 방법이
+    **프로세스 재기동뿐**이었다 — 2026-08-11 09:27에 점검용 kill 한 번으로 운영 G2의 게이트가
+    닫혔고 실제로 재기동해야 했다.
+
+    ## 게이트가 열려 있으면 버튼을 안 그린다
+
+    "지금 할 일이 없는 버튼"을 상시 노출하면 비상시에 눈이 그것부터 찾는다. 게이트 상태는
+    이미 CB 배지가 `gateway_halted`로 말하고 있으므로(`_render_circuit_breaker_badge`),
+    그 사실이 참일 때만 이 버튼이 존재한다.
+
+    ## 여기서 판단하지 않는다
+
+    누른다고 열리는 것이 아니다 — `TradingPipeline.handle_resume()`이 서킷브레이커가
+    의심/확정 중이면 **거부한다**. 화면은 "요청했다"까지만 말하고, 실제로 열렸는지는 다음
+    heartbeat의 `gateway_halted`가 답한다. 그 둘을 화면이 합쳐 말하면 안 된다(L18).
+    """
+    snap = source.snapshot("CircuitBreakerStatus")
+    status = snap.message
+    if not isinstance(status, CircuitBreakerStatus) or not status.gateway_halted:
+        return
+
+    live = source.mode == DataSourceMode.LIVE and bool(redis_url)
+    if not live:
+        st.caption("주문 게이트 정지 중 — REPLAY에서는 재가동할 수 없다")
+        return
+
+    operator = st.text_input("재가동 승인자(operator)", key="resume_operator", max_chars=32)
+    if st.button("주문 게이트 재가동", disabled=not operator.strip()):
+        st.session_state["resume_confirm_pending"] = True
+    if st.session_state.get("resume_confirm_pending"):
+        st.warning("주문 차단을 해제하고 KillSwitch를 리셋합니다. (2단 확인)")
+        if st.button("확인 — 재가동 요청"):
+            st.session_state["resume_confirm_pending"] = False
+            try:
+                _publish_resume(redis_url or "", operator.strip(), "Command Center 수동 재가동")
+                st.session_state["resume_requested"] = "요청 발행됨"
+            except Exception as exc:  # noqa: BLE001 — 실패도 화면에 남아야 한다
+                st.session_state["resume_requested"] = f"발행 실패: {exc}"
+    requested = st.session_state.get("resume_requested")
+    if requested == "요청 발행됨":
+        st.info(
+            "재가동 요청 발행됨(sys.resume) — **열렸는지는 이 배지의 "
+            "`주문 게이트 정지 중` 문구가 사라지는 것으로 확인할 것**. "
+            "서킷브레이커가 의심/확정 중이면 G2가 거부한다(로그 `ResumeRefused`)"
+        )
+    elif requested:
+        st.error(f"재가동 {requested}")
 
 
 # ---------------------------------------------------------------- 코드 버전 스트립

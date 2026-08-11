@@ -145,6 +145,8 @@ def staleness_status(
     warn_after: float,
     critical_after: float,
     warming_up_detail: str = "웜업 — 아직 첫 수신 전",
+    warmup_expired: bool = False,
+    warmup_expired_detail: str = "첫 수신이 시한까지 없다 — 회선/구독 확인",
     unit: str = "초",
     subject: str = "수신",
 ) -> HealthStatus:
@@ -179,8 +181,19 @@ def staleness_status(
 
     `UNKNOWN`은 그 소비처의 `None`(모름) 갈래로 매핑되어, 억제하지 않고 원래 규칙대로 간다 —
     안전한 방향이다.
+    ## 웜업에는 **시한이 있어야 한다** (2026-08-11 G-5)
+
+    위 두 절의 결론("첫 수신 전은 UNKNOWN")에는 구멍이 하나 있었다 — **끝나지 않는 웜업도
+    UNKNOWN이다.** 08:43에 회색인 것은 옳지만 09:30에도 회색이면 그건 정상 웜업이 아니라
+    회선이 죽은 것이고, 화면·상태판·G2의 CB 억제 근거가 전부 그것을 "모른다"로 다룬다.
+    2026-08-10에 사람이 08:50에 손으로 복구를 시도한 것은 화면이 말해줘서가 아니었다.
+
+    `warmup_expired=True`면 같은 "첫 수신 전"을 CRITICAL로 낸다. 판정 시한 자체는 호출자가
+    안다(수집기는 `SessionHours.open_time`을 쓴다) — 이 함수는 시계를 갖지 않는다.
     """
     if age_seconds is None:
+        if warmup_expired:
+            return HealthStatus(HealthLevel.CRITICAL, warmup_expired_detail)
         return HealthStatus(HealthLevel.UNKNOWN, warming_up_detail)
     if age_seconds >= critical_after:
         return HealthStatus(HealthLevel.CRITICAL, f"{age_seconds:.0f}{unit}간 {subject} 없음")

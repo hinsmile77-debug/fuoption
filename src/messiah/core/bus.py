@@ -34,6 +34,14 @@ TOPIC_EXEC_ORDER = "exec.order"  # Streams
 TOPIC_EXEC_FILL = "exec.fill"  # Streams
 TOPIC_HEALTH = "sys.health"
 TOPIC_KILL = "sys.kill"  # 최우선
+# Kill의 반대편 (2026-08-11). `sys.kill`은 2026-08-07부터 있었는데 **그것을 되돌리는 경로가
+# 없었다** — `KillSwitch._triggered`가 서면 `handle_kill()`이 재진입 가드에 걸려 게이트만 다시
+# 닫고, 푸는 방법은 프로세스 재기동뿐이었다. 2026-08-11 09:27에 점검용 kill 한 번으로 운영
+# G2의 주문 게이트가 닫혔고, 그날 그것을 여는 데 실제로 재기동이 필요했다.
+#
+# kill과 달리 **자동 배달하지 않는다**: 원하는 구독자가 `patterns`에 직접 넣는다. 재가동은
+# 비상 정지와 달리 "모두가 즉시 알아야 하는" 종류가 아니라 게이트를 가진 쪽만의 일이다.
+TOPIC_RESUME = "sys.resume"
 TOPIC_CIRCUIT_BREAKER = "sys.circuit_breaker"  # CircuitBreakerStatus heartbeat (Command Center UI)
 
 # L6 Learning / Self Evolution (Ver 2.0 §9 W35~36, Phase 5) — 전부 감사 이력이 필요해

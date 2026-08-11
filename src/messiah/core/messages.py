@@ -506,6 +506,30 @@ class KillSignal(BusMessage):
     triggered_by: str  # R2 손실한도 / R11 데이터 단절 / manual / model_anomaly
 
 
+class ResumeSignal(BusMessage):
+    """재가동 (sys.resume) — Kill Switch로 닫힌 게이트를 사람이 다시 연다 (2026-08-11).
+
+    ## 왜 이 메시지가 필요했나
+
+    `sys.kill`은 2026-08-07에 결선됐는데 **되돌리는 경로가 같이 안 붙었다.**
+    `KillSwitch._triggered`가 서면 `TradingPipeline.handle_kill()`이 재진입 가드에 걸려
+    게이트만 다시 닫고 끝나므로, 한 번 닫힌 게이트를 여는 유일한 방법이 프로세스 재기동이었다.
+    2026-08-11 09:27에 점검용 kill 한 번으로 운영 G2의 게이트가 닫혔고, 실제로 재기동해야
+    했다 — 화면에 빨간 버튼은 있는데 그 반대편이 없는 상태였다.
+
+    `operator`는 **선택이 아니다**(Ver 1.1 §4-4 "사람 확인 전 재가동 금지",
+    `risk/kill_switch.py` 모듈 docstring 4단계). `ModelRegistry.promote_to_live()`가 승인자를
+    남기는 것과 같은 근거 — 되돌릴 수 없는 방향의 조작에는 이름이 붙는다.
+
+    **이 메시지는 "열어라"가 아니라 "열어도 되는지 판단하라"다**: 받는 쪽
+    (`TradingPipeline.handle_resume()`)이 서킷브레이커가 의심/확정 중이면 거부한다.
+    데이터가 끊긴 채로 게이트를 열면 그 상태에서 주문이 나간다.
+    """
+
+    operator: str
+    reason: str = ""
+
+
 # `CircuitBreakerStatus.phase`의 **발행자측 센티널** — 판정을 아직 안 했다는 뜻이다
 # (2026-08-11 F-2). `CircuitBreakerPhase` enum에 넣지 않은 이유는 그 enum이
 # `CircuitBreakerMonitor`의 상태기계이고, 이 값은 그 기계가 **돌기 전** 구간을 가리키기

@@ -77,7 +77,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
@@ -356,6 +356,62 @@ def _ui_log_path(today_str: str) -> Path:
     return Path("logs") / f"ui_{today_str}.log"
 
 
+async def alert_if_no_first_tick(
+    collector,
+    *,
+    deadline: time = DEFAULT_SESSION.open_time,
+    sleep=asyncio.sleep,
+    now=now_kst,
+) -> bool:
+    """정규장 개시까지 첫 틱이 한 건도 없으면 **한 번** 크게 운다 (2026-08-11 G-5).
+
+    ## 왜 헬스 판정만으로는 부족한가
+
+    `TickCollector.health()`가 같은 시한으로 CRITICAL을 내게 됐지만(그쪽 `warmup_expired`),
+    그건 **화면을 보는 사람에게만** 닿는다. 2026-08-10의 실패는 화면이 있는데도 아무도
+    안 본 것이 아니라, 08:20~08:58 사이 그 화면이 아예 없었다는 것이다. 로그는 화면과
+    독립적으로 남고 일일 무결성 리포트의 태그 집계에 잡히므로, 그날 놓쳐도 장후에 드러난다.
+
+    ## 한 번만 운다
+
+    주기적으로 반복하면 하루 수천 줄이 되고 그러면 아무도 안 본다(`FeaturePublish`가 그랬다).
+    시한까지 자고, 한 번 보고, 끝낸다 — 상태의 지속은 헬스 heartbeat가 계속 말한다.
+
+    ## 자동 재기동을 여기서 하지 않는 이유
+
+    같은 계좌로 WS를 두 번 연결하면 **서로 끊는다**(`data/collector.py` 모듈 docstring,
+    2026-07-29 실측). 이 함수가 프로세스를 다시 띄우면 그 사고를 자동화하는 셈이다 —
+    죽었는지 살았는지 판정할 근거가 이 프로세스 안에는 없다(자기가 그 프로세스다).
+    그래서 사람이 한 줄로 복구할 수단(`scripts/recover_now.bat`)을 주고, 판단은 사람이 한다.
+
+    반환값은 테스트용이다: True면 "시한을 넘겼다"를 보고했다는 뜻.
+    """
+    while True:
+        current = now()
+        if current.time() >= deadline:
+            break
+        remaining = (
+            datetime.combine(current.date(), deadline, tzinfo=current.tzinfo) - current
+        ).total_seconds()
+        await sleep(max(remaining, 0.0))
+
+    if collector.first_tick_overdue(now=now()):
+        mlog.log(
+            "CollectorFirstTickOverdue",
+            f"{deadline.strftime('%H:%M')}까지 첫 틱이 한 건도 없다 — 그때까지의 체결틱·"
+            "수급·옵션체인은 영구 소실(소급 경로 없음). 회선/구독/토큰을 확인하고 "
+            "scripts\\recover_now.bat로 복구할 것",
+            symbol=getattr(collector, "_symbol", "unknown"),
+            deadline=deadline.strftime("%H:%M"),
+        )
+        print(
+            f"[손실] {deadline.strftime('%H:%M')}까지 첫 틱 0건 — scripts\\recover_now.bat",
+            flush=True,
+        )
+        return True
+    return False
+
+
 def _launch_ui(today_str: str) -> LaunchedUI:
     """`core/ui_launcher.py`의 얇은 래퍼 — 이 프로세스(데이터 수집)와 화면은 서로
     독립적이다. 중복 기동 방지(포트 응답 확인)는 공용 모듈이 담당한다(2026-07-30 추가,
@@ -590,6 +646,9 @@ async def _run_regular_session(
     3시간 무화면). 컴포넌트 목록에 고정으로 자리를 잡아두면 화면이 돌아왔을 때 "언제부터
     감시가 꺼져 있었는지"가 그대로 보인다."""
 
+    async def _alert_if_no_first_tick() -> None:
+        await alert_if_no_first_tick(collector)
+
     async def _report_ui_gave_up() -> None:
         await HealthReporter(
             bus,
@@ -608,6 +667,10 @@ async def _run_regular_session(
         collector.run_forever(),
         composer.run_forever(),
         engine.run_forever(),
+        # 첫 틱 시한 감시 (2026-08-11 G-5) — 09:00까지 한 건도 없으면 한 번 크게 운다.
+        # 헬스 판정(`TickCollector.health()`)이 이미 같은 시한으로 CRITICAL을 내지만,
+        # 그건 화면을 보는 사람에게만 닿는다. 이 줄은 **로그와 일일 리포트**에 남긴다.
+        _alert_if_no_first_tick(),
         watch_command_center_forever(
             caller_tag="run_l1_daily",
             project_root=_PROJECT_ROOT,

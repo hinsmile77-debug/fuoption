@@ -3344,3 +3344,58 @@ v2026.08-ev (08-07)  37/842        0.147         804      ← 7.4배
       넣어 번들의 성과 3종을 "미측정"에서 실제 값으로 바꾼다. 지금은 `build_bundles.py`가
       그 자리를 비워 두고 그 사실을 리포트에 적는다.
 - [ ] **수동 kill 뒤 재가동 수단**(`sys.resume`) — 08-11 09:27 사고가 드러낸 자리
+
+
+---
+
+## 2026-08-11 고도화 2차 — G-4·G-5·재가동 ([MW0601], 2026-08-11)
+
+상세는 `DECISION_LOG.md` 2026-08-11 고도화 2차 항목.
+
+- [x] **G-4(상수)** `MINUTE_CLOSE_GRACE_SECONDS` 1.0 → 2.0초 — 3거래일 실측 최대 1.3964초 위로
+      43% 여유. **정정: NEXT_TODO의 "4거래일치"는 사실이 아니었다**(08-07은 프로세스가 죽어
+      `delivery_latency`가 null)
+- [x] **G-5** 웜업에 시한 — `staleness_status(warmup_expired=)` + `TickCollector.first_tick_overdue()`
+      + `CollectorFirstTickOverdue`(ERROR) + `scripts/recover_now.bat`
+- [x] **재가동** `sys.resume` — `ResumeSignal(operator)` · `handle_resume()` · 화면 2단 확인.
+      CB 의심/확정이면 **거부**한다
+- [ ] **G-4(승격)** `configs/instance.yaml`의 `minute_bar_close: tick → timer` — **오늘
+      15:35에 4일째 표본이 나온 뒤**. 그 값이 2.0초를 넘으면 상수를 먼저 다시 올린다
+
+### 오늘 15:35~15:45 이후에 할 것 (Q-*와 함께, 순서 그대로)
+
+```
+1) run_postmarket.py 완료 확인(15:45 자동)     ← 재합성 전에 학습하면 잘린 봉을 배운다
+2) logs/daily_integrity_20260811.json의 delivery_latency.max 확인
+     ≤ 2.0  → instance.yaml을 timer로 (G-4 승격 완료)
+     > 2.0  → MINUTE_CLOSE_GRACE_SECONDS를 먼저 올리고 승격은 다음 날로
+3) python scripts/train_regime_ai.py
+4) python scripts/build_bundles.py --horizons 30m --promote live --operator MW0601
+5) G2 재기동(또는 내일 08:25 정시)
+```
+
+### 2026-08-12(수)에 볼 것 — R-1~R-4 (Q-1~Q-5와 함께)
+
+- [ ] **R-1** `1분봉 확정: timer (거래소 시각 경계+2.0초)`가 기동 로그에 찍히는가.
+      그리고 그날 리포트의 **`late_bar_drops`가 0인가** — 이것이 유예 2.0초의 진짜 채점이다.
+      0이 아니면 유예가 여전히 부족한 것이고, 그 건수만큼 틱을 버린 것이다.
+- [ ] **R-2** `봉 1m` 커버리지가 종전과 같거나 나은가. `timer`는 **틱이 늦는 구간에서만**
+      동작이 달라지므로 정상 구간 수치는 안 바뀌어야 한다 — 바뀌면 그게 볼 것이다.
+- [ ] **R-3** 08:45~09:00에 화면 수집기 배지가 `웜업 — 장 개시 전(첫 틱 대기)`(회색)이고,
+      **09:00을 넘겨도 첫 틱이 없는 날에만** CRITICAL로 바뀌는가. 정상일에 09:00 직후
+      붉어지면 시한 판정이 틀린 것이다(첫 틱은 08:45에 오므로 그럴 일이 없어야 한다).
+- [ ] **R-4** `CollectorFirstTickOverdue`가 **안** 찍히는가(정상일이면 0건).
+
+### 재가동 경로는 아직 **한 번도 안 눌러봤다**
+
+- [ ] **resume 실동작 검증** — `scripts/verify_kill_switch.py`와 같은 형태로 격리 Redis에서
+      kill → resume 왕복을 흘려볼 것. Kill Switch가 "구현됨≠검증됨"으로 며칠 있었던 것과
+      같은 자리이고, 이번엔 그 교훈이 이미 있다.
+      **주의**: 운영 Redis로 쏘면 안 된다(pub/sub는 DB로 안 갈린다, 08-11 09:27 실측).
+
+### 남은 것
+
+- [ ] **C-1 후속** 분봉 차트 실전 도메인 — **08-13 관측 뒤**. 노력이 아니라 데이터가 막는다
+      (오늘 1일째: 재시도 0건, 기준선 52건)
+- [ ] **성과 관문 결선** — G1 walk-forward 산출물을 `validate_performance()`에 흘려 번들의
+      성과 3종을 "미측정"에서 실제 값으로

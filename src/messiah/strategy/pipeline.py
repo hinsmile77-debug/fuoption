@@ -139,6 +139,7 @@ from messiah.core.bus import (
     TOPIC_FUTURES,
     TOPIC_HEALTH,
     TOPIC_INTENT,
+    TOPIC_RESUME,
     BusLike,
 )
 from messiah.core.event_calendar import EventCalendar
@@ -154,6 +155,7 @@ from messiah.core.messages import (
     HealthLevel,
     Horizon,
     KillSignal,
+    ResumeSignal,
     Side,
     bar_confirm_time,
 )
@@ -555,6 +557,9 @@ class TradingPipeline:
             # 자체 WS 연결이 없어(`scripts/run_g2_paper_trading.py`) 데이터 흐름의 실제
             # 상태를 직접 잴 근거가 없다 — 그걸 아는 쪽의 보고를 받는다.
             TOPIC_HEALTH,
+            # 재가동 (2026-08-11). kill과 달리 버스가 자동 배달하지 않으므로 **직접 넣는다** —
+            # 게이트를 가진 쪽만의 일이고, 그게 이 파이프라인이다.
+            TOPIC_RESUME,
         ]
         # `on_kill`을 **명시적으로** 준다 (2026-08-07 P0-1). 종전엔 버스가 모든 구독자에게
         # kill을 자동 배달했고, 그 자동 배달이 그날 수집 프로세스를 죽였다. 이제 kill은
@@ -572,6 +577,70 @@ class TradingPipeline:
             # 버스가 `on_kill`로 보내므로 보통 여기 안 온다. `InProcessBus`에 직접
             # `_dispatch`를 물린 경로(재생·스모크)와 테스트를 위해 남긴다.
             await self.handle_kill(msg)
+        elif isinstance(msg, ResumeSignal):
+            await self.handle_resume(msg)
+
+    async def handle_resume(self, signal: ResumeSignal) -> bool:
+        """`sys.resume` 수신 → **판단한 뒤** 게이트를 연다 (2026-08-11).
+
+        ## 이 경로가 없던 동안
+
+        `sys.kill`은 2026-08-07부터 있었는데 되돌리는 경로가 없었다. `KillSwitch._triggered`가
+        서면 `handle_kill()`이 재진입 가드에 걸려 게이트만 다시 닫으므로, 푸는 방법은 프로세스
+        재기동뿐이었다 — 2026-08-11 09:27에 실제로 그렇게 풀어야 했다.
+
+        ## 거부하는 경우 — "열어라"가 아니라 "열어도 되는지 판단하라"
+
+        서킷브레이커가 `suspected`/`confirmed`면 **거부한다.** 그 상태는 데이터가 끊겼다는
+        뜻이고, 끊긴 채로 게이트를 열면 시장 상태를 모르는 채 주문이 나간다. 사람이 눌렀다는
+        사실이 그 위험을 없애지 않는다 — 사람은 화면에서 CB 배지를 보고도 습관적으로 누를 수
+        있고, 그때 막는 것이 이 분기의 일이다. CB가 정상으로 돌아오면 그때 다시 누르면 된다.
+
+        `operator`가 비면 거부한다(Ver 1.1 §4-4 "사람 확인 전 재가동 금지" — 이름 없는 확인은
+        확인이 아니다).
+
+        `handle_kill()`과 같은 이유로 예외를 위로 안 던진다: `_dispatch`가 죽으면 구독 루프가
+        끊겨 나머지 감시가 전부 멈춘다.
+
+        반환값은 실제로 열었는가다(테스트·호출측 판정용).
+        """
+        if not signal.operator.strip():
+            log(
+                "ResumeRefused",
+                "재가동 거부 — operator가 비어 있다(사람 확인 전 재가동 금지)",
+                reason=signal.reason,
+            )
+            return False
+
+        monitor = self._circuit_breaker_monitor
+        phase = getattr(monitor, "phase", None)
+        if phase is not None and phase.value in ("suspected", "confirmed"):
+            log(
+                "ResumeRefused",
+                f"재가동 거부 — 서킷브레이커가 {phase.value}다. 데이터가 끊긴 채로 게이트를 "
+                "열면 시장 상태를 모르고 주문이 나간다. CB가 정상으로 돌아온 뒤 다시 시도할 것",
+                operator=signal.operator,
+                phase=phase.value,
+            )
+            return False
+
+        try:
+            self._kill_switch.reset(operator=signal.operator)
+            await self._gateway.resume(operator=signal.operator)
+        except Exception as exc:  # noqa: BLE001 — 구독 루프를 죽이면 나머지 감시가 멈춘다
+            log(
+                "ResumeFailed",
+                f"재가동 처리 실패 — 게이트가 여전히 닫혀 있을 수 있다: {exc}",
+                operator=signal.operator,
+            )
+            return False
+        log(
+            "Resumed",
+            f"재가동 — operator={signal.operator}; {signal.reason}".strip("; "),
+            operator=signal.operator,
+            reason=signal.reason,
+        )
+        return True
 
     async def handle_kill(self, signal: KillSignal) -> None:
         """`sys.kill` 수신 → 게이트 정지 + 전량 청산 (2026-08-07 고도화 6).

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from messiah.broker.kis import tr_codes
 from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.ws_client import ApprovalKeyIssuer
 from messiah.core.messages import HealthLevel
+from messiah.core.timeutil import KST
 from messiah.data.archiver import ParquetArchiver
 from messiah.data.collector import (
     _WS_DISCONNECT_ERRORS,
@@ -436,12 +438,29 @@ def test_health_is_unknown_not_ok_while_warming_up_before_the_first_tick(tmp_pat
 
     그렇다고 `OK`도 아니다(2026-08-05 2차, 고도화 3). 한 건도 못 받은 상태를 정상이라고
     보고하면 G2가 그걸 "한산하다"로 읽어 서킷브레이커 승격을 억제한다.
+
+    시각을 주입하는 이유(2026-08-11 G-5): 웜업 판정에 시한이 생겨 이 함수가 벽시계에
+    의존하게 됐다 — 주입이 없으면 이 테스트가 오후에 돌 때 CRITICAL로 깨진다.
     """
-    status = _health_collector(tmp_path, _FakeClock()).health()
+    before_open = datetime(2026, 8, 11, 8, 40, tzinfo=KST)
+
+    status = _health_collector(tmp_path, _FakeClock()).health(now=before_open)
 
     assert status.level is HealthLevel.UNKNOWN
     assert status.level not in (HealthLevel.WARN, HealthLevel.CRITICAL)
     assert "웜업" in status.detail
+
+
+def test_health_turns_critical_when_the_first_tick_never_arrives(tmp_path: Path):
+    """**웜업에는 시한이 있다** (2026-08-11 G-5). 08:40의 회색은 옳지만 09:30의 회색은
+    "회선이 죽었다"를 "모른다"로 부르는 것이다 — 2026-08-10에 사람이 08:50에 손으로 복구를
+    시도한 것은 화면이 말해줘서가 아니었다."""
+    after_open = datetime(2026, 8, 11, 9, 30, tzinfo=KST)
+
+    status = _health_collector(tmp_path, _FakeClock()).health(now=after_open)
+
+    assert status.level is HealthLevel.CRITICAL
+    assert "recover_now" in status.detail
 
 
 def test_health_walks_ok_warn_critical_as_ticks_go_silent(tmp_path: Path):

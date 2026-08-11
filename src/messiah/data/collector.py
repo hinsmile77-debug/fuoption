@@ -77,6 +77,7 @@ from messiah.broker.kis.credentials import KISCredentials
 from messiah.broker.kis.ws_client import ApprovalKeyIssuer, KISWebSocketClient, Subscription
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, TOPIC_TICK, MessageBus
+from messiah.core.event_calendar import DEFAULT_SESSION
 from messiah.core.health import HealthStatus, staleness_status
 from messiah.core.messages import BarClosed, Horizon, Tick
 from messiah.core.timeutil import now_kst
@@ -440,7 +441,7 @@ class TickCollector:
         """None은 "이 연결에서 아직 틱을 못 봤다"(웜업) — "0초 전에 받았다"와 구분된다."""
         return self._watchdog.seconds_since_last_tick()
 
-    def health(self) -> HealthStatus:
+    def health(self, *, now: datetime | None = None) -> HealthStatus:
         """`sys.health` heartbeat용 자가 판정 (고도화 4 — 데이터 흐름의 1차 책임은 수집기에
         있다). 임계는 스톨 워치독과 **같은 값**을 쓴다: WARN은 그 절반 지점이라 "곧 강제
         재연결이 일어날 것"을 화면이 미리 보여주고, CRITICAL이 뜨는 시점이 곧 재연결 시점이다.
@@ -454,7 +455,30 @@ class TickCollector:
             warn_after=threshold / 2,
             critical_after=threshold,
             warming_up_detail="웜업 — 장 개시 전(첫 틱 대기)",
+            # **웜업에 시한을 건다** (2026-08-11 G-5). 첫 틱 실측은 08:45이고 정규장 개시는
+            # 09:00이다 — 15분 여유를 주고도 안 오면 그건 웜업이 아니라 회선이 죽은 것이다.
+            # 이 한 줄이 화면·상태판·G2의 `collector_healthy`를 동시에 바꾼다: 종전엔 셋 다
+            # 하루 종일 "모른다"였고, 2026-08-10에 사람이 08:50에 손으로 복구를 시도한 것은
+            # 화면이 말해줘서가 아니었다.
+            # `now`는 테스트 주입점이다 — 이 판정이 벽시계에 의존하게 된 순간부터,
+            # 주입 없이는 "장 개시 전 웜업"을 검증하는 테스트가 오후에 돌면 깨진다.
+            warmup_expired=self.first_tick_overdue(now=now),
+            warmup_expired_detail=(
+                f"첫 틱이 {DEFAULT_SESSION.open_time.strftime('%H:%M')}까지 없다 — "
+                "회선/구독 확인(scripts\\recover_now.bat)"
+            ),
         )
+
+    def first_tick_overdue(self, *, now: datetime | None = None) -> bool:
+        """첫 틱을 받을 시한이 지났는가 — 판정 시한은 **정규장 개시**(09:00)다.
+
+        휴장일이면 시한 자체가 의미가 없지만 여기서 달력을 보지 않는다: 휴장일에 이
+        프로세스가 떠 있는 것 자체가 이미 이상이고(`run_l1_daily.py`가 거래일을 확인하고
+        뜬다), 그 경우 이 판정이 CRITICAL을 내는 것이 오히려 맞다.
+        """
+        if self._watchdog.seen_first_tick:
+            return False
+        return (now or now_kst()).time() >= DEFAULT_SESSION.open_time
 
     async def _handle_message(self, message: dict) -> None:
         raw = message.get("raw")
