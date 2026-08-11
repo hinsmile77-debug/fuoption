@@ -71,6 +71,10 @@ class InstanceConfig(BaseModel):
     # 그 크기를 정할 회선 지연 분포가 2026-08-05까지 측정된 적이 없었다. 같은 날 계측을
     # 붙였으므로(`TickDeliveryLatency`) 며칠 p99를 보고 승격한다. 실측 없이 임계를 정하지
     # 않는다 — 이 프로젝트가 반복해서 배운 것이다.
+    #
+    # 2026-08-11 G-4 진행 상황: 유예 상수는 3거래일 실측으로 확정했다(1.0 → 2.0초,
+    # `data/normalizer.MINUTE_CLOSE_GRACE_SECONDS` 주석의 표). **남은 것은 이 한 줄뿐**이고,
+    # 08-11 15:35에 4일째 표본이 나온 뒤 `timer`로 바꾼다. 되돌리려면 다시 `tick`으로.
     minute_bar_close: str = "tick"
 
     @field_validator("universe")
