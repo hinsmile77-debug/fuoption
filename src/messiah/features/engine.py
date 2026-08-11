@@ -33,7 +33,7 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Callable, Mapping, Sequence
 
@@ -136,6 +136,12 @@ class FeatureHealth:
     samples: int
     always_nan: list[str]
     constant: list[str]
+    # **허용된 상수의 실제 값** (2026-08-11). 퇴화로는 안 세지만 값은 남긴다 —
+    # `ev_dow_*`는 매 거래일 반드시 달라져야 하므로, 이 값이 전일과 같으면 캘린더 사이드카가
+    # 얼어붙었다는 뜻이다. 화이트리스트가 검출을 **끄는** 것이 아니라 하루 단위 축에서
+    # 날짜 단위 축으로 **옮기는** 것이고, 이 필드가 그 이관의 재료다
+    # (`ops/integrity_report._calendar_freeze_finding`).
+    allowed_constant_values: dict[str, float] = field(default_factory=dict)
 
     @property
     def degenerate_count(self) -> int:
@@ -150,12 +156,26 @@ def _base_feature_name(name: str) -> str:
 
 
 def _constant_is_normal(name: str) -> bool:
-    """세션 내내 안 변해도 결함이 아닌 피처인가 (2026-08-06).
+    """세션 내내 안 변해도 결함이 아닌 피처인가 (2026-08-06, 2026-08-11 정본 이관).
 
-    근거와 목록은 `features/px_core.INTRADAY_CONSTANT_OK` — 정의상 상수(`px_gap_open`)이거나
-    값역이 좁아 하루 종일 같은 값이 정상인 상태형 지표들이다.
+    근거와 목록은 **각 계산기 모듈의 `INTRADAY_CONSTANT_OK`** — 정의상 상수(`px_gap_open`)
+    이거나 날짜만 보는 캘린더 값(`ev_dow_*`, `ev_dte_*`)이다. 선언은 정의 옆에 있고 여기서는
+    `spec.intraday_constant_ok()`로 모아 읽는다.
+
+    ## 왜 `px_core`를 직접 안 보는가 (2026-08-11)
+
+    종전엔 이 줄이 `px_core.INTRADAY_CONSTANT_OK`를 직접 참조했다. 그래서 2026-08-10에 운영
+    피처셋을 `v2026.08-ev`로 올리자 다음 날 리포트가 4개 Horizon 전부에 "피처 11개가 세션
+    내내 죽어 있었다"를 찍었다 — 전부 EV 캘린더 값이고, 하루 안에서 상수인 것이 **정의**다.
+    등록부 `no-degenerate-features`(임계 0)는 그날부터 구조적으로 통과 불가였다.
+
+    카테고리가 늘 때마다 판정기를 고쳐야 하는 구조 자체가 문제였다. 이제 카테고리가 자기
+    상수를 선언하고 판정기는 그것을 모아 본다.
+
+    판정 자체는 `spec.is_intraday_constant_ok()` 한 곳이다 — 장후 리포트도 같은 함수를
+    부르므로 두 경로가 갈릴 수 없다(그쪽 docstring).
     """
-    return _base_feature_name(name) in px_core.INTRADAY_CONSTANT_OK
+    return feature_spec.is_intraday_constant_ok(name)
 
 
 def _is_price_degenerate(history: Sequence[BarClosed]) -> bool:
@@ -288,7 +308,11 @@ class FeatureEngine:
         구조적으로 통과 불가였다 — 매일 울리는 경고는 결국 아무도 안 본다.
 
         **검출력은 안 잃는다**: 이 셋도 `always_nan`이면 그대로 잡힌다(그게 이 피처들의
-        진짜 사고다). 목록은 `features/px_core.INTRADAY_CONSTANT_OK`에 근거와 함께 있다.
+        진짜 사고다). 목록은 각 계산기 모듈의 `INTRADAY_CONSTANT_OK`에 근거와 함께 있고
+        (`px_core`·`ev_core`), `spec.intraday_constant_ok()`가 모아 준다.
+
+        2026-08-11에 EV 캘린더 11종이 같은 이유로 목록에 들어갔다 — 그쪽은 추가로 **날짜 간
+        동결**을 리포트가 따로 잡는다(`ops/integrity_report._calendar_freeze_finding`).
         """
         out: list[FeatureHealth] = []
         for horizon in self._horizons:
@@ -304,6 +328,11 @@ class FeatureEngine:
                     constant=sorted(
                         n for n, s in stats.items() if s.constant and not _constant_is_normal(n)
                     ),
+                    allowed_constant_values={
+                        n: s.lo
+                        for n, s in sorted(stats.items())
+                        if s.constant and _constant_is_normal(n)
+                    },
                 )
             )
         return out
@@ -331,6 +360,9 @@ class FeatureEngine:
                 samples=health.samples,
                 always_nan=health.always_nan,
                 constant=health.constant,
+                # 퇴화로는 안 세지만 값은 남긴다 — 날짜 간 동결 검사의 재료
+                # (`FeatureHealth.allowed_constant_values` 주석).
+                allowed_constant_values=health.allowed_constant_values,
             )
         return healths
 

@@ -47,6 +47,10 @@ from messiah.features import ev_core, fl_core, px_core, vl_core
 # 계산기 모듈이 노출하는 레지스트리 속성 이름 — 카테고리마다 같은 규약을 쓴다.
 _WINDOWED_ATTR = "WINDOWED_FEATURES"
 _STATEFUL_ATTR = "STATEFUL_FEATURES"
+# **선택** 속성 — "세션 내내 안 변해도 정상"인 피처 이름들(2026-08-11).
+# 없는 카테고리는 빈 집합으로 다룬다. 새 카테고리가 자기 상수를 여기 선언하지 않으면 그날
+# 리포트가 그 피처를 퇴화로 잡고, 등록부가 매일 운다 — 2026-08-11에 EV로 그렇게 됐다.
+_CONSTANT_OK_ATTR = "INTRADAY_CONSTANT_OK"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +81,15 @@ class CategorySpec:
         if self.sidecar is None or self.sidecar_attr is None:
             return ()
         return getattr(self.module, self.sidecar_attr, ())
+
+    @property
+    def intraday_constant_ok(self) -> frozenset[str]:
+        """이 카테고리에서 **세션 내내 상수여도 정상**인 피처 이름들 (2026-08-11).
+
+        선언은 계산기 모듈이 한다(정의 옆에 둔다) — `px_core`·`ev_core`가 그렇게 갖고 있고,
+        선언이 없는 카테고리는 빈 집합이다. 여기서 목록을 들면 그게 두 번째 사본이 된다.
+        """
+        return frozenset(getattr(self.module, _CONSTANT_OK_ATTR, frozenset()))
 
     @property
     def feature_names(self) -> tuple[str, ...]:
@@ -202,6 +215,55 @@ def registered_names() -> tuple[str, ...]:
     return tuple(sorted(FEATURE_SETS))
 
 
+def _base_name(name: str) -> str:
+    """`px_ema_cross_20` → `px_ema_cross`. `features/engine._base_feature_name()`과 **같은
+    규칙**이다 — 상수 허용 선언은 기저 이름으로 쓰고 판정도 기저 이름으로 하기 때문이다.
+
+    두 벌을 두는 이유는 방향이다: 엔진은 `spec`을 임포트하지만 그 반대는 순환이 된다.
+    규칙이 갈리면 `validate_registry()`가 잡는다 — 실제 피처 이름과 대조하므로, 한쪽 규칙만
+    바뀌면 멀쩡한 선언이 "존재하지 않는 피처"로 보고된다.
+    """
+    head, _, tail = name.rpartition("_")
+    return head if head and tail.isdigit() else name
+
+
+def intraday_constant_ok() -> frozenset[str]:
+    """**전 카테고리**의 "세션 내내 상수여도 정상" 목록 — 퇴화 판정의 정본 (2026-08-11).
+
+    `feature_set`과 무관하게 등록된 카테고리 전부를 모은다. 판정하는 쪽
+    (`features/engine.py`)은 그날 활성 카테고리만 계산하므로 목록이 넓어도 무해하고,
+    반대로 좁히면 A/B로 피처셋을 바꿀 때마다 오탐이 돌아온다.
+
+    종전엔 엔진이 `px_core.INTRADAY_CONSTANT_OK`를 **직접** 참조했다. 그래서 2026-08-10에
+    EV 카테고리를 켰을 때 그 목록이 EV를 모른 채로 판정했고, 다음 날 리포트가 4개 Horizon
+    전부에 퇴화 11건을 찍었다 — 등록부 `no-degenerate-features`(임계 0)가 구조적으로
+    통과 불가가 됐다. 카테고리가 늘 때마다 판정기를 고쳐야 하는 구조 자체가 문제였다.
+    """
+    names: set[str] = set()
+    for spec in CATEGORIES.values():
+        names |= spec.intraday_constant_ok
+    return frozenset(names)
+
+
+def is_intraday_constant_ok(name: str) -> bool:
+    """이 피처 이름이 **세션 내내 상수여도 정상**인가 — 퇴화 판정의 유일한 결정 함수.
+
+    윈도우형 이름(`px_ema_cross_20`)은 기저 이름으로 판정한다. 그 규칙을 여기 한 곳에 두는
+    이유는 호출처가 셋이기 때문이다:
+
+        features/engine.py          장중에 로그를 쓸 때 — 로그를 깨끗하게 유지한다
+        ops/integrity_report.py     장후에 그 로그를 읽을 때 — **소급 교정**이 가능해진다
+        (테스트)                    두 경로가 같은 답을 내는지
+
+    셋이 같은 함수를 부르므로 갈릴 수 없다. 리포트에서 한 번 더 거르는 것이 중복처럼
+    보이지만, 그래야 **화이트리스트가 늘었을 때 과거 리포트를 재생성해 반영**할 수 있다 —
+    2026-08-11이 정확히 그 경우였다(그날 15:35 로그는 EV 선언이 생기기 전 코드가 썼다).
+    """
+    head, _, tail = name.rpartition("_")
+    base = head if head and tail.isdigit() else name
+    return base in intraday_constant_ok()
+
+
 def validate_registry() -> list[str]:
     """레지스트리 자체의 정합성 — 문제 목록을 돌려준다(비어 있으면 정상).
 
@@ -216,6 +278,16 @@ def validate_registry() -> list[str]:
             problems.append(f"feature_set '{name}'이 미등록 카테고리를 참조: {unknown}")
 
     for key, spec in CATEGORIES.items():
+        # **죽은 선언을 잡는다** (2026-08-11). 상수 허용 목록에 오타가 있으면 그 이름은
+        # 아무것도 안 가리고, 정작 대상 피처는 계속 퇴화로 잡힌다 — 선언했다고 믿는 동안
+        # 등록부는 계속 운다. 윈도우형 이름은 `f"{기저}_{윈도우}"`로 전개되므로
+        # (`engine._base_feature_name`) 기저 이름과 대조한다.
+        base_names = {_base_name(name) for name in spec.feature_names}
+        dead = sorted(spec.intraday_constant_ok - base_names)
+        if dead:
+            problems.append(
+                f"카테고리 '{key}'의 {_CONSTANT_OK_ATTR}가 존재하지 않는 피처를 가리킨다: {dead}"
+            )
         if spec.key != key:
             problems.append(f"CATEGORIES 키 '{key}'와 CategorySpec.key '{spec.key}' 불일치")
         if (spec.sidecar is None) != (spec.sidecar_attr is None):

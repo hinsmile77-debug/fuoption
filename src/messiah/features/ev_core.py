@@ -303,6 +303,44 @@ CALENDAR_FEATURES: list[tuple[str, "callable[[Bars, EventCalendar], float | None
     ("ev_lunch_flag", ev_lunch_flag),
 ]
 
+# 세션 내내 안 변해도 **결함이 아닌** 피처 (2026-08-11).
+#
+# `px_core.INTRADAY_CONSTANT_OK`와 같은 뜻·같은 규약이고, 여기 두는 이유는 **정의 옆에
+# 선언한다**는 것뿐이다. 2026-08-10에 운영 피처셋을 `v2026.08-ev`로 올렸을 때 이 선언이
+# 없어서, 다음 날 리포트가 4개 Horizon 전부에 "피처 11개가 세션 내내 죽어 있었다"를 찍었다
+# — 등록부 `no-degenerate-features`(임계 0)가 **구조적으로 통과 불가**가 된 것이다.
+# 목록이 px_core 한 곳에만 있으면 새 카테고리를 붙일 때마다 같은 일이 반복된다.
+#
+# 아래 11개는 전부 **`_confirm_day()` 또는 `now.weekday()`만 보는** 계산이다 — 하루 안에서
+# 변할 수 있는 입력이 하나도 없다. 상수인 것이 사고가 아니라 **정의**다.
+# (`ev_tod_sin`/`ev_tod_cos`/`ev_open_elapsed`/`ev_close_remain`/`ev_lunch_flag`는 시각을
+# 보므로 여기 없다 — 실제로 2026-08-11 리포트도 그 다섯은 안 걸었다. 검출기는 잘 돌고 있다.)
+#
+# ## 검출력을 잃지 않는다
+#
+# ① **항상 NaN이면 여전히 잡힌다** — 캘린더 사이드카가 아예 안 붙은 날의 진짜 사고다.
+# ② **요일 원-핫의 날짜 간 동결**은 리포트가 따로 잡는다(`ops/integrity_report.py`의
+#    `_calendar_freeze_finding`). `ev_dow_*`는 매 거래일 반드시 달라져야 하므로 —
+#    어제와 오늘의 요일이 같을 수 없다 — 전일과 동일하면 그게 곧 사이드카 동결의 증거다.
+#    화이트리스트가 검출을 끄는 것이 아니라 **하루 단위 축에서 날짜 단위 축으로 옮긴다.**
+INTRADAY_CONSTANT_OK: frozenset[str] = frozenset(
+    {
+        *(f"ev_dow_{name}" for name in _WEEKDAY_NAMES),
+        "ev_dte_fut",
+        "ev_dte_opt_m",
+        "ev_dte_opt_w",
+        "ev_expiry_flag",
+        "ev_rollover_win",
+        "ev_holiday_adj",
+    }
+)
+
+# 위 목록 중 **매 거래일 반드시 달라지는** 부분집합 — 동결 검사의 대상(위 ② 참고).
+# `ev_dte_*`나 `ev_expiry_flag`는 이틀 연속 같은 값이 정상일 수 있어(만기가 멀면 dte는
+# 하루에 1씩만 줄고, 만기가 아닌 날은 flag가 계속 0) 여기 넣지 않는다. 요일 원-핫만이
+# **오탐 0으로** 동결을 말할 수 있다.
+DAILY_VARYING_FEATURES: tuple[str, ...] = tuple(f"ev_dow_{name}" for name in _WEEKDAY_NAMES)
+
 # Ver 1.4 §2.7의 14행 중 여기 없는 3개 — 경제지표 캘린더 피드가 없어서다(모듈 docstring).
 # 상수로 남겨 두면 "빠뜨린 것"과 "일부러 뺀 것"이 구분되고, 소스가 생겼을 때 무엇을 채워야
 # 하는지가 코드에 남는다.

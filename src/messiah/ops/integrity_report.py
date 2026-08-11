@@ -54,6 +54,7 @@ from messiah.core.messages import BarSession, Horizon
 from messiah.core.timeutil import KST, now_kst
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
+from messiah.features import spec as feature_spec
 from messiah.ops import (
     canonical_consumers,
     observation_gaps,
@@ -207,6 +208,11 @@ class IntegrityReport:
     # 세션 내내 상수이거나 항상 NaN이던 피처 (2026-08-05 고도화 3, `features/engine.py`).
     # `nan_ratio`가 못 보는 것을 본다 — `px_macd_h_5`는 값을 내므로 흔적이 없었다.
     degenerate_features: dict[str, dict[str, list[str]]]
+    # **허용된 상수의 값** (2026-08-11). 퇴화로는 안 세는 피처들(`ev_dow_*` 등)의 그날 값이다.
+    # 여기 남겨야 **다음 날 리포트가 어제와 대조**할 수 있다 — 화이트리스트가 검출을 끄는
+    # 대신 하루 단위 축에서 날짜 단위 축으로 옮긴 것이고, 이 필드가 그 축의 저장소다
+    # (`_calendar_freeze_finding`).
+    allowed_constant_values: dict[str, float]
     # 거래소 공식 분봉 대비 아카이브 거래량 비율 (2026-08-05 고도화 1).
     # `scripts/verify_archive_volume.py`가 남긴 파일을 읽는다 — 안 돌린 날은 None이고,
     # 그 사실은 `unmeasured`에 들어간다.
@@ -532,6 +538,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     clock_skews: list[float] = []
     delivery_latency: dict[str, float] | None = None
     degenerate: dict[str, dict[str, list[str]]] = {}
+    allowed_constants: dict[str, float] = {}
     nan_by_horizon: dict[str, list[float]] = {}
     cb_events: dict[str, int] = {}
 
@@ -578,6 +585,14 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 "always_nan": list(record.get("always_nan") or []),
                 "constant": list(record.get("constant") or []),
             }
+            # 허용된 상수의 **값** (2026-08-11) — 퇴화 판정에서 빠진 대신 날짜 간 동결
+            # 검사로 옮겨진 축(`_calendar_freeze_finding`). Horizon마다 같은 값이므로
+            # 하나만 남긴다(첫 것 우선 — 어느 것이든 같아야 하고, 다르면 그 자체가 사고다).
+            allowed = record.get("allowed_constant_values")
+            if isinstance(allowed, dict) and not allowed_constants:
+                allowed_constants.update(
+                    {str(k): float(v) for k, v in allowed.items() if isinstance(v, (int, float))}
+                )
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -617,6 +632,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "clock_skew_seconds": (max(clock_skews, key=abs) if clock_skews else None),
         "delivery_latency": delivery_latency,
         "degenerate_features": degenerate,
+        "allowed_constant_values": allowed_constants,
         "nan_ratio_by_horizon": nan_summary,
         "circuit_breaker_events": cb_events,
     }
@@ -1032,6 +1048,128 @@ def load_json_artifact(day: date, log_dir: Path, prefix: str) -> dict[str, Any] 
         return None
 
 
+def _ui_activity_from_watchdog(
+    *,
+    ui_own: Sequence[str],
+    watcher_activity: Sequence[str],
+    watcher_records: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """UI가 살아 있었다는 **적극적 관측**을 감시자의 침묵에서 만든다 (2026-08-11).
+
+    ## 왜 필요한가 — 침묵을 공백으로 세고 있었다
+
+    `find_gaps()`는 "그 프로세스가 뭔가를 찍은 시각"으로만 생존을 안다. 그런데 Streamlit은
+    기동 배너 이후 **정상 동작 중 아무것도 안 찍는다.** 2026-08-11에 그 결과가
+    `ui: 08:20:33~09:40:20 79.8분 관측 공백`이었는데, 같은 시각 상태판의 `command_center_ui`는
+    15초 간격으로 계속 `UP`이었고 15:40 종료 워치독이 산 프로세스 셋을 실제로 죽였다.
+
+    그 한 값이 등록부 **두 건**을 동시에 재발시켰다(`ui-restart-observability`,
+    `launch-window-refusal-not-counted` — 둘 다 metric이 `observation_gap_minutes_max`).
+    `observation_gaps` 모듈은 이 한계를 알고 `exact=False`로 표시하지만, 임계 판정은 그
+    상한을 그대로 쓴다 — 그래서 **모른다고 표시하면서 동시에 위반으로 셌다.**
+
+    ## 침묵이 관측이 되는 조건
+
+    `run_l1_daily.py`의 `watch_command_center_forever()`가 **30초마다** UI 포트를 찌르고,
+    무응답이면 `CommandCenterUIDown`을 남긴다(계약). 그러므로 **감시자가 살아서 로그를
+    찍고 있고 그 구간에 `Down`이 없다면, UI는 살아 있었다** — 바운드 30초는 임계 5분보다
+    훨씬 촘촘하다. 부정 증거(로그 없음)를 긍정 증거(감시자가 봤고 문제없다고 했다)로 바꾼다.
+
+    재료는 감시자 자신의 활동 시각이다. 감시자가 죽은 구간에는 합성 활동도 없으므로
+    (원료가 없다) UI를 산 것으로 만들지 않는다 — 그 구간은 `l1_daily`의 공백이 따로 잡는다.
+
+    ## 무엇을 안 하는가
+
+    - `Down` ~ `Restarted` **사이 구간은 합성하지 않는다** — 거기서는 UI가 실제로 죽어 있었고,
+      그것이 이 축이 잡아야 하는 진짜 사건이다.
+    - `CommandCenterUIRestartGaveUp` **이후로는 합성을 멈춘다** — 감시자가 재기동을 포기한
+      뒤의 침묵은 "화면이 없다"는 뜻이다(2026-07-31에 3시간이 그랬다). 죽은 UI를 산 것으로
+      만들면 이 수정이 고치려던 것보다 나쁜 거짓말이 된다.
+    - `g2_paper`에는 안 쓴다. 그쪽은 이런 감시자가 없고, 실제 사망은 종료 코드 축이 잡는다
+      (2026-08-11이 그 실증이다) — 관측자 없는 프로세스는 보수적으로 우는 것이 맞다.
+    """
+    down_at: str | None = None
+    blind_windows: list[tuple[str, str]] = []
+    gave_up_at: str | None = None
+    for record in watcher_records:
+        tag = str(record.get("tag", ""))
+        stamp = str(record.get("ts", ""))[11:19]
+        if len(stamp) != 8:
+            continue
+        if tag == "CommandCenterUIDown":
+            down_at = down_at or stamp
+        elif tag == "CommandCenterUIRestarted" and down_at is not None:
+            blind_windows.append((down_at, stamp))
+            down_at = None
+        elif tag == "CommandCenterUIRestartGaveUp":
+            gave_up_at = gave_up_at or stamp
+
+    def _observed_alive(stamp: str) -> bool:
+        if gave_up_at is not None and stamp >= gave_up_at:
+            return False
+        if down_at is not None and stamp >= down_at:
+            return False  # 재기동 확인 없이 끝난 사망 — 그 뒤는 모른다
+        return not any(start <= stamp < end for start, end in blind_windows)
+
+    return sorted(set(ui_own) | {s for s in watcher_activity if _observed_alive(s)})
+
+
+def _calendar_freeze_finding(day: date, log_dir: Path, allowed: Mapping[str, float]) -> str | None:
+    """캘린더 사이드카가 **어제 값 그대로 얼어붙었나** — 화이트리스트의 반대편 (2026-08-11).
+
+    ## 왜 필요한가
+
+    같은 날 `ev_dow_*` 등 11종을 "세션 내내 상수여도 정상"으로 선언했다(`features/ev_core.
+    INTRADAY_CONSTANT_OK`). 하루 안에서 안 변하는 것이 그 피처들의 정의이기 때문이다.
+    그런데 선언만 하고 끝내면 **캘린더가 실제로 죽은 날**을 아무도 못 잡는다 — 사이드카가
+    어제 날짜로 얼어붙어도 "상수니까 정상"으로 통과한다. 검출을 끄면 안 되고, 축을 옮겨야 한다.
+
+    ## 왜 요일 원-핫만 보는가
+
+    `ev_dow_*`는 **매 거래일 반드시 달라진다** — 어제와 오늘의 요일이 같을 수 없다. 그래서
+    전일과 동일한 벡터는 오탐 없이 "얼었다"를 뜻한다. `ev_dte_*`나 `ev_expiry_flag`는 이틀
+    연속 같은 값이 정상일 수 있어(만기가 멀면 dte가 하루 1씩만 줄고, 만기 아닌 날은 flag가
+    계속 0) 대상이 아니다 — 넓은 그물은 늑대소년을 만든다.
+
+    ## 판정 불가와 정상을 안 합친다
+
+    전일 리포트가 없거나 그 필드가 없으면(이 축이 생기기 전 리포트) `None`이다 — "비교
+    못 했다"이지 "정상"이 아니다. 다만 `unmeasured`에도 안 올린다: 매일 자동 산출되는
+    리포트가 재료라 정상 운영이면 다음 날부터 저절로 채워지고, 첫날 하루를 미측정으로
+    올리면 그 목록이 한 번 울고 끝나는 항목으로 지저분해진다.
+    """
+    from messiah.features import ev_core
+
+    watched = [name for name in ev_core.DAILY_VARYING_FEATURES if name in allowed]
+    if not watched:
+        return None  # EV 카테고리가 꺼져 있거나 그 값이 상수가 아니었다 — 판정 대상 아님
+
+    previous = load_json_artifact(day - timedelta(days=1), log_dir, "daily_integrity")
+    for offset in range(2, 6):  # 주말·휴장을 건너 직전 리포트를 찾는다
+        if previous is not None:
+            break
+        previous = load_json_artifact(day - timedelta(days=offset), log_dir, "daily_integrity")
+    if not previous:
+        return None
+
+    before = previous.get("allowed_constant_values")
+    if not isinstance(before, dict):
+        return None  # 이 축이 생기기 전의 리포트 — 비교 못 했다(정상이 아니다)
+
+    today_vector = {name: allowed[name] for name in watched}
+    prior_vector = {name: before.get(name) for name in watched}
+    if any(value is None for value in prior_vector.values()):
+        return None
+    if today_vector != prior_vector:
+        return None
+
+    return (
+        f"캘린더 사이드카 동결 의심 — 요일 원-핫이 {previous.get('date')}와 동일하다"
+        f"({today_vector}). `ev_dow_*`는 매 거래일 달라져야 한다 — "
+        "EventCalendar 주입 또는 봉 시각을 확인할 것"
+    )
+
+
 def build_report(
     *,
     day: date,
@@ -1174,7 +1312,23 @@ def build_report(
     vol_axis = load_json_artifact(day, resolved_log_dir, "vol_scorecard") or {}
 
     # ---- 고도화 3: 세션 내내 죽어 있던 피처 ----
-    degenerate_features = logs["degenerate_features"]
+    #
+    # **여기서 한 번 더 거른다** (2026-08-11). 엔진이 로그를 쓸 때 이미 같은 정본으로
+    # 걸렀지만, 그 판정은 **그날 코드**의 것이다. 화이트리스트가 나중에 늘면 과거 로그의
+    # `constant`에는 그 이름이 그대로 남아 있고, 리포트를 재생성해도 옛 판정이 따라온다 —
+    # 2026-08-11이 정확히 그 경우였다(15:35 로그는 EV 선언이 생기기 전 코드가 썼다).
+    # 같은 함수를 부르므로 두 경로가 갈릴 수 없다(`features/spec.is_intraday_constant_ok`).
+    degenerate_features = {
+        horizon: {
+            "always_nan": list(entry.get("always_nan") or []),
+            "constant": [
+                name
+                for name in (entry.get("constant") or [])
+                if not feature_spec.is_intraday_constant_ok(str(name))
+            ],
+        }
+        for horizon, entry in logs["degenerate_features"].items()
+    }
     for horizon, entry in sorted(degenerate_features.items()):
         dead = list(entry.get("always_nan") or []) + list(entry.get("constant") or [])
         if dead:
@@ -1182,6 +1336,12 @@ def build_report(
                 f"{horizon} 피처 {len(dead)}개가 세션 내내 죽어 있었다({', '.join(dead[:5])}"
                 f"{' 외' if len(dead) > 5 else ''}) — 모델에 죽은 입력이 들어간다"
             )
+
+    # 화이트리스트가 검출을 **끄지 않게** 하는 반대편 축 (2026-08-11).
+    allowed_constants = logs["allowed_constant_values"]
+    freeze = _calendar_freeze_finding(day, resolved_log_dir, allowed_constants)
+    if freeze is not None:
+        breaches.append(freeze)
 
     # ---- 고도화 1: 외부 대조 ----
     volume_check = load_volume_check(day, resolved_log_dir)
@@ -1365,10 +1525,16 @@ def build_report(
     observation.events, observation.events_available, observation.events_detail = (
         host_event_collector(day)
     )
+    activity_for_gaps = {name: result["activity_kst"] for name, result in per_process.items()}
+    activity_for_gaps["ui"] = _ui_activity_from_watchdog(
+        ui_own=activity_for_gaps.get("ui", ()),
+        watcher_activity=activity_for_gaps.get("l1_daily", ()),
+        watcher_records=_iter_json_lines(log_paths.get("l1_daily", ())),
+    )
     observation.gaps = observation_gaps.find_gaps(
         day,
         starts_by_process=starts_for_gaps,
-        activity_by_process={name: result["activity_kst"] for name, result in per_process.items()},
+        activity_by_process=activity_for_gaps,
         events=observation.events,
     )
     for gap in observation.gaps:
@@ -1398,6 +1564,7 @@ def build_report(
         delivery_latency=logs["delivery_latency"],
         session_git_shas=logs["session_git_shas"],
         degenerate_features=degenerate_features,
+        allowed_constant_values=allowed_constants,
         volume_check=volume_check,
         vol_axis=vol_axis,
         host_health=host.to_dict(),
