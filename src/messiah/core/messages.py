@@ -506,6 +506,15 @@ class KillSignal(BusMessage):
     triggered_by: str  # R2 손실한도 / R11 데이터 단절 / manual / model_anomaly
 
 
+# `CircuitBreakerStatus.phase`의 **발행자측 센티널** — 판정을 아직 안 했다는 뜻이다
+# (2026-08-11 F-2). `CircuitBreakerPhase` enum에 넣지 않은 이유는 그 enum이
+# `CircuitBreakerMonitor`의 상태기계이고, 이 값은 그 기계가 **돌기 전** 구간을 가리키기
+# 때문이다 — enum에 넣으면 전이표에 없는 상태를 전이표가 다뤄야 하는 것처럼 보인다.
+#
+# 이 값이 있어야 화면에서 셋이 갈린다: 토픽 없음(미사용) · warmup(아직 못 잼) · 실제 phase.
+CIRCUIT_BREAKER_PHASE_WARMUP = "warmup"
+
+
 class CircuitBreakerStatus(BusMessage):
     """거래소 서킷브레이커(CB) 추정 상태 (sys.circuit_breaker) — Command Center UI 배지용
     (2026-07-29, `risk/circuit_breaker_monitor.py` 반영). `strategy/pipeline.py`가

@@ -111,6 +111,8 @@ from messiah.core.messages import HealthLevel, Horizon  # noqa: E402
 from messiah.core.scheduler import FixedTickScheduler  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import (  # noqa: E402
+    DEFAULT_PORT,
+    LaunchedUI,
     is_ui_already_running,
     launch_command_center,
     watch_command_center_forever,
@@ -354,10 +356,14 @@ def _ui_log_path(today_str: str) -> Path:
     return Path("logs") / f"ui_{today_str}.log"
 
 
-def _launch_ui(today_str: str) -> subprocess.Popen | None:
+def _launch_ui(today_str: str) -> LaunchedUI:
     """`core/ui_launcher.py`의 얇은 래퍼 — 이 프로세스(데이터 수집)와 화면은 서로
     독립적이다. 중복 기동 방지(포트 응답 확인)는 공용 모듈이 담당한다(2026-07-30 추가,
-    `run_g2_paper_trading.py`와 UI를 동시에 켰을 때의 실측 발견 대응)."""
+    `run_g2_paper_trading.py`와 UI를 동시에 켰을 때의 실측 발견 대응).
+
+    반환값의 `port`를 **반드시 아래로 흘려야 한다**(2026-08-11 F-6) — 워치독과 상태판의 UI
+    프로브가 기본 포트를 계속 쳐다보면, 화면이 대체 포트로 뜬 날 둘 다 남의 프로세스를 보며
+    "정상"이라고 말한다."""
     return launch_command_center(
         caller_tag="run_l1_daily",
         project_root=_PROJECT_ROOT,
@@ -567,6 +573,7 @@ async def _run_regular_session(
     rest: _RestCollection | None = None,
     tick_archiver: TickArchiver | None = None,
     minute_bar_close: str = "tick",
+    ui_port: int = DEFAULT_PORT,
 ) -> None:
     """수집 3종 + UI 생존 감시 + 컴포넌트 heartbeat를 동시에 돌린다.
 
@@ -605,6 +612,8 @@ async def _run_regular_session(
             caller_tag="run_l1_daily",
             project_root=_PROJECT_ROOT,
             log_path=_ui_log_path(today_str),
+            # 기본 포트가 아니라 **실제로 뜬 포트**를 본다(2026-08-11 F-6).
+            port=ui_port,
             on_gave_up=_report_ui_gave_up,
         ),
         # 컴포넌트 이름은 상수로 — G2의 `TradingPipeline`이 이 heartbeat를 구독해 CB 오탐을
@@ -629,7 +638,9 @@ async def _run_regular_session(
         # `logs/status_snapshot.json`에 주기적으로 남긴다. 화면이 죽어도(07-30 32분,
         # 07-31 3시간) 관측은 계속되고, 15:40에 UI가 종료된 뒤의 장후 리뷰도 가능해진다.
         # UI 생사까지 같은 스냅샷에 기록한다 — 화면 없이 화면 상태를 안다.
-        run_status_board_forever(bus, symbol=symbol, ui_probe=is_ui_already_running),
+        run_status_board_forever(
+            bus, symbol=symbol, ui_probe=lambda: is_ui_already_running(ui_port)
+        ),
         # 파생 장중 수급 (2026-08-04 결선). 폴러 자체는 2026-07-27부터 있었지만 **어디에도
         # 결선돼 있지 않았고** `raw.investor_flow.*` 구독자도 없어서, 이 프로젝트는 파생
         # 수급을 한 건도 갖고 있지 않다. 그리고 KIS 장중 엔드포인트는 당일 누적만 준다 —
@@ -920,7 +931,7 @@ async def main(cfg: InstanceConfig) -> None:
             flush=True,
         )
 
-    _launch_ui(today.strftime("%Y%m%d"))
+    launched_ui = _launch_ui(today.strftime("%Y%m%d"))
 
     creds = KISCredentials.from_broker_config(cfg.broker)
     symbol = await asyncio.to_thread(_resolve_front_month_symbol)
@@ -964,11 +975,16 @@ async def main(cfg: InstanceConfig) -> None:
     # `v2026.08-ev`로 올리면 엔진이 "사이드카 ['calendar']가 주입되지 않았다"로 **기동을
     # 거부**했다 — EV 계산기도 피처셋 정의도 이미 다 있었는데, 정본을 안 부르는 소비자
     # 하나가 그 전환을 막고 있었다(2026-08-10 B-4).
+    # **엔진을 만들기 전에** 무슨 모양으로 뜨려는지 찍는다 (2026-08-11 F-1) — 사이드카가
+    # 빠져 엔진이 기동을 거부하면 이 줄이 마지막 단서가 되고, 그때 필요한 정보가 정확히
+    # "어떤 피처셋이 무슨 사이드카를 요구했나"다.
+    resolved_spec = feature_spec.resolve(cfg.feature_set)
+    print(resolved_spec.describe(), flush=True)
     engine = FeatureEngine(
         symbol,
         bus,
         feature_set=cfg.feature_set,
-        sidecars=sidecar.build(feature_spec.resolve(cfg.feature_set)),
+        sidecars=sidecar.build(resolved_spec),
     )
     # 체결틱 원본 적재 (2026-08-04, F2). 지금까지 이 프로젝트는 틱을 한 번도 저장한 적이
     # 없다 — 받아서 분봉으로 집계하고 버렸다. 그래서 MS(마이크로구조) 30개가 통째로
@@ -1018,6 +1034,7 @@ async def main(cfg: InstanceConfig) -> None:
                     rest,
                     tick_archiver,
                     cfg.minute_bar_close,
+                    launched_ui.port,
                 ),
                 timeout=remaining,
             )

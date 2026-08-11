@@ -11,16 +11,19 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from messiah.core.event_calendar import EventCalendar
 from messiah.core.health import health_cache_key
 from messiah.core.messages import BarClosed, Health, HealthLevel, Horizon
 from messiah.data.archiver import ParquetArchiver
 from messiah.ui import app as app_module
 from messiah.ui.app import (
+    _NOTICE_RENDERER,
     _absence_reason,
     _available_dates,
     _candlestick_figure,
     _component_versions,
     _default_redis_url,
+    _event_calendar_lines,
     _live_date_notice,
     _load_bars,
     _load_bars_with_status,
@@ -445,17 +448,98 @@ def test_component_versions_keep_the_empty_sha_of_an_old_process():
 # ---------------------------------------------------------------- LIVE 차트 날짜 (P1-3)
 
 
-def test_live_chart_labels_today_as_today():
-    is_today, notice = _live_date_notice(date(2026, 8, 5), today=date(2026, 8, 5))
+def _at(y: int, m: int, d: int, hh: int, mm: int) -> datetime:
+    return datetime(y, m, d, hh, mm, tzinfo=_KST)
 
-    assert is_today is True
+
+def test_live_chart_labels_today_as_today():
+    severity, notice = _live_date_notice(date(2026, 8, 5), now=_at(2026, 8, 5, 10, 0))
+
+    assert severity == "ok"
     assert "오늘(2026-08-05)" in notice
 
 
 def test_live_chart_never_calls_a_past_day_today():
     """장 개시 전·적재 정지 구간에 전일 차트가 "오늘"로 찍히던 경로의 회귀 방지."""
-    is_today, notice = _live_date_notice(date(2026, 8, 4), today=date(2026, 8, 5))
+    _severity, notice = _live_date_notice(date(2026, 8, 4), now=_at(2026, 8, 5, 8, 30))
 
-    assert is_today is False
     assert "2026-08-04" in notice
-    assert "오늘(2026-08-05) 봉이 아직 없어" in notice
+    assert "오늘(2026-08-05)" not in notice or "봉이 없다" not in notice
+
+
+# ---------------------------------------------------------------- 정상과 사고를 가른다 (F-3)
+
+
+def test_before_the_first_tick_an_empty_today_is_expected():
+    """08:45 전에 오늘 봉이 없는 것은 **매일 아침 반복되는 정상**이다 — 경고로 찍으면
+    사람이 그 박스를 무시하는 법을 배우고, 정작 적재가 멈춘 날에도 똑같이 넘긴다."""
+    severity, notice = _live_date_notice(date(2026, 8, 10), now=_at(2026, 8, 11, 8, 30))
+
+    assert severity == "expected"
+    assert "장 개시 전" in notice
+
+
+def test_after_the_first_tick_an_empty_today_is_an_alert():
+    """**이 갈래가 F-3의 요점이다.** 08:45가 지났는데 오늘 봉이 없으면 적재가 멈춘 것이고,
+    그건 위 경우와 같은 색으로 보이면 안 된다."""
+    severity, notice = _live_date_notice(date(2026, 8, 10), now=_at(2026, 8, 11, 9, 30))
+
+    assert severity == "alert"
+    assert "l1.collector" in notice
+
+
+def test_a_market_holiday_is_not_an_alert():
+    """휴장일엔 09:30에도 오늘 봉이 없는 게 맞는다 — 달력을 안 보면 이 날이 매번 P0로 뜬다."""
+    calendar = EventCalendar.from_file()
+
+    severity, notice = _live_date_notice(
+        date(2026, 8, 7), now=_at(2026, 8, 8, 9, 30), calendar=calendar
+    )
+
+    assert severity == "expected"
+    assert "휴장" in notice
+
+
+def test_the_notice_still_judges_time_when_the_calendar_is_missing():
+    """달력이 없어도 시각 판정은 살아 있어야 한다 — 부가 정보 하나가 사고 탐지를 끄면 안 된다."""
+    severity, _notice = _live_date_notice(date(2026, 8, 10), now=_at(2026, 8, 11, 9, 30))
+
+    assert severity == "alert"
+
+
+def test_every_severity_has_a_renderer():
+    """severity 문자열을 늘렸는데 렌더러를 안 늘리면 그 갈래에서 화면이 KeyError로 죽는다."""
+    for value in ("ok", "expected", "alert"):
+        assert value in _NOTICE_RENDERER
+
+
+# ---------------------------------------------------------------- 이벤트 캘린더 D-day (F-5)
+
+
+def test_the_calendar_states_the_monthly_expiry_d_day():
+    """2026-08-11은 8/13 먼슬리 만기 D-2였고, 화면은 그 사실을 한 마디도 안 했다."""
+    lines = _event_calendar_lines(date(2026, 8, 11), EventCalendar.from_file())
+
+    assert any("2026-08-13" in line and "D-2" in line for line in lines)
+
+
+def test_the_calendar_explains_why_thursday_weekly_is_absent_today():
+    """2026-08-07에 이 부재가 오탐 22건과 사고 오판을 낳았다 — 부재와 복귀 예정일을 같이 말한다."""
+    lines = _event_calendar_lines(date(2026, 8, 11), EventCalendar.from_file())
+
+    absence = [line for line in lines if "weekly_thu" in line]
+    assert absence and "정상" in absence[0] and "2026-08-14" in absence[0]
+
+
+def test_the_calendar_flags_quadruple_witching():
+    lines = _event_calendar_lines(date(2026, 9, 10), EventCalendar.from_file())
+
+    assert any("동시만기" in line for line in lines)
+
+
+def test_the_calendar_says_so_when_it_cannot_judge():
+    """조용히 빈칸으로 두면 "오늘 아무 이벤트도 없다"로 읽힌다 — 답할 수 없는 상태에서
+    답한 척하지 않는다."""
+    lines = _event_calendar_lines(date(2026, 8, 11), None)
+
+    assert len(lines) == 1 and "판정 불가" in lines[0]

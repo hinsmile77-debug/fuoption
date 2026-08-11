@@ -40,12 +40,14 @@ streamlit·실제 소켓 없이 순수하게 테스트 가능.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
 import sys
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -53,6 +55,37 @@ from messiah.core import logging as mlog
 
 DEFAULT_PORT = 8511  # MESSIAH 전용 고정 포트 — Streamlit 기본값(8501)과 의도적으로 다름
 DEFAULT_SKIP_ENV_VAR = "MESSIAH_SKIP_UI"
+
+# 우리가 띄운 UI의 흔적 (2026-08-11 F-6). `is_ui_already_running()`은 "포트가 응답한다"만
+# 알 수 있고 **누가 응답하는지는 모른다** — 그 한계가 2026-07-29에 하루치 무화면으로
+# 실현됐다. 기동할 때 우리 흔적을 남겨 두면 다음 기동이 그 흔적과 대조할 수 있다.
+DEFAULT_MARKER_PATH = Path("logs") / "command_center_ui.json"
+
+# 8511이 남의 것으로 판정될 때 훑을 대체 포트 수. 좁게 잡은 이유: 포트를 옮기면 사람의
+# 북마크·워치독·`status_board`의 UI 프로브가 전부 그 포트를 따라와야 하고(호출측이
+# `LaunchedUI.port`를 그대로 넘긴다), 넓게 훑을수록 "어디에 떴는지 모르는 화면"이 된다.
+_PORT_SCAN_LIMIT = 3
+
+
+@dataclass(frozen=True)
+class LaunchedUI:
+    """기동 결과 — **어느 포트를 봐야 하는가**가 핵심이다 (2026-08-11 F-6).
+
+    종전 반환값은 `Popen | None`이었고 `None`이 "생략·이미 실행 중·실패"를 겸했다. 포트가
+    고정일 때는 그걸로 충분했지만, 대체 포트로 옮길 수 있게 되면 호출측이 **실제 포트**를
+    알아야 한다 — 워치독(`watch_command_center_forever`)과 상태판의 UI 프로브가 8511을
+    쳐다보는 동안 화면이 8512에 떠 있으면, 그 화면은 아무도 안 보는 화면이고 워치독은
+    남의 프로세스를 우리 UI로 착각해 감시를 안 한다.
+
+    `process is None`은 종전 `None`과 같은 뜻이다("새로 띄운 프로세스가 없다").
+    """
+
+    port: int
+    process: subprocess.Popen | None
+    # "launched" 새로 띄움 · "already-ours" 우리 UI가 이미 응답 중 · "skipped" 환경변수/파일
+    # 부재 · "foreign" 점유자를 우리 것으로 확인 못 했고 대체 포트도 못 잡음 · "failed" 기동 예외
+    status: str
+
 
 # 감시 주기 — UI가 죽은 걸 늦어도 30초 안에 알아채면 사람이 화면을 보고 이상을 느끼기 전에
 # 대개 복구된다. 재기동 한도는 "고쳐지지 않는 크래시 루프"를 무한 반복하지 않기 위한 것으로,
@@ -81,6 +114,63 @@ def is_ui_already_running(
         return False
 
 
+def _read_marker(marker_path: Path) -> dict | None:
+    """읽기 실패는 **전부 "흔적 없음"으로 다룬다** — 이 파일은 판정의 보조 근거지 그 자체가
+    사고 지점이 되면 안 된다(깨진 JSON 하나로 기동이 막히는 것이 훨씬 나쁘다)."""
+    try:
+        data = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_marker(marker_path: Path, *, port: int, pid: int, app_path: Path) -> None:
+    """기동 성공 직후 흔적을 남긴다. 실패해도 조용히 넘어간다 — 흔적이 없으면 다음 기동이
+    "확인 못 함"으로 보수적으로 판정할 뿐이고, 그건 안전한 방향의 오차다."""
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(
+            json.dumps(
+                {
+                    "port": port,
+                    "pid": pid,
+                    "app_path": str(app_path),
+                    "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def identify_port_holder(port: int, *, marker_path: Path, app_path: Path) -> bool:
+    """이 포트에 응답 중인 것이 **우리 UI인가** (2026-08-11 F-6).
+
+    ## 이 함수의 한계를 먼저 적는다
+
+    증명하는 것은 "MESSIAH가 이 포트에 UI를 띄운 적이 있다"이지 "지금 응답하는 그 프로세스가
+    바로 그것이다"가 아니다. 후자를 확정하려면 포트 소유 PID를 봐야 하는데, 그건 psutil
+    의존성을 새로 들이거나(`pyproject.toml`에 없다) `netstat` 파싱이 필요하고 — 그렇게
+    얻은 PID로도 알 수 있는 건 `streamlit.exe`라는 이름뿐이라 **남의 Streamlit과 여전히
+    구분이 안 된다**. 즉 비용은 실재하고 이득은 없다.
+
+    그래도 이 판정이 의미 있는 이유는 실제 사고 형태와 맞기 때문이다. 2026-07-29의 사고는
+    "우리가 이 포트에 UI를 띄운 적이 **없는데** 뭔가 응답하고 있었다"였고, 그건 흔적 부재로
+    정확히 잡힌다. 반대 방향의 오판(우리 UI가 죽고 그 자리를 남이 차지)은 흔적이 남아 있어
+    못 잡지만, 그 경우는 워치독이 별도로 다룬다.
+
+    `app_path`까지 대조하는 이유: 같은 PC의 다른 체크아웃(워크트리·복제본)이 8511에 자기
+    UI를 띄웠다면 그건 우리 화면이 아니다 — 우리 코드가 아니라 **우리 프로젝트**의 화면인지를
+    묻는 것이 맞다.
+    """
+    marker = _read_marker(marker_path)
+    if marker is None:
+        return False
+    return marker.get("port") == port and marker.get("app_path") == str(app_path)
+
+
 def launch_command_center(
     *,
     caller_tag: str,
@@ -89,38 +179,78 @@ def launch_command_center(
     port: int = DEFAULT_PORT,
     streamlit_exe: Path | None = None,
     skip_env_var: str = DEFAULT_SKIP_ENV_VAR,
+    marker_path: Path = DEFAULT_MARKER_PATH,
     is_running: Callable[[int], bool] = is_ui_already_running,
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
-) -> subprocess.Popen | None:
-    """`None`은 "새로 띄운 프로세스가 없다"는 뜻이다 — 생략(환경변수·이미 실행 중)과
-    실패(실행파일 없음·기동 예외) 세 경우를 구분하지 않는다. 호출자 입장에서는 셋 다 "화면을
-    새로 열 필요가 없다"는 점에서 동일하기 때문(메시지는 각 경우마다 다르게 출력해 사람은
-    구분 가능)."""
+) -> LaunchedUI:
+    """`LaunchedUI.process is None`은 "새로 띄운 프로세스가 없다"는 뜻이다 — 생략(환경변수·
+    이미 실행 중)과 실패(실행파일 없음·기동 예외)를 구분하지 않는다. 호출자 입장에서는 둘 다
+    "화면을 새로 열 필요가 없다"는 점에서 동일하기 때문(`status`로 구분 가능하고, 메시지는
+    각 경우마다 다르게 출력해 사람도 구분 가능).
+
+    ## 포트가 응답한다고 우리 화면인 것은 아니다 (2026-08-11 F-6)
+
+    종전엔 응답만 보고 "무언가 응답 중 — 기동 생략"으로 물러났고, 그 WARN 문구가 스스로
+    "실제로 MESSIAH UI인지는 확인하지 않는다"고 인정하고 있었다. 그 미확인이 2026-07-29에
+    하루치 무화면으로 실현됐다. 이제 `identify_port_holder()`로 대조하고, 우리 것이 아니면
+    **물러나지 않고 대체 포트로 뜬다** — 경고만 남기고 화면을 포기하면 그 경고를 볼 화면이
+    바로 없는 화면이다(`watch_command_center_forever()`의 `on_gave_up`과 같은 논리).
+    """
+    app_path = project_root / "src" / "messiah" / "ui" / "app.py"
+
     if os.environ.get(skip_env_var) == "1":
         print(f"[{caller_tag}] {skip_env_var}=1 — Command Center UI 기동 생략", flush=True)
-        return None
+        return LaunchedUI(port=port, process=None, status="skipped")
 
+    target_port = port
     if is_running(port):
-        print(
-            f"[{caller_tag}] WARN: 포트 {port}에 이미 무언가 응답 중 — Command Center UI "
-            f"기동 생략. MESSIAH 전용 포트라 다른 프로젝트와 겹칠 확률은 낮지만, 응답 중인 "
-            f"프로세스가 실제로 MESSIAH UI인지는 확인하지 않는다 — 화면이 예상과 다르면 "
-            f"http://localhost:{port} 을 직접 열어 확인할 것 (2026-07-29 다른 프로젝트의 "
-            f"Streamlit이 구 기본 포트 8501을 선점해 이 UI가 하루 종일 안 뜬 사례 실측).",
-            flush=True,
+        if identify_port_holder(port, marker_path=marker_path, app_path=app_path):
+            mlog.log(
+                "CommandCenterUIPortConfirmed",
+                f"포트 {port} 점유자가 MESSIAH UI로 확인됨 — 중복 기동 생략",
+                port=port,
+                caller=caller_tag,
+            )
+            print(
+                f"[{caller_tag}] 포트 {port} — MESSIAH UI가 이미 응답 중(흔적 대조 확인) · "
+                f"중복 기동 생략 — http://localhost:{port}",
+                flush=True,
+            )
+            return LaunchedUI(port=port, process=None, status="already-ours")
+
+        target_port = _next_free_port(port, is_running=is_running)
+        mlog.log(
+            "CommandCenterUIPortForeign",
+            f"포트 {port} 점유자를 MESSIAH UI로 확인하지 못했다 — "
+            + (
+                f"대체 포트 {target_port}로 기동한다"
+                if target_port is not None
+                else f"{port}~{port + _PORT_SCAN_LIMIT} 전부 점유돼 화면을 못 띄운다"
+            ),
+            port=port,
+            fallback_port=target_port,
+            caller=caller_tag,
         )
-        return None
+        if target_port is None:
+            print(
+                f"[{caller_tag}] ERROR: 포트 {port}~{port + _PORT_SCAN_LIMIT}가 전부 응답 중이고 "
+                f"어느 것도 MESSIAH UI로 확인되지 않는다 — 화면 없이 진행. "
+                f"2026-07-29에 남의 Streamlit이 포트를 선점해 하루 종일 화면이 없던 사례와 "
+                f"같은 형태다(본 작업은 계속).",
+                flush=True,
+            )
+            return LaunchedUI(port=port, process=None, status="foreign")
 
     exe = streamlit_exe or (Path(sys.executable).parent / "streamlit.exe")
-    app_path = project_root / "src" / "messiah" / "ui" / "app.py"
     if not exe.exists() or not app_path.exists():
         print(
             f"[{caller_tag}] Streamlit 실행파일/앱을 찾을 수 없어 UI 생략 "
             f"({exe} / {app_path}) — 본 작업은 계속 진행",
             flush=True,
         )
-        return None
+        return LaunchedUI(port=target_port, process=None, status="skipped")
 
+    port = target_port
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # `with`로 감싸 **성공 경로에서도** 닫는다(2026-08-03 수정). 예전엔 실패 경로에서만
     # 닫아서, 재기동할 때마다 이 프로세스에 파일 핸들이 하나씩 남았다 — 08-03에 2개, 크래시가
@@ -136,14 +266,27 @@ def launch_command_center(
             )
     except OSError as e:
         print(f"[{caller_tag}] Streamlit 기동 실패(본 작업은 계속): {e}", flush=True)
-        return None
+        return LaunchedUI(port=port, process=None, status="failed")
 
+    _write_marker(marker_path, port=port, pid=process.pid, app_path=app_path)
+    moved = "" if port == DEFAULT_PORT else "  ⚠ 기본 포트가 아니다 — 이 주소로 열 것"
     print(
         f"[{caller_tag}] Command Center UI 기동(PID={process.pid}) — "
-        f"http://localhost:{port} (로그: {log_path})",
+        f"http://localhost:{port} (로그: {log_path}){moved}",
         flush=True,
     )
-    return process
+    return LaunchedUI(port=port, process=process, status="launched")
+
+
+def _next_free_port(port: int, *, is_running: Callable[[int], bool]) -> int | None:
+    """`port` 다음으로 비어 있는 포트 — 전부 응답 중이면 `None`.
+
+    원래 포트 자신은 후보가 아니다(이 함수는 그 포트가 남의 것으로 판정된 뒤에만 불린다).
+    """
+    for candidate in range(port + 1, port + _PORT_SCAN_LIMIT + 1):
+        if not is_running(candidate):
+            return candidate
+    return None
 
 
 async def watch_command_center_forever(
@@ -157,6 +300,7 @@ async def watch_command_center_forever(
     restart_window_seconds: float = _UI_RESTART_WINDOW_SECONDS,
     streamlit_exe: Path | None = None,
     skip_env_var: str = DEFAULT_SKIP_ENV_VAR,
+    marker_path: Path = DEFAULT_MARKER_PATH,
     is_running: Callable[[int], bool] = is_ui_already_running,
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -192,7 +336,10 @@ async def watch_command_center_forever(
 
     포트 응답만 보고 판단하는 한계는 `is_ui_already_running()`과 동일하다 — 제3의 프로세스가
     8511을 선점하면 "살아있다"로 오판해 재기동을 안 한다. 그 경우는 원래도 UI가 안 뜨는
-    상황이고 `launch_command_center()`가 기동 시점에 이미 WARN을 찍어둔다.
+    상황이고 `launch_command_center()`가 기동 시점에 이미 ERROR를 찍어둔다(2026-08-11 F-6).
+
+    감시 포트는 **고정이 아니다** — 재기동이 대체 포트로 뜨면 이 루프도 그 포트를 따라간다
+    (아래 `launched.port` 참고).
     """
     if os.environ.get(skip_env_var) == "1":
         return
@@ -234,21 +381,27 @@ async def watch_command_center_forever(
             port=port,
             caller=caller_tag,
         )
-        process = launch_command_center(
+        launched = launch_command_center(
             caller_tag=caller_tag,
             project_root=project_root,
             log_path=log_path,
             port=port,
             streamlit_exe=streamlit_exe,
             skip_env_var=skip_env_var,
+            marker_path=marker_path,
             is_running=is_running,
             popen=popen,
         )
-        if process is not None:
+        if launched.process is not None:
+            # **감시 대상을 실제 포트로 옮긴다** (2026-08-11 F-6). 재기동 사이에 남이 원래
+            # 포트를 채가면 `launch_command_center()`가 대체 포트로 뜨는데, 여기서 `port`를
+            # 안 따라가면 워치독은 그 남의 프로세스를 보며 "살아있다"고 판정하고 정작 우리
+            # 화면은 아무도 안 보는 포트에서 죽어도 조용해진다.
+            port = launched.port
             mlog.log(
                 "CommandCenterUIRestarted",
                 "Command Center UI 재기동 완료",
                 port=port,
-                pid=process.pid,
+                pid=launched.process.pid,
                 caller=caller_tag,
             )

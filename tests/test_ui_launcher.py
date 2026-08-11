@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
 
 from messiah.core.ui_launcher import (
     DEFAULT_PORT,
+    identify_port_holder,
     launch_command_center,
     watch_command_center_forever,
 )
@@ -25,60 +27,80 @@ def _fake_popen(pid: int = 4242):
     return _popen, calls
 
 
+def _project(tmp_path):
+    """실행파일·앱 경로가 실재하는 최소 프로젝트 — 기동 단계까지 가려면 둘 다 있어야 한다."""
+    exe = tmp_path / "streamlit.exe"
+    exe.write_text("stub")
+    app_dir = tmp_path / "src" / "messiah" / "ui"
+    app_dir.mkdir(parents=True)
+    app_path = app_dir / "app.py"
+    app_path.write_text("")
+    return exe, app_path
+
+
+def _launch(tmp_path, **overrides):
+    """마커 경로를 **반드시 tmp_path로** 넘긴다 — 기본값은 실제 `logs/`라 테스트가 운영
+    흔적 파일을 덮어쓴다."""
+    kwargs = {
+        "caller_tag": "test",
+        "project_root": tmp_path,
+        "log_path": tmp_path / "ui.log",
+        "marker_path": tmp_path / "marker.json",
+    }
+    kwargs.update(overrides)
+    return launch_command_center(**kwargs)
+
+
 def test_skips_when_env_var_set(tmp_path, monkeypatch):
     monkeypatch.setenv("MESSIAH_SKIP_UI", "1")
     popen, calls = _fake_popen()
-    result = launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
-        is_running=lambda port: False,
-        popen=popen,
-    )
-    assert result is None
+    result = _launch(tmp_path, is_running=lambda port: False, popen=popen)
+    assert result.process is None
+    assert result.status == "skipped"
     assert calls == []
 
 
-def test_skips_when_already_running(tmp_path):
+def test_skips_when_our_own_ui_already_holds_the_port(tmp_path):
+    """정상 시나리오 — L1이 08:20에 띄운 UI가 응답 중이고 G2가 08:25에 확인한다."""
+    _exe, app_path = _project(tmp_path)
     popen, calls = _fake_popen()
-    result = launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
-        is_running=lambda port: True,
-        popen=popen,
+    marker = tmp_path / "marker.json"
+    marker.write_text(
+        json.dumps({"port": DEFAULT_PORT, "pid": 4828, "app_path": str(app_path)}),
+        encoding="utf-8",
     )
-    assert result is None
-    assert calls == []  # 이미 떠 있으니 새로 안 띄운다
+
+    result = _launch(tmp_path, is_running=lambda port: True, popen=popen)
+
+    assert result.status == "already-ours"
+    assert result.port == DEFAULT_PORT
+    assert calls == []  # 우리 것으로 확인됐으니 새로 안 띄운다
 
 
 def test_checks_the_configured_port(tmp_path):
     seen_ports = []
     popen, _ = _fake_popen()
-    launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
+    _launch(
+        tmp_path,
         port=9999,
         is_running=lambda port: seen_ports.append(port) or True,
         popen=popen,
     )
-    assert seen_ports == [9999]
+    # 9999가 남의 것으로 판정되면 대체 포트를 훑는다 — 첫 질문은 여전히 설정된 포트다.
+    assert seen_ports[0] == 9999
 
 
 def test_skips_when_streamlit_exe_missing(tmp_path):
     popen, calls = _fake_popen()
     (tmp_path / "src" / "messiah" / "ui").mkdir(parents=True)
     (tmp_path / "src" / "messiah" / "ui" / "app.py").write_text("")
-    result = launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
+    result = _launch(
+        tmp_path,
         streamlit_exe=tmp_path / "nope.exe",
         is_running=lambda port: False,
         popen=popen,
     )
-    assert result is None
+    assert result.process is None
     assert calls == []
 
 
@@ -86,43 +108,104 @@ def test_skips_when_app_path_missing(tmp_path):
     popen, calls = _fake_popen()
     exe = tmp_path / "streamlit.exe"
     exe.write_text("stub")
-    result = launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,  # src/messiah/ui/app.py 없음
-        log_path=tmp_path / "ui.log",
+    result = _launch(
+        tmp_path,  # src/messiah/ui/app.py 없음
         streamlit_exe=exe,
         is_running=lambda port: False,
         popen=popen,
     )
-    assert result is None
+    assert result.process is None
     assert calls == []
 
 
 def test_launches_when_not_running_and_files_exist(tmp_path):
-    exe = tmp_path / "streamlit.exe"
-    exe.write_text("stub")
-    app_dir = tmp_path / "src" / "messiah" / "ui"
-    app_dir.mkdir(parents=True)
-    app_path = app_dir / "app.py"
-    app_path.write_text("")
+    exe, app_path = _project(tmp_path)
     popen, calls = _fake_popen(pid=1234)
 
-    result = launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
+    result = _launch(
+        tmp_path,
         log_path=tmp_path / "logs" / "ui.log",
         streamlit_exe=exe,
         is_running=lambda port: False,
         popen=popen,
     )
 
-    assert result is not None
-    assert result.pid == 1234
+    assert result.process is not None
+    assert result.process.pid == 1234
+    assert result.port == DEFAULT_PORT
+    assert result.status == "launched"
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0] == [str(exe), "run", str(app_path), "--server.port", str(DEFAULT_PORT)]
     assert kwargs["cwd"] == str(tmp_path)
     assert (tmp_path / "logs" / "ui.log").exists()  # 로그 디렉터리까지 만들어짐
+
+
+# ------------------------------------------- 포트 점유자 신원 확인 (2026-08-11 F-6)
+
+
+def test_a_foreign_holder_pushes_the_ui_to_a_fallback_port(tmp_path):
+    """**이것이 F-6의 요점이다.** 2026-07-29엔 남의 Streamlit이 포트를 선점했고 우리는
+    경고만 남기고 물러났다 — 그 결과가 하루치 무화면이다. 이제 옆 포트로 뜬다."""
+    exe, app_path = _project(tmp_path)
+    popen, calls = _fake_popen()
+
+    result = _launch(
+        tmp_path,
+        streamlit_exe=exe,
+        is_running=lambda port: port == DEFAULT_PORT,  # 8511만 남이 점유
+        popen=popen,
+    )
+
+    assert result.status == "launched"
+    assert result.port == DEFAULT_PORT + 1
+    args, _kwargs = calls[0]
+    assert args[0][-1] == str(DEFAULT_PORT + 1)  # 실제로 그 포트로 띄웠다
+
+
+def test_all_ports_taken_reports_foreign_and_does_not_launch(tmp_path):
+    """전부 막혔으면 화면은 못 뜬다 — 그 사실을 `foreign`으로 말한다(조용히 성공한 척 금지)."""
+    exe, _app_path = _project(tmp_path)
+    popen, calls = _fake_popen()
+
+    result = _launch(tmp_path, streamlit_exe=exe, is_running=lambda port: True, popen=popen)
+
+    assert result.status == "foreign"
+    assert result.process is None
+    assert calls == []
+
+
+def test_a_successful_launch_leaves_a_marker_for_the_next_process(tmp_path):
+    """흔적이 없으면 다음 기동이 자기 UI를 남의 것으로 오판한다 — 이 파일이 그 연결고리다."""
+    exe, app_path = _project(tmp_path)
+    popen, _calls = _fake_popen(pid=777)
+    marker = tmp_path / "marker.json"
+
+    _launch(tmp_path, streamlit_exe=exe, is_running=lambda port: False, popen=popen)
+
+    written = json.loads(marker.read_text(encoding="utf-8"))
+    assert written["port"] == DEFAULT_PORT
+    assert written["pid"] == 777
+    assert written["app_path"] == str(app_path)
+
+
+def test_identification_rejects_a_marker_from_another_checkout(tmp_path):
+    """같은 PC의 다른 체크아웃이 8511을 쓰고 있으면 그건 우리 화면이 아니다."""
+    marker = tmp_path / "marker.json"
+    marker.write_text(
+        json.dumps({"port": DEFAULT_PORT, "app_path": r"C:\elsewhere\app.py"}),
+        encoding="utf-8",
+    )
+
+    assert not identify_port_holder(DEFAULT_PORT, marker_path=marker, app_path=tmp_path / "app.py")
+
+
+def test_a_broken_marker_is_treated_as_no_marker(tmp_path):
+    """깨진 JSON 하나로 기동이 막히면 안 된다 — 판정의 보조 근거일 뿐이다."""
+    marker = tmp_path / "marker.json"
+    marker.write_text("{{{ not json", encoding="utf-8")
+
+    assert not identify_port_holder(DEFAULT_PORT, marker_path=marker, app_path=tmp_path / "app.py")
 
 
 def test_default_port_constant_is_messiah_dedicated_not_streamlit_default():
@@ -133,18 +216,11 @@ def test_default_port_constant_is_messiah_dedicated_not_streamlit_default():
 
 
 def test_launches_with_explicit_server_port_arg(tmp_path):
-    exe = tmp_path / "streamlit.exe"
-    exe.write_text("stub")
-    app_dir = tmp_path / "src" / "messiah" / "ui"
-    app_dir.mkdir(parents=True)
-    app_path = app_dir / "app.py"
-    app_path.write_text("")
+    exe, app_path = _project(tmp_path)
     popen, calls = _fake_popen()
 
-    launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
+    _launch(
+        tmp_path,
         port=9999,
         streamlit_exe=exe,
         is_running=lambda port: False,
@@ -155,25 +231,17 @@ def test_launches_with_explicit_server_port_arg(tmp_path):
     assert args[0] == [str(exe), "run", str(app_path), "--server.port", "9999"]
 
 
-def test_launch_failure_is_caught_and_returns_none(tmp_path):
-    exe = tmp_path / "streamlit.exe"
-    exe.write_text("stub")
-    app_dir = tmp_path / "src" / "messiah" / "ui"
-    app_dir.mkdir(parents=True)
-    (app_dir / "app.py").write_text("")
+def test_launch_failure_is_caught_and_reports_no_process(tmp_path):
+    exe, _app_path = _project(tmp_path)
 
     def _raising_popen(*args, **kwargs):
         raise OSError("boom")
 
-    result = launch_command_center(
-        caller_tag="test",
-        project_root=tmp_path,
-        log_path=tmp_path / "ui.log",
-        streamlit_exe=exe,
-        is_running=lambda port: False,
-        popen=_raising_popen,
+    result = _launch(
+        tmp_path, streamlit_exe=exe, is_running=lambda port: False, popen=_raising_popen
     )
-    assert result is None
+    assert result.process is None
+    assert result.status == "failed"
 
 
 # ---------------------------------------------------------------- UI 생존 감시 (2026-07-30)
@@ -240,6 +308,7 @@ async def test_watcher_returns_immediately_when_skip_env_set(tmp_path, monkeypat
         caller_tag="test",
         project_root=tmp_path,
         log_path=tmp_path / "ui.log",
+        marker_path=tmp_path / "marker.json",
         is_running=is_running,
         popen=popen,
         sleep=ticker,
@@ -259,6 +328,7 @@ async def test_watcher_does_not_touch_a_healthy_ui(tmp_path):
             caller_tag="test",
             project_root=tmp_path,
             log_path=tmp_path / "ui.log",
+            marker_path=tmp_path / "marker.json",
             is_running=is_running,
             popen=popen,
             sleep=ticker,
@@ -280,6 +350,7 @@ async def test_watcher_relaunches_after_the_ui_dies(tmp_path):
             caller_tag="test",
             project_root=tmp_path,
             log_path=tmp_path / "ui.log",
+            marker_path=tmp_path / "marker.json",
             streamlit_exe=exe,
             is_running=is_running,
             popen=popen,
@@ -315,6 +386,7 @@ async def test_watcher_stops_relaunching_after_restart_limit(tmp_path):
             caller_tag="test",
             project_root=tmp_path,
             log_path=tmp_path / "ui.log",
+            marker_path=tmp_path / "marker.json",
             max_restarts=3,
             streamlit_exe=exe,
             is_running=lambda port: False,
@@ -342,6 +414,7 @@ async def test_watcher_keeps_reporting_after_it_gives_up(tmp_path):
             caller_tag="test",
             project_root=tmp_path,
             log_path=tmp_path / "ui.log",
+            marker_path=tmp_path / "marker.json",
             max_restarts=2,
             streamlit_exe=exe,
             is_running=lambda port: False,
@@ -369,6 +442,7 @@ async def test_restart_limit_is_a_rolling_window_not_a_daily_total(tmp_path):
             caller_tag="test",
             project_root=tmp_path,
             log_path=tmp_path / "ui.log",
+            marker_path=tmp_path / "marker.json",
             max_restarts=3,
             restart_window_seconds=3600.0,
             streamlit_exe=exe,

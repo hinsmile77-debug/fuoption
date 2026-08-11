@@ -86,6 +86,34 @@ def test_every_registered_feature_set_can_be_assembled(name: str):
         ), f"'{name}'이 조립기가 모르는 사이드카 '{required}'를 요구한다"
 
 
+def test_the_startup_line_states_the_shape_the_checklist_asks_for():
+    """**채점 항목과 그 항목을 출력하는 코드는 같은 자리에 있어야 한다** (2026-08-11 F-1).
+
+    2026-08-10 커밋 ④-a는 다음 날 아침의 확인 항목을 "기동 로그에 피처 수(137)가 찍히는지"로
+    적었는데 그 줄을 찍는 코드가 없었다 — 확인할 수 없는 채점 항목이 하루를 통째로 흘렸다.
+    이 테스트는 그 줄이 개수·카테고리·사이드카를 실제로 말하는지 고정한다.
+    """
+    cfg = load_instance("configs")
+    spec = feature_spec.resolve(cfg.feature_set)
+
+    line = spec.describe()
+
+    assert cfg.feature_set in line
+    assert f"{len(spec)}개" in line
+    for category in spec.categories:
+        assert category in line
+    for required in spec.required_sidecars:
+        assert required in line
+
+
+def test_the_startup_line_flags_an_unregistered_name():
+    """오타난 운영 설정이 "PX·VL 121개로 정상 기동"처럼 보이면 안 된다 — `resolve()`가
+    조용히 기저 카테고리로 떨어뜨리기 때문에 그 사실을 이 줄이 말해야 한다."""
+    line = feature_spec.resolve("v2026.08-ev-오타").describe()
+
+    assert "미등록" in line
+
+
 def test_every_expected_consumer_calls_the_canonical_builder():
     """진입점 하나가 정본을 빠뜨리면 그 자리만 조용히 다른 벡터를 쓴다.
 

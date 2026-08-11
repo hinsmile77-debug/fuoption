@@ -48,7 +48,12 @@ from typing import Any, Callable
 
 from messiah.core.bus import BusLike
 from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
-from messiah.core.messages import BusMessage, CircuitBreakerStatus, Health
+from messiah.core.messages import (
+    CIRCUIT_BREAKER_PHASE_WARMUP,
+    BusMessage,
+    CircuitBreakerStatus,
+    Health,
+)
 from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
 from messiah.core.version import PROCESS_GIT_SHA, assess_version_drift, head_git_sha
@@ -303,7 +308,12 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
         lines.append("  서킷브레이커: 미사용/데이터 없음")
     else:
         halted = " · 주문 게이트 정지 중" if cb.get("gateway_halted") else ""
-        lines.append(f"  서킷브레이커: {cb.get('phase')}({cb.get('age_seconds')}초 전){halted}")
+        # `warmup`은 phase 문자열 그대로 두면 "정상 아님"으로도 "이상"으로도 안 읽힌다 —
+        # 화면 배지와 같은 문구를 쓴다(2026-08-11 F-2, `ui/app._CB_PHASE_LABEL`).
+        phase = cb.get("phase")
+        if phase == CIRCUIT_BREAKER_PHASE_WARMUP:
+            phase = "웜업 — 첫 봉 대기(판정 전)"
+        lines.append(f"  서킷브레이커: {phase}({cb.get('age_seconds')}초 전){halted}")
     return "\n".join(lines)
 
 

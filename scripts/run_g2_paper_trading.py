@@ -110,8 +110,9 @@ from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: 
 from messiah.core.health import HealthReporter  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
-from messiah.core.ui_launcher import launch_command_center  # noqa: E402
+from messiah.core.ui_launcher import LaunchedUI, launch_command_center  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
+from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
@@ -136,7 +137,7 @@ def _today_at(reference_kst: datetime, hour: int, minute: int) -> datetime:
     return reference_kst.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
-def _launch_ui(today_str: str) -> subprocess.Popen | None:
+def _launch_ui(today_str: str) -> LaunchedUI:
     """`core/ui_launcher.py`의 얇은 래퍼(`run_l1_daily.py`와 동일 패턴) — G2도 거래일 확인
     직후 Command Center를 별도 백그라운드 프로세스로 띄운다. 오늘(2026-07-29) 조사 시점
     기준 `ModelRegistry`에 `live` 번들이 0개라 화면의 AI Decision 존은 사실상 비어 있지만
@@ -202,6 +203,10 @@ def _load_futures_service(
         experts[horizon] = live.load_expert()
         meta_labelers[horizon] = live.load_meta_labeler()
     print(f"live 번들 결선: {[h.value for h in experts]} (feature_set={feature_set})", flush=True)
+    # 이 프로세스는 피처를 만들지 않고 L1이 발행한 것을 받아 쓴다 — 그래서 **양쪽이 같은
+    # 모양을 말하는지**가 결선 성립의 전제다(2026-08-11 F-1). 두 로그의 이 줄이 다르면
+    # 번들이 붙어도 입력 벡터가 어긋난 채로 판단이 나간다.
+    print(feature_spec.resolve(feature_set).describe(), flush=True)
     return FuturesAIService(symbol, experts, bus, meta_labelers=meta_labelers)
 
 

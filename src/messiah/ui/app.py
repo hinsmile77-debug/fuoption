@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 # 무거운 임포트보다 **먼저** 네이티브 크래시 덤프를 무장한다(2026-08-03). 이 프로세스는
@@ -47,6 +47,7 @@ from pathlib import Path
 # 원인을 추정해야 했다 — 임포트 도중의 크래시까지 덮으려면 이 줄이 맨 위여야 한다
 # (`core/crash_forensics.py` 모듈 docstring). 멱등이라 Streamlit의 5초 재실행에 안전하다.
 from messiah.core import crash_forensics
+from messiah.core import logging as mlog
 
 crash_forensics.enable(tag="ui")
 
@@ -68,8 +69,10 @@ import streamlit as st
 
 from messiah.core.bus import TOPIC_KILL, MessageBus
 from messiah.core.config import load_instance
+from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
 from messiah.core.messages import (
+    CIRCUIT_BREAKER_PHASE_WARMUP,
     BusMessage,
     CircuitBreakerStatus,
     DecisionIntent,
@@ -150,12 +153,16 @@ _CB_PHASE_COLOR: dict[str, str] = {
     "warning": "#FFB020",
     "suspected": "#FF8C42",
     "confirmed": "#FF5C7A",
+    # 웜업은 **판정 전**이라 초록이 아니다 — `_HEALTH_LEVEL_COLOR["UNKNOWN"]`과 같은 회색,
+    # 같은 뜻이다("판정할 근거가 없는 상태를 정상색으로 칠하지 않는다", 2026-08-05 고도화 3).
+    CIRCUIT_BREAKER_PHASE_WARMUP: "#8A8F98",
 }
 _CB_PHASE_LABEL: dict[str, str] = {
     "normal": "정상",
     "warning": "주의(데이터 지연)",
     "suspected": "CB 의심",
     "confirmed": "CB 정지 추정",
+    CIRCUIT_BREAKER_PHASE_WARMUP: "웜업 — 첫 봉 대기(판정 전)",
 }
 
 
@@ -164,7 +171,16 @@ def _render_circuit_breaker_badge(source) -> None:
     `CircuitBreakerStatus` heartbeat를 그대로 보여준다. `circuit_breaker_monitor`를 안 쓰는
     구성(스모크/재생 등)에서는 이 토픽 자체가 발행되지 않아 항상 NO_DATA — 그 경우 "미사용"
     문구로 명시해 "정상"과 혼동되지 않게 한다(마흐디 L18과 같은 원칙 — 값이 없는 것과 정상인
-    것을 구분)."""
+    것을 구분).
+
+    ## "미사용"이 두 가지를 덮고 있었다 (2026-08-11 F-2)
+
+    2026-08-11 08:43 화면이 `미사용/데이터 없음`이었는데 그 시각 CB 모니터는 **정상 주입돼
+    있었다** — 첫 봉이 확정되기 전이라 워치독이 판정을 건너뛰며 아무것도 발행하지 않았을
+    뿐이다(`strategy/pipeline.observe_circuit_breaker_tick()`의 콜드스타트 분기). 그 침묵이
+    "이 구성에선 CB를 안 쓴다"로 보였다. 이제 그 구간은 `warmup` phase heartbeat로 오고,
+    토픽이 정말 없을 때만 "미사용"이다 — `_ABSENCE_REASON`이 NO_DATA를 ①끊김 ②미배선
+    ③대기로 가른 것과 같은 수술이며, 여기서 걸린 것이 ③이다."""
     snap = source.snapshot("CircuitBreakerStatus")
     if not isinstance(snap.message, CircuitBreakerStatus):
         st.markdown(
@@ -183,6 +199,12 @@ def _render_circuit_breaker_badge(source) -> None:
     )
     if snap.badge == FreshnessBadge.STALE:
         st.caption(f"⚠ 상태 갱신 지연({snap.age_seconds:.0f}초 전)")
+
+    # 웜업은 **정상 경로**다 — 무엇을 기다리는지 적어야 사람이 "고장인가"를 다시 안 묻는다.
+    # 아래 `gateway_halted` 줄은 건너뛰지 않는다: 판정을 못 하는 것과 게이트가 닫혀 있는 것은
+    # 별개 사실이고, 후자는 웜업 중에도 이미 아는 값이다.
+    if phase == CIRCUIT_BREAKER_PHASE_WARMUP:
+        st.caption("첫 봉이 확정되면 판정을 시작한다 — 기준선이 없는 동안은 CB 판정 대상이 아니다")
 
     # **거래소가 멈춘 것인가, 우리가 죽은 것인가** (2026-08-07 고도화 2).
     #
@@ -368,6 +390,32 @@ def _default_redis_url() -> str:
         return load_instance().redis_url
     except Exception:
         return "redis://localhost:6380/0"
+
+
+# ---------------------------------------------------------------- KRX 달력 (F-3·F-5 공용)
+
+
+@st.cache_resource(show_spinner=False)
+def _event_calendar_or_none() -> EventCalendar | None:
+    """휴장일 달력 — 못 읽으면 `None`이고, **화면은 그래도 뜬다** (2026-08-11 F-3/F-5).
+
+    `configs/krx_holidays.yaml`은 운영 프로세스가 이미 쓰는 파일이라 정상 배포에선 항상
+    있다. 그런데 화면은 부가 정보를 얹는 자리고, 그 파일 하나가 없다고 차트·헬스 신호등까지
+    같이 죽으면 정작 사고를 볼 수단이 사라진다 — UI 크래시가 32분간 안 보였던 2026-07-30이
+    그 형태다. 실패는 `None`으로 돌려 호출측이 그 항목만 접게 한다.
+
+    `cache_resource`인 이유: 달력은 프로세스 수명 동안 불변인데 Streamlit은 5초마다 스크립트
+    전체를 다시 돌린다(`_LIVE_REFRESH_SECONDS`) — 캐시가 없으면 YAML을 하루 6천 번 읽는다.
+    """
+    try:
+        return EventCalendar.from_file()
+    except (OSError, ValueError) as exc:
+        mlog.log(
+            "UIEventCalendarUnavailable",
+            f"휴장일 달력을 못 읽어 화면의 캘린더 항목을 접는다 — {exc}",
+            error=str(exc),
+        )
+        return None
 
 
 # ---------------------------------------------------------------- Parquet 캔들 (LIVE/REPLAY 공용)
@@ -845,8 +893,10 @@ def render_ai_decision_panel(source) -> None:
         st.info(_absence_reason(source, "OptionsView") or "intel.options 데이터 없음")
 
 
-def _live_date_notice(chosen: date, *, today: date) -> tuple[bool, str]:
-    """LIVE 차트 위에 붙일 날짜 문구 — 반환은 (오늘인가, 문구).
+def _live_date_notice(
+    chosen: date, *, now: datetime, calendar: EventCalendar | None = None
+) -> tuple[str, str]:
+    """LIVE 차트 위에 붙일 날짜 문구 — 반환은 (severity, 문구).
 
     ## **"오늘"이라고 쓰기 전에 오늘인지 확인한다** (2026-08-05 3차, P1-3)
 
@@ -854,13 +904,49 @@ def _live_date_notice(chosen: date, *, today: date) -> tuple[bool, str]:
     봉 적재가 멈추면 그 최근 날짜는 **전일**이고, 그때 화면은 어제 차트에 "오늘" 라벨을
     붙인다. 차트는 화면에서 가장 큰 요소라 그 한 단어가 곧 "지금 시장이 이렇게 움직이고
     있다"로 읽힌다 — 값은 진짜인데 문구가 틀린, L18이 정확히 막으려던 형태다.
+
+    ## 그런데 그 문구가 **정상과 사고를 한 문장에 담고 있었다** (2026-08-11 F-3)
+
+    고친 문구는 `장 개시 전이거나 봉 적재가 멈춘 상태`였다. 앞쪽은 매일 아침 반복되는
+    정상이고 뒤쪽은 P0인데, 화면은 둘을 같은 노란 박스로 말했다 — 그러면 사람은 그 박스를
+    아침마다 보다가 무시하는 법을 배우고, 정작 적재가 멈춘 날에도 똑같이 넘긴다.
+
+    **시스템은 둘을 가를 근거를 이미 갖고 있었다**: 오늘이 거래일인가(`EventCalendar`),
+    지금이 첫 틱 시각(08:45, `SessionHours.first_tick_time`)을 지났는가. 그 둘만 보면
+    "아직 올 때가 아니다"와 "올 때가 지났는데 없다"가 갈린다.
+
+    달력을 못 읽으면(파일 부재·미등록 연도) 휴장 판정만 포기하고 시각 판정은 그대로
+    한다 — 부가 정보 하나 때문에 화면 전체가 죽는 것이 훨씬 나쁘다
+    (`EventCalendar.thursday_weekly_listing_resumes()`가 예외를 삼키는 것과 같은 판단).
     """
+    today = now.date()
     if chosen == today:
-        return True, f"오늘({chosen.isoformat()}) 봉 — LIVE는 항상 최신 날짜"
-    return False, (
-        f"⚠ 오늘({today.isoformat()}) 봉이 아직 없어 {chosen.isoformat()} 차트를 표시 중 "
-        "— 장 개시 전이거나 봉 적재가 멈춘 상태"
+        return "ok", f"오늘({chosen.isoformat()}) 봉 — LIVE는 항상 최신 날짜"
+
+    tail = f"{chosen.isoformat()} 차트를 표시 중"
+
+    if calendar is not None:
+        try:
+            if not calendar.is_trading_day(today):
+                return "expected", f"ℹ {today.isoformat()}은 KRX 휴장 — 최근 거래일 {tail}"
+        except ValueError:
+            pass  # 휴장일 데이터 없는 연도 — 아래 시각 판정만으로 간다
+
+    first_tick = DEFAULT_SESSION.first_tick_time
+    if now.time() < first_tick:
+        return "expected", (
+            f"ℹ 장 개시 전({first_tick.strftime('%H:%M')} 첫 틱 예정) — 전일 {tail}"
+        )
+
+    return "alert", (
+        f"🛑 {first_tick.strftime('%H:%M')}이 지났는데 오늘({today.isoformat()}) 봉이 없다 "
+        f"— 봉 적재 정지 의심, 수집기(l1.collector)를 먼저 확인할 것. {tail}"
     )
+
+
+# severity → 렌더러. `expected`는 정상이라 캡션이고, `alert`는 P0라 경고색이 아니라 에러색이다
+# (종전엔 셋 다 `st.warning` 하나였다 — 2026-08-11 F-3).
+_NOTICE_RENDERER = {"ok": st.caption, "expected": st.caption, "alert": st.error}
 
 
 def render_market_view(
@@ -877,8 +963,10 @@ def render_market_view(
         chosen = st.selectbox("날짜(REPLAY)", options=list(reversed(available)), key="replay_date")
     else:
         chosen = available[-1]
-        is_today, notice = _live_date_notice(chosen, today=now_kst().date())
-        (st.caption if is_today else st.warning)(notice)
+        severity, notice = _live_date_notice(
+            chosen, now=now_kst(), calendar=_event_calendar_or_none()
+        )
+        _NOTICE_RENDERER[severity](notice)
 
     bars, stale_reason = _load_bars_with_status(symbol, horizon, chosen, bar_dir)
     if stale_reason is not None:
@@ -903,6 +991,57 @@ def render_position_risk_panel(source) -> None:
     st.caption("옵션 실행 경로가 없어(known gap) 실제 보유 옵션 Greeks 합산은 항상 비어 있음")
 
 
+def _event_calendar_lines(today: date, calendar: EventCalendar | None) -> list[str]:
+    """화면 ④의 이벤트 캘린더 D-day (2026-08-11 F-5).
+
+    ## 없던 기능이 아니라 **안 붙인 기능이었다**
+
+    `core/event_calendar.py`는 2026-07-27부터 있고 `ev_core`·`sidecar`·`session_guard`·
+    `option_chain_poller`가 이미 정본으로 쓴다. 그런데 화면은 `알려진 갭 — EventCalendar
+    연동 미배선`이라고만 적혀 있었다. 2026-08-11이 8/13 먼슬리 만기 D-2였고 그 사실이 그날
+    `weekly_thu 미상장`의 **원인**인데, 화면은 두 사실 중 어느 쪽도 말하지 않았다 —
+    기동 로그에만 있었고 로그는 아침에 한 번 흘러가면 끝이다.
+
+    D-day는 **거래일 거리**로 센다(`trading_days_until`). 달력 날짜로 세면 금요일에 보는
+    "D-3"이 실제로는 하루 뒤라 급한 정도가 거꾸로 읽힌다 — 등록부 재발 문구가 거래일
+    거리를 쓰기로 한 것과 같은 근거(2026-08-10 B-3).
+
+    달력이 없으면 **한 줄로 그 사실만** 말한다. 조용히 빈칸으로 두면 "오늘 아무 이벤트도
+    없다"로 읽히는데, 그건 이 함수가 답할 수 없는 상태에서 답한 척하는 것이다.
+    """
+    if calendar is None:
+        return ["이벤트 캘린더: 휴장일 달력을 못 읽어 판정 불가 — configs/krx_holidays.yaml 확인"]
+
+    lines: list[str] = []
+    try:
+        monthly = calendar.next_monthly_expiry(today)
+        d_day = calendar.trading_days_until(today, monthly)
+        witching = " · 동시만기(쿼드러플 위칭)" if calendar.is_quadruple_witching(monthly) else ""
+        when = "오늘" if d_day == 0 else f"D-{d_day}(거래일)"
+        lines.append(f"먼슬리 만기: {monthly.isoformat()} — {when}{witching}")
+
+        weekly = calendar.next_weekly_expiry(today)
+        if weekly is not None:
+            w_day = calendar.trading_days_until(today, weekly)
+            w_when = "오늘" if w_day == 0 else f"D-{w_day}(거래일)"
+            lines.append(f"위클리 만기: {weekly.isoformat()} — {w_when}")
+
+        # 목위클리 미상장 구간은 **부재를 사고로 오인한 전례**가 있다(2026-08-07 오탐 22건).
+        # 화면이 그 사실과 복귀 예정일을 같이 말하면 사람이 매일 다시 확인하지 않는다.
+        if not calendar.thursday_weekly_listed(today):
+            resumes = calendar.thursday_weekly_listing_resumes(today)
+            resume_text = resumes.isoformat() if resumes is not None else "모름"
+            lines.append(
+                f"목위클리(weekly_thu): 오늘 미상장 — 먼슬리 만기 주라 KRX 미상장(정상) · "
+                f"{resume_text} 재개 예정"
+            )
+    except ValueError as exc:
+        # 휴장일 데이터가 없는 연도로 계산이 넘어간 경우 — 지금까지 만든 줄은 살리고 사유를 붙인다.
+        lines.append(f"이벤트 캘린더: 일부 판정 불가 — {exc}")
+
+    return lines
+
+
 def render_bottom_zone(source) -> None:
     st.subheader("④ 실행 로그 · 이벤트 캘린더 · Self-Eval")
     fill_snap = source.snapshot("Fill")
@@ -911,7 +1050,8 @@ def render_bottom_zone(source) -> None:
         st.caption(f"최근 체결: {fill.symbol} {fill.qty}계약 @ {fill.price_ticks}")
     else:
         st.caption(_absence_reason(source, "Fill") or "exec.fill 데이터 없음")
-    st.caption("이벤트 캘린더 D-day: 알려진 갭 — EventCalendar 연동 미배선")
+    for line in _event_calendar_lines(now_kst().date(), _event_calendar_or_none()):
+        st.caption(line)
     st.caption("Self-Evaluation 미니보드: Phase 5 미구현 — 자리만")
 
 

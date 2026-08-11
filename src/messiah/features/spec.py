@@ -151,6 +151,31 @@ class FeatureSpec:
     def __len__(self) -> int:
         return len(self.feature_names)
 
+    def describe(self) -> str:
+        """기동 로그 한 줄 — **"무슨 모양으로 떴는가"를 첫 발행 전에 말한다** (2026-08-11 F-1).
+
+        2026-08-10 커밋 ④-a가 운영 `feature_set`을 `v2026.08-ev`(137개)로 올리면서 다음 날
+        아침의 채점 항목을 "기동 로그에 피처 수 137이 찍히는지 확인"으로 적었는데, **그 줄을
+        찍는 코드가 어디에도 없었다.** 기동 로그가 말하던 것은 웜스타트 봉 수뿐이었고
+        `feature_set` 이름은 첫 `FeaturePublish`(DEBUG)까지 기다려야 나왔다 — 08-11 아침에
+        그 항목을 확인할 방법이 실제로 없었다.
+
+        여기 두는 이유는 카테고리·개수·사이드카가 **전부 이 객체의 파생값**이기 때문이다.
+        호출처가 각자 문자열을 조립하면 그게 곧 두 번째 사본이고, `sidecar.build()`가 여섯
+        소비자 중 셋에서 빠져 엿새를 잃은 것과 같은 형태로 어긋난다(커밋 ④-a).
+
+        미등록 이름이면 그 사실을 함께 말한다 — `resolve()`가 조용히 기저 카테고리로
+        떨어뜨리므로(모듈 docstring "미등록 이름"), 오타난 운영 설정이 "PX·VL 121개로 정상
+        기동"처럼 보이는 것을 막는다.
+        """
+        breakdown = " · ".join(f"{s.key} {len(s.feature_names)}" for s in self.category_specs)
+        sidecars = list(self.required_sidecars)
+        tail = "" if self.registered else "  ⚠ 미등록 이름 — 기저 카테고리로 해석됨"
+        return (
+            f"피처셋 {self.name} — {len(self)}개 ({breakdown}) · "
+            f"사이드카 {sidecars if sidecars else '없음'}{tail}"
+        )
+
 
 def resolve(feature_set: str) -> FeatureSpec:
     """`feature_set` 이름 → `FeatureSpec`.

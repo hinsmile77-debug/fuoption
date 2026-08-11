@@ -145,6 +145,7 @@ from messiah.core.event_calendar import EventCalendar
 from messiah.core.health import COLLECTOR_COMPONENT, HEALTH_STALE_AFTER_SECONDS
 from messiah.core.logging import log
 from messiah.core.messages import (
+    CIRCUIT_BREAKER_PHASE_WARMUP,
     BarClosed,
     BusMessage,
     CircuitBreakerStatus,
@@ -481,6 +482,27 @@ class TradingPipeline:
             ),
         )
 
+    async def _publish_circuit_breaker_warmup(self) -> None:
+        """콜드스타트 heartbeat — **"안 씀"이 아니라 "아직 못 잼"이라고 말한다** (2026-08-11 F-2).
+
+        `_publish_circuit_breaker_status()`와 갈라 둔 이유는 저쪽이 `CircuitBreakerEvent`를
+        요구하는데 여기엔 event가 **없기 때문**이다(모니터를 안 돌렸다). 가짜 event를 만들어
+        넘기면 phase가 `normal`이 되고, 그건 판정하지 않은 것을 정상으로 보고하는 것이라
+        이 수정이 고치려는 문제보다 나쁘다.
+
+        `gateway_halted`·`collector_healthy`는 판정과 무관하게 **이미 아는 사실**이라 웜업
+        중에도 함께 싣는다 — 첫 봉이 안 오는 동안 게이트가 닫혀 있으면 그게 볼 것이다.
+        """
+        await self._bus.publish(
+            TOPIC_CIRCUIT_BREAKER,
+            CircuitBreakerStatus(
+                symbol=self._symbol,
+                phase=CIRCUIT_BREAKER_PHASE_WARMUP,
+                gateway_halted=self._gateway.halted,
+                collector_healthy=self._collector_healthy(self._now()),
+            ),
+        )
+
     async def watch_circuit_breaker_forever(self) -> None:
         """`handle_futures_view()`는 `FuturesView` 도착이 있어야만 실행되는 완전 이벤트 구동
         경로라, 데이터가 끊긴 동안은 CB phase가 전혀 갱신되지 않는다 — 이 메서드가
@@ -499,9 +521,24 @@ class TradingPipeline:
         루프에서 떼어낸 이유는 검증 때문이다: 주입된 시계와 짝지으면 실제로 몇 분을 기다리지
         않고도 "데이터가 안 오는 동안 phase가 단계적으로 올라가는가"를 그대로 재현할 수 있다
         (`now` 주입 근거는 `__init__` 참고)."""
+        ## 침묵의 두 가지 뜻을 가른다 (2026-08-11 F-2)
+
+        # 모니터가 없으면 이 토픽은 **구조적으로 영원히 안 온다**(스모크·재생 구성) — 화면이
+        # "미사용"이라고 말하는 것이 맞고, 그래서 여기서는 아무것도 발행하지 않는다.
         monitor = self._circuit_breaker_monitor
-        if monitor is None or self._last_bar_confirm_at is None:
-            return  # 콜드스타트/워밍업 — 기준선 없음, CB 판정 대상 아님(위 docstring 근거)
+        if monitor is None:
+            return
+
+        # 기준선이 없으면 **판정만** 건너뛴다. 종전엔 여기서도 그냥 반환했는데, 그러면 첫 봉이
+        # 확정되기 전까지 토픽이 조용하고 화면은 그 침묵을 "미사용/데이터 없음"으로 읽는다 —
+        # 2026-08-11 08:43 실측이 그 상태였다(정상 웜업인데 화면은 기능이 꺼진 것처럼 보였다).
+        # 판정을 안 한다는 사실 자체를 발행해야 "안 씀"과 "아직 못 잼"이 갈린다
+        # (`core/health.py` "침묵도 상태다" — 침묵으로 말하면 두 사실이 같은 소리를 낸다).
+        # 콜드스타트에 판정을 건너뛰는 근거 자체는 그대로다(모듈 docstring "콜드스타트 오탐 방지").
+        if self._last_bar_confirm_at is None:
+            await self._publish_circuit_breaker_warmup()
+            return
+
         as_of = self._now()
         event = monitor.observe(
             self._data_age_seconds(as_of),

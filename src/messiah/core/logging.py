@@ -164,6 +164,11 @@ TAG_LEVELS: dict[str, int] = {
     "CommandCenterUIDown": logging.WARNING,  # UI 프로세스 사망 감지 — 자동 재기동 시도
     "CommandCenterUIRestarted": logging.INFO,  # UI 자동 재기동 성공
     "CommandCenterUIRestartGaveUp": logging.ERROR,  # 재기동 한도 소진 — 사람이 봐야 함
+    # 포트 점유자가 우리 UI인지 확인 못 함 — 2026-07-29형(남의 Streamlit이 선점) 재발 신호.
+    # ERROR인 이유: 이 상태의 결과가 "화면이 하루 종일 안 뜬다"였고 그때 아무도 몰랐다.
+    "CommandCenterUIPortForeign": logging.ERROR,
+    "CommandCenterUIPortConfirmed": logging.INFO,  # 점유자가 우리 UI로 확인됨 — 중복 기동 생략
+    "UIEventCalendarUnavailable": logging.WARNING,  # 화면의 캘린더 항목만 접는다(차트는 그대로)
     "FeatureWarmStart": logging.INFO,  # 기동 시 과거 봉으로 롤링 윈도 사전 충전
     "FeatureWarmStartFailed": logging.WARNING,  # 웜스타트 실패 — 수집은 계속(콜드스타트로 진행)
     "HealthPublishError": logging.ERROR,  # sys.health heartbeat 발행 실패 — 처리 루프는 계속(L22)

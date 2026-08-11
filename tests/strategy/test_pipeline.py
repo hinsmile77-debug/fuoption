@@ -8,6 +8,7 @@ from messiah.broker.simulator.adapter import SimBroker
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.health import COLLECTOR_COMPONENT, staleness_status
 from messiah.core.messages import (
+    CIRCUIT_BREAKER_PHASE_WARMUP,
     BarClosed,
     CircuitBreakerStatus,
     FuturesView,
@@ -347,6 +348,71 @@ async def test_circuit_breaker_watchdog_uses_the_injected_clock():
     await pipeline.observe_circuit_breaker_tick()  # 워치독 1틱만 수행
 
     assert published and published[0].phase == CircuitBreakerPhase.NORMAL.value
+
+
+@pytest.mark.asyncio
+async def test_watchdog_says_warming_up_before_the_first_bar():
+    """**침묵이 두 가지를 뜻하면 안 된다** (2026-08-11 F-2).
+
+    2026-08-11 08:43 화면은 `서킷브레이커 미사용/데이터 없음`이었는데 모니터는 정상
+    주입돼 있었다 — 첫 봉 전이라 워치독이 조용했을 뿐이다. 그 침묵이 "이 구성엔 CB가
+    없다"로 읽혔다. 판정을 안 한다는 사실 자체가 발행돼야 한다.
+    """
+    bus, _broker, gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor()
+    )
+    published: list[CircuitBreakerStatus] = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["sys.circuit_breaker"], collector)
+
+    await pipeline.observe_circuit_breaker_tick()  # 봉을 한 번도 안 넣은 상태
+
+    assert [p.phase for p in published] == [CIRCUIT_BREAKER_PHASE_WARMUP]
+    # 판정은 여전히 건너뛴다 — 콜드스타트 오탐 방지(2026-07-29)는 그대로여야 한다.
+    assert pipeline._circuit_breaker_monitor.phase == CircuitBreakerPhase.NORMAL
+    assert gateway.halted is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stays_silent_when_no_monitor_is_injected():
+    """모니터 미주입은 **구조적 부재**라 화면의 "미사용"이 맞는 문구다 — 이 경우까지
+    heartbeat를 보내면 웜업 수정이 반대 방향의 거짓말을 하게 된다."""
+    bus, _broker, _gateway, pipeline = await _make_pipeline()  # circuit_breaker_monitor 없음
+    published: list[CircuitBreakerStatus] = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["sys.circuit_breaker"], collector)
+
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_warmup_heartbeat_stops_once_the_baseline_exists():
+    """웜업 문구가 남아 있으면 그것대로 거짓이다 — 첫 봉이 확정되면 실제 phase로 바뀐다."""
+    fake_now = _START + timedelta(minutes=_WARMUP_BARS)
+    bus, broker, _gateway, pipeline = await _make_pipeline(
+        circuit_breaker_monitor=CircuitBreakerMonitor(), now=lambda: fake_now
+    )
+    published: list[CircuitBreakerStatus] = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["sys.circuit_breaker"], collector)
+
+    await pipeline.observe_circuit_breaker_tick()
+    await _warm_up(pipeline, broker)
+    published.clear()
+    await pipeline.observe_circuit_breaker_tick()
+
+    assert [p.phase for p in published] == [CircuitBreakerPhase.NORMAL.value]
 
 
 @pytest.mark.asyncio
