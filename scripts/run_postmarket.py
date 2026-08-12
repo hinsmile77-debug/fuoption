@@ -79,6 +79,8 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from messiah.core import logging as mlog  # noqa: E402
+from messiah.core.config import load_instance  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -260,9 +262,25 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
     return planned
 
 
+def _instance_id(config_dir: str) -> str:
+    try:
+        return load_instance(config_dir).instance_id
+    except Exception:  # noqa: BLE001 — 설정을 못 읽어도 장후 절차는 돌아야 한다
+        return "unset"
+
+
 def main() -> int:
     args = _parse_args()
     session_guard.refuse_if_regular_session("장후 절차 일괄 실행", force=args.force_intraday)
+
+    # **이 프로세스도 자기 세션 경계를 남긴다** (2026-08-12 F-5).
+    #
+    # 종전엔 `postmarket_*.log`에 `SessionStart` 한 줄이 있었지만 그건 **자식**
+    # (`daily_integrity_report.py`)이 찍은 것이었고, 이 프로세스 자신은 시작도 끝도 말하지
+    # 않았다. 그래서 장후 배치가 3/5단계에서 죽어도 어떤 축도 조용했다 —
+    # SYSTEM.md R13(종료 시퀀스 자기검증)·금지계명 14가 요구하는 것을, "장후 배치보다 먼저
+    # 결론 내지 말라"는 운영 규율의 근거 자체가 못 갖추고 있었다.
+    mlog.setup(_instance_id(args.configs))
 
     day = args.date or datetime.now().astimezone().date()  # noqa: DTZ005 — 로컬=KST 전제
     print(f"=== MESSIAH 장후 절차 — {day.isoformat()} / {args.symbol} ===", flush=True)
@@ -273,37 +291,56 @@ def main() -> int:
     # 자식이 다시 거부하면 "통과시킨 줄 알았는데 아무것도 안 돌았다"가 된다.
     passthrough = ["--force-intraday"] if args.force_intraday else []
 
-    results = [
-        _run_step(Step(step.name, step.argv + passthrough, step.one_means_finding))
-        for step in _steps(args, day)
-    ]
+    # `try/finally`인 이유: 예외로 죽는 경로에서도 마커를 남겨야 "죽었다"가 관측된다.
+    # 마커가 예외 때만 빠지면 **가장 알고 싶은 날에만 없는 축**이 된다.
+    results: list[StepResult] = []
+    try:
+        results = [
+            _run_step(Step(step.name, step.argv + passthrough, step.one_means_finding))
+            for step in _steps(args, day)
+        ]
 
-    print("\n=== 장후 절차 요약 ===", flush=True)
-    for result in results:
-        print(f"  {result.mark} {result.name} — {result.detail}", flush=True)
+        print("\n=== 장후 절차 요약 ===", flush=True)
+        for result in results:
+            print(f"  {result.mark} {result.name} — {result.detail}", flush=True)
 
-    failed = [r for r in results if not r.ok]
-    if failed:
-        # 조용한 실패 금지 — 무엇이 안 돌았는지 한 줄로 말하고 종료 코드로도 알린다.
-        print(
-            f"\n  ** {len(failed)}개 단계 실패 ** — 리포트의 `미측정`/`horizon_findings`가 "
-            "그대로 남는다. 등록부(daily-axes-measured)가 다음 채점에서 잡는다.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return 1
+        failed = [r for r in results if not r.ok]
+        if failed:
+            # 조용한 실패 금지 — 무엇이 안 돌았는지 한 줄로 말하고 종료 코드로도 알린다.
+            print(
+                f"\n  ** {len(failed)}개 단계 실패 ** — 리포트의 `미측정`/`horizon_findings`가 "
+                "그대로 남는다. 등록부(daily-axes-measured)가 다음 채점에서 잡는다.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
 
-    findings = [r for r in results if r.finding]
-    if findings:
-        # 실패와 **다른 사건**이다 — 절차는 다 돌았고, 그 절차가 볼 것을 찾았다.
-        print(
-            f"\n  전 단계 완료 — 그중 {len(findings)}개가 볼 것을 찾았다. "
-            "리포트의 임계 초과 목록을 읽을 것.",
-            flush=True,
-        )
+        findings = [r for r in results if r.finding]
+        if findings:
+            # 실패와 **다른 사건**이다 — 절차는 다 돌았고, 그 절차가 볼 것을 찾았다.
+            print(
+                f"\n  전 단계 완료 — 그중 {len(findings)}개가 볼 것을 찾았다. "
+                "리포트의 임계 초과 목록을 읽을 것.",
+                flush=True,
+            )
+            return 0
+        print("\n  전 단계 완료 — 발견 없음. 리포트의 `미측정`이 비어 있어야 한다.", flush=True)
         return 0
-    print("\n  전 단계 완료 — 발견 없음. 리포트의 `미측정`이 비어 있어야 한다.", flush=True)
-    return 0
+    finally:
+        planned = len(_steps(args, day))
+        failed_count = sum(1 for r in results if not r.ok)
+        # 문구는 `run_l1_daily.py`/`run_g2_paper_trading.py`와 같은 형식("정상 종료")을
+        # 쓰되, 몇 단계까지 갔는지를 함께 남긴다 — 중간에 죽은 날 그 숫자가 곧 진단이다.
+        mlog.log(
+            "SessionEnd",
+            "정상 종료" if len(results) == planned and not failed_count else "중단",
+            process="postmarket",
+            date=day.isoformat(),
+            steps_planned=planned,
+            steps_run=len(results),
+            steps_failed=failed_count,
+            steps_with_findings=sum(1 for r in results if r.finding),
+        )
 
 
 if __name__ == "__main__":

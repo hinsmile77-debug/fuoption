@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 # Windows 콘솔 기본 코드페이지(cp949)가 한글 출력을 깨뜨리는 것 방지
@@ -202,6 +203,75 @@ def check_host(*, collector=None) -> CheckResult:
     return CheckResult("host", True, " · ".join(parts))
 
 
+def check_bar_close(cfg: InstanceConfig) -> CheckResult:
+    """1분봉 확정 방식을 기동 로그에 노출한다 (2026-08-12 F-5 / NEXT_TODO R-1).
+
+    ## 왜 설정 파일만으로는 부족한가
+
+    `configs/instance.yaml`의 `minute_bar_close`는 **G-4 승격의 대상 그 자체**다(마지막 틱
+    구동 → 거래소 시각 경계 구동). 2026-08-12 점검에서 그 값이 `timer`인 것은 파일로
+    확인됐지만 **기동 로그 어디에도 안 찍혔다** — 즉 "그날 프로세스가 실제로 어느 방식으로
+    돌았나"를 사후에 로그만 보고는 말할 수 없었다. 승격 여부는 `late_bar_drops: 0`과
+    커버리지 100%로 **간접** 확인됐을 뿐이고, 직접 관측 축이 없었다.
+
+    이 저장소가 반복해 온 실패 형태가 정확히 그것이다(결선했다고 믿는데 안 붙어 있음).
+    설정과 실제가 어긋나는 날 이 한 줄이 그 사실을 그날 아침에 말한다.
+
+    **판정하지 않는다** — 두 값 다 정당한 설정이다. 노출이 목적이다.
+    """
+    mode_value = getattr(cfg, "minute_bar_close", None)
+    if mode_value == "timer":
+        detail = "1분봉 확정: timer (거래소 시각 경계 구동)"
+    elif mode_value:
+        detail = f"1분봉 확정: {mode_value} (마지막 틱 구동 — timer 승격 대상)"
+    else:
+        detail = "1분봉 확정: 설정 없음(기본값 사용)"
+    return CheckResult("bar_close", True, detail)
+
+
+def check_prev_postmarket(
+    *, log_dir: Path = Path("logs"), today: date | None = None
+) -> CheckResult:
+    """**직전 거래일의 장후 배치가 끝까지 갔는가** (2026-08-12 F-5).
+
+    ## 왜 여기서 보나 — 순서 함정
+
+    장후 배치(`run_postmarket.py`)의 5/5단계가 그날 무결성 리포트를 **자기가** 만든다.
+    그러니 그 리포트가 쓰이는 시점에 postmarket 자신의 `SessionEnd`는 아직 안 찍혀 있다 —
+    당일 리포트에 이 판정을 넣으면 **매일 오탐 1건**이 생긴다(2026-08-12 P1-3의
+    `daily-axes-measured`와 정확히 같은 형태의 함정이다).
+
+    그래서 하루 뒤에, 파일이 완결된 뒤에 본다. 장전 자가점검이 그 자리다.
+
+    **기동은 막지 않는다.** 어제 장후 배치가 실패한 것이 오늘 수집을 포기할 이유는 아니다
+    (`check_host`와 같은 원칙) — 대신 그 사실을 detail에 남겨 아침에 눈에 띄게 한다.
+    """
+    today = today or now_kst().date()
+    logs = sorted(log_dir.glob("postmarket_*.log"))
+    previous = [p for p in logs if p.stem[len("postmarket_") :] < today.strftime("%Y%m%d")]
+    if not previous:
+        return CheckResult("postmarket", True, "직전 장후 배치 로그 없음 — 판정 불가")
+
+    path = previous[-1]
+    stamp = path.stem[len("postmarket_") :]
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        return CheckResult("postmarket", True, f"{stamp} 로그 읽기 실패: {exc}")
+
+    # 태그로만 센다 — 설명 문구 안의 단어("no-silent-process-death"의 해설 등)에 걸리면
+    # 안 돈 날을 돈 날로 읽는다(2026-08-12에 실제로 그 문자열이 로그에 있었다).
+    ended = '"tag": "SessionEnd"' in text
+    if not ended:
+        return CheckResult(
+            "postmarket",
+            True,
+            f"경고: {stamp} 장후 배치가 SessionEnd를 안 남겼다 — 중간에 죽었을 수 있다"
+            f" (그날 리포트의 `미측정`이 그대로 남는다: run_postmarket.py --date {stamp})",
+        )
+    return CheckResult("postmarket", True, f"{stamp} 장후 배치 정상 종료 확인")
+
+
 def check_git_state(mode: str) -> CheckResult:
     """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제).
 
@@ -334,7 +404,10 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     results.append(check_timezone())
     results.append(check_clock())
     results.append(check_host())
+    # 어제 장후 배치의 결말 — 오늘 아침이 그것을 볼 수 있는 첫 시점이다(F-5의 순서 함정).
+    results.append(check_prev_postmarket())
     if cfg is not None:
+        results.append(check_bar_close(cfg))
         results.append(check_git_state(cfg.mode))
         results.append(check_secrets(cfg))
         results.append(check_bundle(cfg))
