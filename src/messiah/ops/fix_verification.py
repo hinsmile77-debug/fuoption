@@ -101,6 +101,22 @@ def _absent_watchlist_features(report: dict[str, Any]) -> float | None:
     return float(total) if seen_field else None
 
 
+def _regime_unknown_ratio(report: dict[str, Any]) -> float | None:
+    """국면 판정 중 `UNKNOWN`의 비율 — 못 잰 날은 None (2026-08-12 F-2).
+
+    못 잰 날이 둘이다: ① 이 필드 이전에 쓰인 옛 리포트 ② 국면이 아예 안 배선돼
+    `RegimeClassified`가 하루 종일 0건인 날. **둘 다 0.0이 아니다** — 0으로 세면 국면이
+    죽어 있던 날이 "UNKNOWN 0% 통과"로 기록되고, 그건 이 지표가 잡으려는 상태 그 자체다.
+    """
+    distribution = report.get("regime_distribution")
+    if not isinstance(distribution, dict) or not distribution:
+        return None
+    total = sum(v for v in distribution.values() if isinstance(v, (int, float)))
+    if total <= 0:
+        return None
+    return float(distribution.get("UNKNOWN", 0)) / float(total)
+
+
 def _native_crashes(report: dict[str, Any]) -> float | None:
     """집계 불가(`available=False`)는 **0건이 아니라 판정 불가**다 — 못 센 날을 "깨끗한 날"로
     세면 검증이 통과해 버린다(L18, 이 프로젝트에서 가장 자주 재발하는 실패 형태)."""
@@ -392,6 +408,16 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # **승격이 조용히 안 먹은 것**이다 — 이 프로젝트가 반복한 실패 형태(결선했다고 믿는데
     # 안 붙어 있음)를 이 자리에서 잡는다. 채점을 안 돌린 날은 None(판정 불가).
     "absent_watchlist_features": _absent_watchlist_features,
+    # 국면 판정 중 UNKNOWN의 비율 (2026-08-12 F-2). **분포인가 상수인가**를 묻는다.
+    #
+    # 이 지표가 없던 2026-08-12에 국면은 하루 종일 100% UNKNOWN이었고, 그날 Meta Decision
+    # 14건이 전부 첫 관문에서 접혀 Risk·Sizer·OrderGateway가 한 번도 호출되지 않았다.
+    # 그런데 그날 리포트의 `breaches`는 수급 다리 결손 1건뿐이었다 — 판단 축의 전면 마비를
+    # 재는 자리가 등록부에도 리포트에도 없었다.
+    #
+    # 필드가 없는 옛 리포트와 국면이 안 배선된 날은 **None**(판정 불가)이다 — 0.0이 아니다.
+    # 그 둘을 0으로 뭉개면 국면이 죽어 있던 날들이 "UNKNOWN 0% 통과"로 기록된다(L18).
+    "regime_unknown_ratio": _regime_unknown_ratio,
 }
 
 
@@ -567,11 +593,25 @@ def _as_date(value: Any) -> date:
 
 
 def load_daily_reports(log_dir: Path = DEFAULT_LOG_DIR) -> dict[date, dict[str, Any]]:
-    """`logs/daily_integrity_YYYYMMDD.json` 전부 — 날짜 → 리포트 dict."""
+    """`logs/daily_integrity_YYYYMMDD.json` 전부 — 날짜 → 리포트 dict.
+
+    ## 예비본은 안 읽는다 (2026-08-12 F-3)
+
+    `provisional: true`인 리포트는 **장후 산출물이 생기기 전**(15:36)에 쓰인 불완전본이다.
+    거래량 대조·변동성 채점 파일이 그 시점엔 물리적으로 존재할 수 없어 `unmeasured`가
+    구조적으로 비지 않는데, 그 상태로 채점하면 `daily-axes-measured`가 **매일 거짓 재발**을
+    낸다(08-11·08-12 이틀 연속 실측 — 11분 뒤 최종본의 `unmeasured`는 `[]`였다).
+
+    건너뛴 날은 그 날짜의 판정 자체가 **미측정**으로 남는다 — 통과로도 위반으로도 안 센다.
+    그 침묵이 방치되지 않는 이유는 확정본 생성 시 `_stale_provisional_findings()`가
+    "예비본으로 남아 있다"를 오늘 breach로 올리기 때문이다. 두 장치는 짝이다.
+    """
     reports: dict[date, dict[str, Any]] = {}
     for path in sorted(log_dir.glob("daily_integrity_*.json")):
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
+            if report.get("provisional"):
+                continue
             reports[date.fromisoformat(report["date"])] = report
         except (OSError, ValueError, KeyError):
             continue  # 깨진 리포트 하나가 나머지 채점을 막지 않는다

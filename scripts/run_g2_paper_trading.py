@@ -87,7 +87,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -111,6 +111,7 @@ from messiah.core.health import HealthReporter  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import LaunchedUI, launch_command_center  # noqa: E402
+from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
 from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
@@ -135,6 +136,10 @@ _REGISTRY_DB = Path("data/models/registry.db")
 # Registry(번들 상태기계)에 안 얹는 이유는 그쪽 단위가 Horizon당 하나인데 RegimeAI는
 # 프로세스당 하나라서다(`train_regime_ai.py` 모듈 docstring).
 _REGIME_MODEL_PATH = Path("data/models/regime_ai")
+# 국면 웜스타트가 읽는 아카이브 (2026-08-12 F-1). `run_l1_daily._DATA_DIR`·
+# `ops/integrity_report.DEFAULT_BAR_DIR`와 같은 자리다 — 이 프로세스는 봉을 **쓰지** 않고
+# 기동 시 한 번 **읽기만** 한다(수집은 전적으로 run_l1_daily.py의 일이다).
+_BAR_DIR = Path("data") / "bars"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -216,7 +221,66 @@ def _load_futures_service(
     return FuturesAIService(symbol, experts, bus, meta_labelers=meta_labelers)
 
 
-def _load_regime_runtime(symbol: str, bus: MessageBus) -> RegimeRuntime | None:
+def _warm_start_regime(runtime: RegimeRuntime, symbol: str, today: date) -> None:
+    """국면 이력 버퍼를 아카이브의 과거 30m 완성봉으로 채운다 (2026-08-12 F-1).
+
+    `run_l1_daily._load_warmup_artifacts()`와 **같은 로더**(`ParquetArchiver.
+    load_recent_bars`)를 쓴다 — 두 벌을 만들면 이 저장소가 이미 네 번 겪은 "정본 아닌
+    소비자"가 다섯 번째로 생긴다(`ops/canonical_consumers.py`가 존재하는 이유).
+
+    ## 왜 필요한가
+
+    `classify()`의 하한은 22봉인데 하루가 만드는 30m 봉은 15봉이다. 웜스타트가 없으면
+    **매 거래일 장 마감까지 하한을 못 넘고**, 그날 판단은 전량 `Regime=UNKNOWN` →
+    `NO_TRADE`가 된다(2026-08-12 실측 14/14). 자세한 산술은 `regime/runtime.py` 모듈
+    docstring.
+
+    실패해도 기동은 계속한다 — 국면은 부가 입력이지 이 프로세스의 전제조건이 아니다
+    (`_load_regime_runtime()`의 로드 실패 처리와 같은 원칙). 다만 조용히 넘어가지 않는다.
+    """
+    try:
+        history = ParquetArchiver(_BAR_DIR).load_recent_bars(
+            symbol, Horizon.M30, on_or_before=today, max_bars=runtime.history_capacity
+        )
+        loaded = runtime.warm_start(history)
+    except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 운영을 막으면 안 됨
+        mlog.log(
+            "RegimeWarmStartFailed",
+            f"국면 웜스타트 실패 — 콜드스타트로 진행(오늘 판정은 UNKNOWN에서 시작): {exc}",
+            symbol=symbol,
+        )
+        print(f"국면 웜스타트 실패 — 콜드스타트로 진행: {exc}", flush=True)
+        return
+
+    minimum = runtime.min_bars_for_classify
+    mlog.log(
+        "RegimeWarmStart",
+        f"과거 완성봉으로 국면 이력 사전 충전 (용량 {runtime.history_capacity}봉)",
+        symbol=symbol,
+        horizon=Horizon.M30.value,
+        bars=loaded,
+        min_bars=minimum,
+    )
+    print(f"국면 웜스타트: {loaded}봉 (하한 {minimum}봉)", flush=True)
+    if loaded < minimum:
+        # 조용한 폴백 금지(금지계명 12) — 모델은 멀쩡히 로드됐는데 판정만 계속 실패하는
+        # 상태가 정확히 2026-08-12였고, 그날 `WARNING` 한 줄도 없었다.
+        mlog.log(
+            "RegimeWarmStartShort",
+            f"충전 {loaded}봉 < 하한 {minimum}봉 — 오늘 국면은 UNKNOWN으로 시작한다"
+            f"(30m 아카이브가 얕다: run_backfill.py 확인)",
+            symbol=symbol,
+            bars=loaded,
+            min_bars=minimum,
+        )
+        print(
+            "  ** 하한 미달 — 하루 30m 봉은 15개뿐이라 실시간으로는 못 채운다. "
+            "오늘 판단은 대부분 NO_TRADE가 된다 **",
+            flush=True,
+        )
+
+
+def _load_regime_runtime(symbol: str, bus: MessageBus, today: date) -> RegimeRuntime | None:
     """저장된 `RegimeAI`가 있으면 `intel.regime` 발행을 결선한다 (2026-08-11 ④-c).
 
     ## 이 배선이 없던 동안 무슨 일이 있었나
@@ -262,7 +326,9 @@ def _load_regime_runtime(symbol: str, bus: MessageBus) -> RegimeRuntime | None:
         f"· 구동 {Horizon.M30.value}",
         flush=True,
     )
-    return RegimeRuntime(symbol, regime_ai, bus)
+    runtime = RegimeRuntime(symbol, regime_ai, bus)
+    _warm_start_regime(runtime, symbol, today)
+    return runtime
 
 
 def _load_shadow_manager(registry: ModelRegistry, symbol: str, bus: MessageBus) -> ShadowManager:
@@ -480,7 +546,7 @@ async def main(cfg: InstanceConfig) -> None:
 
     futures_service = _load_futures_service(registry, symbol, bus, cfg.feature_set)
     shadow_manager = _load_shadow_manager(registry, symbol, bus)
-    regime_runtime = _load_regime_runtime(symbol, bus)
+    regime_runtime = _load_regime_runtime(symbol, bus, today)
 
     broker = SimBroker(cash=cfg.capital.total)
     await broker.connect()

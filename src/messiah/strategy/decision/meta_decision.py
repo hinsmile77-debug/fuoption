@@ -55,6 +55,24 @@ SCORE_THRESHOLD = 0.20  # Ver 2.0 §3.1 ④⑤
 
 _EVENT_LIKE_REGIMES = frozenset({Regime.EVENT, Regime.UNKNOWN})
 
+# 판단 사슬의 **관문 이름** (2026-08-12 G-1). 로그의 구조화 필드로 나가고 무결성 리포트가
+# 이것을 세어 `decision_funnel`을 만든다.
+#
+# ## 왜 사유 문자열을 파싱하지 않고 코드가 직접 세나
+#
+# 2026-08-12에 `decide()`의 다섯 갈래 중 **②에서 14/14가 접혔다.** 그런데 그날 리포트가
+# 아는 것은 `DecisionEmitted: 14`뿐이었다 — ③·④·⑤가 **한 번도 평가되지 않았다**는 사실,
+# 즉 Risk Engine·Sizer·OrderGateway가 통째로 미검증 상태라는 사실이 어디에도 안 남았다.
+#
+# 사유 문자열(`rationale`)에 ①~⑤가 이미 들어 있지만 그것을 사후에 정규식으로 긁는 것은
+# 다른 실패다: 문구를 다듬는 순간 조용히 0이 된다. **코드가 자기 갈래를 직접 말한다.**
+GATE_KILL = "kill"  # ① sys.kill 활성
+GATE_REGIME = "regime"  # ② 이벤트/미판정 국면
+GATE_DISPERSION = "dispersion"  # ③ 전문가 의견 분산
+GATE_SCORE = "score"  # ④ |S| 미달
+GATE_PASS = "pass"  # ⑤ 통과 — 여기까지 와야 Risk·Sizer·OrderGateway가 돈다
+DECISION_GATES = (GATE_KILL, GATE_REGIME, GATE_DISPERSION, GATE_SCORE, GATE_PASS)
+
 
 @dataclass(frozen=True)
 class MetaDecisionConfig:
@@ -70,18 +88,25 @@ class MetaDecisionEngine:
         cfg = self._config
 
         if kill_active:
-            return self._no_trade(view, "① sys.kill 활성 — 무조건 NO TRADE")
+            return self._no_trade(view, "① sys.kill 활성 — 무조건 NO TRADE", gate=GATE_KILL)
         if view.regime in _EVENT_LIKE_REGIMES:
-            return self._no_trade(view, f"② Regime={view.regime.value} — 이벤트/미판정 국면")
+            return self._no_trade(
+                view,
+                f"② Regime={view.regime.value} — 이벤트/미판정 국면",
+                gate=GATE_REGIME,
+            )
         if view.dispersion > cfg.dispersion_threshold:
             return self._no_trade(
                 view,
                 f"③ 전문가 의견 분산 {view.dispersion:.3f} > {cfg.dispersion_threshold} — "
                 "의견이 갈리면 배팅하지 않는다",
+                gate=GATE_DISPERSION,
             )
         if abs(view.score) < cfg.score_threshold:
             return self._no_trade(
-                view, f"④ |S|={abs(view.score):.3f} < {cfg.score_threshold} — 우위 부족"
+                view,
+                f"④ |S|={abs(view.score):.3f} < {cfg.score_threshold} — 우위 부족",
+                gate=GATE_SCORE,
             )
 
         side = Side.LONG if view.score >= cfg.score_threshold else Side.SHORT
@@ -109,10 +134,11 @@ class MetaDecisionEngine:
             symbol=view.symbol,
             side=side.value,
             confidence=confidence,
+            gate=GATE_PASS,
         )
         return intent
 
-    def _no_trade(self, view: FuturesView, rationale: str) -> DecisionIntent:
+    def _no_trade(self, view: FuturesView, rationale: str, *, gate: str) -> DecisionIntent:
         intent = DecisionIntent(
             symbol=view.symbol,
             side=Side.NO_TRADE,
@@ -125,5 +151,5 @@ class MetaDecisionEngine:
             latency_trace={},
             rationale=rationale,
         )
-        mlog.log("DecisionEmitted", rationale, symbol=view.symbol, side="NO_TRADE")
+        mlog.log("DecisionEmitted", rationale, symbol=view.symbol, side="NO_TRADE", gate=gate)
         return intent

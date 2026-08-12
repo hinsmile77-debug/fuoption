@@ -1607,3 +1607,162 @@ def test_an_unreadable_exit_log_lands_in_unmeasured(tmp_path: Path):
 
     assert any("진입점 종료 코드" in item for item in report.unmeasured)
     assert not any("종료 코드" in item for item in report.breaches)
+
+
+# ---------------------------------------------- 국면 분포 축 (2026-08-12 F-2)
+
+
+def _regime_log(tmp_path: Path, regimes: list[str]) -> Path:
+    """`RegimeClassified` 로그 — 국면 판정 하나에 한 줄(`strategy/regime/runtime.py`)."""
+    path = tmp_path / "g2.log"
+    records = [{"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"}]
+    for i, regime in enumerate(regimes):
+        records.append(
+            {
+                "ts": f"2026-07-29T{9 + i // 2:02d}:{(i % 2) * 30:02d}:00+09:00",
+                "level": "INFO",
+                "tag": "RegimeClassified",
+                "regime": regime,
+            }
+        )
+    _write_log(path, records)
+    return path
+
+
+def test_a_constant_unknown_regime_becomes_a_breach(tmp_path: Path):
+    """2026-08-12 실측 재현 — 판정 14건이 전부 UNKNOWN이었고 리포트는 조용했다.
+
+    그날 `breaches`는 수급 다리 결손 1건뿐이었다. 판단 사슬의 첫 관문이 하루 종일 닫혀
+    Risk·Sizer·OrderGateway가 한 번도 안 돌았다는 사실이 아무 흔적도 안 남겼다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = _report2(tmp_path, logs={"g2_paper": [_regime_log(tmp_path, ["UNKNOWN"] * 14)]})
+
+    assert report.regime_distribution == {"UNKNOWN": 14}
+    assert report.regime_unknown_ratio == 1.0
+    assert any("국면 판정의 100%가 UNKNOWN" in item for item in report.breaches)
+    assert "국면 분포: UNKNOWN=14 · UNKNOWN 100% ❌" in format_summary(report)
+
+
+def test_a_real_distribution_passes(tmp_path: Path):
+    """웜업 구간의 UNKNOWN 몇 건은 정상이다 — 0으로 두면 늑대소년이 된다."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    regimes = ["UNKNOWN", "UNKNOWN", "TREND_UP", "RANGE", "RANGE", "TREND_DOWN"]
+
+    report = _report2(tmp_path, logs={"g2_paper": [_regime_log(tmp_path, regimes)]})
+
+    assert report.regime_unknown_ratio == pytest.approx(1 / 3)
+    assert not any("UNKNOWN" in item for item in report.breaches)
+
+
+def test_no_regime_logs_is_unmeasured_not_zero(tmp_path: Path):
+    """국면 미배선인 날을 "UNKNOWN 0%"로 세면 등록부가 그날을 통과로 센다 (L18)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    log = tmp_path / "quiet.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"}])
+
+    report = _report2(tmp_path, logs={"g2_paper": [log]})
+
+    assert report.regime_distribution is None
+    assert report.regime_unknown_ratio is None
+    assert "국면 분포: 미측정" in format_summary(report)
+
+
+# ------------------------------------------ 판단 사슬 관문 통과율 (2026-08-12 G-1)
+
+
+def test_the_decision_funnel_shows_where_the_chain_folded(tmp_path: Path):
+    """②에서 14/14가 접혔다는 사실이 리포트에 남는다.
+
+    종전엔 `DecisionEmitted: 14`만 남아, ③·④·⑤가 **한 번도 평가되지 않았다**는 것 —
+    즉 Risk·Sizer·OrderGateway가 통째로 미검증이라는 것 — 이 어디에도 없었다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+    path = tmp_path / "g2.log"
+    _write_log(
+        path,
+        [{"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"}]
+        + [
+            {
+                "ts": "2026-07-29T09:00:00+09:00",
+                "level": "INFO",
+                "tag": "DecisionEmitted",
+                "side": "NO_TRADE",
+                "gate": "regime",
+            }
+        ]
+        * 14,
+    )
+
+    report = _report2(tmp_path, logs={"g2_paper": [path]})
+
+    assert report.decision_funnel == {"regime": 14}
+    summary = format_summary(report)
+    assert "판단 사슬: ②국면=14" in summary
+    assert "Risk·Sizer·OrderGateway 미검증" in summary
+
+
+def test_old_logs_without_a_gate_field_are_unmeasured(tmp_path: Path):
+    """`gate` 필드 이전에 쓰인 로그는 판정 불가다 — 0으로 접으면 거짓 통과다(L18)."""
+    _write_bars(tmp_path / "bars", list(range(30)))
+    path = tmp_path / "g2.log"
+    _write_log(
+        path,
+        [
+            {"ts": "2026-07-29T08:35:00+09:00", "level": "INFO", "tag": "SessionStart"},
+            {"ts": "2026-07-29T09:00:00+09:00", "level": "INFO", "tag": "DecisionEmitted"},
+        ],
+    )
+
+    report = _report2(tmp_path, logs={"g2_paper": [path]})
+
+    assert report.decision_funnel is None
+    assert "판단 사슬: 미측정" in format_summary(report)
+
+
+# ------------------------------------------- 예비 리포트 분리 (2026-08-12 F-3)
+
+
+def test_a_leftover_provisional_report_becomes_a_breach(tmp_path: Path):
+    """예비본이 확정본으로 안 덮인 채 남으면 그날 장후 배치가 안 돈 것이다.
+
+    **이 판정과 `load_daily_reports`의 예비본 건너뛰기는 짝이다.** 건너뛰기만 넣으면
+    배치가 실패한 날 채점이 통째로 사라지고 아무도 모른다 — 그 침묵이 이 프로젝트가
+    가장 자주 반복한 실패다(08-10이 정확히 그런 날이었다).
+    """
+    from messiah.ops.integrity_report import _stale_provisional_findings
+
+    (tmp_path / "daily_integrity_20260728.json").write_text(
+        json.dumps({"date": "2026-07-28", "provisional": True}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    findings = _stale_provisional_findings(_DAY, tmp_path)
+
+    assert len(findings) == 1
+    assert "2026-07-28" in findings[0]
+    assert "run_postmarket.py --date 2026-07-28" in findings[0]
+
+
+def test_a_final_report_leaves_no_finding(tmp_path: Path):
+    from messiah.ops.integrity_report import _stale_provisional_findings
+
+    (tmp_path / "daily_integrity_20260728.json").write_text(
+        json.dumps({"date": "2026-07-28", "provisional": False}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert _stale_provisional_findings(_DAY, tmp_path) == []
+
+
+def test_todays_own_provisional_report_is_not_a_finding(tmp_path: Path):
+    """지금 쓰고 있는 중인 오늘 것을 세면 확정본이 매일 자기를 신고한다."""
+    from messiah.ops.integrity_report import _stale_provisional_findings
+
+    (tmp_path / f"daily_integrity_{_DAY:%Y%m%d}.json").write_text(
+        json.dumps({"date": _DAY.isoformat(), "provisional": True}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert _stale_provisional_findings(_DAY, tmp_path) == []

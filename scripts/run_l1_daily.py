@@ -756,9 +756,19 @@ def _write_integrity_report(today: date, symbol: str, instance_id: str) -> None:
     `ops/integrity_report.py` 모듈 docstring). 봉 flush가 끝난 **뒤**에 불러야 그날 마지막
     봉까지 집계에 들어간다.
 
-    실패해도 종료 절차를 막지 않는다 — 리포트는 관측 수단이지 운영 전제조건이 아니다."""
+    실패해도 종료 절차를 막지 않는다 — 리포트는 관측 수단이지 운영 전제조건이 아니다.
+
+    ## 이 리포트는 **예비본**이다 (2026-08-12 F-3)
+
+    여기는 15:36이고 장후 산출물(`volume_check_*.json` 15:45 · `vol_scorecard_*.json`
+    15:46)은 아직 없다 — 그건 설계대로다(REST를 종료 예산에 안 넣는다). 그래서
+    `provisional=True`로 쓴다: 화면과 파일에는 남되 **등록부 채점은 하지 않는다.**
+    그러지 않으면 `daily-axes-measured`가 매일 거짓 `재발`을 낸다(08-11·08-12 실측 —
+    11분 뒤 `run_postmarket.py`의 재생성본에서는 같은 축이 깨끗했다).
+
+    확정본은 `scripts/run_postmarket.py`의 5/5단계가 쓴다."""
     try:
-        generate_and_write(day=today, symbol=symbol, instance_id=instance_id)
+        generate_and_write(day=today, symbol=symbol, instance_id=instance_id, provisional=True)
     except Exception as exc:  # noqa: BLE001
         mlog.log(
             "IntegrityThresholdBreached",

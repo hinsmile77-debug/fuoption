@@ -809,3 +809,68 @@ def test_registry_reads_since_from_yaml(tmp_path: Path):
 
     assert item.since == date(2026, 8, 10)
     assert item.scored_after == date(2026, 8, 10)
+
+
+# ------------------------------------------- 예비 리포트 분리 (2026-08-12 F-3)
+
+
+def test_provisional_reports_are_not_scored(tmp_path: Path):
+    """15:36 예비본은 채점 대상이 아니다 — 그게 매일 거짓 재발을 만들던 자리다.
+
+    08-11·08-12에 `daily-axes-measured`가 이틀 연속 「오늘 기준 위반 — 수정이 듣지 않았다」로
+    ERROR를 냈는데, 11분 뒤 최종본의 `unmeasured`는 `[]`였다. **애초에 위반이 아니었다.**
+    """
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    bad = _report(date(2026, 8, 5), native_crashes={"available": True, "count": 9, "details": []})
+    bad["provisional"] = True
+    (log_dir / "daily_integrity_20260805.json").write_text(
+        json.dumps(bad, ensure_ascii=False), encoding="utf-8"
+    )
+    (log_dir / "daily_integrity_20260806.json").write_text(
+        json.dumps(_report(date(2026, 8, 6)), ensure_ascii=False), encoding="utf-8"
+    )
+
+    reports = load_daily_reports(log_dir)
+
+    assert date(2026, 8, 5) not in reports, "예비본은 이력에 들어오지 않는다"
+    assert date(2026, 8, 6) in reports, "확정본은 그대로 채점된다"
+
+
+def test_final_report_is_scored_even_when_a_provisional_one_existed(tmp_path: Path):
+    """같은 날짜의 확정본이 나중에 덮으면 그날은 정상 채점된다 — 침묵이 남으면 안 된다."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    final = _report(date(2026, 8, 5))
+    final["provisional"] = False
+    (log_dir / "daily_integrity_20260805.json").write_text(
+        json.dumps(final, ensure_ascii=False), encoding="utf-8"
+    )
+
+    assert date(2026, 8, 5) in load_daily_reports(log_dir)
+
+
+# ------------------------------------------- 국면 분포 지표 (2026-08-12 F-2)
+
+
+def test_regime_unknown_ratio_reads_the_distribution():
+    extract = METRIC_EXTRACTORS["regime_unknown_ratio"]
+
+    # 2026-08-12 실측 — 14건 전부 UNKNOWN. 이 값이 1.0이라는 사실이 그날 어디에도 없었다.
+    assert extract(_report(date(2026, 8, 12), regime_distribution={"UNKNOWN": 14})) == 1.0
+    assert extract(
+        _report(date(2026, 8, 13), regime_distribution={"UNKNOWN": 2, "TREND_UP": 8})
+    ) == pytest.approx(0.2)
+
+
+def test_regime_unknown_ratio_is_none_when_unmeasured():
+    """옛 리포트와 **국면 미배선인 날**은 0.0이 아니라 판정 불가다 (L18).
+
+    0으로 세면 국면이 죽어 있던 날이 "UNKNOWN 0% 통과"로 기록된다 — 이 지표가 잡으려는
+    상태 그 자체가 통과로 둔갑한다.
+    """
+    extract = METRIC_EXTRACTORS["regime_unknown_ratio"]
+
+    assert extract(_report(date(2026, 8, 12))) is None, "필드 없는 옛 리포트"
+    assert extract(_report(date(2026, 8, 12), regime_distribution=None)) is None, "국면 미배선"
+    assert extract(_report(date(2026, 8, 12), regime_distribution={})) is None, "빈 분포"

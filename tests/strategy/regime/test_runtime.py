@@ -87,6 +87,118 @@ async def test_state_duration_accumulates_across_calls():
 
 
 @pytest.mark.asyncio
+async def test_cold_start_stays_unknown_until_minimum_bars():
+    """현행 동작 보존 — 웜스타트 없이는 하한 전까지 UNKNOWN이다 (2026-08-12 F-1).
+
+    이게 무해한 워밍업으로 보였던 것이 문제의 핵심이었다: 하루가 만드는 30m 봉(15개)이
+    하한(22)보다 적어 **실제 운영에서는 이 구간이 하루 종일**이었다.
+    """
+    fit_bars = _bars(120)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    bus = InProcessBus()
+    published = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["intel.regime"], collector)
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, bus)
+
+    minimum = regime_ai.min_bars_for_classify
+    for bar in fit_bars[: minimum - 1]:
+        await runtime.handle_bar(bar)
+
+    assert len(published) == minimum - 1
+    assert all(
+        p.regime is Regime.UNKNOWN for p in published
+    ), "하한 미만에서는 UNKNOWN이어야 한다 — 이 동작 자체는 설계대로다"
+
+
+@pytest.mark.asyncio
+async def test_warm_start_classifies_from_the_very_first_bar():
+    """웜스타트를 채우면 **첫 봉부터** 판정이 난다 — F-1이 겨냥한 그 차이다."""
+    fit_bars = _bars(120)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    bus = InProcessBus()
+    published = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["intel.regime"], collector)
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, bus)
+
+    history = _bars(200)[:100]
+    loaded = runtime.warm_start(history)
+    assert loaded == 100
+    assert not published, "웜스타트는 발행하지 않는다 — 채우기만 한다"
+
+    await runtime.handle_bar(fit_bars[0])
+
+    assert len(published) == 1
+    assert (
+        published[0].regime is not Regime.UNKNOWN
+    ), "충전 후 첫 봉이 UNKNOWN이면 웜스타트가 안 먹은 것이다"
+
+
+def test_warm_start_filters_and_sorts_like_feature_engine():
+    """심볼/Horizon이 안 맞는 봉은 버리고, 시간순이 아니어도 정렬한다."""
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, InProcessBus())
+
+    mixed = [
+        *_bars(3, symbol="OTHER"),
+        *_bars(2, horizon=Horizon.M5),
+        *reversed(_bars(5)),
+    ]
+    assert runtime.warm_start(mixed) == 5
+
+    bars = runtime._bars()  # noqa: SLF001 — 정렬 결과를 직접 확인
+    assert [b.bar_open_kst for b in bars] == sorted(b.bar_open_kst for b in bars)
+
+
+def test_warm_start_respects_capacity():
+    """용량을 넘으면 최신 것만 남는다 — `deque(maxlen)` 계약."""
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, InProcessBus(), history_limit=30)
+
+    assert runtime.history_capacity == 30
+    assert runtime.warm_start(_bars(120)) == 30
+    assert runtime._bars()[-1].bar_open_kst == _bars(120)[-1].bar_open_kst  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_classification_is_logged_for_the_report_axis(monkeypatch):
+    """판정마다 `RegimeClassified`를 남긴다 (2026-08-12 F-2).
+
+    이 태그가 리포트의 `regime_distribution`의 유일한 재료다 — 없으면 "14건 전부 UNKNOWN"
+    같은 상태를 사람이 로그를 눈으로 읽어야만 발견한다.
+    """
+    from messiah.strategy.regime import runtime as runtime_module
+
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        runtime_module.mlog, "log", lambda tag, msg, **fields: logged.append((tag, fields))
+    )
+
+    fit_bars = _bars(120)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, InProcessBus())
+    runtime.warm_start(_bars(200)[:100])
+
+    await runtime.handle_bar(fit_bars[0])
+
+    tags = [tag for tag, _ in logged]
+    assert tags == ["RegimeClassified"]
+    fields = logged[0][1]
+    assert fields["regime"] in {r.value for r in Regime}
+    assert fields["bars_used"] == 101
+    assert fields["min_bars"] == regime_ai.min_bars_for_classify
+
+
+@pytest.mark.asyncio
 async def test_run_forever_subscribes_to_driving_horizon_topic():
     fit_bars = _bars(100)
     regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))

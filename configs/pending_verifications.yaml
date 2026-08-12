@@ -535,3 +535,29 @@ verifications:
     max: 0
     consecutive_days: 3
     deadline: 2026-08-21
+
+  - id: regime-not-constant
+    summary: "국면이 분포인가 상수인가(2026-08-12 F-1/F-2) — RegimeRuntime 웜스타트"
+    registered: 2026-08-12
+    # 2026-08-12에 국면 판정이 **하루 종일 100% UNKNOWN**이었다. 사고가 아니라 산술이었다:
+    # `classify()`의 하한은 window+2 = 22봉인데 `RegimeRuntime`이 빈 deque로 기동해
+    # 당일 실시간 30m 봉만 받았고, 하루가 만드는 30m 봉은 15봉이다. 15 < 22이므로
+    # **장 마감까지 단 한 번도 하한을 못 넘는다** — 매 거래일 결정적으로 보장된 상태였다.
+    #
+    # 그 결과 Meta Decision 14건이 전부 규칙 ②에서 접혔고 Risk·Sizer·OrderGateway가
+    # 하루 한 번도 호출되지 않았다. 08-11에 결선한 사슬(`2ac5339`)의 실효가 0이었다는 뜻이다.
+    #
+    # F-1(웜스타트)이 처방이고 이 항목이 그 결과를 잰다. **F-2가 없으면 채점할 값 자체가
+    # 없었다** — 그날 리포트의 판단 측 지표는 `tag_counts.DecisionEmitted`(건수)뿐이었고,
+    # 전면 마비가 `breaches` 한 줄도 없이 지나갔다.
+    #
+    # **max 0.5인 이유**: 0으로 두면 늑대소년이 된다 — UNKNOWN 발행은 원래 정상 경로다
+    # (`RegimeAI` docstring "판단 불가 → UNKNOWN 발행"). 잡으려는 것은 "조금 많다"가 아니라
+    # **상수**이고, 08-12 실측은 1.00이었다. `train_regime_ai.MAX_UNKNOWN_RATIO`와 같은
+    # 값이다 — 홀드아웃에서 결선을 허가한 기준을 운영에서 다르게 재면 두 판정이 어긋난다.
+    #
+    # 미측정(옛 리포트·국면 미배선)은 통과로도 위반으로도 안 센다(`_regime_unknown_ratio`).
+    metric: regime_unknown_ratio
+    max: 0.5
+    consecutive_days: 3
+    deadline: 2026-08-21

@@ -67,6 +67,27 @@ class RegimeAI:
         return self._model.n_states
 
     @property
+    def min_bars_for_classify(self) -> int:
+        """`classify()`가 UNKNOWN을 즉시 반환하지 않으려면 필요한 최소 봉 수.
+
+        `classify()` 본문이 쓰는 것과 **같은 값**이다(아래 `min_length`) — 호출측이
+        "몇 봉을 채워야 하나"를 알아야 하는데, 그 값을 웜스타트 코드에 다시 하드코딩하면
+        window를 바꾼 날 한쪽만 바뀐다. 2026-08-12에 이 값(22)과 하루가 만드는 30m 봉
+        수(15)의 대소가 곧 그날 판단 전량이 NO_TRADE였던 이유였고, 그 산술을 호출측이
+        스스로 확인할 수 있어야 한다(`features/engine.py`의 `history_capacity`와 같은 취지).
+        """
+        return self._window + 2
+
+    @property
+    def recommended_history_bars(self) -> int:
+        """전이행렬이 startprob을 충분히 씻어내는 이력 길이 — 웜스타트 충전량의 하한.
+
+        `classify()`가 `bars[-(min_length + _FILTER_OBSERVATIONS):]`를 잘라 쓰므로 그보다
+        짧으면 사후분포에 초기분포의 영향이 남는다(그 docstring "짧으면 있는 만큼만 쓰고,
+        그 경우 startprob의 영향이 남는다")."""
+        return self.min_bars_for_classify + _FILTER_OBSERVATIONS
+
+    @property
     def labels(self) -> dict[int, Regime]:
         """상태 인덱스 -> Regime 명명 결과(사본) — 사람 검수·스모크 출력용."""
         return dict(self._labels)
@@ -130,7 +151,7 @@ class RegimeAI:
         사라진다. 미래 참조는 없다 — 전부 판정 시점까지의 과거 관측이다.
         """
         symbol = bars[-1].symbol if bars else "UNKNOWN"
-        min_length = self._window + 2
+        min_length = self.min_bars_for_classify
         if len(bars) < min_length:
             return self._emit(
                 symbol,

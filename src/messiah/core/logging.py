@@ -185,6 +185,19 @@ TAG_LEVELS: dict[str, int] = {
     "UIEventCalendarUnavailable": logging.WARNING,  # 화면의 캘린더 항목만 접는다(차트는 그대로)
     "FeatureWarmStart": logging.INFO,  # 기동 시 과거 봉으로 롤링 윈도 사전 충전
     "FeatureWarmStartFailed": logging.WARNING,  # 웜스타트 실패 — 수집은 계속(콜드스타트로 진행)
+    # 국면 판정 한 건 (2026-08-12 F-2, `strategy/regime/runtime.py`). 30분마다 한 줄.
+    #
+    # 이 태그가 없던 2026-08-12에 국면은 **하루 종일 100% UNKNOWN**이었고, 그 전면 마비가
+    # 리포트를 아무 자국 없이 통과했다 — 판단 측 지표가 `tag_counts.DecisionEmitted`(건수)
+    # 뿐이라 "몇 건 나왔나"는 알고 "무엇이 나왔나"는 몰랐다. 국면의 유일한 증거가 Meta
+    # Decision의 NO_TRADE 사유 **문자열**이었다는 뜻이다.
+    "RegimeClassified": logging.INFO,
+    # 국면 이력 버퍼를 과거 완성봉으로 사전 충전 (2026-08-12 F-1) — `FeatureWarmStart`와 대칭.
+    "RegimeWarmStart": logging.INFO,
+    # 충전했는데도 `classify()` 하한(window+2)에 못 닿는다 — 그날 국면은 UNKNOWN으로
+    # 시작하고, 아카이브가 얕다는 뜻이다. 조용히 콜드스타트로 넘어가지 않는다(금지계명 12).
+    "RegimeWarmStartShort": logging.WARNING,
+    "RegimeWarmStartFailed": logging.WARNING,  # 웜스타트 실패 — 국면 없이라도 기동은 계속
     "HealthPublishError": logging.ERROR,  # sys.health heartbeat 발행 실패 — 처리 루프는 계속(L22)
     "IntegrityReportGenerated": logging.INFO,  # 일일 무결성 리포트 산출
     "IntegrityThresholdBreached": logging.WARNING,  # 무결성 지표가 임계 초과 — 사람이 봐야 함

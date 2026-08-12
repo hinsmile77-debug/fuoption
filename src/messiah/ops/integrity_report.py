@@ -50,7 +50,7 @@ import polars as pl
 
 from messiah.core import universe
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
-from messiah.core.messages import BarSession, Horizon
+from messiah.core.messages import BarSession, Horizon, Regime
 from messiah.core.timeutil import KST, now_kst
 from messiah.data import tick_archiver
 from messiah.data.archiver import ParquetArchiver
@@ -99,6 +99,15 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # 본다. 재합성(`run_recompose.py`)을 돌리면 아카이브는 복구되지만 **그날 수집이 실제로
     # 손상됐다는 사실은 남아야 한다** — 안 그러면 다음 날 "어제는 깨끗했는데"로 읽힌다.
     "late_bar_drops": 0.0,
+    # 국면 판정 중 UNKNOWN의 비율 (2026-08-12 F-2, `strategy/regime/runtime.py`).
+    #
+    # **0.5인 이유**: 0으로 두면 늑대소년이 된다 — 개장 직후 웜업 구간이나 아카이브가 얕은
+    # 날에 UNKNOWN이 일부 섞이는 것은 정상 동작이다(`RegimeAI` docstring "판단 불가 →
+    # UNKNOWN 발행"은 정상 운영 경로다). 잡으려는 것은 "조금 많다"가 아니라 **상수**다:
+    # 2026-08-12에 이 값이 **1.00**이었고 그날 Meta Decision 14건이 전부 첫 관문에서 접혔다.
+    # `scripts/train_regime_ai.py`의 결선 관문(`MAX_UNKNOWN_RATIO`)과 **같은 값**이다 —
+    # 홀드아웃에서 통과시킨 기준을 운영에서 다른 잣대로 재면 두 판정이 어긋난다.
+    "regime_unknown_ratio": 0.5,
     # 관측 공백(분) — 프로세스가 죽어 아무것도 못 본 구간 (2026-08-06 P1-1).
     #
     # **5분인 이유**: 부팅 트리거가 붙은 뒤 재부팅 복구의 설계값이 부팅 30초 + 트리거 지연
@@ -294,9 +303,54 @@ class IntegrityReport:
     # `canonical_consumer_gaps`를 판다."* A-1~A-3이 진짜 결손을 breach로 올리기 시작하면서
     # 그날이 왔다. 이 판정은 **코드 구조**라 그날 데이터와 무관해야 한다.
     canonical_consumer_findings: list[str] = field(default_factory=list)
+    # **국면 판정의 분포** (2026-08-12 F-2, `strategy/regime/runtime.py`의 `RegimeClassified`).
+    #
+    # `tag_counts.DecisionEmitted`가 "몇 건 판단했나"를 센다면 이쪽은 **"무엇을 판단했나"**를
+    # 센다. 2026-08-12에 국면은 하루 종일 100% `UNKNOWN`이었고 — 즉 Meta Decision 14건이
+    # 전부 첫 관문에서 접혀 Risk·Sizer·OrderGateway가 하루 한 번도 호출되지 않았고 —
+    # 그런데도 그날 `breaches`는 수급 다리 결손 1건뿐이었다. 판단 축의 전면 마비가
+    # 리포트를 아무 흔적 없이 통과할 수 있었던 이유가 이 축의 부재다.
+    #
+    # **None은 미측정이다**(태그가 하루 종일 없었다 = 국면 미배선). 빈 dict와 구분한다(L18)
+    # — 그래야 등록부가 "국면이 안 붙은 날"을 통과로도 위반으로도 세지 않는다.
+    regime_distribution: dict[str, int] | None = None
+    # **이 리포트가 장후 산출물 이전에 만들어진 불완전본인가** (2026-08-12 F-3).
+    #
+    # True면 `unmeasured`에 거래량 대조·변동성 채점이 남아 있는 것이 **정상**이다 —
+    # 그 파일들은 15:45~15:46에 생기고 이 리포트는 15:36에 쓰였다. 등록부는 이 리포트를
+    # 채점하지 않는다(`fix_verification.load_daily_reports`). 자세한 사유는
+    # `generate_and_write()`의 `provisional` 절 참고.
+    provisional: bool = False
+    # **판단 사슬이 어디까지 살아 있었나** (2026-08-12 G-1, `decision/meta_decision.py`).
+    #
+    # `regime_distribution`이 첫 관문 하나를 본다면 이쪽은 **전 경로**를 본다 — 마스터플랜
+    # Ver 2.0 §9 W24~26 「Aggregator·Meta Decision·Risk Engine·Sizer·Kill Switch 전 경로
+    # 관통」의 진척도를 그대로 수치화한 것이다. 그 관통을 무엇으로 증명할지가 지금까지
+    # 정의돼 있지 않았다.
+    #
+    # 2026-08-12 실측이면 `{"regime": 14}`가 된다 — `pass`가 0이라는 것은 그날
+    # Risk Engine·Sizer·OrderGateway가 **한 번도 호출되지 않았다**는 뜻이고, 그 사실이
+    # `주문 0건`과 구별되지 않은 채 "기회가 없었다"로 읽히던 것이 이 축의 신설 사유다.
+    #
+    # None은 미측정(판단 0건 = 사슬 미배선)이다 — 빈 dict와 구분한다(L18).
+    decision_funnel: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def regime_unknown_ratio(self) -> float | None:
+        """국면 판정 중 `UNKNOWN`의 비율 — 못 쟀으면 None.
+
+        **분포가 아니라 상수인지**를 묻는 값이다. 1.0이면 그날 판단 경로가 통째로 죽어
+        있었다는 뜻이고(2026-08-12 실측), 그 상태는 주문 0건과 구별되지 않는 채로
+        "기회가 없었다"로 오독된다."""
+        if not self.regime_distribution:
+            return None
+        total = sum(self.regime_distribution.values())
+        if total <= 0:
+            return None
+        return self.regime_distribution.get(Regime.UNKNOWN.value, 0) / total
 
 
 # ---------------------------------------------------------------- 봉 연속성
@@ -541,6 +595,12 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     allowed_constants: dict[str, float] = {}
     nan_by_horizon: dict[str, list[float]] = {}
     cb_events: dict[str, int] = {}
+    # 국면 판정 분포 (2026-08-12 F-2) — 태그가 하나도 없으면 **빈 dict가 아니라 미측정**으로
+    # 올라간다(L18: 0과 못 잼을 섞지 않는다). 그 변환은 `build_report()`가 한다.
+    regime_counts: dict[str, int] = {}
+    # 판단 사슬의 관문별 통과·차단 건수 (2026-08-12 G-1). `regime_counts`와 같은 규율로
+    # 비어 있으면 미측정이다(판단이 하루 종일 0건이면 사슬 자체가 안 붙은 것이다).
+    decision_gates: dict[str, int] = {}
 
     # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
     # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
@@ -593,6 +653,20 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 allowed_constants.update(
                     {str(k): float(v) for k, v in allowed.items() if isinstance(v, (int, float))}
                 )
+        elif tag == "DecisionEmitted":
+            # 판단 사슬의 **어느 관문에서 접혔나** (2026-08-12 G-1). 사유 문자열이 아니라
+            # 엔진이 넘긴 구조화 필드를 센다(`strategy/decision/meta_decision.py`
+            # `DECISION_GATES` — 문구를 다듬는 순간 조용히 0이 되는 파싱을 피한다).
+            gate = record.get("gate")
+            if isinstance(gate, str) and gate:
+                decision_gates[gate] = decision_gates.get(gate, 0) + 1
+        elif tag == "RegimeClassified":
+            # 국면 **분포** (2026-08-12 F-2). 건수가 아니라 내역을 센다 — 2026-08-12엔
+            # `DecisionEmitted: 14`만 남아 "14건 나왔다"는 알았지만 **그 14건이 전부 같은
+            # 사유(UNKNOWN)로 접혔다**는 것은 로그를 눈으로 읽어야만 알 수 있었다.
+            value = record.get("regime")
+            if isinstance(value, str) and value:
+                regime_counts[value] = regime_counts.get(value, 0) + 1
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -635,6 +709,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "allowed_constant_values": allowed_constants,
         "nan_ratio_by_horizon": nan_summary,
         "circuit_breaker_events": cb_events,
+        "regime_counts": regime_counts,
+        "decision_gates": decision_gates,
     }
 
 
@@ -1297,6 +1373,37 @@ def build_report(
             "확정됐다(장 종료 후 `run_recompose.py`로 재합성 필요, 원인은 수집 경로에 있다)"
         )
 
+    # ---- 국면 판정의 분포 (2026-08-12 F-2) ----
+    #
+    # 태그가 하루 종일 하나도 없으면 **미측정**이다(국면이 안 배선된 날) — 빈 dict가 아니라
+    # None으로 둔다(L18). 그래야 등록부가 그날을 통과로도 위반으로도 세지 않는다.
+    regime_distribution: dict[str, int] | None = (
+        dict(sorted(logs["regime_counts"].items())) if logs["regime_counts"] else None
+    )
+    regime_unknown = (
+        None
+        if not regime_distribution
+        else regime_distribution.get(Regime.UNKNOWN.value, 0) / sum(regime_distribution.values())
+    )
+    if regime_unknown is not None and regime_unknown > limits["regime_unknown_ratio"]:
+        # **분포가 아니라 상수일 때만 운다.** 개장 직후 웜업 구간에서 UNKNOWN이 몇 건 나오는
+        # 것은 정상이므로 0으로 두면 늑대소년이 된다 — 절반을 넘으면 그건 분포가 아니다.
+        breaches.append(
+            f"국면 판정의 {regime_unknown:.0%}가 UNKNOWN "
+            f"(임계 {limits['regime_unknown_ratio']:.0%}) — Meta Decision 규칙 ②가 그만큼을 "
+            "NO_TRADE로 보낸다(Risk·Sizer·OrderGateway가 그 비율만큼 미검증)"
+        )
+
+    # ---- 판단 사슬 관문 통과율 (2026-08-12 G-1) ----
+    #
+    # **판정은 안 한다.** `pass`가 0인 날이 정상일 수 있다 — 우위가 없으면 안 쏘는 것이
+    # 설계다(규칙 ④). 잡으려는 것은 "왜 0인가"를 사람이 매일 로그로 캐지 않게 하는 것이고,
+    # 그 원인이 국면이면 `regime_unknown_ratio`가 이미 운다. 여기서 또 울면 같은 사실에
+    # 경보가 둘이 된다(늑대소년).
+    decision_funnel: dict[str, int] | None = (
+        dict(sorted(logs["decision_gates"].items())) if logs["decision_gates"] else None
+    )
+
     # **측정 불능은 0건이 아니다** (2026-08-05). 종전에는 `available=False`가 조용히
     # 지나가서, 크래시 0건인 날에만 집계가 실패하는 결함이 드러나지 않았고 그 상태로는
     # "3거래일 연속 크래시 0건" 등록부가 영원히 판정을 못 채웠다.
@@ -1585,6 +1692,8 @@ def build_report(
         abnormal_exits=abnormal_exits,
         observation_gaps=[gap.to_dict() for gap in observation.gaps],
         host_events=[event.to_dict() for event in observation.events],
+        regime_distribution=regime_distribution,
+        decision_funnel=decision_funnel,
         breaches=breaches,
     )
 
@@ -1692,6 +1801,33 @@ def format_summary(report: IntegrityReport) -> str:
         f"  버킷 유실(늦은 봉·미완 확정): {report.late_bar_drops}건"
         + (" ✅" if report.late_bar_drops == 0 else " ⚠")
     )
+    # **국면 분포** (2026-08-12 F-2) — 판단 사슬의 첫 관문이 오늘 살아 있었나.
+    # 미측정도 찍는다: "국면이 안 붙은 날"이 "붙었는데 조용한 날"처럼 보이면 안 된다(L18).
+    if report.regime_distribution is None:
+        lines.append("  국면 분포: 미측정(RegimeClassified 로그 없음 — 국면 미배선)")
+    else:
+        unknown = report.regime_unknown_ratio or 0.0
+        spread = " ".join(f"{k}={v}" for k, v in report.regime_distribution.items())
+        mark = "✅" if unknown <= DEFAULT_THRESHOLDS["regime_unknown_ratio"] else "❌"
+        lines.append(f"  국면 분포: {spread} · UNKNOWN {unknown:.0%} {mark}")
+    # **판단 사슬이 어디까지 갔나** (2026-08-12 G-1) — 판정은 안 하고 매일 보여만 준다.
+    # `통과 0`이 정상일 수 있지만, 그 0이 ②에서 접혀서인지 ④에서 접혀서인지는 매일 달라진다.
+    if report.decision_funnel is None:
+        lines.append("  판단 사슬: 미측정(DecisionEmitted 없음 — 사슬 미배선)")
+    else:
+        labels = {
+            "kill": "①kill",
+            "regime": "②국면",
+            "dispersion": "③분산",
+            "score": "④우위부족",
+            "pass": "⑤통과",
+        }
+        funnel = " ".join(
+            f"{labels.get(gate, gate)}={count}" for gate, count in report.decision_funnel.items()
+        )
+        passed = report.decision_funnel.get("pass", 0)
+        tail = "" if passed else " — Risk·Sizer·OrderGateway 미검증"
+        lines.append(f"  판단 사슬: {funnel}{tail}")
     # 적재 계열 커버리지 (2026-08-06 고도화 2) — **정상인 계열도 전부 찍는다.**
     # 2026-08-06에 리포트가 조용했던 이유는 이 계열들을 "정상"으로 판정해서가 아니라
     # 아예 안 봐서였다. 목록 자체가 "무엇을 보고 있는가"의 증거다.
@@ -1842,12 +1978,33 @@ def generate_and_write(
     instance_id: str,
     bar_dir: Path = DEFAULT_BAR_DIR,
     log_dir: Path = DEFAULT_LOG_DIR,
+    provisional: bool = False,
 ) -> IntegrityReport:
     """리포트를 만들어 `logs/daily_integrity_YYYYMMDD.json`에 쓰고 로그에 남긴다.
 
     CLI(`scripts/daily_integrity_report.py`)와 장후 종료 절차(`run_l1_daily.py`)가 같은
     함수를 쓴다 — 두 경로가 갈리면 "손으로 돌린 리포트와 자동 리포트가 다르다"는 최악의
     형태가 된다.
+
+    ## `provisional` — 11분 먼저 만든 리포트가 매일 거짓 재발을 냈다 (2026-08-12 F-3)
+
+    같은 날짜에 리포트가 **두 번** 생성된다: `run_l1_daily.py`의 종료 절차가 15:36에 한 번,
+    `run_postmarket.py`의 5/5단계가 15:47에 다시. 앞의 것은 구조적으로 불완전하다 —
+    거래량 대조(`volume_check_*.json` 15:45)와 변동성 채점(`vol_scorecard_*.json` 15:46)이
+    그 시점에 **물리적으로 존재할 수 없기** 때문이다. 그건 설계대로다(REST 호출을 종료
+    예산 안에 넣지 않는다는 판단, `_volume_check_artifact` 주석).
+
+    문제는 그 불완전본이 **등록부까지 채점**했다는 것이다. 2026-08-12 15:36 리포트가
+    `daily-axes-measured: 오늘 기준 위반 — 수정이 듣지 않았다`를 ERROR로 냈고, 11분 뒤
+    최종본의 `unmeasured`는 `[]`였다 — **애초에 위반이 아니었다.** 08-11에 장후 배치를
+    15:45로 정시화한 뒤 이틀 연속 그랬다. 자동화가 만든 부작용이고, `fix_verification`의
+    최고 신호(**재발**)가 매일 1건씩 가짜로 채워지는 형태다.
+
+    그래서 예비본은 ① 등록부 채점·로깅을 건너뛰고 ② JSON에 `"provisional": true`를 심는다.
+    **반대 안(15:45 이전에는 장후 축을 면제한다)은 기각했다** — 그건 장후 배치가 아예 안 돈
+    날을 침묵시킨다. 08-10이 정확히 그런 날이었고(도구를 저녁에 수동 실행), 그 침묵이 이
+    프로젝트가 가장 자주 반복한 실패다. 이 안은 반대로 배치가 안 돌면 `provisional` 파일이
+    그대로 남아 **그 사실 자체가 신호**가 된다(`_stale_provisional_finding`).
     """
     from messiah.core import logging as mlog  # 순환 방지용 지역 임포트 아님 — 로깅만 필요
 
@@ -1858,6 +2015,12 @@ def generate_and_write(
         bar_dir=bar_dir,
         log_paths=log_paths_for(day, log_dir),
     )
+    report.provisional = provisional
+    if not provisional:
+        # 어제(그리고 그 전) 예비본이 확정본으로 안 덮인 채 남아 있으면 그날 장후 배치가
+        # 안 돈 것이다 — 위 docstring이 기각한 대안의 구멍을 이 줄이 막는다.
+        report.breaches.extend(_stale_provisional_findings(day, log_dir))
+
     out_path = log_dir / f"daily_integrity_{day.strftime('%Y%m%d')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
@@ -1865,21 +2028,60 @@ def generate_and_write(
     )
 
     print(format_summary(report), flush=True)
+    if provisional:
+        print(
+            "  (예비 리포트 — 장후 산출물 이전이라 `미측정`이 남는다. 등록부 채점은 "
+            "15:45 장후 배치의 재생성본이 한다: run_postmarket.py)",
+            flush=True,
+        )
     mlog.log(
         "IntegrityReportGenerated",
-        "일일 무결성 리포트 산출",
+        "일일 무결성 리포트 산출" + (" (예비본 — 등록부 채점 없음)" if provisional else ""),
         date=report.date,
         symbol=symbol,
         restarts_by_process=report.restarts_by_process,
         breaches=len(report.breaches),
+        provisional=provisional,
         path=str(out_path),
     )
     for breach in report.breaches:
         mlog.log("IntegrityThresholdBreached", breach, date=report.date, symbol=symbol)
 
+    if provisional:
+        # **여기서 끝낸다.** 예비본은 자기가 불완전하다는 것을 알고 있고, 그 상태로 등록부를
+        # 채점하면 "수정이 듣지 않았다"는 거짓말을 매일 ERROR로 만든다(위 docstring).
+        return report
+
     _report_loss_budget(log_dir)
     _report_fix_verifications(day, log_dir)
     return report
+
+
+def _stale_provisional_findings(day: date, log_dir: Path) -> list[str]:
+    """확정본으로 안 덮인 채 남은 과거 예비 리포트 (2026-08-12 F-3).
+
+    예비본이 등록부 채점을 건너뛰므로, 장후 배치가 실패한 날은 **그날 채점이 통째로
+    사라진다.** 그 구멍을 여기서 막는다 — 남아 있다는 사실 자체를 오늘 breach로 올린다.
+    이 두 변경은 반드시 함께 있어야 한다(하나만 넣으면 침묵이 생긴다).
+
+    오늘 것은 안 센다 — 지금 쓰고 있는 중이다.
+    """
+    out: list[str] = []
+    for path in sorted(log_dir.glob("daily_integrity_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # 깨진 리포트 하나가 오늘 리포트를 막지 않는다
+        if not payload.get("provisional"):
+            continue
+        stamp = str(payload.get("date", ""))
+        if stamp >= day.isoformat():
+            continue
+        out.append(
+            f"{stamp} 리포트가 예비본으로 남아 있다 — 그날 장후 배치(run_postmarket.py)가 "
+            f"안 돌아 등록부 채점이 통째로 없다 (복구: run_postmarket.py --date {stamp})"
+        )
+    return out
 
 
 def _report_loss_budget(log_dir: Path) -> None:
