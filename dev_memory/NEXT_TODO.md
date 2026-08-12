@@ -3490,3 +3490,125 @@ v2026.08-ev (08-07)  37/842        0.147         804      ← 7.4배
       heartbeat성 관측자가 필요한데, 실제 사망은 종료 코드 축이 이미 정확히 잡는다
       (08-11 실증). **지금은 안 고치는 것이 맞다** — 관측자 없는 프로세스는 보수적으로
       우는 편이 낫고, 두 축이 서로를 검산한다.
+
+---
+
+## 2026-08-12 장후 점검 — Fix 6종 + 고도화 4종 ([MW0601], 2026-08-12)
+
+상세는 `DECISION_LOG.md` 2026-08-12 장후 항목 · 보고서 `logs/dailycheck/2026-08-12_post_report.md`.
+
+### 착수 전 조사 (F-1의 선행 조건 — 이것부터)
+
+- [x] **조사-1** `scripts/train_regime_ai.py`의 시계열 분할 방식 — **연속으로 잇는다.
+      F-1은 유효하다.** (2026-08-12 확인)
+
+      `load_continuous_series()` → `aggregate_to_horizon(m1_bars, M30)`로 소급 한계일
+      (2025-12-12)부터 오늘까지를 **하나의 시계열**로 적합하고(192행), 홀드아웃 판정도
+      `classify(bars[: i + 1])`로 일자를 걸친 전체 이력을 넘긴다(109행). 즉 **휴장 경계에서
+      끊지 않는 것이 이 모델의 전제**이고, 매일 빈 deque로 출발하던 런타임이 오히려 학습과
+      어긋나 있었다. 웜스타트는 그 어긋남을 없애는 방향이다.
+
+      → **G-2의 차단 질문이 여기서 답해졌다.** 구동 Horizon 15m 전환은 불필요하다
+      (그 대안은 "일별로 끊는다"를 택했을 때만 따라오는 것이었다).
+
+### Fix (P0부터) — **6종 전부 구현 완료 (2026-08-12 장후)**
+
+- [x] **F-1 (P0)** `RegimeRuntime` 웜스타트 — 구현 완료.
+      **계획과 다른 점**: `__init__` 인자가 아니라 `warm_start()` **메서드**로 넣었다.
+      `FeatureEngine.warm_start()`가 이미 그 형태이고(계산은 클래스가, 적재는 호출측이),
+      대칭을 맞추는 편이 두 웜스타트를 나란히 읽게 한다. 로더는 계획대로 정본 하나
+      (`ParquetArchiver.load_recent_bars`)를 재사용했다 — 두 벌을 만들지 않았다.
+      하한 미달 시 `RegimeWarmStartShort`(WARNING).
+- [x] **F-2 (P0)** 국면 분포 축 — 구현 완료. `RegimeClassified` 태그 → `regime_distribution`
+      (미측정은 None) → `regime_unknown_ratio` → 등록부 `regime-not-constant`(max 0.5).
+      임계는 `train_regime_ai.MAX_UNKNOWN_RATIO`와 **같은 값**으로 맞췄다 — 홀드아웃에서
+      결선을 허가한 기준을 운영에서 다르게 재면 두 판정이 어긋난다.
+- [x] **F-3 (P1)** 예비 리포트 채점 제외 — 구현 완료. `provisional` 플래그 +
+      `load_daily_reports`가 예비본 건너뜀 + `_stale_provisional_findings()`가 잔존 예비본을
+      breach로. **둘은 계획대로 같은 커밋에 함께** 들어갔다.
+- [x] **F-4 (P1)** 수급 재시도 예산 — 구현 완료.
+      **계획 정정**: 보고서는 `RETRY_ATTEMPTS 2→3`이라고 적었으나 실제 상수는 **1**이었다
+      (총 시도 = 1 + ATTEMPTS = 2회, 그래서 로그가 「2회 시도」였다). 의도(총 3회)는 그대로,
+      **1 → 2**로 올렸다. 지수 백오프(0.5→1.0초) · 5xx/타임아웃만 · 총 상한 40초.
+      `option_chain_poller`는 같은 정본을 공유하는 것으로 확인(카덴스 5·10분이라 40초 상한이
+      먼저 걸릴 일 없음).
+- [x] **F-5 (P2)** — 구현 완료. **계획과 다른 점**: `abnormal_exits` 대상에 postmarket을
+      추가하지 **않았다**. 그 경로엔 함정이 둘인데 보고서는 하나만 봤다:
+      ① 리포트를 postmarket 자신이 만들어 당일엔 자기 `SessionEnd`가 없다(보고서가 지적한 것)
+      ② `postmarket_*.log`는 자식(`daily_integrity_report.py`)의 `SessionStart`도 담는 **합쳐진
+      stdout**이라, postmarket이 자기 마커를 찍으면 그 파일의 `SessionStart`가 2개가 되어
+      `restarts 1회` 오탐이 새로 생긴다.
+      → 판정을 리포트가 아니라 **다음 날 장전 자가점검**(`check_prev_postmarket`)에 뒀다.
+      전일 파일은 그 시점에 완결돼 있고, 기동을 막지 않는 경고로만 남는다.
+      `check_bar_close`로 R-1(`1분봉 확정: timer`)도 함께 해소.
+- [x] **F-6 (P2)** `collect_evidence.py` — 구현 완료. 08-12 로그 재실행으로 §9 적신호 3·8이
+      「기동 창 거절 1회(정상)」로 바뀌는 것 확인.
+
+### 고도화 — **4종 중 3종 구현 완료 · G-2는 조사로 종결**
+
+- [x] **G-1** 판단 사슬 관문 통과율 축 — 구현 완료. `meta_decision.py`가 `gate` 구조화 필드를
+      넘기고(`DECISION_GATES` = kill/regime/dispersion/score/pass) 리포트가 `decision_funnel`로
+      집계한다. **사유 문자열을 파싱하지 않는다** — 문구를 다듬는 순간 조용히 0이 된다.
+      `pass=0`이면 요약이 「Risk·Sizer·OrderGateway 미검증」을 덧붙인다. **판정(breach)은 안 한다**:
+      원인이 국면이면 `regime_unknown_ratio`가 이미 울고, 같은 사실에 경보가 둘이면 늑대소년이다.
+- [x] **G-2** RegimeAI 학습·추론 시계열 경계 — **조사로 종결(코드 변경 불필요)**.
+      조사-1이 답했다: 학습·홀드아웃·(F-1 이후) 런타임이 모두 **연속 시계열**을 쓰고 관측
+      생성도 이미 같은 함수(`build_observations`)를 공유한다. 어긋나 있던 것은 런타임의 빈
+      deque 하나였고 F-1이 그것을 없앴다. **구동 Horizon 15m 전환은 불필요** — 마스터플랜
+      Ver 1.1 §3-1(「입력: feat.30m」) 변경 제안을 철회한다.
+- [x] **G-3** 손실 예산 경보에 최대 기여일 표시 — 구현 완료. `LossBudget.dominant_day`.
+      실데이터 검증: 「3거래일에 51분 … · 최대 2026-08-10 41분(80%) · 나머지 2일 10분」.
+      임계 판정은 무변경.
+- [x] **G-4** 변동성 축 `undefined_after_control` — 구현 완료. 산출물 JSON + 콘솔 요약의
+      **분모**까지 정정했다(「7개 중 1개」 → 채점 가능했던 개수 기준). `absent_features`
+      (피처셋에 없음)와는 다른 상태로 분리해 남긴다.
+
+### 구현 산물 (2026-08-12 장후)
+
+- 테스트 신규: `tests/data/test_poll_retry.py`(11건, 신규 파일) · regime runtime 5건 ·
+  integrity report 9건 · fix_verification 4건 · loss_budget 3건 · vol_scorecard 3건.
+- 기존 테스트 수정 3건 — 재시도 횟수를 **박아둔 숫자에서 정본 상수 참조로** 바꿨다
+  (`1 + poll_retry.RETRY_ATTEMPTS`). 예산을 조정할 때마다 폴러가 아니라 단언이 깨지고 있었다.
+
+### 2026-08-13(목)에 볼 것 — U-1~U-12
+
+- [ ] **U-1** `RegimeWarmStart` 1건 · 충전 봉 수 ≥ 22 (g2_daily)
+- [ ] **U-2 ★ 오늘의 진짜 채점** `DecisionEmitted` 중 `Regime=UNKNOWN` 비율 **< 50%** (현재 100%)
+- [ ] **U-3** `daily_integrity`에 `regime_distribution` 수록 · 2개 이상 상태 출현
+- [ ] **U-4** `l1_daily` 15:36 ERROR **≤ 4건** · `daily-axes-measured` 미출현
+- [ ] **U-5** `InvestorFlowPollError` 0건 · `short_cycles` 0건
+- [ ] **U-6** `postmarket_20260813.log`에 `SessionEnd` 1건
+- [ ] **U-7** 자가점검에 `bar_close  1분봉 확정: timer` 행 (R-1 이월)
+- [ ] **U-8** `SessionStart.git_sha`가 `ce51375` 이후 — `code_version.stale` 자연 해소 확인
+- [ ] **U-9** `IrrecoverableLossBudgetExceeded` **미출현** (08-10 41분이 3거래일 창에서 이탈)
+- [ ] **U-10** 등록부 `truncation-is-visible` 3/3거래일 → 검증 완료 전환
+- [ ] **U-11** 등록부 `morning-launch-actually-happens` 3/3거래일 → 검증 완료 전환
+- [ ] **U-12** `exit-code-matches-log`·`launch-window-refusal-not-counted`·`ui-restart-observability`
+      08-11 잔상 소멸 → ❌재발에서 ⏳검증 대기로 전환. 안 되면 **오늘 새로 위반한 것**이다.
+
+### 오늘 완료 처리 — 2026-08-11 오탐 둘 fix는 4/4 통과
+
+- [x] **T-1** 피처 퇴화 0건 — 6개 Horizon 전부 `{always_nan: [], constant: []}` ·
+      등록부 `no-degenerate-features` **4거래일 연속 검증 완료**
+- [x] **T-2** `ui` 관측 공백 **0건** (`observation_gaps: []`, 08-11 79.8분 → 0분)
+- [x] **T-3** `allowed_constant_values` 리포트 수록 (`ev_dow_wed: 1.0` 포함 12개)
+- [x] **T-4** 캘린더 사이드카 동결 의심 미출현 — **이 축의 첫 채점 통과** (`market_findings: []`)
+- [x] **S-4** `late_bar_drops` 0 — G-4(timer) 승격 채점 통과 ·
+      `composer-bucket-completeness` 5거래일 연속 검증 완료
+- [x] **S-5** 봉 1m 커버리지·거래량 대조 만점 (0.998 · 410/410분 · missing 0)
+- [x] **R-2** 봉 1m 커버리지 종전 이상 (410행 · 100% · 최장 공백 0분)
+- [x] **R-4** `CollectorFirstTickOverdue` 0건 (`CollectorFirstTick` 08:44:58)
+
+### 미결 — 판정 보류
+
+- [ ] **미커밋 174건 범위 확인** — `git diff --stat 4825ffe -- src/`로 런타임 영향 범위 확인.
+      dev 모드라 금지계명 10 위반은 아니나 **paper/live 승격 전 반드시 정리**.
+- [ ] **S-6 이월** 등록부 재발 4건(목표 2건). 오늘 **신규 위반은 1건뿐**이고 3건은 08-11 잔상 —
+      U-12가 답을 낸다.
+
+### 이월 (변동 없음)
+
+- [ ] **resume 실동작 검증** — 격리 Redis로 kill→resume 왕복(아직 한 번도 안 눌러봤다)
+- [ ] **C-1 후속** 분봉 차트 실전 도메인 — 08-13 관측 뒤
+- [ ] **성과 관문 결선** — G1 walk-forward → `validate_performance()`
+      (self_eval 오늘도 `pnl_measurable: false` · `wiring_stage: 주문 미발생` — F-1이 선행)
