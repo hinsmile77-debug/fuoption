@@ -35,13 +35,33 @@ DEFAULT_CONFIG = {
     # procs: 이 앵커가 적용되는 프로세스. 비면 전부.
     "anchors": [
         {"at": "08:15", "label": "기동 창 개시", "phase": "pre", "procs": ["l1_daily"]},
-        {"at": "08:20", "label": "Messiah(L1) 스케줄 트리거", "phase": "pre", "procs": ["l1_daily"]},
+        {
+            "at": "08:20",
+            "label": "Messiah(L1) 스케줄 트리거",
+            "phase": "pre",
+            "procs": ["l1_daily"],
+        },
         {"at": "08:25", "label": "Messiah-G2 스케줄 트리거", "phase": "pre", "procs": ["g2_daily"]},
-        {"at": "08:40", "label": "장전 준비(옵션체인·마스터·번들)", "phase": "pre", "procs": ["l1_daily"]},
-        {"at": "09:00", "label": "정규장 개장", "phase": "intra", "procs": ["l1_daily", "g2_daily"]},
+        {
+            "at": "08:40",
+            "label": "장전 준비(옵션체인·마스터·번들)",
+            "phase": "pre",
+            "procs": ["l1_daily"],
+        },
+        {
+            "at": "09:00",
+            "label": "정규장 개장",
+            "phase": "intra",
+            "procs": ["l1_daily", "g2_daily"],
+        },
         {"at": "12:00", "label": "장중 중간점", "phase": "intra", "procs": ["l1_daily"]},
         {"at": "15:35", "label": "정규장 마감", "phase": "post", "procs": ["l1_daily", "g2_daily"]},
-        {"at": "15:40", "label": "Messiah-Shutdown", "phase": "post", "procs": ["shutdown_watchdog"]},
+        {
+            "at": "15:40",
+            "label": "Messiah-Shutdown",
+            "phase": "post",
+            "procs": ["shutdown_watchdog"],
+        },
         {"at": "15:45", "label": "Messiah-Postmarket", "phase": "post", "procs": ["postmarket"]},
     ],
     "anchor_window_minutes": 4,
@@ -176,10 +196,19 @@ def truncate(s, n):
 def run_git(root: Path, args, timeout=25):
     try:
         p = subprocess.run(
-            ["git", *args], cwd=str(root), capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace",
+            ["git", *args],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
         )
-        return p.stdout.strip() if p.returncode == 0 else f"(git 실패 rc={p.returncode}) {p.stderr.strip()[:300]}"
+        return (
+            p.stdout.strip()
+            if p.returncode == 0
+            else f"(git 실패 rc={p.returncode}) {p.stderr.strip()[:300]}"
+        )
     except Exception as e:  # noqa: BLE001
         return f"(git 실행 불가) {e}"
 
@@ -205,12 +234,15 @@ class LogDigest:
         self.size = path.stat().st_size if self.exists else 0
         self.mtime = (
             datetime.fromtimestamp(path.stat().st_mtime, KST).strftime("%H:%M:%S")
-            if self.exists else None
+            if self.exists
+            else None
         )
         self.total_lines = 0
+        # 기동 창 가드가 되돌려보낸 기동 (2026-08-12 F-6) — `session_markers()`가 채운다.
+        self.refused_starts: list = []
         self.json_lines = 0
         self.raw_preamble: list[str] = []
-        self.records: list[dict] = []          # 시각 있는 JSON 레코드
+        self.records: list[dict] = []  # 시각 있는 JSON 레코드
         self.level_counts: dict[str, int] = {}
         self.tag_counts: dict[str, int] = {}
         self.by_level_tag: dict[tuple, list] = {}
@@ -255,10 +287,16 @@ class LogDigest:
         m = TS_RE.search(str(ts))
         hhmm = f"{m.group(2)}:{m.group(3)}:{m.group(4)}" if m else "??:??:??"
         minutes = int(m.group(2)) * 60 + int(m.group(3)) if m else None
-        entry = {"hhmm": hhmm, "minutes": minutes, "level": level, "tag": tag,
-                 "msg": rec.get("msg", ""), "extra": {
-                     k: v for k, v in rec.items()
-                     if k not in ("ts", "timestamp", "level", "tag", "msg")}}
+        entry = {
+            "hhmm": hhmm,
+            "minutes": minutes,
+            "level": level,
+            "tag": tag,
+            "msg": rec.get("msg", ""),
+            "extra": {
+                k: v for k, v in rec.items() if k not in ("ts", "timestamp", "level", "tag", "msg")
+            },
+        }
         if minutes is not None:
             self.records.append(entry)
         key = (level, tag)
@@ -268,9 +306,34 @@ class LogDigest:
 
     # --- 파생 지표 -------------------------------------------------
     def session_markers(self):
+        """유효 기동·정상 종료. **기동 창이 거절한 기동은 기동이 아니다** (2026-08-12 F-6).
+
+        `ops/session_guard.py`가 되돌려보낸 프로세스도 `SessionStart`는 이미 찍은 뒤다 —
+        로깅 설정이 프로세스 최초에 일어나기 때문이다. 그것을 그대로 세면 정시 기동 하나뿐인
+        정상일이 **매일 "중복 기동 2회"**로 찍힌다(2026-08-12 실측: 07:23:34 거절 +
+        08:20:28 정시 기동 → 적신호 2건이 전부 가짜였다).
+
+        `ops/integrity_report.py`는 이미 옳게 센다(`_drop_refused_starts`, 2026-08-07 P0-4)
+        — 그 fix가 리포트 쪽에만 반영되고 이 점검 도구에는 안 들어와 있었다. 짝짓기 규칙도
+        그쪽과 맞춘다: 거절 하나마다 **그 시각 이하의 가장 늦은 기동** 하나를 지운다.
+        개수만 빼면 순서가 반대인 날(정시 기동 뒤 장 마감 직후 부팅 트리거 발화)에
+        살아 있어야 할 기동이 지워진다.
+        """
         starts = [e for e in self.records if e["tag"] == "SessionStart"]
         ends = [e for e in self.records if e["tag"] == "SessionEnd"]
-        return starts, ends
+        refused = sorted(e["hhmm"] for e in self.records if e["tag"] == "LaunchWindowRefused")
+
+        remaining = sorted(starts, key=lambda e: e["hhmm"])
+        dropped = []
+        for moment in refused:
+            candidates = [e for e in remaining if e["hhmm"] <= moment]
+            if candidates:
+                remaining.remove(candidates[-1])
+                dropped.append(candidates[-1])
+        # 거절 자체는 버리지 않는다 — 관측 가치가 있다(정시 트리거 시각이 어긋나면
+        # 이 값이 먼저 는다). §9가 "기동 창 거절 n회(정상)"로 따로 표기한다.
+        self.refused_starts = dropped
+        return remaining, ends
 
     def gaps(self):
         lo = hhmm_to_minutes(self.cfg["gap_scan_window"][0])
@@ -300,7 +363,11 @@ class LogDigest:
         """자가점검을 기동 회차별로 쪼갠다 (config 라인이 회차의 시작)."""
         blocks, cur = [], []
         for ln in self.selfcheck:
-            if ln.startswith("[OK ] config") or ln.startswith("[FAIL] config") or ln.startswith("[WARN] config"):
+            if (
+                ln.startswith("[OK ] config")
+                or ln.startswith("[FAIL] config")
+                or ln.startswith("[WARN] config")
+            ):
                 if cur:
                     blocks.append(cur)
                 cur = []
@@ -326,6 +393,7 @@ def summarize_json(path: Path, max_chars=2200) -> str:
     dumped = json.dumps(obj, ensure_ascii=False, indent=1, sort_keys=False)
     if len(dumped) <= max_chars:
         return dumped
+
     # 너무 크면 1~2단계만 남기고 접는다
     def fold(o, depth=0):
         if depth >= 2:
@@ -340,6 +408,7 @@ def summarize_json(path: Path, max_chars=2200) -> str:
             head = [fold(v, depth + 1) for v in o[:3]]
             return head + ([f"…외 {len(o) - 3}건"] if len(o) > 3 else [])
         return o
+
     return truncate(json.dumps(fold(obj), ensure_ascii=False, indent=1), max_chars)
 
 
@@ -368,8 +437,9 @@ def devmemory_section(root: Path, day: _date) -> list[str]:
             out.extend(heads[-12:])
             out.append("```")
         if fname == "NEXT_TODO.md":
-            open_items = [ln.strip() for ln in text.splitlines()
-                          if re.match(r"^\s*[-*]\s*\[ \]", ln)]
+            open_items = [
+                ln.strip() for ln in text.splitlines() if re.match(r"^\s*[-*]\s*\[ \]", ln)
+            ]
             out.append("")
             out.append(f"미완료 체크박스: **{len(open_items)}건** (끝에서 30건)")
             if open_items:
@@ -393,8 +463,12 @@ def devmemory_section(root: Path, day: _date) -> list[str]:
 def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     d = day.strftime("%Y%m%d")
     D = day.strftime("%Y-%m-%d")
-    phases = {"pre": ["pre"], "intra": ["pre", "intra"],
-              "post": ["pre", "intra", "post"], "all": ["pre", "intra", "post"]}[phase]
+    phases = {
+        "pre": ["pre"],
+        "intra": ["pre", "intra"],
+        "post": ["pre", "intra", "post"],
+        "all": ["pre", "intra", "post"],
+    }[phase]
     now = datetime.now(KST)
     L: list[str] = []
     A = L.append
@@ -420,8 +494,9 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             A(f"… 외 {len(dirty) - 40}건")
         A("```")
     nxt = (day + timedelta(days=1)).strftime("%Y-%m-%d")
-    todays = run_git(root, ["log", "--oneline", "--no-decorate",
-                            f"--since={D} 00:00", f"--until={nxt} 00:00"])
+    todays = run_git(
+        root, ["log", "--oneline", "--no-decorate", f"--since={D} 00:00", f"--until={nxt} 00:00"]
+    )
     A("")
     A(f"**당일({D}) 커밋**")
     A("```")
@@ -453,12 +528,22 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if not dg.json_lines:
             s_txt = e_txt = "n/a (비-JSON 로그)"
         else:
-            s_txt = " / ".join(f"{e['hhmm']}(sha={e['extra'].get('git_sha', '?')})" for e in starts[:3]) or "—"
-            e_txt = " / ".join(f"{e['hhmm']}({truncate(e['msg'], 20)})" for e in ends[:3]) or "**없음 ⚠**"
-        A(f"| `{name}` | {p.name} | {fmt_bytes(dg.size)} | {dg.mtime} | {dg.total_lines} | {s_txt} | {e_txt} |")
+            s_txt = (
+                " / ".join(f"{e['hhmm']}(sha={e['extra'].get('git_sha', '?')})" for e in starts[:3])
+                or "—"
+            )
+            e_txt = (
+                " / ".join(f"{e['hhmm']}({truncate(e['msg'], 20)})" for e in ends[:3])
+                or "**없음 ⚠**"
+            )
+        A(
+            f"| `{name}` | {p.name} | {fmt_bytes(dg.size)} | {dg.mtime} | {dg.total_lines} | {s_txt} | {e_txt} |"
+        )
     A("")
     A("> SessionEnd 가 비어 있으면 비정상 종료를 의심한다 (SYSTEM.md R13 · 금지계명 14).")
-    A("> SessionStart 가 2회 이상이면 중복 기동 또는 크래시 후 재기동이다. sha 가 HEAD와 다르면 옛 코드로 돈 것이다.")
+    A(
+        "> SessionStart 가 2회 이상이면 중복 기동 또는 크래시 후 재기동이다. sha 가 HEAD와 다르면 옛 코드로 돈 것이다."
+    )
     A("")
 
     # 자가점검 라인 — 기동 회차별로, 비-OK는 전량 노출
@@ -467,8 +552,14 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if not dg or not dg.exists or not dg.selfcheck:
             continue
         blocks = dg.selfcheck_blocks()
-        bad = [x for x in dg.selfcheck if not x.startswith("[OK ]") and not x.startswith("self-check: PASS")]
-        A(f"### `{name}` 기동 자가점검 — 기동 {len(blocks)}회 · 총 {len(dg.selfcheck)}행 · 비-OK {len(bad)}행")
+        bad = [
+            x
+            for x in dg.selfcheck
+            if not x.startswith("[OK ]") and not x.startswith("self-check: PASS")
+        ]
+        A(
+            f"### `{name}` 기동 자가점검 — 기동 {len(blocks)}회 · 총 {len(dg.selfcheck)}행 · 비-OK {len(bad)}행"
+        )
         A("")
         if bad:
             A("**비-OK 라인 전량**")
@@ -503,9 +594,17 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     for name, dg in digests.items():
         if not dg.exists or not dg.json_lines:
             continue
-        lv = ", ".join(f"{k}={v}" for k, v in sorted(
-            dg.level_counts.items(), key=lambda kv: (LEVEL_ORDER.index(kv[0]) if kv[0] in LEVEL_ORDER else 99)))
-        A(f"### `{name}` — JSON {dg.json_lines}행 · {lv}" + (f" · 파싱실패 {dg.parse_errors}" if dg.parse_errors else ""))
+        lv = ", ".join(
+            f"{k}={v}"
+            for k, v in sorted(
+                dg.level_counts.items(),
+                key=lambda kv: LEVEL_ORDER.index(kv[0]) if kv[0] in LEVEL_ORDER else 99,
+            )
+        )
+        A(
+            f"### `{name}` — JSON {dg.json_lines}행 · {lv}"
+            + (f" · 파싱실패 {dg.parse_errors}" if dg.parse_errors else "")
+        )
         A("")
         # ERROR 이상은 태그별 전량 요약
         sev = [(k, v) for k, v in dg.by_level_tag.items() if k[0] in ("CRITICAL", "FATAL", "ERROR")]
@@ -515,8 +614,10 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             A("| level | tag | 건수 | 최초 | 최종 | 대표 msg |")
             A("|---|---|---|---|---|---|")
             for (level, tag), items in sorted(sev, key=lambda kv: -len(kv[1])):
-                A(f"| {level} | `{tag}` | {len(items)} | {items[0]['hhmm']} | {items[-1]['hhmm']} | "
-                  f"{truncate(items[0]['msg'], cfg['msg_truncate'])} |")
+                A(
+                    f"| {level} | `{tag}` | {len(items)} | {items[0]['hhmm']} | {items[-1]['hhmm']} | "
+                    f"{truncate(items[0]['msg'], cfg['msg_truncate'])} |"
+                )
             A("")
             for (level, tag), items in sorted(sev, key=lambda kv: -len(kv[1]))[:8]:
                 n = cfg["max_error_samples_per_tag"]
@@ -539,8 +640,10 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             A("| tag | 건수 | 최초 | 최종 | 대표 msg |")
             A("|---|---|---|---|---|")
             for (level, tag), items in warn[: cfg["max_warn_tags"]]:
-                A(f"| `{tag}` | {len(items)} | {items[0]['hhmm']} | {items[-1]['hhmm']} | "
-                  f"{truncate(items[0]['msg'], cfg['msg_truncate'])} |")
+                A(
+                    f"| `{tag}` | {len(items)} | {items[0]['hhmm']} | {items[-1]['hhmm']} | "
+                    f"{truncate(items[0]['msg'], cfg['msg_truncate'])} |"
+                )
             A("")
         info_tags = sorted(((t, c) for t, c in dg.tag_counts.items()), key=lambda kv: -kv[1])[:20]
         A("**전체 태그 상위 20** — " + ", ".join(f"`{t}`×{c}" for t, c in info_tags))
@@ -583,9 +686,15 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         for a, hits, applies in dg.anchor_slices(cfg["anchors"], phases):
             rep = "—"
             if hits:
-                sev_hit = [h for h in hits if h["level"] in ("ERROR", "CRITICAL", "FATAL", "WARNING", "WARN")]
+                sev_hit = [
+                    h
+                    for h in hits
+                    if h["level"] in ("ERROR", "CRITICAL", "FATAL", "WARNING", "WARN")
+                ]
                 pick = sev_hit[0] if sev_hit else hits[0]
-                rep = f"{pick['hhmm']} [{pick['level']}] `{pick['tag']}` {truncate(pick['msg'], 120)}"
+                rep = (
+                    f"{pick['hhmm']} [{pick['level']}] `{pick['tag']}` {truncate(pick['msg'], 120)}"
+                )
             if not applies:
                 label = f"_{a['label']} (이 프로세스 범위 밖)_"
             else:
@@ -594,7 +703,9 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         A("")
         gaps = dg.gaps() if name in ("l1_daily", "g2_daily") else []
         if name in ("l1_daily", "g2_daily"):
-            A(f"**{cfg['gap_scan_window'][0]}~{cfg['gap_scan_window'][1]} 구간 {cfg['gap_threshold_minutes']}분 이상 공백: {len(gaps)}건**")
+            A(
+                f"**{cfg['gap_scan_window'][0]}~{cfg['gap_scan_window'][1]} 구간 {cfg['gap_threshold_minutes']}분 이상 공백: {len(gaps)}건**"
+            )
         if gaps:
             A("")
             A("| 시작 | 재개 | 공백(분) |")
@@ -604,7 +715,9 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         A("")
         first = dg.records[0]
         last = dg.records[-1]
-        A(f"- 최초 JSON 기록 {first['hhmm']} `{first['tag']}` / 최종 {last['hhmm']} `{last['tag']}`")
+        A(
+            f"- 최초 JSON 기록 {first['hhmm']} `{first['tag']}` / 최종 {last['hhmm']} `{last['tag']}`"
+        )
         A("")
 
     # ---- 6. dev_memory ----
@@ -653,16 +766,22 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             s = json.loads(read_text(snap))
             cv = s.get("code_version", {})
             if cv.get("stale"):
-                flags.append(f"코드 불일치: HEAD `{cv.get('head_git_sha')}` vs 실행 `{cv.get('process_git_sha')}` — {truncate(cv.get('summary', ''), 200)}")
+                flags.append(
+                    f"코드 불일치: HEAD `{cv.get('head_git_sha')}` vs 실행 `{cv.get('process_git_sha')}` — {truncate(cv.get('summary', ''), 200)}"
+                )
             for cname, c in (s.get("components") or {}).items():
                 if str(c.get("state", "")).upper() not in ("OK",):
-                    flags.append(f"컴포넌트 `{cname}` 상태 {c.get('state')} — {truncate(c.get('detail', ''), 120)}")
+                    flags.append(
+                        f"컴포넌트 `{cname}` 상태 {c.get('state')} — {truncate(c.get('detail', ''), 120)}"
+                    )
             cb = s.get("circuit_breaker") or {}
             if cb.get("gateway_halted"):
                 flags.append("게이트웨이 정지 상태(gateway_halted=true)")
             il = s.get("irrecoverable_loss") or {}
             if il and not il.get("clean", True):
-                flags.append(f"소급 불가 손실 {il.get('lost_items')}건 — {truncate(il.get('summary', ''), 150)}")
+                flags.append(
+                    f"소급 불가 손실 {il.get('lost_items')}건 — {truncate(il.get('summary', ''), 150)}"
+                )
             gen = s.get("generated_at_kst", "")
             m = TS_RE.search(gen)
             if m and m.group(1) != D:
@@ -679,11 +798,22 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if starts and not ends and phase in ("post", "all"):
             flags.append(f"`{name}`: SessionStart 있고 SessionEnd 없음 — 비정상 종료 의심")
         if len(starts) > 1:
-            flags.append(f"`{name}`: SessionStart {len(starts)}회 ({', '.join(e['hhmm'] for e in starts[:5])}) — 중복 기동/재기동 확인 필요")
+            flags.append(
+                f"`{name}`: SessionStart {len(starts)}회 ({', '.join(e['hhmm'] for e in starts[:5])}) — 중복 기동/재기동 확인 필요"
+            )
+        # 거절은 적신호가 아니라 **정상 동작의 기록**이다 — 그래도 버리지 않고 표기한다
+        # (거절이 늘면 정시 트리거 시각이 어긋났다는 신호다, 2026-08-10 실측).
+        if getattr(dg, "refused_starts", None):
+            notes = ", ".join(e["hhmm"] for e in dg.refused_starts[:5])
+            flags.append(
+                f"`{name}`: 기동 창 거절 {len(dg.refused_starts)}회 ({notes}) — 정상(기동으로 안 셈)"
+            )
         shas = {e["extra"].get("git_sha") for e in starts if e["extra"].get("git_sha")}
         odd = {s for s in shas if head and not head.startswith(s) and not s.startswith(head)}
         if odd:
-            flags.append(f"`{name}`: 기동 sha {', '.join(sorted(odd))} 가 HEAD `{head}` 와 다르다 — 옛 코드로 기동")
+            flags.append(
+                f"`{name}`: 기동 sha {', '.join(sorted(odd))} 가 HEAD `{head}` 와 다르다 — 옛 코드로 기동"
+            )
         n_err = sum(v for k, v in dg.level_counts.items() if k in ("ERROR", "CRITICAL", "FATAL"))
         if n_err:
             flags.append(f"`{name}`: ERROR 이상 {n_err}건")
@@ -691,7 +821,7 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if recur:
             ids = sorted({e["extra"].get("fix_id", "?") for e in recur})
             flags.append(f"`{name}`: 수정 재발 {len(recur)}건 — fix_id={', '.join(ids)}")
-        for a, b, g in (dg.gaps() if name in ("l1_daily", "g2_daily") else []):
+        for a, b, g in dg.gaps() if name in ("l1_daily", "g2_daily") else []:
             if g >= cfg["gap_threshold_minutes"] * 2:
                 flags.append(f"`{name}`: {m2hhmm(a)}~{m2hhmm(b)} {g}분 로그 공백")
 
@@ -702,7 +832,9 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
                 flags.append(f"산출물 누락({ph}): `{rel}`")
 
     if dirty:
-        flags.append(f"미커밋 변경 {len(dirty)}건 — 금지계명 10(미커밋 수정 실전 반입 금지) 확인 필요")
+        flags.append(
+            f"미커밋 변경 {len(dirty)}건 — 금지계명 10(미커밋 수정 실전 반입 금지) 확인 필요"
+        )
 
     if flags:
         for i, f in enumerate(dict.fromkeys(flags), 1):
@@ -712,8 +844,10 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("")
     A("---")
     A("")
-    A("*이 다이제스트는 원본이 아니라 요약이다. 특정 태그의 전량이 필요하면 "
-      "`grep '\"tag\": \"TAGNAME\"' logs/l1_daily_" + d + ".log` 로 원본을 직접 열 것.*")
+    A(
+        "*이 다이제스트는 원본이 아니라 요약이다. 특정 태그의 전량이 필요하면 "
+        '`grep \'"tag": "TAGNAME"\' logs/l1_daily_' + d + ".log` 로 원본을 직접 열 것.*"
+    )
     return "\n".join(L)
 
 
@@ -732,8 +866,12 @@ def load_config(root: Path) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="MESSIAH 일일 점검 증거 수집기")
-    ap.add_argument("--phase", choices=["pre", "intra", "post", "all"], default="post",
-                    help="장전=pre / 장중=intra / 장후=post (기본 post)")
+    ap.add_argument(
+        "--phase",
+        choices=["pre", "intra", "post", "all"],
+        default="post",
+        help="장전=pre / 장중=intra / 장후=post (기본 post)",
+    )
     ap.add_argument("--date", default=None, help="YYYY-MM-DD 또는 YYYYMMDD (기본 오늘 KST)")
     ap.add_argument("--root", default=None, help="리포 루트 (기본 자동탐지)")
     ap.add_argument("--out", default=None, help="파일로 저장 (기본 stdout)")
