@@ -6,6 +6,7 @@ import pytest
 
 from messiah.core.messages import InvestorFlowSnapshot
 from messiah.core.scheduler import FixedTickScheduler
+from messiah.data import poll_retry
 from messiah.data.investor_flow_poller import InvestorFlowPoller
 
 
@@ -88,8 +89,11 @@ async def test_poll_once_continues_after_one_sector_fails(monkeypatch):
 
     await poller.poll_once()  # 예외를 밖으로 전파하지 않아야 함
 
-    # F001은 재시도까지 두 번 부르고(2026-08-10 A-4), 그래도 실패하면 OC01로 넘어간다.
-    assert rest_client.calls == [("K2I", "F001"), ("K2I", "F001"), ("K2I", "OC01")]
+    # F001은 재시도 예산을 다 쓰고(2026-08-10 A-4), 그래도 실패하면 OC01로 넘어간다.
+    # 횟수는 정본 상수에서 끌어온다 — 박아두면 예산을 조정한 날 폴러가 아니라 이 줄이
+    # 깨진다(2026-08-12 F-4로 총 2회 → 3회가 되며 실제로 그랬다).
+    tries = 1 + poll_retry.RETRY_ATTEMPTS
+    assert rest_client.calls == [("K2I", "F001")] * tries + [("K2I", "OC01")]
     assert len(bus.published) == 1  # OC01만 발행됨
     assert bus.published[0][1].sector_code == "OC01"
     assert any(tag == "InvestorFlowPollError" for tag, _ in logged)

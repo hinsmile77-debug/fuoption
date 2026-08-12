@@ -13,6 +13,7 @@ from messiah.broker.kis import tr_codes
 from messiah.broker.kis.symbol_master import OptionLeg
 from messiah.core.messages import OptionQuoteSnapshot
 from messiah.core.scheduler import FixedTickScheduler
+from messiah.data import poll_retry
 from messiah.data.option_chain_poller import OptionChainPoller, select_atm_window
 
 
@@ -247,8 +248,9 @@ async def test_one_leg_failure_does_not_stop_the_rest(monkeypatch):
 
     await poller.poll_once()
 
-    # 실패한 다리는 재시도까지 2번, 성공한 다리는 1번 (2026-08-05 재시도 도입)
-    assert len(rest.calls) == 3
+    # 실패한 다리는 재시도 예산을 다 쓰고, 성공한 다리는 1번 (2026-08-05 재시도 도입).
+    # 횟수는 정본 상수에서 끌어온다(2026-08-12 F-4 — 박아둔 숫자가 예산 조정에 깨졌다).
+    assert len(rest.calls) == 1 + (1 + poll_retry.RETRY_ATTEMPTS)
     assert len(bus.published) == 1  # 성공한 것만 발행
     assert "OptionChainPollError" in logged
 
@@ -340,7 +342,9 @@ async def test_persistent_failure_still_gives_up_and_reports_the_attempts(monkey
 
     errors = [f for tag, f in logged if tag == "OptionChainPollError"]
     assert len(errors) == 1, "포기한 다리는 정확히 한 번만 WARNING이어야 한다"
-    assert errors[0]["attempts"] == 2
+    # 정본 상수를 그대로 쓴다 — 여기 숫자를 박아두면 재시도 예산을 조정한 날
+    # 폴러가 아니라 이 단언이 깨진다(2026-08-12 F-4로 1 → 2가 되며 실제로 그랬다).
+    assert errors[0]["attempts"] == 1 + poll_retry.RETRY_ATTEMPTS
     assert errors[0]["symbol"] == dead
 
 
