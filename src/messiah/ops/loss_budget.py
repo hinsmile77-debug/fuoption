@@ -79,13 +79,46 @@ class LossBudget:
             detail += f" · 이 축이 없는 날 {self.missing_days}일"
         return f"소급 불가 손실 예산: {detail}"
 
+    @property
+    def dominant_day(self) -> tuple[date, float, float] | None:
+        """(날짜, 분, 창 전체에서 차지하는 비율) — 손실이 0이면 None.
+
+        ## 왜 이 값이 필요한가 (2026-08-12 G-3)
+
+        2026-08-12에 이 경보가 「3거래일에 51분(> 예산 20분)」으로 울었다. 그 문장을 읽은
+        사람이 받는 첫인상은 **"요즘 계속 새고 있다"**인데, 51분의 내역은 08-10 **41분** ·
+        08-11 5분 · 08-12 5분이었다. 사실은 "사흘 전 한 번 크게 샜고 이후 안정적"이고,
+        다음 날이면 08-10이 창에서 빠져 10분으로 자동 복귀할 상태였다.
+
+        **추세와 단발은 처방이 다르다.** 추세면 구조를 봐야 하고 단발이면 그날 원인 하나로
+        끝난다. 임계 판정은 그대로 둔다 — 누적이 예산을 넘은 것은 사실이고, 이 축의 취지
+        (「원인은 날마다 달랐지만 잃은 것은 같은 종류다」)도 그대로다. 바뀌는 것은 사람이
+        그 한 줄에서 **어느 쪽인지 즉시 구분**한다는 것뿐이다.
+        """
+        if not self.days or self.total_minutes <= 0:
+            return None
+        day, minutes = max(self.days, key=lambda item: item[1])
+        if minutes <= 0:
+            return None
+        return day, minutes, minutes / self.total_minutes
+
     def finding(self) -> list[str]:
         if not self.over_budget:
             return []
-        return [
+        line = (
             f"소급 불가 손실이 {self.measured_days}거래일에 {self.total_minutes:.0f}분 "
             f"(> 예산 {BUDGET_MINUTES:.0f}분) — 원인은 날마다 달랐지만 잃은 것은 같은 종류다"
-        ]
+        )
+        dominant = self.dominant_day
+        if dominant is not None:
+            day, minutes, share = dominant
+            rest = self.total_minutes - minutes
+            others = max(self.measured_days - 1, 0)
+            line += (
+                f" · 최대 {day.isoformat()} {minutes:.0f}분({share:.0%})"
+                f" · 나머지 {others}일 {rest:.0f}분"
+            )
+        return [line]
 
 
 def load_daily_losses(log_dir: Path = DEFAULT_LOG_DIR) -> dict[date, float | None]:

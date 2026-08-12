@@ -224,3 +224,72 @@ def test_write_scorecards_produces_the_file_the_report_reads(tmp_path):
     assert payload["symbol"] == "A05608"
     assert "5m" in payload["horizons"]
     assert payload["horizons"]["5m"]["measurable"] is True
+
+
+# ------------------------------ 통제후 정의불가를 산출물이 말한다 (2026-08-12 G-4)
+
+
+def _card_with(scores: list[vol_scorecard.FeatureScore]) -> vol_scorecard.VolScorecard:
+    return vol_scorecard.VolScorecard(
+        horizon="5m",
+        samples=100,
+        baseline_ic=0.5,
+        window_days=20,
+        baseline_used=["vl_gk_5"],
+        features=scores,
+    )
+
+
+def test_the_control_variable_itself_is_reported_as_undefined():
+    """2026-08-12 실측 재현 — `vl_gk_5`가 3개 Horizon 전부 「통제후 정의불가」였다.
+
+    통제 변수 자신이 통제군에 있으니 잔차가 0인 것은 구조적 결과다. 문제는 그 사실이
+    `vol_scorecard_*.json`에 **아무 형태로도 안 남았다**는 것이다 — `beats_baseline`에도
+    `absent_features`에도 없어서, 「7개 중 1개 초과」의 분모가 실제로는 6개라는 것을
+    **콘솔을 본 사람만** 알았다.
+    """
+    card = _card_with(
+        [
+            # 통제군 자신 — 값은 있는데 통제 후 잔차가 사라졌다.
+            vol_scorecard.FeatureScore(name="vl_gk_5", ic=0.515, partial_ic=None),
+            vol_scorecard.FeatureScore(name="px_kurt_r_5", ic=0.1, partial_ic=0.05, partial_t=3.0),
+            # 애초에 피처셋에 없는 것 — 이쪽은 다른 상태다(`absent_features`).
+            vol_scorecard.FeatureScore(
+                name="ev_tod_cos", ic=None, partial_ic=None, status=vol_scorecard.STATUS_ABSENT
+            ),
+        ]
+    )
+
+    assert card.undefined_after_control == ["vl_gk_5"]
+
+    summary = vol_scorecard.summarise([card])["5m"]
+    assert summary["undefined_after_control"] == ["vl_gk_5"]
+    assert summary["absent_features"] == ["ev_tod_cos"], "미탑재와 정의불가는 다른 상태다"
+    assert summary["beats_baseline"] == ["px_kurt_r_5"]
+
+
+def test_the_console_line_reports_the_true_denominator():
+    """분모가 정직해야 한다 — 판정 자체가 불가능했던 피처는 "초과 못 함"이 아니다."""
+    card = _card_with(
+        [
+            vol_scorecard.FeatureScore(name="vl_gk_5", ic=0.515, partial_ic=None),
+            vol_scorecard.FeatureScore(name="px_kurt_r_5", ic=0.1, partial_ic=0.05, partial_t=3.0),
+        ]
+    )
+
+    line = vol_scorecard.format_scorecards([card])[0]
+
+    assert "기준선 초과 1/1개" in line, "분모는 2가 아니라 채점 가능했던 1이다"
+    assert "통제후 정의불가 1개(vl_gk_5)" in line
+
+
+def test_a_clean_scorecard_says_nothing_extra():
+    """정의불가가 없으면 그 문구도 없다 — 매일 붙는 꼬리표는 곧 안 읽힌다."""
+    card = _card_with(
+        [vol_scorecard.FeatureScore(name="px_kurt_r_5", ic=0.1, partial_ic=0.05, partial_t=3.0)]
+    )
+
+    line = vol_scorecard.format_scorecards([card])[0]
+
+    assert "정의불가" not in line
+    assert "기준선 초과 1/1개" in line

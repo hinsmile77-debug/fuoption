@@ -158,6 +158,27 @@ class VolScorecard:
         return self.samples >= MIN_SAMPLES and self.baseline_ic is not None
 
     @property
+    def undefined_after_control(self) -> list[str]:
+        """채점은 됐는데 **부분 IC가 정의 불가**로 나온 피처 (2026-08-12 G-4).
+
+        ## 왜 따로 남기나
+
+        2026-08-12 채점에서 `vl_gk_5`가 3개 Horizon **전부** 「IC +0.515/+0.436/+0.128 ·
+        통제후 **정의불가**」였다. 통제 변수 자신이 통제군에 들어 있어 생기는 구조적 결과다
+        (`DEFAULT_BASELINE_FEATURES = ("vl_gk_5",)` — 자기 자신을 통제하면 잔차가 0이다).
+
+        그런데 그 사실이 `vol_scorecard_*.json`에는 **아무 형태로도 안 남았다** —
+        `beats_baseline`에도 없고 `absent_features`에도 없다. 콘솔 출력에만 있었다. 그래서
+        「7개 중 1개 초과」의 분모가 실제로는 6개라는 것을 **콘솔을 본 사람만** 알았다.
+
+        `absent_features`가 "측정조차 못 했다"를 남기는 것과 같은 계열이고, 같은 규율이다:
+        **산출물이 정본이어야 한다**(`ops/canonical_consumers.py`가 존재하는 이유).
+        `STATUS_ABSENT`(피처셋에 없음)와는 다른 상태다 — 이쪽은 값이 있는데 통제 후 잔차가
+        사라진 것이다.
+        """
+        return [f.name for f in self.features if f.status == STATUS_SCORED and f.partial_ic is None]
+
+    @property
     def beats_baseline(self) -> list[str]:
         """기준선 너머의 증분이 **관문과 같은 기준으로** 살아남은 피처.
 
@@ -306,10 +327,17 @@ def format_scorecards(cards: Sequence[VolScorecard]) -> list[str]:
             lines.append(f"  {card.horizon}: 미측정 — {card.note}")
             continue
         beats = card.beats_baseline
+        # **분모를 정직하게 적는다** (2026-08-12 G-4): 통제 후 판정 자체가 불가능했던 피처는
+        # "초과 못 함"이 아니라 "채점 대상이 아니었다"이다. 2026-08-12에 `vl_gk_5`가 3개
+        # Horizon 전부 그 상태였고(통제군 자신이라 잔차가 0), 「7개 중 1개」의 실제 분모는
+        # 6개였다. 그 사실이 콘솔에도 산출물에도 없으면 다음 사람이 분모를 틀리게 센다.
+        undefined = card.undefined_after_control
+        scorable = len(card.features) - len(undefined)
+        note = f" · 통제후 정의불가 {len(undefined)}개({', '.join(undefined)})" if undefined else ""
         lines.append(
             f"  {card.horizon}: 최근 {card.window_days}거래일 · 표본 {card.samples} · "
             f"기준선 IC {card.baseline_ic:+.3f} · 통제 {'+'.join(card.baseline_used)} · "
-            f"기준선 초과 {len(beats)}/{len(card.features)}개"
+            f"기준선 초과 {len(beats)}/{scorable}개{note}"
         )
         for score in card.features:
             if score.ic is None:
@@ -398,6 +426,10 @@ def summarise(cards: Mapping[str, VolScorecard] | Sequence[VolScorecard]) -> dic
             "beats_baseline": card.beats_baseline,
             "measurable": card.measurable,
             "absent_features": [f.name for f in card.features if f.status == STATUS_ABSENT],
+            # 통제 후 잔차가 사라져 판정 자체가 불가능했던 피처 (2026-08-12 G-4).
+            # 「N개 중 M개 초과」의 **분모**가 실제로 몇이었는지가 이 목록으로 결정된다 —
+            # 종전엔 콘솔에만 있어 산출물만 읽는 사람은 분모를 틀리게 셌다.
+            "undefined_after_control": card.undefined_after_control,
         }
         for card in items
     }
