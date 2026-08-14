@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping
 
+from messiah.core import logging as mlog
 from messiah.core.messages import (
     HORIZON_SECONDS,
     ExpertView,
@@ -153,6 +154,49 @@ class Aggregator:
     def __init__(self, config: AggregatorConfig | None = None) -> None:
         self._config = config or AggregatorConfig()
 
+    def _log_no_contribution(
+        self,
+        symbol: str,
+        views: Mapping[Horizon, ExpertView],
+        regime_state: RegimeState,
+        blocked: Mapping[str, list[str]],
+    ) -> None:
+        """기여 의견 0의 **사유를 갈래별로** 남긴다 (2026-08-14 F-5).
+
+        ## 왜 이 로그가 없으면 확정이 안 되나
+
+        2026-08-14 화면은 `통합점수 S=+0.000 · 분산=0.000 · n=0 · 불확실성 1.00`을 종일
+        보여줬다. `n_experts=0`으로 가는 길은 다섯이다:
+
+            ① views가 비었다            전문가가 아예 안 붙었다(번들 미결선)
+            ② outside_weight_table      그 Horizon이 이 국면의 가중치표에 없다
+            ③ zero_regime_weight        표에 있으나 가중치가 0
+            ④ blocked_by_meta           Meta-Labeler가 거부(meta_passed=False)
+            ⑤ blocked_by_uncertainty    ens_std가 uncertainty_scale 이상 → u_h=1
+            ⑥ blocked_by_freshness      valid_until 경과 → f_h=0
+
+        어느 길이었는지 로그가 없어 `NEXT_TODO` W-2가 **3거래일째 미확정**이었다. 30m
+        `nan_ratio`가 종일 84.7%였으니 ⑤가 유력했지만, 유력한 것과 확정한 것은 다르다 —
+        그 구분을 지키는 것이 이 저장소의 규율이다.
+
+        **INFO인 것이 설계다.** 국면이 UNKNOWN인 날엔 이것이 정상 동작이고(게이트 ②가
+        어차피 NO_TRADE로 접는다), WARNING으로 올리면 그런 날 30분마다 울어 잡음이 된다.
+        승격 여부는 20거래일 분포를 본 뒤에 정한다.
+        """
+        reasons = {name: sorted(items) for name, items in blocked.items() if items}
+        mlog.log(
+            "AggregatorNoContribution",
+            f"기여 의견 0 — 이 사이클의 FuturesView는 n=0으로 나간다"
+            f"(수신 {len(views)}건 · 국면 {regime_state.regime.value}"
+            + (f" · {', '.join(f'{k}={v}' for k, v in reasons.items())}" if reasons else "")
+            + ")",
+            symbol=symbol,
+            regime=regime_state.regime.value,
+            views_received=len(views),
+            horizons_received=sorted(h.value for h in views),
+            **{name: sorted(items) for name, items in blocked.items()},
+        )
+
     def compute(
         self,
         symbol: str,
@@ -169,12 +213,34 @@ class Aggregator:
         """
         weight_table = REGIME_WEIGHTS.get(regime_state.regime, REGIME_WEIGHTS[Regime.UNKNOWN])
         weighted: list[_WeightedView] = []
+        # **왜 0이 됐는지를 갈래별로 모은다** (2026-08-14 F-5). 아래 `total_weight <= 0`
+        # 분기가 `n_experts=0`을 내보내는데, 그 0에 이르는 길이 다섯이고 종전엔 **어느
+        # 길이었는지 로그가 한 줄도 남기지 않았다.** 그래서 `NEXT_TODO` W-2가 3거래일째
+        # *"가설 강화되었으나 확정 아님"* 에 머물렀다 — 사람이 며칠을 봐도 계측이 없으면
+        # 확정이 안 된다. 한 Horizon이 여러 갈래에 동시에 걸릴 수 있으므로 **전부** 기록한다
+        # (하나만 남기면 "먼저 검사한 것"이 원인처럼 보인다).
+        blocked: dict[str, list[str]] = {
+            "outside_weight_table": [],
+            "zero_regime_weight": [],
+            "blocked_by_meta": [],
+            "blocked_by_uncertainty": [],
+            "blocked_by_freshness": [],
+        }
         for horizon, view in views.items():
             if horizon not in weight_table:
+                blocked["outside_weight_table"].append(horizon.value)
                 continue
             meta_h = 1.0 if view.meta_passed else 0.0
             u_h = min(1.0, max(0.0, view.ens_std) / self._config.uncertainty_scale)
             f_h = _freshness(view.valid_until, as_of, horizon)
+            if weight_table[horizon] <= 0:
+                blocked["zero_regime_weight"].append(horizon.value)
+            if meta_h == 0.0:
+                blocked["blocked_by_meta"].append(horizon.value)
+            if u_h >= 1.0:
+                blocked["blocked_by_uncertainty"].append(horizon.value)
+            if f_h <= 0.0:
+                blocked["blocked_by_freshness"].append(horizon.value)
             weight = weight_table[horizon] * meta_h * (1.0 - u_h) * f_h
             direction = view.p_up - view.p_down
             weighted.append(_WeightedView(horizon, view, weight, u_h, direction))
@@ -183,6 +249,7 @@ class Aggregator:
         total_weight = sum(w.weight for w in active)
 
         if total_weight <= 0:
+            self._log_no_contribution(symbol, views, regime_state, blocked)
             return FuturesView(
                 symbol=symbol,
                 ts_utc=as_of,

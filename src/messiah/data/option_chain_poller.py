@@ -239,8 +239,31 @@ class OptionChainPoller:
                 nearest=chain[0].month_label,
             )
 
-        for leg in select_atm_window(chain, spot, self._strike_window):
-            await self._poll_one(leg)
+        window = select_atm_window(chain, spot, self._strike_window)
+        published = 0
+        for leg in window:
+            if await self._poll_one(leg):
+                published += 1
+
+        # **성공도 남긴다** (2026-08-14 F-6).
+        #
+        # 종전엔 이 경로에 로그가 한 줄도 없었다. 실패·이상만 찍혔으므로 **"폴러가 잘 돌고
+        # 있다"와 "폴러 태스크가 죽었다"가 로그상 완전히 동일**했다 — 건수 0은 "없었다"와
+        # "안 셌다" 둘인데 그것을 가를 근거가 없었다. 2026-08-14 장중 점검에서 사람이
+        # `data/option_chain/`의 파일 수정시각을 직접 뒤져서야 "정상 폴링 중"을 확인했다.
+        #
+        # 다리마다가 아니라 **사이클당 1건**이다. ATM 창이 21다리이므로 다리마다 찍으면
+        # 하루 1만 줄이 되고, 그러면 이 태그 자체가 로그를 못 읽게 만든다.
+        mlog.log(
+            "OptionChainPolled",
+            f"{published}/{len(window)}다리 발행",
+            underlying=self._underlying,
+            series=self._series,
+            legs=len(window),
+            published=published,
+            spot=spot,
+            nearest=chain[0].month_label,
+        )
 
     def _report_empty_chain(self, listed: bool) -> None:
         """빈 체인의 이유를 가려서 딱 필요한 만큼만 운다 — 모듈 docstring의 표 그대로."""
@@ -279,10 +302,16 @@ class OptionChainPoller:
                 cycles=self._empty_streak,
             )
 
-    async def _poll_one(self, leg: OptionLeg) -> None:
+    async def _poll_one(self, leg: OptionLeg) -> bool:
+        """다리 1개를 조회해 발행한다 — **발행에 성공했으면 True** (2026-08-14 F-6).
+
+        반환값이 생긴 이유: 사이클 요약(`OptionChainPolled`)이 "몇 다리를 **실제로**
+        내보냈나"를 말해야 하기 때문이다. 창 크기만 적으면 절반이 조용히 실패한 사이클과
+        온전한 사이클이 같은 줄로 나간다 — 그건 이 태그를 만든 이유와 정반대다.
+        """
         raw = await self._fetch_with_retry(leg)
         if raw is None:
-            return
+            return False
 
         snapshot = OptionQuoteSnapshot(
             underlying=self._underlying,
@@ -303,6 +332,8 @@ class OptionChainPoller:
                 series=self._series,
                 symbol=leg.symbol,
             )
+            return False
+        return True
 
     async def _fetch_with_retry(self, leg: OptionLeg) -> dict | None:
         """다리 1개를 조회한다 — 재시도 계층의 정본은 `data/poll_retry.py`다 (2026-08-10 A-4).

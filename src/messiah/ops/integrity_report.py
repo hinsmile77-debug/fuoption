@@ -344,6 +344,12 @@ class IntegrityReport:
     # **한 표면에만 나타난 사실** (2026-08-14 G-6). 스냅샷이 말한 사유가 로그엔 없으면
     # 다른 표면을 보는 사람은 그 사실을 영영 못 본다 — 그것 자체가 관측 결함이다.
     verdict_surface_gaps: list[dict[str, Any]] = field(default_factory=list)
+    # **기여 의견 0의 사유 분포** (2026-08-14 F-5, `AggregatorNoContribution`).
+    #
+    # `n_experts=0`으로 가는 길이 여섯인데 어느 길이었는지 계측이 없어 `NEXT_TODO` W-2가
+    # 3거래일째 미확정이었다. 갈래별 건수를 하루 단위로 세면 **1회 관측으로 확정된다.**
+    # 빈 dict는 "그런 사이클이 없었다"이고, None은 이 축이 아직 없던 옛 리포트다(L18).
+    no_contribution_reasons: dict[str, int] | None = None
     # **다일 누적 퇴화 판정** (2026-08-14 G-9). 30m은 하루 15봉이 상한이라 일간 판정이
     # 구조적으로 불가능하다 — 3거래일 합산이면 45봉으로 하한 30을 넘는다. 임계를 낮추지
     # 않고 창을 넓혀 답한다(`ops/feature_health_rolling.py`).
@@ -610,6 +616,9 @@ def _drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[
 def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     level_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
+    # 기여 의견 0의 갈래별 관여 횟수 (2026-08-14 F-5) — W-2를 1회 관측으로 확정시키는 축.
+    no_contribution_reasons: dict[str, int] = {}
+    no_contribution_cycles = 0
     session_starts: list[str] = []
     # 기동 창 가드가 되돌려보낸 기동 (2026-08-07 P0-4) — `session_starts`에서 뺄 목록.
     refused_starts: list[str] = []
@@ -692,6 +701,24 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 allowed_constants.update(
                     {str(k): float(v) for k, v in allowed.items() if isinstance(v, (int, float))}
                 )
+        elif tag == "AggregatorNoContribution":
+            # **갈래별로 센다** (2026-08-14 F-5). 한 사이클이 여러 갈래에 동시에 걸릴 수
+            # 있으므로 합이 사이클 수를 넘을 수 있다 — 그게 맞다. 우리가 알고 싶은 것은
+            # "어느 갈래가 몇 번 관여했나"이지 갈래별 배타 분할이 아니다.
+            no_contribution_cycles += 1
+            if not record.get("views_received"):
+                no_contribution_reasons["views_empty"] = (
+                    no_contribution_reasons.get("views_empty", 0) + 1
+                )
+            for cause in (
+                "outside_weight_table",
+                "zero_regime_weight",
+                "blocked_by_meta",
+                "blocked_by_uncertainty",
+                "blocked_by_freshness",
+            ):
+                if record.get(cause):
+                    no_contribution_reasons[cause] = no_contribution_reasons.get(cause, 0) + 1
         elif tag == "DecisionEmitted":
             # 판단 사슬의 **어느 관문에서 접혔나** (2026-08-12 G-1). 사유 문자열이 아니라
             # 엔진이 넘긴 구조화 필드를 센다(`strategy/decision/meta_decision.py`
@@ -735,6 +762,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     return {
         "level_counts": level_counts,
         "tag_counts": tag_counts,
+        "no_contribution_reasons": no_contribution_reasons,
+        "no_contribution_cycles": no_contribution_cycles,
         "session_starts": effective_starts,
         "refused_starts": all_refused,
         "session_ends": sorted(session_ends),
@@ -1668,6 +1697,30 @@ def build_report(
         unmeasured.append("변동성 축 채점(run_vol_scorecard.py 미실행)")
     if not degenerate_features:
         unmeasured.append("피처 건강도(장 마감 FeatureHealth 로그 없음)")
+    # **옵션체인이 돌긴 했나** (2026-08-14 F-6).
+    #
+    # 종전엔 성공 경로에 로그가 없어 "0건"이 *"없었다"* 와 *"안 셌다"* 둘이었다 — 그 구분이
+    # 없어 2026-08-14 장중 점검에서 사람이 `data/option_chain/` 파일 수정시각을 직접 뒤져야
+    # 했다.
+    #
+    # **옛 로그를 위반으로 찍지 않는다.** F-6 이전 로그에는 이 태그가 아예 없으므로 0을
+    # 그대로 판정하면 과거 전부가 거짓 위반이 된다 — `judged`(F-C)와 같은 규율로,
+    # 계측이 없는 날은 `unmeasured`이고 위반이 아니다.
+    polled = logs["tag_counts"].get("OptionChainPolled", 0)
+    poller_alive = any(
+        logs["tag_counts"].get(tag)
+        for tag in ("OptionChainSkipped", "OptionChainPollEmpty", "OptionChainSeriesNotListed")
+    )
+    #
+    # **"태그가 하나도 없다"는 갈래를 두지 않는다.** 그건 이 로그가 수집 프로세스를 안
+    # 담았다는 뜻일 수도 있어(부분 로그·테스트 픽스처) 그 자체로는 결함이 아니다 —
+    # 넓은 그물은 늑대소년을 만든다. 여기서 보는 것은 **폴러가 살아 있었다는 증거가
+    # 있는데도 완주가 0인** 좁은 경우뿐이다. 그날 옵션이 실제로 쌓였는지는 `series_coverage`가
+    # 아카이브로 따로 판정한다(축이 둘인 것이 맞다 — 하나는 로그, 하나는 산출물).
+    if not polled and poller_alive:
+        unmeasured.append(
+            "옵션체인 성공 사이클(OptionChainPolled 0건 — F-6 이전 로그이거나 미완주)"
+        )
     # **판정 못 한 Horizon은 `unmeasured`가 정본이다** (2026-08-14 F-C). 로그는 INFO로
     # 조용히 두고 판정은 이 축이 진다 — 2026-08-14에 30m이 "퇴화 0건(14표본)"으로 나갔고,
     # 30m은 하루 15봉이 상한이라 그 문장이 **매일** 나온다. 0건이 아니라 모르는 것이었다.
@@ -1893,6 +1946,7 @@ def build_report(
         symbol_candidates=symbol_candidates,
         feature_health_rolling=[v.to_dict() for v in rolling],
         verdict_surface_gaps=surface_gaps,
+        no_contribution_reasons=logs["no_contribution_reasons"],
         breaches=breaches,
     )
 

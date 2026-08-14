@@ -301,6 +301,26 @@ TAG_LEVELS: dict[str, int] = {
     # `matched_minute=None`으로 표시해 왔지만 **아무도 그 표시를 읽지 않았다** — 2026-08-14
     # 롤이 정확히 그 상태로 학습 시계열에 들어갈 뻔했다. 이제 그 자리에서 운다.
     "RollBasisUnmeasured": logging.WARNING,
+    # 기여 의견 0의 **사유** (2026-08-14 F-5, `strategy/futures/aggregator.py`).
+    #
+    # `n_experts=0`으로 가는 길이 여섯인데 종전엔 어느 길이었는지 로그가 한 줄도 없었다.
+    # 그래서 W-2가 3거래일째 "가설 강화되었으나 확정 아님"에 머물렀다 — 계측이 없으면
+    # 사람이 며칠을 봐도 확정이 안 된다.
+    #
+    # **INFO인 것이 설계다.** 국면이 UNKNOWN인 날엔 정상 동작이고(게이트 ②가 어차피
+    # NO_TRADE로 접는다), WARNING이면 그런 날 30분마다 울어 잡음이 된다. 승격 여부는
+    # 20거래일 분포를 본 뒤에 정한다.
+    "AggregatorNoContribution": logging.INFO,
+    # 옵션체인 사이클이 **성공했다** (2026-08-14 F-6, `data/option_chain_poller.py`).
+    #
+    # 종전엔 성공 경로에 로그가 한 줄도 없어 "폴러가 잘 돈다"와 "폴러 태스크가 죽었다"가
+    # 로그상 완전히 동일했다. 2026-08-14 장중 점검에서 사람이 그것을 가르려고
+    # `data/option_chain/`을 직접 뒤져야 했다 — 건수 0은 "없었다"와 "안 셌다" 둘이다.
+    #
+    # DEBUG인 이유: 3계열 × 종일이면 하루 550건 안팎이라 `FeaturePublish`(227건)와 같은
+    # 자릿수다. `OptionChainPollEmpty`가 2026-08-07에 WARNING이라 22번 울고 강등된 전례를
+    # 따른다 — 판정은 장후 커버리지 축이 하고 이 태그는 "돌았다"의 증거만 남긴다.
+    "OptionChainPolled": logging.DEBUG,
     # 워밍업 중 NaN 임계 초과 (2026-08-14 F-9). **INFO인 것이 설계다** — 창이 차는 동안
     # 높은 NaN은 정상이고, WARNING으로 찍으면 2026-07-24가 없앤 잡음이 그대로 돌아온다.
     # 그러나 침묵도 답이 아니었다: 롤 당일 전 Horizon이 0봉에서 출발해 종일 임계를 넘겼는데
