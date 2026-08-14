@@ -4508,3 +4508,90 @@ v2026.08-ev (08-07)  37/842        0.147         804      ← 7.4배
 두 프로세스는 15:35~15:36에 정상 종료돼 지금 살아 있지 않다. 월요일 08:20/08:25 정시
 트리거가 새 코드를 태운다. **`code_version.stale`은 오늘 저녁 6커밋으로 true가 됐고**
 월요일 기동이 자동 해소한다(W-24가 검증점).
+
+## 2026-08-14 고도화 구현 완료 — G-1~G-10 ([MW0601], 커밋 f52eed7)
+
+전체 회귀 2,004건 통과 · 신규 테스트 43건.
+
+### ★★ 날짜 정정 — 오늘 기록 전체에 적용
+
+- [x] **2026-08-17은 광복절 대체휴일이다.** `configs/krx_holidays.yaml:53`.
+      `EventCalendar.next_trading_day(2026-08-14)` = **2026-08-18(화)**.
+      **오늘 네 보고서와 위 dev_memory 항목이 전부 "월요일 08-17"로 적었다 — 전부 08-18이다.**
+      아래 관측 항목의 날짜를 그에 맞춰 적는다.
+
+### 완료 — 구현되어 커밋됨
+
+- [x] **G-2 (조사)** 롤 경계 8곳 실측. **전제가 틀렸다** — `load_continuous_series()`가 이미
+      후방조정을 한다. 진짜 갭은 basis 측정 실패(이번 롤 `matched_minute=None`).
+      basis 중앙값 116틱(2.32pt) = 1분봉 변동 중앙값의 3배. 고유 거래일 **164일**(167 아님).
+- [x] **G-5** `required_bars_by_feature()` 측정 — `px_ema_cross_60`=180 · `px_macd_h_60`=139.
+      `BARS_PER_SESSION` 실측표 + `recovery_forecast()`. **웜스타트 0봉이면 30m 12거래일.**
+      `FeatureWarmStart`에 `required_bars`·`recovery_forecast` 실림 + `FeatureWarmStartShort` 신설.
+- [x] **G-7** `core/symbol_resolution.py` — `resolve`/`record`/`recorded`/`resolve_for_tools`.
+      우선순위 명시 > 런타임 기록 > 만기 규칙. 소비처 5곳 통일(postmarket·compact·
+      vol_scorecard·self_check·UI). `TradingSymbolDisagreement`(ERROR) 신설.
+- [x] **G-10** `is_rollover_day()`/`next_rollover_day()` + **진입점 전수 CI 게이트 2종**.
+      운영 스크립트·모듈에 만기 심볼 상수가 새로 생기면 롤 당일까지 안 기다리고 깨진다.
+      `run_compact`·`run_vol_scorecard`의 하드코딩 제거.
+- [x] **G-1** `scripts/run_roll_overlap.py` + 장후 배치 **5/6단계 조건부 결선**.
+      `RollOverlapCaptured`/`RollOverlapFailed`/`RollBasisUnmeasured` 신설.
+      **다음 실동작: 2026-09-10(만기일) 장후.**
+- [x] **G-9** `ops/feature_health_rolling.py` — 3거래일 합산(30m 45봉 > 하한 30).
+      퇴화는 **교집합**. `spans_rollover`로 창 안 롤 경계 표시. 리포트 `unmeasured` 연동.
+- [x] **G-3** `ops/verdict.py` + `status_snapshot.verdict` — 별도 `readiness` 키 안 만듦.
+- [x] **G-6** 표면 대조를 **리포트**가 한다(상태판은 로그를 안 읽는다).
+      `verdict_surface_gaps` + breach.
+- [x] **G-8** `arbitrate_axes()` — 경로가 다르면 원인 후보로 승격, 소수파 경로를 되물어
+      답을 싣는다. 기존 `cross_check_head_truncation`에 결선.
+- [x] **G-4** `TopicSnapshot.cadence_seconds`/`dead` — 주기×3이면 "죽음". 상수 임계가
+      다시 생기면 깨지는 회귀 테스트.
+
+### 2026-08-18(화) 장전에 볼 것 — **날짜 정정됨**
+
+- [ ] **W-16 ★★ F-1 라이브 검증** — `FeatureWarmStart.bars_by_horizon` 전 Horizon ≥ 22 ·
+      `bars_by_source`에 A05608 등장 · `RegimeWarmStartShort` 0건 · `OptionChainSkipped` 0건.
+      **F-1이 들어갔으므로 "미적용의 결과"라는 변명이 성립하지 않는다.**
+- [ ] **W-17** 자가점검 `rollover` — 비-롤일이므로 `비-롤일 — 근월물 A05609 유지 ·
+      다음 롤 2026-09-11`. **롤일 채점은 2026-09-11.**
+- [ ] **W-19** UI 상단 `A05609` · 사이드바 "기본값 출처: 상태판(수집 프로세스가 기록)"
+- [ ] **W-23** 다이제스트 §1 미커밋 두 축 실측 표기
+- [ ] **W-24** `code_version.stale=false` 복귀(어제 7커밋을 태운다)
+- [ ] **W-30 (신규 G-5)** `FeatureWarmStart.required_bars=180` · `recovery_forecast`에
+      전 Horizon "충족" — 웜스타트가 200봉을 채웠으면 부족 Horizon이 0이어야 한다.
+- [ ] **W-31 (신규 G-7)** `logs/trading_symbol_20260818.json` 생성 ·
+      `TradingSymbolDisagreement` **0건**(마스터파일과 만기 규칙이 일치해야 한다)
+
+### 2026-08-18(화) 장중/장후에 볼 것
+
+- [ ] **W-20** `intel.futures` 배지 — 30분 주기에서 LIVE 유지 · 캡션 "주기 30분"
+- [ ] **W-26** `FeatureNanWarmupExceeded` — F-1이 들었으면 **안 떠야 한다**
+- [ ] **W-27** `NestedSessionStart` 4건 · `SessionStart` 1건 · 다이제스트 중복기동 오탐 0
+- [ ] **W-28** `StatusSnapshotWriteFailed` 0건
+- [ ] **W-29** `unmeasured`에 퇴화 판정 보류 표기 · `feature_health_rolling` 채워짐
+- [ ] **W-32 (신규 G-3)** `status_snapshot.verdict.summary` — 정상일이면 "판단 가용"
+- [ ] **W-33 (신규 G-6)** `verdict_surface_gaps` **0건**(F-9가 로그 침묵을 이미 막았다)
+- [ ] **W-9 ★ (4회째 이월)** 08-13 분봉 420 vs 395. **이제 장후 배치가 정상 심볼로 돈다.**
+- [ ] **W-10** `CollectorReconnectNoTick` — 재연결 0회면 replay 강제 채점
+
+### 2026-09-10(목) 만기일 장후 · 2026-09-11(금) 롤 당일
+
+- [ ] **W-34 (G-1 실동작)** `run_roll_overlap` 5/6단계가 `RollOverlapCaptured`를 남긴다
+- [ ] **W-35 (G-1 효과)** 다음 `compute_roll_offsets`에서 A05609→A05610의
+      `matched_minute`이 **None이 아니다** · `RollBasisUnmeasured` 0건
+- [ ] **W-36 (G-10 실동작)** 자가점검 `rollover` 줄이 롤일 `[WARN]` 형태로 뜬다
+
+### 미착수 — 남은 것
+
+- [ ] **F-5** `AggregatorNoContribution`(P1) — W-21의 확정 조건. **여전히 미착수.**
+- [ ] **F-6** `OptionChainPolled`(P1) — W-22의 확정 조건. **여전히 미착수.**
+- [ ] **F-11** DECISION_LOG G-1 근거 문구 정정(코드 변경 없음)
+- [ ] **F-12** 같은 날 같은 국면 2회 점검 시 보고서 파일명 규칙
+- [ ] **포맷 비준수 6파일** — `models/score_calibration.py` + 테스트 5종.
+      고도화 커밋에서 **의도적으로 뺐다**(무관한 포맷 변경이 섞이면 설계 변경과 잡음을
+      못 가른다). 별건 커밋으로 처리할 것.
+- [ ] **런타임 후방조정(신규 제안)** — F-1의 `load_recent_bars_by_source()`는 **무조정**
+      스플라이스다. 학습은 back-adjust된 연속 시계열을 쓰는데 추론은 무조정 창을 쓴다 —
+      **학습과 추론이 롤 경계에서 어긋난다.** G-1이 basis를 확보하면 그 값으로 런타임
+      웜스타트도 조정할 수 있다. **선행: G-1 실동작(2026-09-10).** 그 전에는 조정할
+      basis 자체가 없다.
