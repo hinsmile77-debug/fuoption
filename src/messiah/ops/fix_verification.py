@@ -210,6 +210,32 @@ _boot_recovery_armed = _host_check_ok("boot_recovery")
 _schedule_matches_registration = _host_check_ok("schedule_drift")
 
 
+def _degenerate_feature_count(report: dict[str, Any]) -> float | None:
+    """세션 내내 죽어 있던 피처 수 — **판정된 Horizon만** 센다 (2026-08-14 F-C).
+
+    표본이 하한(30)에 못 미친 Horizon은 분모에서 뺀다. 종전엔 그런 Horizon도 `always_nan`·
+    `constant`가 빈 목록이라 **0으로 합산**됐다 — 2026-08-14에 30m이 14표본으로 판정 불가
+    였는데 그 사실이 "퇴화 0건"과 구분되지 않았고, 30m은 하루 15봉이 물리적 상한이라
+    그 상태가 **매일** 이어진다.
+
+    한 Horizon도 판정 못 한 날은 `None`(판정 불가)이다 — `evaluate()`가 통과로도 위반으로도
+    안 센다(L18). 0으로 내면 "오늘도 깨끗했다"는 거짓 통과가 매일 쌓인다.
+
+    옛 리포트에는 `judged` 키가 없다. 그때는 표본 미달도 0건으로 나갔으므로 기본값
+    True가 그 시절의 의미를 그대로 보존한다 — 과거 판정을 소급해 뒤집지 않는다.
+    """
+    entries = (report.get("degenerate_features") or {}).values()
+    judged = [entry for entry in entries if entry.get("judged", True)]
+    if not judged:
+        return None
+    return float(
+        sum(
+            len(entry.get("always_nan") or []) + len(entry.get("constant") or [])
+            for entry in judged
+        )
+    )
+
+
 # 등록부에서 쓸 수 있는 지표 — **무결성 리포트에 실제로 있는 필드만** 연다. 임의 표현식을
 # 허용하면 등록부가 코드가 되고, 그러면 등록부 자체를 검증해야 하는 문제가 생긴다.
 METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
@@ -274,12 +300,7 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     "native_crashes_measurable": _native_crashes_measurable,
     # 세션 내내 죽어 있던 피처 수 (2026-08-05 고도화 3). 0이어야 한다 — 값을 내지만
     # 안 변하는 피처는 `nan_ratio`에 흔적이 없어 8거래일 내내 안 보였다(`px_macd_h_5`).
-    "degenerate_feature_count": lambda r: float(
-        sum(
-            len(entry.get("always_nan") or []) + len(entry.get("constant") or [])
-            for entry in (r.get("degenerate_features") or {}).values()
-        )
-    ),
+    "degenerate_feature_count": _degenerate_feature_count,
     # 적재 계열 시간 커버리지 판정 수 (2026-08-06 고도화 2, `ops/series_coverage.py`).
     #
     # `horizon_findings`가 상위 봉의 정합을 보는 것과 같은 자리 — 이쪽은 **봉이 아닌 계열**

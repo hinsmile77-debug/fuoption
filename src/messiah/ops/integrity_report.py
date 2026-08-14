@@ -652,11 +652,23 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                     for key in ("p50", "p90", "p99", "max", "samples")
                     if isinstance(record.get(key), (int, float))
                 }
-        elif tag in ("FeatureHealthSummary", "FeatureHealthDegenerate"):
+        elif tag in (
+            "FeatureHealthSummary",
+            "FeatureHealthDegenerate",
+            # 표본 미달로 판정 못 한 Horizon (2026-08-14 F-C). **여기 넣는 것이 핵심이다** —
+            # 빠뜨리면 그 Horizon이 리포트에서 통째로 사라져 "검사했는데 없었다"와
+            # 구분이 안 된다. `judged=False`로 실려 아래에서 `unmeasured`로 간다.
+            "FeatureHealthNotJudged",
+        ):
             horizon = str(record.get("horizon", "?"))
             degenerate[horizon] = {
                 "always_nan": list(record.get("always_nan") or []),
                 "constant": list(record.get("constant") or []),
+                # 옛 로그에는 이 필드가 없다 — 그때는 표본 미달도 "0건"으로 나갔으므로
+                # 기본값 True(판정됨)가 그 시절의 의미를 그대로 보존한다.
+                "judged": bool(record.get("judged", True)),
+                "samples": int(record.get("samples") or 0),
+                "min_samples": int(record.get("min_samples") or 0),
             }
             # 허용된 상수의 **값** (2026-08-11) — 퇴화 판정에서 빠진 대신 날짜 간 동결
             # 검사로 옮겨진 축(`_calendar_freeze_finding`). Horizon마다 같은 값이므로
@@ -1480,6 +1492,9 @@ def build_report(
                 for name in (entry.get("constant") or [])
                 if not feature_spec.is_intraday_constant_ok(str(name))
             ],
+            # 판정 여부를 그대로 나른다 (2026-08-14 F-C) — 채점기가 이걸 보고 분모에서 뺀다.
+            "judged": bool(entry.get("judged", True)),
+            "samples": int(entry.get("samples") or 0),
         }
         for horizon, entry in logs["degenerate_features"].items()
     }
@@ -1573,6 +1588,15 @@ def build_report(
         unmeasured.append("변동성 축 채점(run_vol_scorecard.py 미실행)")
     if not degenerate_features:
         unmeasured.append("피처 건강도(장 마감 FeatureHealth 로그 없음)")
+    # **판정 못 한 Horizon은 `unmeasured`가 정본이다** (2026-08-14 F-C). 로그는 INFO로
+    # 조용히 두고 판정은 이 축이 진다 — 2026-08-14에 30m이 "퇴화 0건(14표본)"으로 나갔고,
+    # 30m은 하루 15봉이 상한이라 그 문장이 **매일** 나온다. 0건이 아니라 모르는 것이었다.
+    for horizon, entry in sorted(degenerate_features.items()):
+        if not entry.get("judged", True):
+            floor = logs["degenerate_features"].get(horizon, {}).get("min_samples") or 0
+            unmeasured.append(
+                f"{horizon} 피처 퇴화 판정(표본 {entry.get('samples', 0)} < 최소 {floor})"
+            )
     unmeasured.extend(f"호스트 위생 — {item}" for item in host.unmeasured)
 
     # ---- 고도화 2(2026-08-06): 적재 계열 전수 커버리지 ----

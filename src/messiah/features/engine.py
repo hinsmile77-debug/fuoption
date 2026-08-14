@@ -149,6 +149,20 @@ class FeatureHealth:
     allowed_constant_values: dict[str, float] = field(default_factory=dict)
 
     @property
+    def judged(self) -> bool:
+        """표본이 판정 하한을 넘겼는가 (2026-08-14 F-C).
+
+        **`degenerate_count == 0`에는 두 뜻이 있다**: 검사했는데 없었거나, 검사를 못 했거나.
+        2026-08-14 리포트가 *"30m 피처 퇴화 0건(14표본)"* 이라고 말했는데, 30m은 하루 15봉이
+        물리적 상한이라 하한 30을 **어떤 날에도 못 넘는다** — 가장 위험한 Horizon에 대한
+        가장 안심되는 문장이 매일 나오고 있었다.
+
+        이 속성이 그 둘을 가른다. 임계를 낮추는 것은 답이 아니다(오탐이 는다) — 답은
+        다일 누적 판정이고 그건 별건이다(고도화 G-9).
+        """
+        return self.samples >= _MIN_SAMPLES_FOR_HEALTH
+
+    @property
     def degenerate_count(self) -> int:
         return len(self.always_nan) + len(self.constant)
 
@@ -350,21 +364,44 @@ class FeatureEngine:
         정상(퇴화 0건)일 때도 남긴다. "오늘 몇 개를 검사했고 몇 개가 죽어 있었나"가 매일
         기록돼야 `0건`이 **측정된 0**이라는 뜻이 되기 때문이다 — 로그가 없는 날은 검사를
         안 한 날과 구분되지 않는다(L18).
+
+        ## 세 번째 상태를 어휘에 넣는다 (2026-08-14 F-C)
+
+        종전엔 `degenerate_count`가 0인지 아닌지 **두 갈래**였다. 그래서 표본이 하한에 못
+        미쳐 **판정 자체를 못 한** 날도 *"퇴화 0건"* 으로 나갔다 — 2026-08-14의
+        *"30m 피처 퇴화 0건(14표본)"* 이 그것이고, 30m은 하루 15봉이 상한이라 그 문장이
+        **매일** 나온다. 가장 위험한 Horizon에 대한 가장 안심되는 문장이었다.
+
+        새 태그는 **INFO**다. WARNING으로 올리면 15m·30m가 대부분의 날 표본 미달이라 매일
+        2건씩 울고, 그건 이 파일 자신이 경고해 온 형태다(*"매일 울리는 경고는 결국 아무도
+        안 본다"*). 판정의 정본은 리포트의 `unmeasured` 축이고 로그는 그 근거다.
         """
         healths = self.feature_health()
         for health in healths:
             degenerate = health.degenerate_count
-            mlog.log(
-                "FeatureHealthDegenerate" if degenerate else "FeatureHealthSummary",
-                (
+            if not health.judged:
+                tag = "FeatureHealthNotJudged"
+                msg = (
+                    f"{health.horizon} 퇴화 판정 보류 — {health.samples}표본 < 최소 "
+                    f"{_MIN_SAMPLES_FOR_HEALTH} (0건이 아니라 '모른다'이다)"
+                )
+            elif degenerate:
+                tag = "FeatureHealthDegenerate"
+                msg = (
                     f"{health.horizon} 피처 {degenerate}개가 세션 내내 죽어 있었다 — "
                     f"항상NaN {health.always_nan} · 상수 {health.constant}"
-                    if degenerate
-                    else f"{health.horizon} 피처 퇴화 0건 ({health.samples}표본)"
-                ),
+                )
+            else:
+                tag = "FeatureHealthSummary"
+                msg = f"{health.horizon} 피처 퇴화 0건 ({health.samples}표본 · 판정됨)"
+            mlog.log(
+                tag,
+                msg,
                 symbol=self._symbol,
                 horizon=health.horizon,
                 samples=health.samples,
+                judged=health.judged,
+                min_samples=_MIN_SAMPLES_FOR_HEALTH,
                 always_nan=health.always_nan,
                 constant=health.constant,
                 # 퇴화로는 안 세지만 값은 남긴다 — 날짜 간 동결 검사의 재료
