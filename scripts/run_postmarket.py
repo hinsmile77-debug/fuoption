@@ -53,16 +53,30 @@
 날은 매일 그렇게 찍힌다 — 이 프로젝트가 이름 붙여 경계해 온 늑대소년이 정확히 이 형태다
 (`configs/pending_verifications.yaml`의 "넓은 그물은 늑대소년을 만든다").
 
-그래서 종료 코드를 셋으로 읽는다:
+그래서 종료 코드를 넷으로 읽는다:
 
     0                      완료
     1                      완료 — **발견한 것이 있다**(리포트를 읽어야 한다). 실패 아님
     2(REFUSED_EXIT_CODE)   session_guard가 거부 — 실패
+    3                      조회 대상 심볼이 그날 아카이브에 없다 — 단계 진입 전 중단
     그 밖                   진짜 실패
 
+## 심볼은 날짜가 정한다 (2026-08-14 F-A)
+
+`--symbol`의 기본값은 **`--date`의 근월물**이다. 종전엔 `default="A05608"`이 소스에 박혀
+있었고, 만기가 있는 값을 상수로 둔 대가를 2026-08-14(첫 월물 롤)에 치렀다 — 5단계 중
+4단계가 **전날 만기된 월물**을 조회했고, 도구들은 저마다 "0행"을 정상 산출로 리포트에 썼다.
+아무도 실패하지 않아 종료 코드는 0이었고, `fix_verification`이 그 리포트를 읽어 재발 12건을
+찍었다(1건 허위·3건 수치 오류). 그날 3/5단계(`verify_archive_volume.py`)만 옳았는데,
+이유는 그 도구가 `--symbol`을 아예 안 받고 스스로 찾도록 만들어졌기 때문이다.
+
+해석은 `backfill.front_month_code_for_day(day)`가 한다 — **날짜를 받는다**는 것이 요점이다
+(마스터파일 조회는 날짜를 안 받아 소급 실행에서 조용히 틀린다. `_resolve_symbol` 참고).
+
 사용:
-    python scripts/run_postmarket.py                    # 오늘
-    python scripts/run_postmarket.py --date 2026-08-06  # 특정일 소급
+    python scripts/run_postmarket.py                     # 오늘 · 심볼 자동
+    python scripts/run_postmarket.py --date 2026-08-06   # 특정일 소급 · 그날의 근월물
+    python scripts/run_postmarket.py --symbol A05609     # 명시(자동 해석을 덮어쓴다)
 """
 
 from __future__ import annotations
@@ -81,14 +95,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
+from messiah.core.event_calendar import EventCalendar  # noqa: E402
+from messiah.core.messages import Horizon  # noqa: E402
+from messiah.data import backfill, bar_paths  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS = _PROJECT_ROOT / "scripts"
+_BAR_DIR = _PROJECT_ROOT / "data" / "bars"
 
 # 한 단계가 이만큼 넘게 걸리면 뒤 단계까지 밀린다 — 15:45에 시작해 장 마감 리뷰 시각까지는
 # 끝나야 한다. 변동성 채점(20거래일 재계산)이 가장 무거워 여유를 크게 잡는다.
 _STEP_TIMEOUT_SECONDS = 900
+
+# 조회 대상 심볼이 그날 아카이브에 없다 — 5단계에 들어가기 전에 멈춘다 (2026-08-14 F-A).
+# `session_guard.REFUSED_EXIT_CODE`(2)와 **다른 값이어야 한다**: 2는 "장중이라 거부"라는
+# 뜻이고 이건 "볼 곳을 잘못 잡았다"라 원인도 조치도 다르다. 같은 숫자를 쓰면 요약이
+# 두 사건을 한 문장으로 말하게 되고, 그게 오늘 리포트가 저지른 실수와 같은 종류다.
+_SYMBOL_MISMATCH_EXIT_CODE = 3
 
 
 @dataclass(frozen=True)
@@ -124,7 +148,11 @@ def _parse_day(text: str) -> date:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MESSIAH 장후 절차 일괄 실행")
     parser.add_argument("--date", type=_parse_day, default=None, help="기본: 오늘 KST")
-    parser.add_argument("--symbol", default="A05608")
+    parser.add_argument(
+        "--symbol",
+        default=None,
+        help="기본: --date의 근월물을 만기 규칙으로 해석(월물 롤 당일에도 옳다)",
+    )
     parser.add_argument("--configs", default="configs")
     parser.add_argument(
         "--skip-rest",
@@ -138,6 +166,50 @@ def _parse_args() -> argparse.Namespace:
 def _python() -> str:
     """이 스크립트를 돌린 인터프리터를 그대로 쓴다 — `.venv` 밖에서 불려도 같은 환경."""
     return sys.executable
+
+
+def _resolve_symbol(explicit: str | None, day: date) -> tuple[str, str]:
+    """그날의 조회 대상 심볼과 그 출처 — (심볼, 출처 설명) (2026-08-14 F-A).
+
+    ## 왜 마스터파일이 아니라 만기 규칙인가
+
+    `symbol_master.front_month_future_code()`는 **날짜를 안 받는다** — 오늘 내려받은 마스터
+    파일의 근월물을 답한다. 장후 배치는 `--date 2026-08-12` 같은 소급 실행이 정상 경로이고,
+    그때 오늘의 근월물을 답하면 **조용히 틀린다**(그 실행은 성공으로 끝나고 리포트만 거짓이
+    된다 — 2026-08-14에 정확히 그 형태로 하루치 채점이 오염됐다).
+
+    `backfill.front_month_code_for_day()`는 날짜를 받고, 만기 규칙의 정본이
+    `core/event_calendar.py` 하나로 모여 있다(그쪽 주석). 네트워크도 안 탄다.
+    실측: 08-12·08-13 → A05608 / 08-14 → A05609 / 09-10 → A05609 / 09-11 → A05610.
+
+    달력을 못 읽으면 만기 보정 없이 진행한다 — 부가 정보 하나 때문에 배치 전체가 죽는 것이
+    훨씬 나쁘다(`EventCalendar` 예외를 삼키는 다른 소비처들과 같은 판단).
+    """
+    if explicit:
+        return explicit, "명시"
+    try:
+        calendar: EventCalendar | None = EventCalendar.from_file()
+    except Exception:  # noqa: BLE001 — 달력 부재로 배치를 죽이지 않는다
+        calendar = None
+    return backfill.front_month_code_for_day(day, calendar), "근월물 자동 해석"
+
+
+def _has_day(symbol: str, day: date) -> bool:
+    """그날 1분봉이 아카이브에 있는가 — 통합본이든 조각이든.
+
+    경로를 직접 조립하지 않고 `bar_paths.day_sources()`에 위임한다(그쪽 모듈 docstring:
+    *"경로를 직접 조립하지 말 것 — 그러면 장중에 그날 데이터가 통째로 안 보인다"*).
+    """
+    return bool(bar_paths.day_sources(_BAR_DIR, symbol, Horizon.M1, day))
+
+
+def _symbols_holding_day(day: date) -> list[str]:
+    """그날 1분봉을 실제로 가진 심볼들 — 오조회 시 "그럼 누가 갖고 있나"를 답한다."""
+    if not _BAR_DIR.is_dir():
+        return []
+    return sorted(
+        entry.name for entry in _BAR_DIR.iterdir() if entry.is_dir() and _has_day(entry.name, day)
+    )
 
 
 def _run_step(step: Step) -> StepResult:
@@ -174,8 +246,12 @@ def _run_step(step: Step) -> StepResult:
     return StepResult(step.name, False, f"종료 코드 {code}")
 
 
-def _steps(args: argparse.Namespace, day: date) -> list[Step]:
-    """실행할 단계 목록 — **순서가 계약이다**(모듈 docstring)."""
+def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
+    """실행할 단계 목록 — **순서가 계약이다**(모듈 docstring).
+
+    `symbol`을 `args`에서 다시 꺼내지 않고 인자로 받는다 — 해석된 값이 흘러야 하고,
+    두 곳에서 각자 꺼내면 그 순간 갈라질 수 있다(오늘 사고의 형태가 정확히 그것이다).
+    """
     stamp = day.isoformat()
     planned: list[Step] = [
         # **재합성보다 먼저** 조각을 통합한다 (2026-08-07 P1-1). 통합은 원래 `run_l1_daily.py`
@@ -187,7 +263,7 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
                 _python(),
                 str(_SCRIPTS / "run_compact.py"),
                 "--symbol",
-                args.symbol,
+                symbol,
                 "--date",
                 stamp,
             ],
@@ -200,7 +276,7 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
                 _python(),
                 str(_SCRIPTS / "run_recompose.py"),
                 "--symbol",
-                args.symbol,
+                symbol,
                 "--start",
                 stamp,
                 "--end",
@@ -235,7 +311,7 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
                 "--date",
                 stamp,
                 "--symbol",
-                args.symbol,
+                symbol,
                 "--configs",
                 args.configs,
             ],
@@ -252,7 +328,7 @@ def _steps(args: argparse.Namespace, day: date) -> list[Step]:
                 "--date",
                 stamp,
                 "--symbol",
-                args.symbol,
+                symbol,
                 "--configs",
                 args.configs,
             ],
@@ -283,7 +359,15 @@ def main() -> int:
     mlog.setup(_instance_id(args.configs))
 
     day = args.date or datetime.now().astimezone().date()  # noqa: DTZ005 — 로컬=KST 전제
-    print(f"=== MESSIAH 장후 절차 — {day.isoformat()} / {args.symbol} ===", flush=True)
+    symbol, origin = _resolve_symbol(args.symbol, day)
+    print(f"=== MESSIAH 장후 절차 — {day.isoformat()} / {symbol} ({origin}) ===", flush=True)
+    mlog.log(
+        "SymbolResolved",
+        f"{day.isoformat()} 조회 대상 {symbol} ({origin})",
+        date=day.isoformat(),
+        symbol=symbol,
+        origin=origin,
+    )
     if args.skip_rest:
         print("  (--skip-rest: 거래량 대조 생략 — 리포트에 '미측정'으로 남는다)", flush=True)
 
@@ -291,13 +375,46 @@ def main() -> int:
     # 자식이 다시 거부하면 "통과시킨 줄 알았는데 아무것도 안 돌았다"가 된다.
     passthrough = ["--force-intraday"] if args.force_intraday else []
 
+    # 단계 목록은 **한 번만** 만든다 — 종전엔 `try`와 `finally`에서 각각 `_steps()`를 불러
+    # 같은 계산이 두 벌 돌았다. 값이 같으니 무해했지만, 심볼 해석이 들어온 지금은 두 벌이
+    # 갈릴 수 있는 자리다(그게 오늘 사고의 형태다).
+    planned_steps = _steps(args, day, symbol)
+
     # `try/finally`인 이유: 예외로 죽는 경로에서도 마커를 남겨야 "죽었다"가 관측된다.
     # 마커가 예외 때만 빠지면 **가장 알고 싶은 날에만 없는 축**이 된다.
     results: list[StepResult] = []
     try:
+        # **5단계에 들어가기 전에 조회 대상을 검증한다** (2026-08-14 F-A).
+        #
+        # 2026-08-14에 배치는 만기된 A05608을 조회했고, 네 도구가 저마다 "0행"을 정상
+        # 산출로 리포트에 썼다. 아무도 실패하지 않았기 때문에 종료 코드도 0이었다 —
+        # 그리고 `fix_verification`이 그 리포트를 읽어 재발 12건을 찍었다(1건 허위·3건
+        # 수치 오류). **조회 대상이 틀린 것을 "데이터가 없다"로 통과시키면 하루치 채점
+        # 전체가 조용히 거짓이 된다**(R10 · 금지계명 12).
+        if not _has_day(symbol, day):
+            holders = _symbols_holding_day(day)
+            detail = (
+                f"보유 심볼: {', '.join(holders)}" if holders else "그날 데이터를 가진 심볼 없음"
+            )
+            mlog.log(
+                "SymbolResolutionMismatch",
+                f"{day.isoformat()} {symbol}의 1분봉이 아카이브에 없다 — 중단 ({detail})",
+                date=day.isoformat(),
+                symbol=symbol,
+                origin=origin,
+                symbols_holding_day=holders,
+            )
+            print(
+                f"\n  ** 조회 대상 불일치 ** — {symbol}/1m/{day.isoformat()} 부재. {detail}.\n"
+                f"     휴장일이면 정상이다. 아니라면 --symbol로 명시하거나 해석 규칙을 확인할 것.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _SYMBOL_MISMATCH_EXIT_CODE
+
         results = [
             _run_step(Step(step.name, step.argv + passthrough, step.one_means_finding))
-            for step in _steps(args, day)
+            for step in planned_steps
         ]
 
         print("\n=== 장후 절차 요약 ===", flush=True)
@@ -327,7 +444,7 @@ def main() -> int:
         print("\n  전 단계 완료 — 발견 없음. 리포트의 `미측정`이 비어 있어야 한다.", flush=True)
         return 0
     finally:
-        planned = len(_steps(args, day))
+        planned = len(planned_steps)
         failed_count = sum(1 for r in results if not r.ok)
         # 문구는 `run_l1_daily.py`/`run_g2_paper_trading.py`와 같은 형식("정상 종료")을
         # 쓰되, 몇 단계까지 갔는지를 함께 남긴다 — 중간에 죽은 날 그 숫자가 곧 진단이다.

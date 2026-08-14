@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # Windows 콘솔 기본 코드페이지(cp949)가 한글 출력을 깨뜨리는 것 방지
@@ -25,8 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.core.bus import registered_types  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
-from messiah.core.messages import SCHEMA_VERSION  # noqa: E402
+from messiah.core.event_calendar import EventCalendar  # noqa: E402
+from messiah.core.messages import SCHEMA_VERSION, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst, now_utc  # noqa: E402
+from messiah.data import backfill, bar_paths  # noqa: E402
 
 
 @dataclass
@@ -272,6 +274,67 @@ def check_prev_postmarket(
     return CheckResult("postmarket", True, f"{stamp} 장후 배치 정상 종료 확인")
 
 
+def check_rollover(
+    *, bar_dir: Path = Path("data") / "bars", today: date | None = None
+) -> CheckResult:
+    """**오늘이 월물 롤 당일인가, 그리고 새 월물의 이력은 얼마나 있는가** (2026-08-14 F-2).
+
+    ## 왜 자가점검이 이걸 먼저 외쳐야 하나
+
+    2026-08-14는 첫 월물 롤이었다(`A05608` → `A05609`). 그날 자가점검은 **PASS를 세 번**
+    냈고, 그 뒤에 벌어진 일은 이랬다:
+
+        · 피처 롤링 윈도 전 Horizon 0봉  → 1m NaN 84.7%로 개장
+        · 국면 이력 0봉 < 하한 22봉      → 종일 UNKNOWN, 판단 14/14가 NO_TRADE
+        · 옵션체인 기준가 시드 없음      → 장전 10사이클 스킵(영구 결손)
+        · 장후 배치 4/5단계가 만기 월물 조회 → 하루치 채점 오염
+
+    넷 다 같은 원인 하나("심볼이 바뀌면 심볼로 색인된 것이 전부 빈다")인데, **기동 시점에
+    그 사실을 말하는 축이 하나도 없었다.** 롤은 4주에 한 번뿐이라 사람도 잊는다.
+
+    ## 기동은 막지 않는다
+
+    롤 자체는 정상이고 수집은 그대로 해야 한다(`check_host`·`check_prev_postmarket`과 같은
+    원칙). 대신 **[WARN] 문구와 가용 봉 수를 남겨** 아침에 눈에 띄게 한다 — 웜스타트가
+    선행 월물을 읽는지(F-1) 확인할 첫 지점이 여기다.
+    """
+    today = today or now_kst().date()
+    try:
+        calendar: EventCalendar | None = EventCalendar.from_file()
+    except Exception:  # noqa: BLE001 — 달력 부재로 기동을 막지 않는다
+        calendar = None
+
+    try:
+        symbol = backfill.front_month_code_for_day(today, calendar)
+        # 달력이 있으면 휴장일을 건너뛴 직전 거래일, 없으면 전날. 달력이 등록 연도 밖을
+        # 물으면 ValueError를 던지므로(그쪽 docstring) 그것도 여기서 받는다.
+        if calendar is not None:
+            previous = calendar.previous_trading_day(today)
+        else:
+            previous = today - timedelta(days=1)
+        previous_symbol = backfill.front_month_code_for_day(previous, calendar)
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult("rollover", True, f"근월물 해석 실패({exc}) — 판정 불가")
+
+    if symbol == previous_symbol:
+        return CheckResult("rollover", True, f"비-롤일 — 근월물 {symbol} 유지")
+
+    # 롤 당일이다. 신규 월물이 **오늘 이전에** 가진 30m 아카이브 일수가 곧 웜스타트의 재료다
+    # (국면 구동 Horizon이 30m — `strategy/regime/runtime.py`).
+    def _days_before(sym: str) -> int:
+        return len([d for d in bar_paths.available_days(bar_dir, sym, Horizon.M30) if d < today])
+
+    new_days, old_days = _days_before(symbol), _days_before(previous_symbol)
+    return CheckResult(
+        "rollover",
+        True,
+        f"경고: 월물 롤 당일 — {previous_symbol} → {symbol}. "
+        f"신규 월물 30m 아카이브 {new_days}일 · 직전 월물 {old_days}일. "
+        f"웜스타트가 선행 월물을 못 읽으면 오늘 국면은 UNKNOWN으로 시작한다"
+        f"(FeatureWarmStart.bars_by_source 확인)",
+    )
+
+
 def check_git_state(mode: str) -> CheckResult:
     """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제).
 
@@ -406,6 +469,8 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     results.append(check_host())
     # 어제 장후 배치의 결말 — 오늘 아침이 그것을 볼 수 있는 첫 시점이다(F-5의 순서 함정).
     results.append(check_prev_postmarket())
+    # 오늘이 월물 롤 당일인가 — 4주에 한 번뿐이라 사람이 잊는다(2026-08-14 F-2).
+    results.append(check_rollover())
     if cfg is not None:
         results.append(check_bar_close(cfg))
         results.append(check_git_state(cfg.mode))
