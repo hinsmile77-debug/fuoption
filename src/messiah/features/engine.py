@@ -34,7 +34,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Callable, Mapping, Sequence
 
 from messiah.core import logging as mlog
@@ -81,6 +81,11 @@ _NAN_RATIO_HALT_THRESHOLD = 0.20  # Ver 1.1 §2-2: 20% 초과 시 해당 Horizon
 # "최근 20봉만 고정, 그 앞은 움직임"인 실제 형태를 못 잡는다(그날 nan_ratio가 0.0165에서
 # 0.3306으로 뛴 구간이 정확히 이 형태였다).
 _DEGENERATE_WINDOW = 20
+
+# 워밍업 중 NaN 임계 초과의 **재고지 간격** (2026-08-14 F-9). 봉 시각 기준이다.
+# 30분이면 1m은 하루 최대 13건, 30m은 15건이 아니라 실질 15건 그대로지만 — 중요한 것은
+# **매 봉이 아니라는 것**이다. 롤 당일 전 Horizon이 동시에 초과해도 로그가 잠기지 않는다.
+_WARMUP_NAN_RENOTIFY = timedelta(minutes=30)
 
 
 # 이 개수 미만의 표본으로는 "상수다"라고 말하지 않는다 — 장 초반 몇 봉은 우연히 같은 값이
@@ -236,6 +241,8 @@ class FeatureEngine:
             h: deque(maxlen=_MAX_HISTORY) for h in self._horizons
         }
         self._session = px_core.SessionState()
+        # 워밍업 NaN 재고지 억제 상태 (2026-08-14 F-9) — Horizon별 마지막 고지 봉 시각.
+        self._warmup_nan_last: dict[Horizon, datetime] = {}
         # `SessionState`를 갱신할 Horizon — M1을 구독하면 M1, 아니면 **구독 중 가장 촘촘한**
         # Horizon (2026-08-04).
         #
@@ -534,7 +541,22 @@ class FeatureEngine:
         # 높은 게 정상이라 매 봉마다 WARNING을 찍으면 agenda.py의 주간 경보 집계가 이 잡음에
         # 파묻힌다(2026-07-24, 실제 운영 로그 리뷰 중 발견) — len(history)가 _MAX_HISTORY에
         # 도달해 "워밍업이 끝났어야 할 시점"이 된 뒤에도 nan_ratio가 여전히 높을 때만 경고한다.
+        # ## 억제가 아니라 분류다 (2026-08-14 F-9)
+        #
+        # 종전엔 `warmed_up`이 아니면 임계 초과를 **아예 안 찍었다**. 그 억제는 위 문단의
+        # 이유로 옳았지만, `len(history) < _MAX_HISTORY`라는 한 조건이 **두 사건**을 함께
+        # 덮고 있었다: 평범한 워밍업과, 월물 롤로 아카이브가 통째로 빈 상태.
+        #
+        # 2026-08-14(첫 월물 롤)에 전 Horizon이 0봉에서 출발해 1m NaN 84.7%로 개장했고
+        # 30m은 종일 62% 아래로 안 내려갔는데, **로그에는 한 줄도 안 남았다.** 화면과
+        # 자가점검이 정상을 말하는 동안 판단은 종일 불가였다.
+        #
+        # 그래서 억제를 분류로 바꾼다. 새 태그는 **INFO**이고 Horizon당 1회 + 재고지 간격을
+        # 둔다 — 기존 WARNING에 합치면 2026-07-24가 없앤 잡음이 그대로 돌아오고, 태그를
+        # 가르면 R6(태그 1개 = 심각도 1개)도 함께 지켜진다.
         warmed_up = len(history) >= _MAX_HISTORY
+        if nan_ratio > _NAN_RATIO_HALT_THRESHOLD and not warmed_up:
+            self._log_warmup_nan(bar, nan_ratio, len(history))
         if warmed_up and nan_ratio > _NAN_RATIO_HALT_THRESHOLD:
             if _is_price_degenerate(history):
                 # 원인이 데이터 결측이 아니라 시장 상태다 — 같은 문구로 찍으면 사람이 매번
@@ -569,6 +591,31 @@ class FeatureEngine:
             values=values,
             nan_ratio=nan_ratio,
             valid_until=bar.bar_open_kst + timedelta(seconds=HORIZON_SECONDS[bar.horizon]),
+        )
+
+    def _log_warmup_nan(self, bar: BarClosed, nan_ratio: float, bars: int) -> None:
+        """워밍업 중 NaN 임계 초과 — Horizon당 1회 + 재고지 간격 (2026-08-14 F-9).
+
+        **매 봉 찍지 않는 것이 핵심이다.** 30m 기준 하루 15건 × 매일이면 2026-07-24가 없앤
+        잡음이 그대로 돌아온다. 그렇다고 침묵하면 롤 당일처럼 "종일 판단 불가인데 로그가
+        조용한" 날이 또 생긴다. 둘 사이가 이 함수다.
+
+        간격은 봉 시각(`bar_open_kst`) 기준이다 — 벽시계로 재면 replay에서 전부 한 번에
+        찍히거나 전부 눌린다.
+        """
+        last = self._warmup_nan_last.get(bar.horizon)
+        if last is not None and bar.bar_open_kst - last < _WARMUP_NAN_RENOTIFY:
+            return
+        self._warmup_nan_last[bar.horizon] = bar.bar_open_kst
+        mlog.log(
+            "FeatureNanWarmupExceeded",
+            f"워밍업 중 NaN 비율 {nan_ratio:.0%} — {bar.horizon.value} "
+            f"{bars}/{_MAX_HISTORY}봉 (창이 차면 해소되는지 확인할 것)",
+            symbol=self._symbol,
+            horizon=bar.horizon.value,
+            nan_ratio=nan_ratio,
+            bars=bars,
+            required=_MAX_HISTORY,
         )
 
     @staticmethod

@@ -123,6 +123,74 @@ def front_month_code_for_day(day: date, calendar: EventCalendar | None = None) -
     return contract_code(nxt.year, nxt.month)
 
 
+def preceding_front_month_codes(
+    day: date, count: int = 1, calendar: EventCalendar | None = None
+) -> list[str]:
+    """`day`의 근월물 **직전**에 근월이었던 월물들 — 가까운 것부터 (2026-08-14 F-1).
+
+    롤 당일에는 새 월물의 아카이브가 비어 있다. 웜스타트가 200봉을 채우려면 그 앞 구간을
+    직전 월물에서 이어 읽어야 하고, 그때 "직전이 누구인가"를 답하는 것이 이 함수다.
+
+    계산: `day`가 속한 달의 1일부터 한 달씩 뒤로 물러나며 근월물 코드를 묻고, 현재 코드와
+         다른 것을 순서대로 모은다. 만기 규칙 자체는 `front_month_code_for_day()` 하나만
+         쓴다 — 월물 경계를 두 번째로 구현하지 않는다.
+    산출: 실측 — 2026-08-14(A05609) → ["A05608"] · 2026-08-13(A05608) → ["A05607"].
+    실패 조건: 없다. 과거로 못 가면(달력 예외 등) 모은 만큼만 돌려준다 — 웜스타트는 부가
+              기능이라 여기서 던지면 기동을 막는다.
+    """
+    if count <= 0:
+        return []
+    current = front_month_code_for_day(day, calendar)
+    found: list[str] = []
+    # **그 달 1일부터 본다.** 롤 당일(만기 다음 날)에는 같은 달 안에서 근월이 바뀌어 있다 —
+    # 2026-08-14의 근월은 A05609지만 2026-08-01의 근월은 A05608이다. 곧바로 전달로 물러나면
+    # 바로 그 직전 월물을 건너뛴다.
+    probe = date(day.year, day.month, 1)
+    # 한 계약이 한 달이므로 count달이면 충분하지만, 만기 보정으로 한 달이 통째로 건너뛰는
+    # 경우를 대비해 여유를 둔다. 상한이 없으면 달력 이상 시 무한 루프가 된다.
+    for _ in range(count + 12):
+        if len(found) >= count:
+            break
+        try:
+            code = front_month_code_for_day(probe, calendar)
+        except Exception:  # noqa: BLE001 — 못 가면 모은 만큼만
+            break
+        if code != current and code not in found:
+            found.append(code)
+        year, month = probe.year, probe.month
+        probe = date(year - 1, 12, 1) if month == 1 else date(year, month - 1, 1)
+    return found
+
+
+def warmstart_symbol_chain(symbol: str, day: date, depth: int = 1) -> list[str]:
+    """웜스타트가 아카이브를 읽을 순서 — `[오늘 심볼, 직전 월물, ...]` (2026-08-14 F-1).
+
+    **소비처가 셋이라 여기 둔다**(`run_l1_daily`의 피처 웜스타트·옵션체인 기준가 시드,
+    `run_g2_paper_trading`의 국면 웜스타트). 스크립트마다 한 벌씩 두면 이 저장소가 이미
+    다섯 번 겪은 "정본 아닌 소비자"가 여섯 번째로 생긴다(`ops/canonical_consumers.py`가
+    존재하는 이유).
+
+    달력을 못 읽으면 만기 보정 없이 계산하고, 산출 자체가 실패하면 **오늘 심볼 하나만**
+    돌려준다 — 체인 산출 실패가 웜스타트를 막으면 안 된다. 다만 조용히 넘어가지 않는다
+    (`SymbolChainFallback`, WARNING).
+    """
+    try:
+        calendar = EventCalendar.from_file()
+    except Exception:  # noqa: BLE001 — 달력은 부가 정보다
+        calendar = None
+    try:
+        preceding = preceding_front_month_codes(day, depth, calendar)
+    except Exception as exc:  # noqa: BLE001
+        mlog.log(
+            "SymbolChainFallback",
+            f"선행 월물 산출 실패 — 오늘 심볼만 읽는다: {exc}",
+            symbol=symbol,
+            date=day.isoformat(),
+        )
+        return [symbol]
+    return [symbol, *(code for code in preceding if code != symbol)]
+
+
 def front_month_days(
     start: date, end: date, calendar: EventCalendar | None = None
 ) -> list[FrontMonthSegment]:

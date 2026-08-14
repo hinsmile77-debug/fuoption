@@ -111,6 +111,7 @@ from messiah.core.health import HealthReporter  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import LaunchedUI, launch_command_center  # noqa: E402
+from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
 from messiah.features import spec as feature_spec  # noqa: E402
@@ -221,6 +222,10 @@ def _load_futures_service(
     return FuturesAIService(symbol, experts, bus, meta_labelers=meta_labelers)
 
 
+# 웜스타트 체인의 정본 (2026-08-14 F-1) — `run_l1_daily`와 **같은 함수**를 쓴다.
+_symbol_chain = backfill.warmstart_symbol_chain
+
+
 def _warm_start_regime(runtime: RegimeRuntime, symbol: str, today: date) -> None:
     """국면 이력 버퍼를 아카이브의 과거 30m 완성봉으로 채운다 (2026-08-12 F-1).
 
@@ -238,9 +243,13 @@ def _warm_start_regime(runtime: RegimeRuntime, symbol: str, today: date) -> None
     실패해도 기동은 계속한다 — 국면은 부가 입력이지 이 프로세스의 전제조건이 아니다
     (`_load_regime_runtime()`의 로드 실패 처리와 같은 원칙). 다만 조용히 넘어가지 않는다.
     """
+    sources: dict[str, int] = {}
     try:
-        history = ParquetArchiver(_BAR_DIR).load_recent_bars(
-            symbol, Horizon.M30, on_or_before=today, max_bars=runtime.history_capacity
+        history, sources = ParquetArchiver(_BAR_DIR).load_recent_bars_by_source(
+            _symbol_chain(symbol, today),
+            Horizon.M30,
+            on_or_before=today,
+            max_bars=runtime.history_capacity,
         )
         loaded = runtime.warm_start(history)
     except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 운영을 막으면 안 됨
@@ -260,8 +269,9 @@ def _warm_start_regime(runtime: RegimeRuntime, symbol: str, today: date) -> None
         horizon=Horizon.M30.value,
         bars=loaded,
         min_bars=minimum,
+        bars_by_source=sources,
     )
-    print(f"국면 웜스타트: {loaded}봉 (하한 {minimum}봉)", flush=True)
+    print(f"국면 웜스타트: {loaded}봉 (하한 {minimum}봉) · 출처 {sources}", flush=True)
     if loaded < minimum:
         # 조용한 폴백 금지(금지계명 12) — 모델은 멀쩡히 로드됐는데 판정만 계속 실패하는
         # 상태가 정확히 2026-08-12였고, 그날 `WARNING` 한 줄도 없었다.

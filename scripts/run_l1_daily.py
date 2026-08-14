@@ -86,6 +86,8 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from typing import Sequence  # noqa: E402
+
 from messiah.broker.kis import symbol_master, tr_codes  # noqa: E402
 from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
 from messiah.broker.kis.rest_client import (  # noqa: E402
@@ -117,7 +119,7 @@ from messiah.core.ui_launcher import (  # noqa: E402
     launch_command_center,
     watch_command_center_forever,
 )
-from messiah.data import normalizer  # noqa: E402
+from messiah.data import backfill, normalizer  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.data.bar_composer import MultiHorizonBarComposer, compose_offline  # noqa: E402
 from messiah.data.collector import TickCollector  # noqa: E402
@@ -261,7 +263,9 @@ def _resolve_front_month_symbol() -> str:
     return symbol
 
 
-def _previous_day_close(archiver: ParquetArchiver, symbol: str, today: date) -> int | None:
+def _previous_day_close(
+    archiver: ParquetArchiver, symbols: Sequence[str], today: date
+) -> int | None:
     """직전 거래일의 마지막 1분봉 종가(틱) — `px_gap_open`의 유일한 원천.
 
     ## 왜 웜스타트 창에 기대면 안 되나 (2026-08-05 실측)
@@ -273,13 +277,22 @@ def _previous_day_close(archiver: ParquetArchiver, symbol: str, today: date) -> 
 
     아카이브에서 직접 읽으면 창 길이와 무관하게 항상 채워진다. 못 찾으면 None을 돌려주고
     (첫 거래일·아카이브 없음) 그건 `px_gap_open`이 정직하게 NaN인 정상 상황이다.
+
+    롤 당일에는 오늘의 근월물에 **어제가 없다** — 그래서 심볼 하나가 아니라 체인을 받는다
+    (2026-08-14 F-1). 체인 순서대로 물어 가장 가까운 과거 종가를 찾는다.
     """
-    days = [d for d in archiver.available_days(symbol, Horizon.M1) if d < today]
-    for day in reversed(days):  # 가장 가까운 과거부터
-        bars = archiver.read_day_bars(symbol, Horizon.M1, day)
-        if bars:
-            return max(bars, key=lambda b: b.bar_open_kst).c_ticks
+    for source_symbol in symbols:
+        days = [d for d in archiver.available_days(source_symbol, Horizon.M1) if d < today]
+        for day in reversed(days):  # 가장 가까운 과거부터
+            bars = archiver.read_day_bars(source_symbol, Horizon.M1, day)
+            if bars:
+                return max(bars, key=lambda b: b.bar_open_kst).c_ticks
     return None
+
+
+# 웜스타트 체인의 정본은 `data/backfill.warmstart_symbol_chain()`이다 — 이 스크립트에만
+# 두면 `run_g2_paper_trading`이 두 번째 사본을 만들게 된다(그쪽도 같은 체인이 필요하다).
+_symbol_chain = backfill.warmstart_symbol_chain
 
 
 def _load_warmup_artifacts(
@@ -297,16 +310,27 @@ def _load_warmup_artifacts(
     (`core/docker_bootstrap.py`와 같은 원칙). 다만 조용히 넘어가지는 않는다(L18/L22).
 
     스캘러·모델 로딩 자리는 여전히 비어 있다 — Phase 3(W17~) 이전엔 실제 모델이 없다.
+
+    ## 롤 경계를 넘어 읽는다 (2026-08-14 F-1)
+
+    첫 월물 롤에서 이 함수가 전 Horizon 0봉을 받았다 — `A05609` 아카이브가 그날 처음
+    생겼기 때문이다. 결과는 1m NaN 84.7%로 개장, 30m는 종일 84.7%(4봉)였다. 이제
+    `_symbol_chain()`이 직전 월물까지 훑고, 무엇을 어디서 읽었는지 `bars_by_source`로
+    남긴다 — **조용히 잇지 않는다(R10).**
     """
+    chain = _symbol_chain(symbol, today)
     try:
-        history = {
-            horizon: archiver.load_recent_bars(
-                symbol, horizon, on_or_before=today, max_bars=engine.history_capacity
+        history: dict[Horizon, list] = {}
+        sources: dict[str, int] = {}
+        for horizon in Horizon:
+            bars, by_source = archiver.load_recent_bars_by_source(
+                chain, horizon, on_or_before=today, max_bars=engine.history_capacity
             )
-            for horizon in Horizon
-        }
+            history[horizon] = bars
+            for sym, count in by_source.items():
+                sources[sym] = sources.get(sym, 0) + count
         loaded = engine.warm_start(
-            history, prev_day_close_ticks=_previous_day_close(archiver, symbol, today)
+            history, prev_day_close_ticks=_previous_day_close(archiver, chain, today)
         )
     except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 수집을 막으면 안 됨
         mlog.log(
@@ -322,8 +346,9 @@ def _load_warmup_artifacts(
         f"과거 완성봉으로 롤링 윈도 사전 충전 (용량 {engine.history_capacity}봉)",
         symbol=symbol,
         bars_by_horizon=summary,
+        bars_by_source=sources,
     )
-    print(f"피처 웜스타트: {summary}", flush=True)
+    print(f"피처 웜스타트: {summary} · 출처 {sources}", flush=True)
 
 
 def _restore_composer_buckets(composer: MultiHorizonBarComposer, symbol: str, today: date) -> None:
@@ -489,7 +514,9 @@ def _seed_preopen_reference_price(
     원칙). 시드가 없으면 종전처럼 08:45까지 사이클을 건너뛸 뿐이다.
     """
     try:
-        recent = archiver.load_recent_bars(symbol, Horizon.M1, on_or_before=today, max_bars=1)
+        recent, _sources = archiver.load_recent_bars_by_source(
+            _symbol_chain(symbol, today), Horizon.M1, on_or_before=today, max_bars=1
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"[run_l1_daily] 장전 기준가 시드 실패(옵션체인은 첫 틱까지 대기): {exc}", flush=True)
         return
@@ -500,7 +527,7 @@ def _seed_preopen_reference_price(
     bar = recent[-1]
     tracker.seed_preopen(bar.c_ticks)
     print(
-        f"장전 기준가 시드 — {bar.bar_open_kst:%Y-%m-%d %H:%M} 종가 "
+        f"장전 기준가 시드 — {bar.symbol} {bar.bar_open_kst:%Y-%m-%d %H:%M} 종가 "
         f"{tracker.price_points():.2f}pt (첫 실틱이 오면 무시된다)",
         flush=True,
     )

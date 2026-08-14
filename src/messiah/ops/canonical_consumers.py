@@ -73,6 +73,23 @@ class Canon:
 
 CANONICAL: tuple[Canon, ...] = (
     Canon(
+        symbol="warmstart_symbol_chain",
+        home="src/messiah/data/backfill.py",
+        expected_consumers=(
+            # 피처 롤링 윈도 + 옵션체인 ATM 기준가 시드 — 둘 다 이 스크립트 안에 있다.
+            "scripts/run_l1_daily.py",
+            # 국면 이력 사전 충전.
+            "scripts/run_g2_paper_trading.py",
+        ),
+        why=(
+            "롤 경계를 넘는 아카이브 읽기 순서. 2026-08-14 첫 월물 롤에서 심볼 단일 색인 "
+            "로더가 0봉을 돌려줬고, 그 하나가 세 소비처를 동시에 무너뜨렸다 — 피처 "
+            "(1m NaN 84.7%로 개장) · 국면(0봉 < 하한 22봉, 판단 14/14 NO_TRADE) · "
+            "옵션체인 기준가(장전 10사이클 스킵, 소급 불가라 영구 결손). 네 번째 소비처가 "
+            "생겼는데 이 체인을 안 쓰면 그 자리만 조용히 롤에 무너진다."
+        ),
+    ),
+    Canon(
         symbol="thursday_weekly_listed",
         home="src/messiah/core/event_calendar.py",
         expected_consumers=(

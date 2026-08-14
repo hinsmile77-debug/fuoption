@@ -329,22 +329,74 @@ class ParquetArchiver:
                   아니다(`core/docker_bootstrap.py`류의 원칙과 동일). 디렉터리 자체가 없으면
                   빈 리스트.
         """
+        bars, _sources = self.load_recent_bars_by_source(
+            [symbol], horizon, on_or_before=on_or_before, max_bars=max_bars
+        )
+        return bars
+
+    def load_recent_bars_by_source(
+        self,
+        symbols: Sequence[str],
+        horizon: Horizon,
+        *,
+        on_or_before: date,
+        max_bars: int,
+    ) -> tuple[list[BarClosed], dict[str, int]]:
+        """여러 심볼을 **앞에서부터** 이어 읽어 max_bars를 채운다 (2026-08-14 F-1).
+
+        입력: `symbols`는 우선순위 순 — 보통 `[오늘의 근월물, 직전 월물, ...]`
+             (`data/backfill.preceding_front_month_codes()`).
+        산출: (봉 목록, 심볼별 채택 봉 수). 두 번째 값이 이 함수의 존재 이유다 —
+             **조용히 잇지 않는다(R10).** 호출부는 이것을 로그로 남겨야 한다.
+
+        ## 왜 필요한가 (2026-08-14 실측)
+
+        첫 월물 롤(A05608 → A05609)에서 이 로더가 심볼 단일 색인이라 0봉을 돌려줬고,
+        그 하나가 **세 소비처를 동시에** 무너뜨렸다: 피처 롤링 윈도(1m NaN 84.7%로 개장) ·
+        국면 이력(0봉 < 하한 22봉 → 종일 UNKNOWN, 판단 14/14 NO_TRADE) · 옵션체인 ATM
+        기준가 시드(장전 10사이클 스킵, 소급 불가라 영구 결손).
+
+        ## 이어 붙인 봉의 `symbol`은 바꾸지 않는다
+
+        직전 월물 구간의 봉은 그 월물의 코드를 그대로 달고 나간다. 요청 심볼로 덮어쓰면
+        나중에 "이 구간이 어디서 왔나"를 아무도 알 수 없다 — `bars_by_source`와 함께
+        **이어 붙였다는 사실이 데이터에 남아야** 한다.
+
+        가격 점프는 보정하지 않는다. 롤 경계에서 월물 간 가격차가 그대로 들어오므로
+        수익률·변동성 계열에 인위적 점프가 한 번 생긴다. 비율 조정은 연속 계약 아카이브의
+        몫이고(고도화 G-1), 여기서 하면 원본과 조정본이 뒤섞여 되돌릴 수 없다.
+        """
         if max_bars <= 0:
-            return []
+            return [], {}
 
         collected: list[BarClosed] = []
-        for day in sorted(self.available_days(symbol, horizon), reverse=True):
-            if day > on_or_before:
-                continue
-            frame = self.read_day(symbol, horizon, day)
-            if frame is None:
-                continue  # 깨진 파일 하나가 웜스타트 전체를 막지 않는다
-            collected = self._frame_to_bars(frame, symbol, horizon) + collected
+        sources: dict[str, int] = {}
+        for source_symbol in symbols:
             if len(collected) >= max_bars:
                 break
+            taken: list[BarClosed] = []
+            for day in sorted(self.available_days(source_symbol, horizon), reverse=True):
+                if day > on_or_before:
+                    continue
+                frame = self.read_day(source_symbol, horizon, day)
+                if frame is None:
+                    continue  # 깨진 파일 하나가 웜스타트 전체를 막지 않는다
+                taken = self._frame_to_bars(frame, source_symbol, horizon) + taken
+                if len(taken) + len(collected) >= max_bars:
+                    break
+            # 앞선 심볼(더 최근 구간)이 뒤에 오도록 — 선행 월물이 시간상 앞이다.
+            collected = taken + collected
+            sources[source_symbol] = len(taken)
 
         collected.sort(key=lambda b: b.bar_open_kst)
-        return collected[-max_bars:]
+        trimmed = collected[-max_bars:]
+        if len(trimmed) != len(collected):
+            # 잘라낸 뒤의 실제 구성으로 다시 센다 — 로그가 "읽은 양"이 아니라 "쓴 양"을
+            # 말해야 한다. 앞쪽(선행 월물)부터 잘리므로 그 차이가 실제로 생긴다.
+            sources = {sym: 0 for sym in sources}
+            for bar in trimmed:
+                sources[bar.symbol] = sources.get(bar.symbol, 0) + 1
+        return trimmed, sources
 
     @staticmethod
     def _frame_to_bars(frame: pl.DataFrame, symbol: str, horizon: Horizon) -> list[BarClosed]:
