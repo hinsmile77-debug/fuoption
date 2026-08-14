@@ -28,12 +28,17 @@
 
 ## 순서가 강제되는 이유
 
-    1. 재합성        상위 Horizon 봉을 1분봉과 정합시킨다 (네트워크 없음)
-    2. 거래량 대조    공식 분봉 대비 — logs/volume_check_{날짜}.json
-    3. 변동성 축 채점  20거래일 창 — logs/vol_scorecard_{날짜}.json
-    4. 리포트 재생성   위 셋의 산출물을 읽어 `unmeasured`를 비운다  ← 반드시 마지막
+    1. 조각 통합      장중 시간대 조각을 통합본으로 (네트워크 없음)
+    2. 재합성        상위 Horizon 봉을 1분봉과 정합시킨다 (네트워크 없음)
+    3. 거래량 대조    공식 분봉 대비 — logs/volume_check_{날짜}.json
+    4. 변동성 축 채점  20거래일 창 — logs/vol_scorecard_{날짜}.json
+    5. 롤 겹침 확보   만기일에만 실제로 일한다 — basis 측정용 (2026-08-14 G-1)
+    6. 리포트 재생성   위 산출물을 읽어 `unmeasured`를 비운다  ← 반드시 마지막
 
-4번이 마지막이 아니면 리포트는 여전히 "미측정"이라고 말한다. 그게 2026-08-06의 상태였다.
+마지막이 마지막이 아니면 리포트는 여전히 "미측정"이라고 말한다. 그게 2026-08-06의 상태였다.
+
+5번이 6번 앞인 이유: 그 단계가 만든 겹침을 그날 리포트가 볼 수 있어야 하고, REST를 쓰므로
+거래량 대조와 같은 구역에 두는 것이 유량 관리에도 맞다.
 
 ## 실패해도 다음 단계를 돈다
 
@@ -95,10 +100,10 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.core import logging as mlog  # noqa: E402
+from messiah.core import symbol_resolution  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
-from messiah.core.event_calendar import EventCalendar  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
-from messiah.data import backfill, bar_paths  # noqa: E402
+from messiah.data import bar_paths  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -185,14 +190,12 @@ def _resolve_symbol(explicit: str | None, day: date) -> tuple[str, str]:
 
     달력을 못 읽으면 만기 보정 없이 진행한다 — 부가 정보 하나 때문에 배치 전체가 죽는 것이
     훨씬 나쁘다(`EventCalendar` 예외를 삼키는 다른 소비처들과 같은 판단).
+
+    **2026-08-14 G-7 이후**: 해석은 `core/symbol_resolution`이 정본이고 이 함수는 그리로
+    위임한다. 런타임(`run_l1_daily`)이 남긴 선택이 있으면 그것을 **조회**하고, 없을 때만
+    만기 규칙으로 계산한다 — 런타임과 배치가 갈릴 수 있는 자리를 없앤다.
     """
-    if explicit:
-        return explicit, "명시"
-    try:
-        calendar: EventCalendar | None = EventCalendar.from_file()
-    except Exception:  # noqa: BLE001 — 달력 부재로 배치를 죽이지 않는다
-        calendar = None
-    return backfill.front_month_code_for_day(day, calendar), "근월물 자동 해석"
+    return symbol_resolution.resolve_for_tools(day, explicit=explicit)
 
 
 def _has_day(symbol: str, day: date) -> bool:
@@ -264,7 +267,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
         # 종료 시퀀스에만 있었는데, 그 시퀀스는 프로세스가 15:35까지 살아야 돈다 — 2026-08-07엔
         # 13:41에 죽어 1분봉이 조각 디렉터리로 남았다. 장후 절차는 프로세스가 죽어도 돈다.
         Step(
-            "1/5 장중 조각 통합",
+            "1/6 장중 조각 통합",
             [
                 _python(),
                 str(_SCRIPTS / "run_compact.py"),
@@ -277,7 +280,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
             one_means_finding=False,
         ),
         Step(
-            "2/5 상위 Horizon 재합성",
+            "2/6 상위 Horizon 재합성",
             [
                 _python(),
                 str(_SCRIPTS / "run_recompose.py"),
@@ -296,7 +299,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
     if not args.skip_rest:
         planned.append(
             Step(
-                "3/5 공식 분봉 대비 거래량 대조",
+                "3/6 공식 분봉 대비 거래량 대조",
                 [
                     _python(),
                     str(_SCRIPTS / "verify_archive_volume.py"),
@@ -310,7 +313,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
         )
     planned.append(
         Step(
-            "4/5 변동성 축 채점",
+            "4/6 변동성 축 채점",
             [
                 _python(),
                 str(_SCRIPTS / "run_vol_scorecard.py"),
@@ -324,10 +327,32 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
             one_means_finding=True,
         )
     )
+    # **롤 겹침 확보** (2026-08-14 G-1) — 다음 거래일이 롤이면 들어오는 월물의 오늘치를
+    # 받아 basis 측정용 겹침을 만든다. 4주에 한 번만 실제로 일하고 나머지 날은 즉시 종료한다.
+    #
+    # 리포트 재생성보다 **앞**이다: 이 단계가 만든 겹침을 그날 리포트가 볼 수 있어야 하고,
+    # REST를 쓰므로 거래량 대조와 같은 구역에 두는 것이 유량 관리에도 맞다.
+    if not args.skip_rest:
+        planned.append(
+            Step(
+                "5/6 롤 겹침 확보(만기일에만)",
+                [
+                    _python(),
+                    str(_SCRIPTS / "run_roll_overlap.py"),
+                    "--date",
+                    stamp,
+                    "--configs",
+                    args.configs,
+                ],
+                # 1 = 겹침을 못 만들었다 — 발견이 아니라 실패다. 이번 롤의 basis가 영영
+                # 측정 불가로 남으므로 요약에서 ❌로 보여야 한다.
+                one_means_finding=False,
+            )
+        )
     # 반드시 마지막 — 앞 단계들의 산출물을 읽어 `unmeasured`를 비운다.
     planned.append(
         Step(
-            "5/5 무결성 리포트 재생성",
+            "6/6 무결성 리포트 재생성",
             [
                 _python(),
                 str(_SCRIPTS / "daily_integrity_report.py"),

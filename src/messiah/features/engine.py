@@ -35,6 +35,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Callable, Mapping, Sequence
 
 from messiah.core import logging as mlog
@@ -47,6 +48,7 @@ from messiah.core.messages import (
     HealthLevel,
     Horizon,
 )
+from messiah.core.timeutil import KST
 from messiah.features import px_core
 from messiah.features import spec as feature_spec
 
@@ -91,6 +93,115 @@ _WARMUP_NAN_RENOTIFY = timedelta(minutes=30)
 # 이 개수 미만의 표본으로는 "상수다"라고 말하지 않는다 — 장 초반 몇 봉은 우연히 같은 값이
 # 나올 수 있고, 워밍업 구간의 NaN도 아직 안 풀린 상태다. 30봉이면 1m 기준 30분치다.
 _MIN_SAMPLES_FOR_HEALTH = 30
+
+# 하루가 만드는 Horizon별 봉 수 — **실측값이다** (2026-08-14 재합성 출력:
+# `1m=410 → 3m=137 5m=82 10m=42 15m=28 30m=15`). 계산으로 갈음하지 않는 이유: 장전
+# 08:45~09:00의 15분과 마감 경계 처리 때문에 단순 나눗셈과 어긋난다(30m은 계산상 13봉인데
+# 실제 15봉이다). 회복 시점을 **거래일 단위**로 환산할 때 이 표가 분모가 된다.
+BARS_PER_SESSION: dict[Horizon, int] = {
+    Horizon.M1: 410,
+    Horizon.M3: 137,
+    Horizon.M5: 82,
+    Horizon.M10: 42,
+    Horizon.M15: 28,
+    Horizon.M30: 15,
+}
+
+
+def _probe_bars(count: int) -> list[BarClosed]:
+    """요구 봉 수 측정용 합성 봉 — **가격이 움직여야 한다**.
+
+    상수 가격이면 롤링 표준편차 계열이 0으로 나누게 되어 정의 자체가 안 되고
+    (`_DEGENERATE_WINDOW` 주석), 그러면 "윈도가 모자라서 None"과 구분이 안 된다.
+    톱니로 흔들어 두 원인을 가른다.
+    """
+    base = datetime(2026, 1, 5, 9, 0, tzinfo=KST)
+    out: list[BarClosed] = []
+    for i in range(count):
+        close = 100_000 + (i * 37) % 811 - 405  # 단조증가가 아니라 진동 — 방향성 편향 제거
+        out.append(
+            BarClosed(
+                symbol="PROBE",
+                horizon=Horizon.M1,
+                bar_open_kst=base + timedelta(minutes=i),
+                o_ticks=close - 3,
+                h_ticks=close + 11,
+                l_ticks=close - 13,
+                c_ticks=close,
+                volume=100 + (i % 17),
+                trades=10,
+                quality_ok=True,
+            )
+        )
+    return out
+
+
+@lru_cache(maxsize=8)
+def required_bars_by_feature(feature_set: str) -> dict[str, int]:
+    """피처별로 **값이 나오기 시작하는 최소 봉 수** — 가정이 아니라 측정 (2026-08-14 G-5).
+
+    ## 왜 윈도 크기로 갈음하면 안 되나
+
+    `px_ema_cross_60`은 윈도가 60인데 slow EMA가 `3×W`를 요구해 **180봉**이 필요하고,
+    `px_macd_h_60`은 `2×W + W//3` = **139봉**이다. 그래서 두 피처는 용량이 130이던 시절
+    **프로덕션에서 영원히 NaN이었다**(모듈 상단 `_MAX_HISTORY` 주석). 윈도 최댓값으로
+    갈음했으면 60이라고 답했을 것이고, 그 답은 8거래일간 아무도 못 잡은 결함을 그대로
+    재생산한다.
+
+    ## 무엇에 쓰나
+
+    롤 당일 아침에 **"이 Horizon은 몇 번째 발행부터 회복이 시작되고 임계 도달은 언제인가"**
+    를 계산해 로그 한 줄로 남긴다(`FeatureWarmStart.required_by_horizon`). 2026-08-14엔
+    그 상수가 어디에도 없어서 사람이 12:30까지 세 번 계산했고 **그중 한 번은 틀렸다**
+    (10:51에 "30m 회복이 정확히 0"이라 확정했는데 11:30에 62.0%로 회복 중이었다).
+
+    사이드카를 요구하는 카테고리는 건너뛴다 — 그쪽은 외부 데이터의 유무가 값을 정하므로
+    봉 수로 답할 수 있는 질문이 아니다.
+    """
+    spec = feature_spec.resolve(feature_set)
+    bars = _probe_bars(_MAX_HISTORY)
+    required: dict[str, int] = {}
+    for category in spec.category_specs:
+        if category.sidecar is not None:
+            continue
+        for name, fn, windows in category.windowed:
+            for window in windows:
+                key = f"{name}_{window}"
+                # 윈도보다 적은 봉으로는 어떤 롤링 계산도 못 한다 — 거기서 시작한다.
+                for n in range(min(window, _MAX_HISTORY), _MAX_HISTORY + 1):
+                    try:
+                        if fn(bars[:n], window) is not None:
+                            required[key] = n
+                            break
+                    except Exception:  # noqa: BLE001 — 못 재는 피처는 목록에서 빠진다
+                        break
+    return required
+
+
+@lru_cache(maxsize=8)
+def required_bars(feature_set: str) -> int:
+    """이 피처셋의 **전 피처가 값을 내는** 최소 봉 수 (2026-08-14 G-5)."""
+    return max(required_bars_by_feature(feature_set).values(), default=0)
+
+
+def recovery_forecast(bars_now: int, feature_set: str, horizon: Horizon) -> str:
+    """지금 봉 수에서 **언제 회복되는가**를 사람 말로 (2026-08-14 G-5).
+
+    하루가 만드는 봉 수로 나눠 거래일까지 환산한다 — "180봉 더 필요"보다 "3거래일 뒤"가
+    운영 판단에 쓰이는 단위다. 2026-08-14에 사람이 손으로 세 번 한 계산이 이것이다.
+    """
+    need = required_bars(feature_set)
+    if bars_now >= need:
+        return f"{horizon.value} 충족({bars_now}/{need}봉)"
+    per_day = BARS_PER_SESSION.get(horizon)
+    short = need - bars_now
+    if not per_day:
+        return f"{horizon.value} {short}봉 부족({bars_now}/{need})"
+    days = math.ceil(short / per_day)
+    return (
+        f"{horizon.value} {short}봉 부족({bars_now}/{need}) — "
+        f"하루 {per_day}봉이므로 약 {days}거래일"
+    )
 
 
 @dataclass
@@ -303,6 +414,16 @@ class FeatureEngine:
     def spec(self) -> feature_spec.FeatureSpec:
         """이 엔진이 계산하는 피처의 정본 — 호출측이 열 순서·개수를 확인할 때 쓴다."""
         return self._spec
+
+    @property
+    def feature_set(self) -> str:
+        """이 엔진의 피처셋 이름 — `required_bars()` 등 셋 단위 질의에 쓴다 (2026-08-14 G-5)."""
+        return self._feature_set
+
+    @property
+    def symbol(self) -> str:
+        """이 엔진이 보는 종목 — 다일 누적 기록이 롤 경계를 표시하는 데 쓴다(2026-08-14 G-9)."""
+        return self._symbol
 
     def seconds_since_last_publish(self) -> float | None:
         if self._last_publish_at is None:

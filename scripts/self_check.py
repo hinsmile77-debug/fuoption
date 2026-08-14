@@ -23,12 +23,13 @@ sys.stderr.reconfigure(encoding="utf-8")
 # src 레이아웃 실행 지원
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from messiah.core import symbol_resolution  # noqa: E402
 from messiah.core.bus import registered_types  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
 from messiah.core.event_calendar import EventCalendar  # noqa: E402
 from messiah.core.messages import SCHEMA_VERSION, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst, now_utc  # noqa: E402
-from messiah.data import backfill, bar_paths  # noqa: E402
+from messiah.data import bar_paths  # noqa: E402
 
 
 @dataclass
@@ -305,19 +306,26 @@ def check_rollover(
         calendar = None
 
     try:
-        symbol = backfill.front_month_code_for_day(today, calendar)
-        # 달력이 있으면 휴장일을 건너뛴 직전 거래일, 없으면 전날. 달력이 등록 연도 밖을
-        # 물으면 ValueError를 던지므로(그쪽 docstring) 그것도 여기서 받는다.
-        if calendar is not None:
-            previous = calendar.previous_trading_day(today)
-        else:
-            previous = today - timedelta(days=1)
-        previous_symbol = backfill.front_month_code_for_day(previous, calendar)
+        # "오늘이 롤인가"는 **하나의 질문**이어야 한다 (2026-08-14 G-10) — 자가점검·장후
+        # 배치·CI 게이트가 각자 날짜 산술을 하면 세 곳이 다르게 답할 수 있다.
+        symbol = symbol_resolution.resolve(today, calendar)
+        rolled = symbol_resolution.is_rollover_day(today, calendar)
+        previous = (
+            calendar.previous_trading_day(today)
+            if calendar is not None
+            else today - timedelta(days=1)
+        )
+        previous_symbol = symbol_resolution.resolve(previous, calendar)
     except Exception as exc:  # noqa: BLE001
         return CheckResult("rollover", True, f"근월물 해석 실패({exc}) — 판정 불가")
 
-    if symbol == previous_symbol:
-        return CheckResult("rollover", True, f"비-롤일 — 근월물 {symbol} 유지")
+    if not rolled:
+        try:
+            nxt = symbol_resolution.next_rollover_day(today, calendar)
+            ahead = f" · 다음 롤 {nxt.isoformat()}"
+        except Exception:  # noqa: BLE001 — 예고는 부가 정보다
+            ahead = ""
+        return CheckResult("rollover", True, f"비-롤일 — 근월물 {symbol} 유지{ahead}")
 
     # 롤 당일이다. 신규 월물이 **오늘 이전에** 가진 30m 아카이브 일수가 곧 웜스타트의 재료다
     # (국면 구동 Horizon이 30m — `strategy/regime/runtime.py`).

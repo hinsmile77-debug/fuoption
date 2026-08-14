@@ -43,6 +43,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.backtest.harness import aggregate_to_horizon  # noqa: E402
+from messiah.core import symbol_resolution  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.event_calendar import EventCalendar  # noqa: E402
 from messiah.core.messages import BarClosed, Horizon  # noqa: E402
@@ -78,7 +79,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--date", type=_parse_day, default=None)
     p.add_argument("--start", type=_parse_day, default=None)
     p.add_argument("--end", type=_parse_day, default=None)
-    p.add_argument("--symbol", default="A05608")
+    p.add_argument(
+        "--symbol",
+        default=None,
+        help="기본: --date의 근월물(런타임 기록 우선). 월물 롤 당일에도 옳다 — 2026-08-14 G-7",
+    )
     p.add_argument("--base-dir", default=str(_DATA_DIR))
     p.add_argument("--configs", default="configs")
     p.add_argument("--log-dir", default="logs")
@@ -202,16 +207,20 @@ async def main() -> int:
 
     exit_code = 0
     for day in days:
+        # **날짜마다 다시 묻는다** (2026-08-14 G-7). 이 스크립트는 여러 날을 한 번에 채점할
+        # 수 있고 그 구간이 롤 경계를 넘을 수 있다 — 심볼을 루프 밖에서 한 번 정하면 경계
+        # 뒤쪽 날들이 통째로 만기된 월물로 조회된다.
+        symbol, origin = symbol_resolution.resolve_for_tools(day, explicit=args.symbol)
         cards = await score_day(
             archiver,
-            args.symbol,
+            symbol,
             day,
             feature_set=cfg.feature_set,
             warmup_days=args.warmup_days,
             score_days=args.score_days,
             calendar=calendar,
         )
-        print(f"=== 변동성 축 채점 {day.isoformat()} ({args.symbol}) ===")
+        print(f"=== 변동성 축 채점 {day.isoformat()} ({symbol} · {origin}) ===")
         if not cards:
             print("  아카이브 없음 — 그날은 수집이 안 돌았다")
             exit_code = 1
@@ -219,7 +228,7 @@ async def main() -> int:
         for line in vol_scorecard.format_scorecards(cards):
             print(line)
         out = vol_scorecard.write_scorecards(
-            cards, symbol=args.symbol, day=day, log_dir=Path(args.log_dir)
+            cards, symbol=symbol, day=day, log_dir=Path(args.log_dir)
         )
         print(f"  → {out}")
     return exit_code

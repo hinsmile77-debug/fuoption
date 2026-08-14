@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -30,6 +31,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import run_postmarket as rp  # noqa: E402  (scripts/)
 import self_check as sc  # noqa: E402
+
+from messiah.core import symbol_resolution  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+
+# 만기가 있는 값을 소스에 박아도 되는 곳 — **재현성이 목적인 스모크·연구 스크립트뿐이다**
+# (2026-08-14 G-10). 이들은 특정 아카이브 날짜에 고정돼 있고 그 날짜의 근월물이 곧 그
+# 심볼이다. 운영 경로(수집·매매·장후 배치·화면)는 예외 없이 날짜에서 해석해야 한다.
+#
+# **이 목록에 새 이름을 추가할 때는 그 스크립트가 운영 경로가 아님을 확인할 것.**
+_FIXED_SYMBOL_ALLOWED = {
+    "run_backtest_harness.py",  # 고정 아카이브 구간 재현
+    "run_full_path_smoke.py",  # 2026-07-24 아카이브 고정
+    "run_formal_expert_training_smoke.py",  # 학습 스모크 — 고정 심볼·고정 Horizon
+    "run_regime_ai_smoke.py",  # 국면 스모크 — 30분봉 1건 고정
+    "probe_ui_concurrency.py",  # UI 동시성 프로브 — 심볼은 부하 생성용 더미
+    "run_chaos_check.py",  # 카오스 점검 — 심볼은 시나리오 상수
+    "verify_kill_switch.py",  # 킬스위치 검증 — 심볼은 시나리오 상수
+}
 
 _ROLL_DAY = date(2026, 8, 14)
 _DAY_BEFORE_ROLL = date(2026, 8, 13)
@@ -63,10 +84,13 @@ def test_symbol_is_resolved_from_the_date_not_from_today(day: date, expected: st
     이 케이스가 F-A의 회귀 방지선이다. 마스터파일 조회(`front_month_future_code()`)는
     날짜를 안 받아 어떤 과거일에 대해서도 오늘의 근월물을 답한다 — 그러면 소급 실행이
     성공으로 끝나면서 리포트만 거짓이 된다.
+
+    출처 문구는 G-7에서 `core/symbol_resolution`의 어휘로 통일됐다(런타임 기록이 없는
+    과거일이므로 "만기 규칙 계산"). 이 테스트가 보는 것은 **심볼이 날짜를 따르는가**다.
     """
     symbol, origin = rp._resolve_symbol(None, day)
     assert symbol == expected
-    assert origin == "근월물 자동 해석"
+    assert origin == "만기 규칙 계산"
 
 
 def test_explicit_symbol_overrides_resolution_and_says_so() -> None:
@@ -184,3 +208,92 @@ def test_self_check_counts_only_history_before_today(tmp_path: Path) -> None:
     _touch_day(tmp_path, _NEW, "30m", _ROLL_DAY)  # 오늘 것
     result = sc.check_rollover(bar_dir=tmp_path, today=_ROLL_DAY)
     assert "신규 월물 30m 아카이브 0일" in result.detail
+
+
+def test_normal_day_announces_the_next_rollover(tmp_path: Path) -> None:
+    """비-롤일엔 **다음 롤을 예고한다** — 4주에 한 번뿐이라 사람이 잊는다 (G-10)."""
+    result = sc.check_rollover(bar_dir=tmp_path, today=_DAY_BEFORE_ROLL)
+    assert "비-롤일" in result.detail
+    assert "다음 롤 2026-08-14" in result.detail
+
+
+# ------------------------------------------------------- G-10: 진입점 전수 게이트
+
+
+def test_no_operational_entrypoint_hardcodes_an_expiring_symbol() -> None:
+    """**사람이 손으로 하던 grep을 테스트가 한다** (2026-08-14 G-10).
+
+    2026-08-14 하루에 롤 결함이 서로 독립인 **네 곳**에서 터졌다: 아카이브 조회 · 장후 배치
+    진입점 · 화면 상수 · 옵션체인 기준가 시드. 넷 다 "심볼이 시계열의 이름인 줄 알았다"는
+    같은 착오인데 **한 곳을 고쳐도 다른 곳은 안 고쳐진다.**
+
+    롤은 4주에 한 번이라 다음 기회(2026-09-14 근방)까지 다섯 번째 지점이 있는지 알 방법이
+    없다. 그날 F-A를 쓰면서 `grep -rn 'default="A056' scripts/`를 손으로 돌려야 한다고 적은
+    것이, 그 검사가 **자동화돼야 한다**는 뜻이었다. 이 테스트가 그 자리다.
+    """
+    offenders: list[str] = []
+    pattern = re.compile(r'default\s*=\s*[\'"]A05\d{2}[\'"]')
+    for path in sorted(_SCRIPTS_DIR.glob("*.py")):
+        if path.name in _FIXED_SYMBOL_ALLOWED:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    assert not offenders, "만기가 있는 심볼을 기본값으로 박은 운영 진입점:\n" + "\n".join(offenders)
+
+
+def test_no_module_hardcodes_an_expiring_symbol_as_a_default() -> None:
+    """`src/` 쪽도 같은 규율 — 2026-08-14엔 `ui/app.py`의 `DEFAULT_SYMBOL`이 그 자리였다."""
+    offenders: list[str] = []
+    pattern = re.compile(r'^\s*(?!#)\w*DEFAULT_SYMBOL\w*\s*[:=].*[\'"]A05\d{2}[\'"]')
+    for path in sorted((_REPO_ROOT / "src").rglob("*.py")):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, "만기가 있는 심볼을 모듈 상수로 박았다:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    ("day", "expected"),
+    [(_DAY_BEFORE_ROLL, False), (_ROLL_DAY, True), (date(2026, 9, 10), False)],
+)
+def test_rollover_day_is_one_question(day: date, expected: bool) -> None:
+    """자가점검·장후 배치·CI 게이트가 각자 날짜 산술을 하면 세 곳이 다르게 답할 수 있다."""
+    assert symbol_resolution.is_rollover_day(day) is expected
+
+
+def test_next_rollover_is_computable_ahead_of_time() -> None:
+    """G-1(사전 백필)이 **언제 돌아야 하는지**를 달력에서 바로 답할 수 있어야 한다."""
+    assert symbol_resolution.next_rollover_day(_DAY_BEFORE_ROLL) == _ROLL_DAY
+    nxt = symbol_resolution.next_rollover_day(_ROLL_DAY)
+    assert nxt > _ROLL_DAY
+    assert symbol_resolution.is_rollover_day(nxt)
+
+
+# ------------------------------------------------------- G-7: 해석의 단일 정본
+
+
+def test_runtime_record_wins_over_computation(tmp_path: Path) -> None:
+    """런타임이 실제로 고른 심볼이 정본이다 — 그 프로세스가 그것으로 구독하고 적재한다."""
+    symbol_resolution.record(_ROLL_DAY, "A99999", log_dir=tmp_path)
+    symbol, origin = symbol_resolution.resolve_for_tools(_ROLL_DAY, log_dir=tmp_path)
+    assert (symbol, origin) == ("A99999", "런타임 기록")
+
+
+def test_explicit_beats_everything(tmp_path: Path) -> None:
+    """소급 조사·수동 복구에는 사람의 명시가 이겨야 한다."""
+    symbol_resolution.record(_ROLL_DAY, "A99999", log_dir=tmp_path)
+    symbol, origin = symbol_resolution.resolve_for_tools(_ROLL_DAY, explicit=_OLD, log_dir=tmp_path)
+    assert (symbol, origin) == (_OLD, "명시")
+
+
+def test_record_for_another_day_is_ignored(tmp_path: Path) -> None:
+    """파일 안의 날짜가 요청과 다르면 버린다 — 어느 쪽을 믿을지 조용히 고르지 않는다.
+
+    `fix_verification.load_daily_reports()`가 2026-08-14에 바로 그 형태로 9거래일간
+    오염돼 있었다(보존본이 정본을 덮었다).
+    """
+    symbol_resolution.record(_DAY_BEFORE_ROLL, _OLD, log_dir=tmp_path)
+    assert symbol_resolution.recorded(_ROLL_DAY, log_dir=tmp_path) is None
+    symbol, origin = symbol_resolution.resolve_for_tools(_ROLL_DAY, log_dir=tmp_path)
+    assert (symbol, origin) == (_NEW, "만기 규칙 계산")

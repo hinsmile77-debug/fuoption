@@ -57,14 +57,21 @@ from messiah.data.archiver import ParquetArchiver
 from messiah.features import spec as feature_spec
 from messiah.ops import (
     canonical_consumers,
+    feature_health_rolling,
     observation_gaps,
     series_coverage,
     series_expectation,
+    status_board,
     task_exit_codes,
 )
+from messiah.ops import verdict as verdict_mod
 from messiah.ops.crash_dumps import CrashForensics, collect_crash_forensics, format_dump_lines
 
 _KST_ZONE_NAME = "Asia/Seoul"
+
+# 옛 로그에 `min_samples`가 없을 때만 쓰는 값 — 정본은 `features/engine`의 상수이고
+# 그날 로그가 그것을 실어 온다(2026-08-14 G-9).
+_FEATURE_HEALTH_MIN_SAMPLES_FALLBACK = 30
 
 # 정상 운영일의 실측(2026-07-27: 결손 0분·재기동 0회)을 기준으로 한 초기 임계 — 미검증.
 DEFAULT_THRESHOLDS: dict[str, float] = {
@@ -334,6 +341,13 @@ class IntegrityReport:
     symbol_mismatch_suspected: bool = False
     # 그날 데이터를 실제로 가진 심볼들 — "그럼 누가 갖고 있나"에 답한다(빈 목록이면 휴장 등).
     symbol_candidates: list[str] = field(default_factory=list)
+    # **한 표면에만 나타난 사실** (2026-08-14 G-6). 스냅샷이 말한 사유가 로그엔 없으면
+    # 다른 표면을 보는 사람은 그 사실을 영영 못 본다 — 그것 자체가 관측 결함이다.
+    verdict_surface_gaps: list[dict[str, Any]] = field(default_factory=list)
+    # **다일 누적 퇴화 판정** (2026-08-14 G-9). 30m은 하루 15봉이 상한이라 일간 판정이
+    # 구조적으로 불가능하다 — 3거래일 합산이면 45봉으로 하한 30을 넘는다. 임계를 낮추지
+    # 않고 창을 넓혀 답한다(`ops/feature_health_rolling.py`).
+    feature_health_rolling: list[dict[str, Any]] = field(default_factory=list)
     # **판단 사슬이 어디까지 살아 있었나** (2026-08-12 G-1, `decision/meta_decision.py`).
     #
     # `regime_distribution`이 첫 관문 하나를 본다면 이쪽은 **전 경로**를 본다 — 마스터플랜
@@ -886,6 +900,8 @@ def cross_check_head_truncation(
     start_lag_minutes: float | None,
     series_head_gap_minutes: float | None,
     volume_head_missing_minutes: int | None,
+    axis_sources: Mapping[str, str] | None = None,
+    axis_evidence: Mapping[str, bool] | None = None,
 ) -> list[str]:
     """**아침이 잘렸는가**를 세 축이 각각 답하게 하고, 갈리면 그 자체를 판정으로 올린다
     (2026-08-10 G-2).
@@ -947,11 +963,26 @@ def cross_check_head_truncation(
         return []  # 전원 같은 답(또는 잴 수 있는 축이 하나뿐) — 조용한 것이 옳다
     said_yes = " · ".join(f"{name} {value}" for name, verdict, value in votes if verdict)
     said_no = " · ".join(f"{name} {value}" for name, verdict, value in votes if not verdict)
-    return [
+    lines = [
         f"아침 잘림 판정이 축마다 다르다 — 잘렸다: {said_yes} / 아니다: {said_no}. "
         "어느 축이 옳은지 모르는 상태 자체가 볼 것이다"
         "(한 축이 조용해진 날 나머지가 그 사실을 말한다)"
     ]
+    # **감지에서 원인 특정까지** (2026-08-14 G-8). 위 한 줄은 모순을 말하지만 풀지는 않았고,
+    # 2026-08-14에 사람이 `data/bars/`를 직접 `ls` 해서야 답이 나왔다 — 그날 소수파 축은
+    # 만기된 심볼 경로를 보고 있었다. 각 축이 **무엇을 봤는지**가 적혀 있었으면 그 한 줄이
+    # 곧 진단이었다.
+    if axis_sources:
+        arbitration = verdict_mod.arbitrate_axes(
+            {
+                name: (verdict, axis_sources.get(name, "(경로 미상)"))
+                for name, verdict, _value in votes
+            },
+            evidence=axis_evidence,
+        )
+        if arbitration is not None:
+            lines.append(arbitration.detail)
+    return lines
 
 
 def irrecoverable_loss_minutes(
@@ -1269,6 +1300,55 @@ def _calendar_freeze_finding(day: date, log_dir: Path, allowed: Mapping[str, flo
         f"({today_vector}). `ev_dow_*`는 매 거래일 달라져야 한다 — "
         "EventCalendar 주입 또는 봉 시각을 확인할 것"
     )
+
+
+def _verdict_surface_gaps(
+    snapshot_verdict: Mapping[str, Any] | None, tag_counts: Mapping[str, int]
+) -> list[dict[str, Any]]:
+    """스냅샷이 말한 사유가 **로그에도 있는가** — 표면 간 불일치를 신호로 (2026-08-14 G-6).
+
+    2026-08-14 12:30에 `status_snapshot`은 피처엔진을 `level=WARN "NaN 비율 임계 초과"`로
+    말했는데 같은 시각 `l1_daily` 로그의 관련 태그는 **0건**이었다. 한 화면은 이상을
+    말했고 다른 화면은 침묵했다 — 사람이 둘을 나란히 열어야만 보였고, 그날 그렇게 찾았다.
+
+    `missing_from`이 비어 있지 않다는 것은 **다른 표면을 보는 사람은 그 사실을 영영 못
+    본다**는 뜻이다. 그것 자체가 관측 결함이라 리포트에 남긴다.
+
+    상태판이 이걸 못 하는 이유: 그 프로세스는 로그를 읽지 않는다. 둘 다 읽는 곳이 여기다.
+    """
+    if not snapshot_verdict:
+        return []
+    # 사유 코드 → 그 사실이 있어야 하는 로그 태그들. 하나라도 있으면 표면이 일치한다.
+    expected_tags = {
+        verdict_mod.REASON_NAN_RATIO_EXCEEDED: (
+            "FeatureNaN",
+            "FeatureDegenerate",
+            "FeatureNanWarmupExceeded",
+        ),
+        verdict_mod.REASON_REGIME_UNKNOWN: ("RegimeClassified",),
+        verdict_mod.REASON_WARM_START_SHORT: (
+            "RegimeWarmStartShort",
+            "FeatureWarmStartShort",
+        ),
+    }
+    gaps: list[dict[str, Any]] = []
+    for reason in snapshot_verdict.get("reasons") or []:
+        code = reason.get("code")
+        tags = expected_tags.get(str(code))
+        if not tags:
+            continue
+        if any(tag_counts.get(tag) for tag in tags):
+            continue
+        gaps.append(
+            {
+                "code": code,
+                "detail": reason.get("detail"),
+                "sources": list(reason.get("sources") or []),
+                "missing_from": ["l1_daily.log"],
+                "expected_tags": list(tags),
+            }
+        )
+    return gaps
 
 
 def _detect_symbol_mismatch(bar_dir: Path, symbol: str, day: date) -> list[str]:
@@ -1591,12 +1671,45 @@ def build_report(
     # **판정 못 한 Horizon은 `unmeasured`가 정본이다** (2026-08-14 F-C). 로그는 INFO로
     # 조용히 두고 판정은 이 축이 진다 — 2026-08-14에 30m이 "퇴화 0건(14표본)"으로 나갔고,
     # 30m은 하루 15봉이 상한이라 그 문장이 **매일** 나온다. 0건이 아니라 모르는 것이었다.
+    #
+    # **다일 누적이 구제하면 `unmeasured`에서 뺀다** (2026-08-14 G-9) — 3거래일 합산으로
+    # 판정된 Horizon은 "모른다"가 아니다. 임계를 낮추지 않고 창을 넓혀 답하는 쪽이다.
+    # 하한은 그날 엔진이 로그에 실은 값을 그대로 쓴다 — 리포트가 두 번째 상수를 갖지
+    # 않게(엔진에서 바뀌면 여기가 조용히 옛 기준으로 채점한다).
+    min_samples = next(
+        (
+            int(entry.get("min_samples") or 0)
+            for entry in logs["degenerate_features"].values()
+            if entry.get("min_samples")
+        ),
+        _FEATURE_HEALTH_MIN_SAMPLES_FALLBACK,
+    )
+    rolling = feature_health_rolling.judge(day=day, min_samples=min_samples)
+    rolling_by_horizon = {v.horizon: v for v in rolling}
+
+    # **표면 간 불일치 자체가 신호다** (2026-08-14 G-6). 스냅샷은 그날 마지막 상태를 담고
+    # 있으므로 여기서 로그와 대조한다 — 상태판은 로그를 안 읽어 이 판정을 못 한다.
+    surface_gaps = _verdict_surface_gaps(
+        (status_board.load_snapshot() or {}).get("verdict"), logs["tag_counts"]
+    )
+    for gap in surface_gaps:
+        breaches.append(
+            f"관측 표면 불일치 — `{gap['code']}`가 {', '.join(gap['sources'])}에만 있고 "
+            f"{', '.join(gap['missing_from'])}엔 없다(기대 태그: {', '.join(gap['expected_tags'])})"
+        )
     for horizon, entry in sorted(degenerate_features.items()):
-        if not entry.get("judged", True):
-            floor = logs["degenerate_features"].get(horizon, {}).get("min_samples") or 0
-            unmeasured.append(
-                f"{horizon} 피처 퇴화 판정(표본 {entry.get('samples', 0)} < 최소 {floor})"
-            )
+        if entry.get("judged", True):
+            continue
+        multi = rolling_by_horizon.get(horizon)
+        if multi is not None and multi.judged:
+            entry["rolling_judged"] = True
+            entry["rolling_days"] = list(multi.days)
+            entry["rolling_samples"] = multi.samples
+            continue
+        floor = logs["degenerate_features"].get(horizon, {}).get("min_samples") or 0
+        got = multi.samples if multi is not None else entry.get("samples", 0)
+        span = f"{len(multi.days)}거래일 누적 {got}" if multi is not None else f"표본 {got}"
+        unmeasured.append(f"{horizon} 피처 퇴화 판정({span} < 최소 {floor})")
     unmeasured.extend(f"호스트 위생 — {item}" for item in host.unmeasured)
 
     # ---- 고도화 2(2026-08-06): 적재 계열 전수 커버리지 ----
@@ -1679,6 +1792,17 @@ def build_report(
                 if isinstance((volume_check or {}).get("head_missing_minutes"), int)
                 else None
             ),
+            # **각 축이 무엇을 봤는가** (2026-08-14 G-8). 2026-08-14엔 계열 커버리지가
+            # 만기된 심볼 경로를 보고 "410분 잘렸다"고 했고 나머지 둘은 정상이라 했다 —
+            # 경로가 나란히 적혔으면 그 한 줄이 곧 진단이었다.
+            axis_sources={
+                "기동 지연": "logs(SessionStart)",
+                "계열 머리 구멍": f"data/bars/{symbol}",
+                "거래량 아침 미수집": f"logs/volume_check_{day.strftime('%Y%m%d')}.json",
+            },
+            axis_evidence={
+                f"data/bars/{symbol}": bool(bar_paths.day_sources(bar_dir, symbol, Horizon.M1, day))
+            },
         )
     )
     # ---- G-6(2026-08-10): 손실 예산의 일일 값 ----
@@ -1767,6 +1891,8 @@ def build_report(
         decision_funnel=decision_funnel,
         symbol_mismatch_suspected=bool(symbol_candidates),
         symbol_candidates=symbol_candidates,
+        feature_health_rolling=[v.to_dict() for v in rolling],
+        verdict_surface_gaps=surface_gaps,
         breaches=breaches,
     )
 

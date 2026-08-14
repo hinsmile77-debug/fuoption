@@ -46,6 +46,19 @@ class TopicSnapshot:
     message: BusMessage | None
     badge: FreshnessBadge
     age_seconds: float | None
+    # 메시지가 스스로 말한 발행 주기(초) — 유도 못 했으면 None (2026-08-14 G-4).
+    # 화면이 배지 옆에 "주기 30분"을 적을 수 있어야 사람이 숫자를 역산하지 않는다.
+    cadence_seconds: float | None = None
+
+    @property
+    def dead(self) -> bool:
+        """**느려진 것과 죽은 것은 처방이 다르다** (2026-08-14 G-4).
+
+        주기를 유도하지 못했으면 판정하지 않는다 — 모르는 것을 "죽었다"로 부르지 않는다.
+        """
+        if self.cadence_seconds is None or self.age_seconds is None:
+            return False
+        return self.age_seconds > self.cadence_seconds * _CADENCE_DEAD_MULTIPLE
 
 
 # 유도된 주기의 몇 배까지 정상으로 볼 것인가 (2026-08-14 F-4).
@@ -54,6 +67,14 @@ class TopicSnapshot:
 # 쓰면 매 주기 경계마다 배지가 깜빡이고, 2배로 잡으면 1회 결손을 놓친다
 # (`data/bar_composer` 계열 판정과 같은 근거).
 _CADENCE_STALE_MULTIPLE = 1.5
+
+# 유도된 주기의 몇 배를 넘으면 **죽은 것**으로 보는가 (2026-08-14 G-4).
+#
+# `STALE`과 `DEAD`는 처방이 다르다 — 전자는 "느려졌다, 지켜본다"이고 후자는 "프로세스를
+# 확인하라"다. `ops/status_board.DEAD_AFTER_MULTIPLE`이 heartbeat 축에서 같은 구분을 이미
+# 하고 있었는데 판단 계열 배지엔 그 구분이 없었다. 3배(=3주기 결번)는 일시 지연으로는
+# 안 나오는 값이다.
+_CADENCE_DEAD_MULTIPLE = 3.0
 
 
 def derived_stale_after(message, fallback: float) -> tuple[float, float | None]:
@@ -126,9 +147,9 @@ class LiveDataSource:
         message = self._cache.get(key)
         age = self._cache.age_seconds(key)
         floor = self._stale_after.get(key, self._default_stale_after)
-        threshold, _cadence = derived_stale_after(message, floor)
+        threshold, cadence = derived_stale_after(message, floor)
         badge = compute_badge(self.mode, age, stale_after_seconds=threshold)
-        return TopicSnapshot(message=message, badge=badge, age_seconds=age)
+        return TopicSnapshot(message=message, badge=badge, age_seconds=age, cadence_seconds=cadence)
 
 
 class ReplayDataSource:

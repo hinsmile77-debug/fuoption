@@ -59,6 +59,7 @@ from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
 from messiah.core.version import PROCESS_GIT_SHA, assess_version_drift, head_git_sha
 from messiah.ops import loss_ledger
+from messiah.ops import verdict as verdict_mod
 
 DEFAULT_SNAPSHOT_PATH = Path("logs") / "status_snapshot.json"
 DEFAULT_INTERVAL_SECONDS = 15.0
@@ -199,6 +200,11 @@ class StatusBoard:
             # 것은 15:45 장후 리포트였다 — 둘은 다른 질문이고 화면에 둘 다 있어야 한다.
             "irrecoverable_loss": loss_ledger.current().to_dict(),
         }
+        # **오늘 판단이 가능한가** (2026-08-14 G-3). 위의 `components`는 *"지금 살아 있나"*에
+        # 답하고 이 한 줄은 *"살아 있는데 쓸 수 있나"*에 답한다. 2026-08-14 10:51에 컴포넌트
+        # 4종 중 3종이 `OK`였고 자가점검도 PASS였는데 시스템은 종일 판단 불능이었다 —
+        # 세 화면이 각자 정상을 말하는 동안 그 사실을 말하는 축이 하나도 없었다.
+        snapshot["verdict"] = self._verdict(components).to_dict()
         if self._symbol is not None:
             # **오늘 이 시스템이 실제로 보고 있는 종목** (2026-08-14 F-3).
             #
@@ -215,6 +221,48 @@ class StatusBoard:
             # 무화면을 스냅샷만 보고도 알 수 있게 만든다.
             snapshot["command_center_ui"] = "UP" if self._ui_probe() else "DOWN"
         return snapshot
+
+    def _verdict(self, components: dict[str, Any]) -> verdict_mod.Verdict:
+        """판단 가용성 — 살아 있는 것과 쓸 수 있는 것은 다른 질문이다 (2026-08-14 G-3).
+
+        사유마다 **출처 표면**을 적는다(G-6). 다만 `missing_from`(그 사실이 없는 표면)은
+        여기서 못 채운다 — 이 프로세스는 로그를 읽지 않기 때문이다. **표면 대조는 둘 다
+        읽는 장후 리포트가 한다**(`ops/integrity_report._verdict_surface_gaps`). 모르는 것을
+        추측해서 채우면 그 자체가 또 하나의 거짓 표면이 된다.
+        """
+        reasons: list[verdict_mod.Reason | None] = []
+
+        engine = components.get("l1.feature_engine") or {}
+        if engine.get("level") == "WARN" and engine.get("detail"):
+            reasons.append(
+                verdict_mod.Reason(
+                    code=verdict_mod.REASON_NAN_RATIO_EXCEEDED,
+                    detail=str(engine.get("detail")),
+                    sources=("status_snapshot",),
+                )
+            )
+
+        regime = self._cache.get("RegimeState")
+        regime_value = getattr(getattr(regime, "regime", None), "value", None)
+        if regime_value == "UNKNOWN":
+            reasons.append(
+                verdict_mod.Reason(
+                    code=verdict_mod.REASON_REGIME_UNKNOWN,
+                    detail="국면 UNKNOWN — MetaDecisionEngine 게이트 ②가 전건 NO_TRADE로 접는다",
+                    sources=("intel.regime",),
+                )
+            )
+
+        futures = self._cache.get("FuturesView")
+        if futures is not None and getattr(futures, "n_experts", None) == 0:
+            reasons.append(
+                verdict_mod.Reason(
+                    code=verdict_mod.REASON_NO_EXPERT_CONTRIBUTION,
+                    detail="기여 전문가 0명 — 통합점수가 구조적으로 0이다",
+                    sources=("intel.futures",),
+                )
+            )
+        return verdict_mod.build(reasons)
 
     def write(
         self,

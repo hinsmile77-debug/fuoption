@@ -478,6 +478,19 @@ def compute_roll_offsets(
                 minute = common[-1]
                 offset = roll_offset_ticks(old_by_min[minute], new_by_min[minute])
         offsets[outgoing.symbol] = offset
+        if minute is None:
+            # **표시만으로는 부족했다** (2026-08-14 G-1). 이 함수는 원래부터 `matched_minute=
+            # None`으로 사실을 남겼지만 소비처가 아무도 안 읽었고, 2026-08-14 롤이 그 상태로
+            # 학습 시계열에 들어갈 뻔했다. 측정된 basis 중앙값이 116틱(= 1분봉 봉간 변동
+            # 중앙값의 3배)이라 조정 없이 잇는 것은 가짜 사건을 하나 심는 일이다.
+            mlog.log(
+                "RollBasisUnmeasured",
+                f"{outgoing.symbol}→{incoming.symbol} ({day}) basis 측정 불가 — 겹침 하루가 "
+                f"없어 offset 0으로 잇는다(scripts/run_roll_overlap.py --date {day})",
+                outgoing=outgoing.symbol,
+                incoming=incoming.symbol,
+                date=day.isoformat(),
+            )
         infos.append(RollInfo(outgoing.symbol, incoming.symbol, day, offset, minute))
     return offsets, infos
 

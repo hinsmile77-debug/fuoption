@@ -68,6 +68,7 @@ import numpy  # noqa: F401
 import plotly.graph_objects as go
 import streamlit as st
 
+from messiah.core import symbol_resolution
 from messiah.core.bus import TOPIC_KILL, TOPIC_RESUME, MessageBus
 from messiah.core.config import load_instance
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
@@ -95,7 +96,7 @@ from messiah.core.version import (
     head_git_sha,
     uptime_text,
 )
-from messiah.data import backfill, bar_paths
+from messiah.data import bar_paths
 from messiah.ops.status_board import DEAD_AFTER_MULTIPLE, load_snapshot
 from messiah.ui.bar_reader import BarExportError, read_day_series
 from messiah.ui.bar_series import BarSeries
@@ -104,7 +105,6 @@ from messiah.ui.data_source import (
     FreshnessBadge,
     LiveDataSource,
     ReplayDataSource,
-    derived_stale_after,
 )
 
 DEFAULT_BAR_DIR = Path("data") / "bars"
@@ -422,8 +422,9 @@ def _resolve_default_symbol(
     except (OSError, ValueError):
         pass
     try:
-        day = today or now_kst().date()
-        return backfill.front_month_code_for_day(day), "만기 규칙 계산(상태판 없음)"
+        # 상태판이 없으면(프로세스 미기동·장후) 정본 해석기로 간다 — 그쪽도 런타임 기록을
+        # 먼저 조회하고 없을 때만 계산한다(2026-08-14 G-7).
+        return symbol_resolution.resolve_for_tools(today or now_kst().date())
     except Exception:  # noqa: BLE001 — 화면을 죽이지 않는다
         return "", "⚠ 자동 해석 실패 — 직접 입력할 것"
 
@@ -711,13 +712,17 @@ def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
     if snapshot.badge == FreshnessBadge.NO_DATA and reason:
         st.caption(reason)
         return
-    # **마지막 수신 시각을 항상 병기한다** (2026-08-14 F-4). 배지 한 글자로는 "느려졌다"와
+    # **마지막 수신 시각을 항상 병기한다** (2026-08-14 F-4·G-4). 배지 한 글자로는 "느려졌다"와
     # "죽었다"를 못 가르고, 숫자를 보고 사람이 주기를 역산하게 두면 그것이 곧 오늘 아침에
     # 사람이 세 화면을 15분간 대조한 이유다.
     if snapshot.age_seconds is not None:
-        _thr, cadence = derived_stale_after(snapshot.message, 0.0)
+        cadence = snapshot.cadence_seconds
         note = f" · 주기 {cadence / 60:.0f}분" if cadence and cadence >= 60 else ""
-        st.caption(f"{snapshot.age_seconds:.0f}초 전 수신{note}")
+        if snapshot.dead:
+            # 주기의 3배를 넘었다 — "느려졌다"가 아니라 "확인하라"다.
+            st.caption(f"**죽음**({snapshot.age_seconds / 60:.0f}분 침묵){note} · 프로세스 확인")
+        else:
+            st.caption(f"{snapshot.age_seconds:.0f}초 전 수신{note}")
 
 
 # ---------------------------------------------------------------- Kill Switch

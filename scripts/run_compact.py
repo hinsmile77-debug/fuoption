@@ -36,6 +36,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from messiah.core import symbol_resolution  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
@@ -49,12 +50,20 @@ def _parse_day(text: str) -> date:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="장중 조각 → 일자 통합본")
-    parser.add_argument("--symbol", default="A05608")
+    parser.add_argument(
+        "--symbol",
+        default=None,
+        help="기본: --date의 근월물(런타임 기록 우선). 월물 롤 당일에도 옳다 — 2026-08-14 G-7",
+    )
     parser.add_argument("--date", type=_parse_day, default=None, help="기본: 오늘(KST)")
     parser.add_argument("--base-dir", default=str(_DATA_DIR))
     args = parser.parse_args()
 
     day = args.date or now_kst().date()
+    # 심볼은 날짜가 정한다 (2026-08-14 G-7) — 상수로 두면 롤 당일에 만기된 월물을 조회한다.
+    symbol, origin = symbol_resolution.resolve_for_tools(day, explicit=args.symbol)
+    args.symbol = symbol
+    print(f"조회 대상 {symbol} ({origin})")
     archiver = ParquetArchiver(Path(args.base_dir))
 
     print(f"조각 통합 — {args.symbol} {day.isoformat()}")

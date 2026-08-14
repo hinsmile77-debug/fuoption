@@ -193,6 +193,11 @@ TAG_LEVELS: dict[str, int] = {
     "UIEventCalendarUnavailable": logging.WARNING,  # 화면의 캘린더 항목만 접는다(차트는 그대로)
     "FeatureWarmStart": logging.INFO,  # 기동 시 과거 봉으로 롤링 윈도 사전 충전
     "FeatureWarmStartFailed": logging.WARNING,  # 웜스타트 실패 — 수집은 계속(콜드스타트로 진행)
+    # 충전했는데도 **측정된 요구 봉 수**에 못 닿는다 (2026-08-14 G-5). `RegimeWarmStartShort`와
+    # 대칭이되 기준이 다르다 — 저쪽은 `classify()` 하한 22봉이고 이쪽은 전 피처가 값을 내는
+    # 180봉이다. 롤 당일 30m은 하루 15봉이라 **12거래일**이 걸린다. 그 숫자가 로그에 없어서
+    # 2026-08-14에 사람이 세 번 손으로 계산했고 한 번 틀렸다.
+    "FeatureWarmStartShort": logging.WARNING,
     # 국면 판정 한 건 (2026-08-12 F-2, `strategy/regime/runtime.py`). 30분마다 한 줄.
     #
     # 이 태그가 없던 2026-08-12에 국면은 **하루 종일 100% UNKNOWN**이었고, 그 전면 마비가
@@ -278,6 +283,24 @@ TAG_LEVELS: dict[str, int] = {
     # 웜스타트가 다시 0봉으로 떨어진다는 뜻이라 조용히 넘기면 안 된다. 다만 기동은 계속하므로
     # WARNING — 웜스타트는 부가 기능이지 기동 전제조건이 아니다.
     "SymbolChainFallback": logging.WARNING,
+    # 오늘의 정본 심볼을 파일로 못 남겼다 (2026-08-14 G-7). 도구들은 만기 규칙 계산으로
+    # 폴백하므로 즉시 사고는 아니지만, 런타임의 선택과 계산이 갈리는 날엔 그 폴백이 곧
+    # 오조회가 된다 — 조용히 넘어가면 안 된다.
+    "TradingSymbolRecordFailed": logging.WARNING,
+    # 마스터파일이 답한 근월물과 만기 규칙 계산이 다르다 (2026-08-14 G-7). 둘 중 하나가
+    # 틀렸다는 뜻이고 어느 쪽이든 사람이 봐야 한다 — 상장 일정 변경이면 런타임이 옳고,
+    # 마스터파일 이상이면 계산이 옳다. 평시엔 절대 안 찍힌다.
+    "TradingSymbolDisagreement": logging.ERROR,
+    # 롤 겹침 하루 확보 (2026-08-14 G-1). 4주에 한 번만 찍히는 정상 경로라 INFO다.
+    "RollOverlapCaptured": logging.INFO,
+    # 겹침을 못 만들었다 — **이번 롤의 basis가 영영 측정 불가로 남는다.** 후방조정이
+    # offset 0으로 넘어가고, 그 경계의 가짜 급등이 조정된 줄 알고 지나간다. 소급 경로가
+    # 있긴 하나(만기 월물도 조회된다) 사람이 알아야 돌린다.
+    "RollOverlapFailed": logging.ERROR,
+    # 후방조정이 basis를 못 재고 0으로 넘어갔다 (2026-08-14 G-1). `compute_roll_offsets()`가
+    # `matched_minute=None`으로 표시해 왔지만 **아무도 그 표시를 읽지 않았다** — 2026-08-14
+    # 롤이 정확히 그 상태로 학습 시계열에 들어갈 뻔했다. 이제 그 자리에서 운다.
+    "RollBasisUnmeasured": logging.WARNING,
     # 워밍업 중 NaN 임계 초과 (2026-08-14 F-9). **INFO인 것이 설계다** — 창이 차는 동안
     # 높은 NaN은 정상이고, WARNING으로 찍으면 2026-07-24가 없앤 잡음이 그대로 돌아온다.
     # 그러나 침묵도 답이 아니었다: 롤 당일 전 Horizon이 0봉에서 출발해 종일 임계를 넘겼는데

@@ -95,7 +95,11 @@ from messiah.broker.kis.rest_client import (  # noqa: E402
     KISRestClient,
 )
 from messiah.broker.kis.token_daemon import TokenDaemon  # noqa: E402
-from messiah.core import crash_forensics, universe  # noqa: E402
+from messiah.core import (  # noqa: E402
+    crash_forensics,
+    symbol_resolution,  # noqa: E402
+    universe,
+)
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
@@ -130,10 +134,16 @@ from messiah.data.normalizer import parse_futures_ticks  # noqa: E402
 from messiah.data.option_chain_archiver import OptionChainArchiver  # noqa: E402
 from messiah.data.option_chain_poller import OptionChainPoller  # noqa: E402
 from messiah.data.tick_archiver import TickArchiver  # noqa: E402
+from messiah.features import engine as feature_engine  # noqa: E402
 from messiah.features import sidecar  # noqa: E402
 from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
-from messiah.ops import loss_ledger, series_expectation, session_guard  # noqa: E402
+from messiah.ops import (  # noqa: E402
+    feature_health_rolling,
+    loss_ledger,
+    series_expectation,
+    session_guard,
+)
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 from messiah.ops.status_board import run_status_board_forever  # noqa: E402
 
@@ -341,14 +351,39 @@ def _load_warmup_artifacts(
         return
 
     summary = {horizon.value: count for horizon, count in loaded.items()}
+    # **언제 회복되는가를 기동 시점에 계산해 남긴다** (2026-08-14 G-5).
+    #
+    # 2026-08-14엔 이 값이 어디에도 없어서 사람이 12:30까지 세 번 손으로 계산했고 그중
+    # 한 번은 틀렸다(10:51에 "30m 회복이 정확히 0"이라 확정했는데 11:30에 62.0%로 회복
+    # 중이었다). 요구 봉 수는 윈도 크기가 아니라 **측정값**이다 — `px_ema_cross_60`은
+    # 윈도 60인데 180봉을 요구한다(`features/engine.required_bars_by_feature`).
+    required = feature_engine.required_bars(engine.feature_set)
+    forecast = {
+        horizon.value: feature_engine.recovery_forecast(count, engine.feature_set, horizon)
+        for horizon, count in loaded.items()
+    }
+    short = [line for line in forecast.values() if "부족" in line]
     mlog.log(
         "FeatureWarmStart",
         f"과거 완성봉으로 롤링 윈도 사전 충전 (용량 {engine.history_capacity}봉)",
         symbol=symbol,
         bars_by_horizon=summary,
         bars_by_source=sources,
+        required_bars=required,
+        recovery_forecast=forecast,
     )
-    print(f"피처 웜스타트: {summary} · 출처 {sources}", flush=True)
+    print(f"피처 웜스타트: {summary} · 출처 {sources} · 요구 {required}봉", flush=True)
+    if short:
+        # 조용히 넘어가면 그날 어느 Horizon이 언제까지 못 쓰는지 아무도 모른다(금지계명 12).
+        mlog.log(
+            "FeatureWarmStartShort",
+            f"요구 {required}봉 미달 Horizon {len(short)}종 — " + " · ".join(short),
+            symbol=symbol,
+            required_bars=required,
+            short_horizons=[h for h, line in forecast.items() if "부족" in line],
+        )
+        for line in short:
+            print(f"  ** 웜스타트 부족 — {line} **", flush=True)
 
 
 def _restore_composer_buckets(composer: MultiHorizonBarComposer, symbol: str, today: date) -> None:
@@ -944,7 +979,11 @@ async def _daily_close(
     # 세션 내내 죽어 있던 피처를 남긴다 (2026-08-05 고도화 3) — `nan_ratio`가 못 보는
     # 것을 본다. 퇴화 0건인 날도 남겨야 "검사했는데 0건"과 "검사를 안 함"이 갈린다.
     if engine is not None:
-        engine.log_feature_health()
+        healths = engine.log_feature_health()
+        # **판정 축을 하루에 가두지 않는다** (2026-08-14 G-9). 30m은 하루 15봉이 상한이라
+        # 일간 판정이 구조적으로 불가능하다 — 3거래일 합산이면 45봉으로 하한을 넘는다.
+        # 여기서 누적만 하고 판정은 장후 리포트가 한다(같은 규율: 계측과 판정을 나눈다).
+        feature_health_rolling.record_day(healths, symbol=engine.symbol, day=now_kst().date())
     # 회선 수신 지연 분포 (2026-08-05 고도화 1) — `minute_bar_close: timer` 승격의 근거
     # 데이터다. 유예를 몇 초로 둘지는 이 p99가 정하고, 그 값은 이 로그 이전엔 존재하지
     # 않았다. 여기(장 마감)에서 남기는 이유: 세션 전체 표본이 다 모인 시점이다.
@@ -1037,6 +1076,22 @@ async def main(cfg: InstanceConfig) -> None:
     symbol = await asyncio.to_thread(_resolve_front_month_symbol)
     tick_size = Decimal(cfg.futures_tick_size)
     print(f"근월물 심볼: {symbol} (tick_size={tick_size})", flush=True)
+    # **오늘의 정본을 남긴다** (2026-08-14 G-7). 장후 배치·UI·점검 도구가 이 파일을 읽어
+    # 같은 심볼을 본다 — 해석이 아니라 조회가 되면 갈라질 수 없다. 런타임의 선택이 정본인
+    # 이유는 이 프로세스가 실제로 그 심볼을 구독하고 그 심볼로 적재하기 때문이다.
+    #
+    # 만기 규칙 계산과 어긋나면 그 사실 자체를 남긴다 — 상장 일정 변경이면 런타임이 옳고,
+    # 마스터파일 이상이면 계산이 옳다. 어느 쪽이든 사람이 봐야 할 사건이다.
+    computed = symbol_resolution.resolve(today)
+    if computed != symbol:
+        mlog.log(
+            "TradingSymbolDisagreement",
+            f"마스터파일 {symbol} ≠ 만기 규칙 계산 {computed} — 런타임은 마스터파일을 따른다",
+            date=today.isoformat(),
+            runtime_symbol=symbol,
+            computed_symbol=computed,
+        )
+    symbol_resolution.record(today, symbol)
     # 1분봉 확정 방식을 기동 로그에 찍는다 — 설정 하나가 봉 생성 규칙을 바꾸므로, 그날
     # 아카이브가 어느 규칙의 산물인지 사후에 알 수 있어야 한다(`session_git_shas`와 같은 이유).
     print(
