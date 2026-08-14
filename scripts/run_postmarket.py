@@ -82,6 +82,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -223,12 +224,17 @@ def _run_step(step: Step) -> StepResult:
         Path(part).name if part.endswith(".py") else part for part in step.argv[1:]
     )
     print(f"\n=== {step.name} — {printable}", flush=True)
+    # 자식은 자기 기동을 `NestedSessionStart`로 남긴다 (2026-08-14 F-13). 종전엔 다섯 도구가
+    # 저마다 `SessionStart`를 찍어 같은 로그 파일에 섞였고, 분석 도구가 그것을 **재기동**으로
+    # 읽었다 — 배치가 정상 동작한 흔적이 매일 적신호로 올라왔다.
+    child_env = {**os.environ, mlog.NESTED_SESSION_ENV: "1"}
     try:
         completed = subprocess.run(  # noqa: S603 — 인자는 전부 이 파일이 만든 고정 문자열
             step.argv,
             cwd=_PROJECT_ROOT,
             timeout=_STEP_TIMEOUT_SECONDS,
             check=False,
+            env=child_env,
         )
     except subprocess.TimeoutExpired:
         return StepResult(step.name, False, f"{_STEP_TIMEOUT_SECONDS}초 내에 안 끝남")

@@ -22,6 +22,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -335,10 +336,45 @@ class LogDigest:
         self.refused_starts = dropped
         return remaining, ends
 
+    def cadence_minutes(self):
+        """이 프로세스의 **설계 발행 주기**(분) — 로그에서 유도한다 (2026-08-14 F-13).
+
+        고정 10분 임계는 매 봉 무언가를 찍는 `l1_daily`에는 맞지만, 30분 격자로만 판단하는
+        `g2_daily`에는 안 맞는다. 2026-08-14 다이제스트 §9의 자동 적신호 11개 중 **8개**가
+        g2의 30분 공백이었고 전부 정상 동작이었다 — 그 8줄이 진짜 신호(NaN·스냅샷 실패)를
+        목록 아래로 밀어냈다.
+
+        주기를 상수로 적지 않는 이유: 그 값은 코드(`RegimeRuntime`의 구동 Horizon)에 있고,
+        복사하면 두 곳이 어긋나는 순간 이 검사가 거짓말을 시작한다. **그날 로그의 인접
+        간격 최빈값**을 쓰면 한 번도 상수를 안 읽고 맞출 수 있다
+        (`ops/series_coverage.py`가 폴링 카덴스에 쓰는 것과 같은 방법).
+
+        표본이 적으면(3간격 미만) None — 유도할 근거가 없으면 고정 임계로 돌아간다.
+        """
+        lo = hhmm_to_minutes(self.cfg["gap_scan_window"][0])
+        hi = hhmm_to_minutes(self.cfg["gap_scan_window"][1])
+        pts = sorted({e["minutes"] for e in self.records if lo <= e["minutes"] <= hi})
+        deltas = [b - a for a, b in zip(pts, pts[1:]) if b > a]
+        if len(deltas) < 3:
+            return None
+        return Counter(deltas).most_common(1)[0][0] or None
+
+    def gap_threshold(self):
+        """공백 임계 — `max(고정 임계, 최빈간격 × 1.5)`.
+
+        1.5배인 것이 핵심이다: **주기 1회 결손은 반드시 걸린다**(2주기 = 2.0배 > 1.5배).
+        주기를 그대로 임계로 쓰면 정상 간격이 매번 걸리고, 2배로 잡으면 1회 결손을 놓친다.
+        """
+        fixed = self.cfg["gap_threshold_minutes"]
+        cadence = self.cadence_minutes()
+        if not cadence:
+            return fixed, None
+        return max(fixed, int(cadence * 1.5)), cadence
+
     def gaps(self):
         lo = hhmm_to_minutes(self.cfg["gap_scan_window"][0])
         hi = hhmm_to_minutes(self.cfg["gap_scan_window"][1])
-        thr = self.cfg["gap_threshold_minutes"]
+        thr, _cadence = self.gap_threshold()
         pts = sorted({e["minutes"] for e in self.records if lo <= e["minutes"] <= hi})
         out = []
         for a, b in zip(pts, pts[1:]):
@@ -484,9 +520,28 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("")
     head = run_git(root, ["rev-parse", "--short", "HEAD"])
     branch = run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
-    status = run_git(root, ["status", "--porcelain"])
+    status = run_git(root, ["status", "--porcelain", "--untracked-files=all"])
     dirty = [ln for ln in status.splitlines() if ln.strip()]
-    A(f"- HEAD `{head}` · 브랜치 `{branch}` · 미커밋 {len(dirty)}건")
+
+    # **개행 잡음과 실제 변경을 갈라 적는다** (2026-08-14 F-7).
+    #
+    # 리포 파일이 CRLF인데 `core.autocrlf`가 미설정이라, 정규화 설정이 다른 환경에서
+    # `git diff`를 돌리면 전 파일이 통째로 "변경됨"으로 잡힌다. 그 숫자("179건")가
+    # **4거래일간 재측정 없이 이월되며** paper 승격 차단의 근거로 쓰였다 — 실재하지 않는
+    # 부채였다. 한쪽만 적으면 반대 방향 오해가 생기므로 **두 값을 나란히** 적는다.
+    raw_diff = run_git(root, ["diff", "--numstat", "HEAD", "--", "src", "scripts"])
+    real_diff = run_git(
+        root, ["diff", "--numstat", "--ignore-all-space", "HEAD", "--", "src", "scripts"]
+    )
+    raw_files = len([ln for ln in raw_diff.splitlines() if ln.strip()])
+    real_files = len([ln for ln in real_diff.splitlines() if ln.strip()])
+    noise = raw_files - real_files
+
+    A(f"- HEAD `{head}` · 브랜치 `{branch}` · 작업트리 미커밋 {len(dirty)}건(untracked 포함)")
+    A(
+        f"- `src/`+`scripts/` 실제 변경 **{real_files}파일**"
+        + (f" · 개행 잡음 {noise}파일(CRLF — 부채 아님)" if noise else " · 개행 잡음 없음")
+    )
     if dirty:
         A("```")
         L.extend(dirty[:40])
@@ -703,8 +758,12 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         A("")
         gaps = dg.gaps() if name in ("l1_daily", "g2_daily") else []
         if name in ("l1_daily", "g2_daily"):
+            thr, cadence = dg.gap_threshold()
+            # 주기를 밝힌다 — 임계가 왜 그 값인지 사람이 되짚을 수 있어야 한다(2026-08-14 F-13).
+            note = f" · 설계 주기 {cadence}분에서 유도" if cadence else " · 고정 임계"
             A(
-                f"**{cfg['gap_scan_window'][0]}~{cfg['gap_scan_window'][1]} 구간 {cfg['gap_threshold_minutes']}분 이상 공백: {len(gaps)}건**"
+                f"**{cfg['gap_scan_window'][0]}~{cfg['gap_scan_window'][1]} 구간 "
+                f"{thr}분 이상 공백: {len(gaps)}건**{note}"
             )
         if gaps:
             A("")
@@ -821,9 +880,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if recur:
             ids = sorted({e["extra"].get("fix_id", "?") for e in recur})
             flags.append(f"`{name}`: 수정 재발 {len(recur)}건 — fix_id={', '.join(ids)}")
+        # 임계는 프로세스마다 다르다 — 그쪽 `gap_threshold()`가 이미 주기를 반영했으므로
+        # 여기서 다시 2배를 곱하지 않는다. 2026-08-14엔 이 줄이 g2의 정상 30분 격자를
+        # 8건이나 적신호로 올려 진짜 신호를 목록 아래로 밀어냈다(F-13).
         for a, b, g in dg.gaps() if name in ("l1_daily", "g2_daily") else []:
-            if g >= cfg["gap_threshold_minutes"] * 2:
-                flags.append(f"`{name}`: {m2hhmm(a)}~{m2hhmm(b)} {g}분 로그 공백")
+            flags.append(f"`{name}`: {m2hhmm(a)}~{m2hhmm(b)} {g}분 로그 공백")
 
     for ph in phases:
         for pat in cfg["expected_artifacts"].get(ph, []):
@@ -831,9 +892,12 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             if not (root / rel).exists():
                 flags.append(f"산출물 누락({ph}): `{rel}`")
 
-    if dirty:
+    # **실제 변경이 있을 때만** 올린다 (2026-08-14 F-7). 종전엔 작업트리 엔트리 수를 그대로
+    # 적신호로 올려, 개행 잡음과 문서 수정까지 "계명 10 확인 필요"로 매일 찍혔다.
+    if real_files:
         flags.append(
-            f"미커밋 변경 {len(dirty)}건 — 금지계명 10(미커밋 수정 실전 반입 금지) 확인 필요"
+            f"`src/`+`scripts/` 미커밋 실제 변경 {real_files}파일 — "
+            "금지계명 10(미커밋 수정 실전 반입 금지) 확인 필요"
         )
 
     if flags:

@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,14 @@ from messiah.ops import loss_ledger
 
 DEFAULT_SNAPSHOT_PATH = Path("logs") / "status_snapshot.json"
 DEFAULT_INTERVAL_SECONDS = 15.0
+
+# `os.replace` 재시도 간격 (2026-08-14 F-10). 길이가 곧 시도 횟수다 — 마지막 원소는
+# 쓰이지 않고(그 시도에서 예외를 올린다) 자리만 지킨다. 총 대기 0.4초로 15초 주기 안에
+# 넉넉히 들어간다. Windows 파일 경합은 대개 수십 ms 안에 풀린다.
+_REPLACE_BACKOFF_SECONDS = (0.1, 0.3, 0.0)
+
+# 이만큼 연속 실패하면 "한 번 미끄러졌다"가 아니라 "멈췄다"이다 — 15초 주기 기준 1분.
+_STALL_AFTER_CONSECUTIVE = 4
 
 # UI와 같은 컴포넌트 목록을 **고정으로** 들고 있는다 — 동적으로 "수신된 것만" 담으면 프로세스가
 # 통째로 죽었을 때 그 줄이 스냅샷에서 사라져 사고가 오히려 안 보인다(`ui/app.py`의
@@ -194,13 +203,37 @@ class StatusBoard:
             snapshot["command_center_ui"] = "UP" if self._ui_probe() else "DOWN"
         return snapshot
 
-    def write(self, path: Path = DEFAULT_SNAPSHOT_PATH) -> None:
-        """원자적으로 교체한다 — 읽는 쪽이 쓰는 도중의 파일을 볼 수 없게(모듈 docstring)."""
+    def write(
+        self,
+        path: Path = DEFAULT_SNAPSHOT_PATH,
+        *,
+        sleep: Callable[[float], Any] = time.sleep,
+    ) -> None:
+        """원자적으로 교체한다 — 읽는 쪽이 쓰는 도중의 파일을 볼 수 없게(모듈 docstring).
+
+        ## 교체는 재시도한다 (2026-08-14 F-10)
+
+        Windows에서 `os.replace`는 다른 프로세스가 그 파일을 연 순간 `WinError 5`(액세스
+        거부)로 튕긴다. 이 스냅샷은 UI·점검 도구·사람이 동시에 읽는 파일이라 경합이
+        구조적이다 — 2026-08-14에 15초 주기 하루치 중 **2회** 났다.
+
+        빈도가 낮다고 둘 수 없는 이유: 이 파일이 못 써진 순간이 곧 관측의 공백이고,
+        하필 사람이 화면을 열어 본 순간(= 사고를 의심한 순간)에 경합 확률이 가장 높다.
+
+        마지막 시도까지 실패하면 예외를 그대로 올린다 — 삼키면 호출부가 "썼다"고 믿는다.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(self.snapshot(), ensure_ascii=False, indent=2), encoding="utf-8")
         try:
-            os.replace(tmp, path)
+            for attempt, backoff in enumerate(_REPLACE_BACKOFF_SECONDS, start=1):
+                try:
+                    os.replace(tmp, path)
+                    return
+                except OSError:
+                    if attempt == len(_REPLACE_BACKOFF_SECONDS):
+                        raise
+                    sleep(backoff)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -234,23 +267,54 @@ async def run_status_board_forever(
     board = StatusBoard(cache, components=components, ui_probe=ui_probe)
 
     async def _write_forever() -> None:
+        # **한 번 미끄러진 것과 영영 죽은 것은 다른 사건이다** (2026-08-14 F-10).
+        # 재시도까지 실패한 1회는 경합이고, 연속 실패는 파일이 잠겼거나 디스크가 죽은 것이다.
+        consecutive = 0
+        stalled_announced = False
         while True:
             await sleep(interval_seconds)
             try:
                 board.write(path)
             except OSError as exc:
+                consecutive += 1
                 mlog.log(
                     "StatusSnapshotWriteFailed",
-                    f"상태 스냅샷 기록 실패: {exc}",
+                    f"상태 스냅샷 기록 실패({consecutive}회 연속): {exc}",
                     path=str(path),
+                    consecutive=consecutive,
                 )
+                if consecutive >= _STALL_AFTER_CONSECUTIVE and not stalled_announced:
+                    # 한 번만 운다 — 계속 울면 그 자체가 잡음이 되고, 회복은 아래 줄이 말한다.
+                    stalled_announced = True
+                    mlog.log(
+                        "StatusSnapshotStalled",
+                        f"상태 스냅샷이 {consecutive}회 연속 실패 — 관측이 멈췄다"
+                        f"(약 {consecutive * interval_seconds:.0f}초)",
+                        path=str(path),
+                        consecutive=consecutive,
+                    )
+            else:
+                if stalled_announced:
+                    mlog.log(
+                        "StatusSnapshotResumed",
+                        f"상태 스냅샷 기록 재개 — {consecutive}회 연속 실패 뒤",
+                        path=str(path),
+                        after_failures=consecutive,
+                    )
+                consecutive = 0
+                stalled_announced = False
 
     try:
         await asyncio.gather(subscriber.run_forever(), _write_forever())
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 — 수집 본 임무를 죽이지 않는다
-        mlog.log("StatusSnapshotWriteFailed", f"상태판 중단: {exc}", path=str(path))
+        # **개명** (2026-08-14 F-10). 종전엔 이 줄과 위의 1회 실패가 같은 태그를 썼다 —
+        # 하나는 "이번 주기를 놓쳤다"이고 이건 "상태판이 그날 내내 죽었다"인데, 같은 이름
+        # 같은 심각도로 나가면 사람이 둘을 구분할 수 없다(R6: 태그 1개 = 심각도 1개).
+        mlog.log(
+            "StatusBoardHalted", f"상태판 중단 — 오늘 남은 시간 관측 없음: {exc}", path=str(path)
+        )
 
 
 def load_snapshot(path: Path = DEFAULT_SNAPSHOT_PATH) -> dict[str, Any] | None:

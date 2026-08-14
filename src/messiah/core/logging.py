@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from math import isfinite
@@ -20,9 +21,16 @@ from typing import Any
 from messiah.core.timeutil import now_kst
 from messiah.core.version import PROCESS_GIT_SHA
 
+# 이 환경변수가 서 있으면 `session_start()`가 `SessionStart` 대신 `NestedSessionStart`를
+# 남긴다 — 배치가 부르는 자식 도구용 (2026-08-14 F-13). `run_postmarket.py`가 세운다.
+NESTED_SESSION_ENV = "MESSIAH_NESTED_SESSION"
+
 # 태그 등록부: 태그 = 심각도 1개 고정 (신규 태그는 여기 등록 후 사용)
 TAG_LEVELS: dict[str, int] = {
     "SessionStart": logging.INFO,
+    # 배치 단계로 실행된 자식 도구의 기동 (2026-08-14 F-13). `SessionStart`와 **이름이 달라야
+    # 한다** — 같으면 분석 도구가 배치의 정상 동작을 "재기동 N회"로 읽는다. 실제로 그랬다.
+    "NestedSessionStart": logging.INFO,
     # 기동 창 가드가 이 프로세스를 **설계대로** 되돌려보냈다 (2026-08-07 P0-4).
     #
     # `SessionStart`는 이미 찍힌 뒤다(로깅 설정이 프로세스 최초에 일어나므로). 그래서
@@ -223,6 +231,12 @@ TAG_LEVELS: dict[str, int] = {
     # 헤드리스 상태판 기록 실패 (고도화 A, `ops/status_board.py`) — 관측의 최후 보루가
     # 안 써지고 있다는 뜻이라 조용히 넘기면 안 된다. 수집 본 임무는 계속되므로 WARNING.
     "StatusSnapshotWriteFailed": logging.WARNING,
+    # 위 태그가 **두 사건을 겸하고 있었다** (2026-08-14 F-10). "이번 주기를 놓쳤다"와
+    # "상태판이 그날 내내 죽었다"가 같은 이름·같은 심각도로 나가면 사람이 둘을 못 가른다.
+    # 연속 실패(1분)는 관측이 멈춘 것이고, 프로세스 중단은 그날이 통째로 없는 것이다.
+    "StatusSnapshotStalled": logging.WARNING,
+    "StatusSnapshotResumed": logging.INFO,  # 회복도 말한다 — 멈췄다고만 하면 언제 풀렸나를 모른다
+    "StatusBoardHalted": logging.ERROR,
     # 크래시 포렌식 무장 사실의 **두 번째 출처** (2026-08-05). 첫 출처인 stderr 마커는
     # 호스트(PowerShell)가 첫 줄에 접두사를 붙이면 탐지가 깨진다 — 실제로 08-04에 그렇게
     # 깨져 "수정이 안 들었다"는 오탐이 ERROR로 찍혔다. 구조화 로그는 그 경로를 안 탄다.
@@ -364,7 +378,27 @@ def setup(instance_id: str, stream: Any = None) -> None:
 
 
 def session_start(instance_id: str) -> None:
-    """세션 경계 마커 (L24) — 분석 도구는 마지막 마커 이후만 본다."""
+    """세션 경계 마커 (L24) — 분석 도구는 마지막 마커 이후만 본다.
+
+    ## 자식 도구는 부모의 마커를 흉내 내지 않는다 (2026-08-14 F-13)
+
+    `run_postmarket.py`는 다섯 도구를 자식 프로세스로 돌리고 그 출력이 **같은 로그 파일**에
+    섞인다. 자식도 `setup()`을 부르므로 `SessionStart`가 하루에 두 줄 이상 남았고, 분석
+    도구는 그것을 **재기동**으로 읽었다 — 2026-08-14 다이제스트가 *"postmarket: SessionStart
+    2회 — 중복 기동/재기동 확인 필요"* 를 올렸는데 그건 배치가 정상 동작한 흔적이었다.
+
+    수집기 쪽에서 휴리스틱으로 가리는 방법도 있었지만(pid 대조 등) 그러면 "무엇이 진짜
+    재기동인가"의 판정이 로그 밖으로 나간다. 발생 지점에서 이름을 가르는 쪽이 옳다.
+    """
+    if os.environ.get(NESTED_SESSION_ENV):
+        log(
+            "NestedSessionStart",
+            "child process start (배치 단계)",
+            instance_id=instance_id,
+            git_sha=PROCESS_GIT_SHA,
+            pid=os.getpid(),
+        )
+        return
     log(
         "SessionStart",
         "process start",
@@ -372,7 +406,7 @@ def session_start(instance_id: str) -> None:
         # 프로세스가 **적재한** 코드의 SHA다 — 지금 작업트리의 HEAD가 아니다
         # (`core/version.py` 모듈 docstring). 장중에 커밋이 들어와도 이 줄은 안 변한다.
         git_sha=PROCESS_GIT_SHA,
-        pid=__import__("os").getpid(),
+        pid=os.getpid(),
     )
 
 
