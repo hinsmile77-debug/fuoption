@@ -52,7 +52,7 @@ from messiah.core import universe
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.messages import BarSession, Horizon, Regime
 from messiah.core.timeutil import KST, now_kst
-from messiah.data import tick_archiver
+from messiah.data import bar_paths, tick_archiver
 from messiah.data.archiver import ParquetArchiver
 from messiah.features import spec as feature_spec
 from messiah.ops import (
@@ -321,6 +321,19 @@ class IntegrityReport:
     # 채점하지 않는다(`fix_verification.load_daily_reports`). 자세한 사유는
     # `generate_and_write()`의 `provisional` 절 참고.
     provisional: bool = False
+    # **조회 대상 심볼이 그날 데이터를 안 가졌고, 다른 심볼은 가졌다** (2026-08-14 F-B).
+    #
+    # `provisional`과 **다른 축이다.** 그쪽은 "아직 안 만들어진 산출물이 있다"(시간 문제)이고
+    # 이쪽은 "엉뚱한 곳을 봤다"(대상 문제)라 원인도 조치도 다르다. 같은 깃발을 쓰면
+    # 다음 날 `_stale_provisional_findings()`가 *"장후 배치가 안 돌았다"*는 **허위** breach를
+    # 낸다 — 배치는 돌았고 볼 곳만 틀렸는데.
+    #
+    # 2026-08-14(첫 월물 롤)에 배치가 만기된 A05608을 조회했고 `tick_rows`가 0으로 찍혔다.
+    # 그 0은 "틱이 없었다"가 아니라 "안 봤다"였다(정정 후 110,397). 리포트가 그 둘을 구분
+    # 못 하면 하루치 채점 전체가 조용히 거짓이 된다(R10 · 금지계명 12).
+    symbol_mismatch_suspected: bool = False
+    # 그날 데이터를 실제로 가진 심볼들 — "그럼 누가 갖고 있나"에 답한다(빈 목록이면 휴장 등).
+    symbol_candidates: list[str] = field(default_factory=list)
     # **판단 사슬이 어디까지 살아 있었나** (2026-08-12 G-1, `decision/meta_decision.py`).
     #
     # `regime_distribution`이 첫 관문 하나를 본다면 이쪽은 **전 경로**를 본다 — 마스터플랜
@@ -1246,6 +1259,26 @@ def _calendar_freeze_finding(day: date, log_dir: Path, allowed: Mapping[str, flo
     )
 
 
+def _detect_symbol_mismatch(bar_dir: Path, symbol: str, day: date) -> list[str]:
+    """대상 심볼이 그날 1분봉을 안 가졌는데 **다른 심볼은 가진** 경우의 후보 목록.
+
+    빈 목록이면 의심할 근거가 없다 — 대상이 데이터를 가졌거나(정상), 아무도 안 가졌거나
+    (휴장·전면 수집 실패, 그건 다른 축이 잡는다). **"0행"과 "엉뚱한 곳을 봤다"를 가르는
+    유일한 근거가 "그럼 누가 갖고 있나"이다**(2026-08-14 F-B).
+    """
+    if bar_paths.day_sources(bar_dir, symbol, Horizon.M1, day):
+        return []
+    if not bar_dir.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in bar_dir.iterdir()
+        if entry.is_dir()
+        and entry.name != symbol
+        and bar_paths.day_sources(bar_dir, entry.name, Horizon.M1, day)
+    )
+
+
 def build_report(
     *,
     day: date,
@@ -1275,6 +1308,7 @@ def build_report(
     """
     limits = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
     continuity = analyze_bar_continuity(bar_dir, symbol, day)
+    symbol_candidates = _detect_symbol_mismatch(bar_dir, symbol, day)
 
     per_process = {name: analyze_logs(paths) for name, paths in log_paths.items()}
     logs = analyze_logs([path for paths in log_paths.values() for path in paths])
@@ -1297,6 +1331,19 @@ def build_report(
     tick_rows = count_tick_rows(tick_dir, symbol, day)
 
     breaches: list[str] = []
+    # **조회 대상이 틀렸을 가능성을 다른 모든 판정보다 먼저 말한다** (2026-08-14 F-B).
+    #
+    # 이 줄이 서면 아래의 "0행" 계열 breach는 전부 그 결과일 뿐이다 — 2026-08-14에
+    # `tick_rows 0` · `커버리지 0.0%` · `머리 구멍 410분`이 한꺼번에 떴는데 셋 다 진짜 사고가
+    # 아니라 **엉뚱한 심볼을 본 결과**였다. 맨 앞에 두는 이유는 사람이 목록의 첫 줄부터
+    # 읽기 때문이고, 원인이 아래에 묻히면 결과 세 줄을 각각 쫓게 된다.
+    if symbol_candidates:
+        breaches.insert(
+            0,
+            f"조회 대상 불일치 의심 — {symbol}의 {day} 1분봉이 없는데 "
+            f"{', '.join(symbol_candidates)}에는 있다. 아래 '0행' 판정은 그 결과일 수 있다"
+            f"(월물 롤이면 run_postmarket.py가 날짜에서 심볼을 해석한다)",
+        )
     # 봉이 정상인 날에도 틱만 조용히 안 쌓일 수 있다 — 수집 경로가 다르기 때문이다. 그리고
     # 틱은 백필이 없어 그 하루가 영구히 빈다(`IntegrityReport.tick_rows` 주석).
     if tick_rows < limits["min_tick_rows"]:
@@ -1694,6 +1741,8 @@ def build_report(
         host_events=[event.to_dict() for event in observation.events],
         regime_distribution=regime_distribution,
         decision_funnel=decision_funnel,
+        symbol_mismatch_suspected=bool(symbol_candidates),
+        symbol_candidates=symbol_candidates,
         breaches=breaches,
     )
 

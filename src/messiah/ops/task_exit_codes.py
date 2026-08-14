@@ -49,6 +49,12 @@ from messiah.ops import task_schedule
 # 정본을 못 읽을 때만 쓰는 그물 — 같은 PC의 다른 프로젝트 작업을 끌어오지 않을 만큼만 넓다.
 TASK_PREFIX = "Messiah"
 
+# `Get-WinEvent` 조회의 시한과 재시도 횟수 (2026-08-14 F-D). 상수로 두되 `collect()`가
+# 인자로 받는다 — 하드코딩 금지(R4)이자, 테스트가 시한을 줄여 재시도 경로를 밟게 하려면
+# 밖에서 넣을 수 있어야 한다. 60초는 종전 값 그대로이고 달라진 것은 **한 번 더 묻는다**는 것.
+DEFAULT_QUERY_TIMEOUT_SECONDS = 60.0
+DEFAULT_QUERY_ATTEMPTS = 2
+
 # 작업 이름 → 구조화 로그의 `process` 이름. `SessionEnd` 대조(판정 ②)의 연결 고리다.
 # 여기 없는 작업(Shutdown·Postmarket)은 로그를 안 내므로 판정 ①만 받는다.
 TASK_TO_PROCESS: dict[str, str] = {
@@ -199,27 +205,60 @@ def _query_script(start: datetime, end: datetime) -> str:
     )
 
 
-def collect(day: date, *, runner=subprocess.run) -> TaskExitReport:
+def collect(
+    day: date,
+    *,
+    runner=subprocess.run,
+    timeout_seconds: float = DEFAULT_QUERY_TIMEOUT_SECONDS,
+    attempts: int = DEFAULT_QUERY_ATTEMPTS,
+) -> TaskExitReport:
     """그날 `Messiah*` 작업의 마지막 종료 코드 — 못 읽으면 `available=False`.
 
     실패 조건: 없다. 관측 도구가 리포트를 죽이면 안 된다(`ops/observation_gaps.py`와 같은 규율).
+
+    ## 왜 재시도하나 (2026-08-14 F-D)
+
+    `available=False`는 **채점에서 빠진다** — `fix_verification`의 `nonzero_task_exits`가
+    `None`을 내고 `evaluate()`가 그날을 `unjudged`로 넘긴다. 그 처리는 옳다(L18: 못 잰 것을
+    통과로도 위반으로도 안 센다). 문제는 **못 재는 상태가 지속되면 그 축이 영영 판정되지
+    않는다**는 것이다.
+
+    2026-08-14 실측: `exit-code-matches-log`가 *"2026-08-11에 기준 위반(3거래일 전)"* 으로
+    재발에 고정돼 있는데, 그 뒤 사흘은 전부 `조회 실패: TimeoutExpired`라 위반을 씻을 기회
+    자체가 없었다. **한 번 걸린 위반이 계측 고장 때문에 영구히 남는 형태다.**
+
+    `Get-WinEvent`는 이벤트 로그가 클 때 간헐적으로 느리다 — 한 번 더 물어보면 대개 온다.
+    타임아웃을 상수에서 빼 인자로 받는 것은 R4(하드코딩 금지)이자 테스트 가능성이다.
     """
     if sys.platform != "win32":
         return TaskExitReport(available=False, detail="Windows 전용 집계 — 건너뜀")
 
     start = datetime.combine(day, datetime.min.time())
     end = start + timedelta(days=1)
-    try:
-        result = runner(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _query_script(start, end)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-        )
-    except Exception as exc:  # noqa: BLE001 — 못 읽는 것과 0건은 다르다
-        return TaskExitReport(available=False, detail=f"조회 실패: {type(exc).__name__}")
+    last_error = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            result = runner(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    _query_script(start, end),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 — 못 읽는 것과 0건은 다르다
+            # 몇 번 만에 실패했는지를 남긴다 — "한 번 튕겼다"와 "계속 안 된다"는 다른 사건이고,
+            # 후자면 축이 영구 판정 불가로 굳는다(위 docstring).
+            last_error = f"조회 실패: {type(exc).__name__} ({attempt}/{max(1, attempts)}회 시도)"
+    else:
+        return TaskExitReport(available=False, detail=last_error)
 
     lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if result.returncode != 0 or not lines or not lines[0].startswith("OK "):

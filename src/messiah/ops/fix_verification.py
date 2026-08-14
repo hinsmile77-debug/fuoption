@@ -44,8 +44,9 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,6 +54,11 @@ import yaml
 
 DEFAULT_REGISTRY_PATH = Path("configs") / "pending_verifications.yaml"
 DEFAULT_LOG_DIR = Path("logs")
+
+# 그날의 **정본** 무결성 리포트 파일명. 접미사가 붙은 사본(`..._pre_recompose.json`,
+# `..._wrong_symbol.json`)은 증거 보존본이지 채점 대상이 아니다 — `load_daily_reports()`의
+# "규격 외 파일명은 그날의 리포트가 아니다" 절 참고.
+_CANONICAL_REPORT_NAME = re.compile(r"daily_integrity_(?P<stamp>\d{8})\.json")
 
 
 class VerificationStatus:
@@ -605,14 +611,40 @@ def load_daily_reports(log_dir: Path = DEFAULT_LOG_DIR) -> dict[date, dict[str, 
     건너뛴 날은 그 날짜의 판정 자체가 **미측정**으로 남는다 — 통과로도 위반으로도 안 센다.
     그 침묵이 방치되지 않는 이유는 확정본 생성 시 `_stale_provisional_findings()`가
     "예비본으로 남아 있다"를 오늘 breach로 올리기 때문이다. 두 장치는 짝이다.
+
+    ## 규격 외 파일명은 그날의 리포트가 아니다 (2026-08-14 F-B)
+
+    종전엔 `daily_integrity_*.json`을 통째로 글롭하고 **파일명이 아니라 JSON 안의 `date`
+    필드**로 키를 잡았다. 그래서 사람이 증거 보존용으로 옆에 둔 사본이 정본을 덮어썼다 —
+    `sorted()`에서 접미사 붙은 이름이 뒤에 오기 때문이다.
+
+    **실측 피해**: `daily_integrity_20260805_pre_recompose.json`이 2026-08-05부터 9거래일간
+    08-05의 채점을 재합성 **이전** 값으로 되돌려 놓고 있었다
+    (`horizon_findings` 정본 0 → 읽힌 값 5 · `unmeasured` 0 → 2 · `breaches` 4 → 9).
+    그날 재합성으로 5→0을 만든 복구가 **채점에는 한 번도 반영된 적이 없다.**
+
+    보존 자체는 옳다(그날 무슨 일이 있었는지의 증거다). 틀린 것은 **보존본과 정본을
+    같은 그물로 줍는 것**이다. 그래서 이름 규격을 강제하고, 규격에 맞더라도 파일명의
+    날짜와 안의 `date`가 어긋나면 버린다 — 둘 중 어느 쪽을 믿을지 조용히 고르지 않는다.
     """
     reports: dict[date, dict[str, Any]] = {}
     for path in sorted(log_dir.glob("daily_integrity_*.json")):
+        match = _CANONICAL_REPORT_NAME.fullmatch(path.name)
+        if match is None:
+            continue  # 보존본·수동 사본 — 그날의 정본이 아니다
         try:
+            stamped = datetime.strptime(match.group("stamp"), "%Y%m%d").date()  # noqa: DTZ007
             report = json.loads(path.read_text(encoding="utf-8"))
             if report.get("provisional"):
                 continue
-            reports[date.fromisoformat(report["date"])] = report
+            # 엉뚱한 심볼을 본 리포트로는 채점하지 않는다 (2026-08-14 F-B). `provisional`과
+            # 같은 처분이지만 **다른 사유**다 — 그쪽은 아직 안 만들어진 산출물, 이쪽은
+            # 잘못 본 대상. 이 침묵은 리포트 `breaches` 첫 줄이 대신 말한다.
+            if report.get("symbol_mismatch_suspected"):
+                continue
+            if date.fromisoformat(report["date"]) != stamped:
+                continue  # 파일명과 내용이 다른 날을 가리킨다 — 믿을 쪽을 조용히 고르지 않는다
+            reports[stamped] = report
         except (OSError, ValueError, KeyError):
             continue  # 깨진 리포트 하나가 나머지 채점을 막지 않는다
     return reports
