@@ -48,6 +48,45 @@ class TopicSnapshot:
     age_seconds: float | None
 
 
+# 유도된 주기의 몇 배까지 정상으로 볼 것인가 (2026-08-14 F-4).
+#
+# 1.5배: **1회 결손(2주기)은 반드시 걸리고 정상 간격은 안 걸린다.** 주기를 그대로 임계로
+# 쓰면 매 주기 경계마다 배지가 깜빡이고, 2배로 잡으면 1회 결손을 놓친다
+# (`data/bar_composer` 계열 판정과 같은 근거).
+_CADENCE_STALE_MULTIPLE = 1.5
+
+
+def derived_stale_after(message, fallback: float) -> tuple[float, float | None]:
+    """메시지가 스스로 말한 유효기간에서 신선도 임계를 계산한다 (2026-08-14 F-4).
+
+    반환은 `(임계 초, 유도된 주기 초 또는 None)`.
+
+    ## 왜 상수를 못 믿나
+
+    `intel.futures`는 **구동 Horizon 격자**로만 나간다. 2026-08-14 기준 live 번들이 `30m`
+    한 종이라 발행 주기가 1800초였는데 임계는 10초였다 — **거래일의 99.4%가 STALE**이고,
+    그 앰버의 뜻("그 프로세스가 죽었거나 멈췄다")은 틀렸다. 화면이 종일 늑대소년이었다.
+
+    `FuturesView`·`RegimeState`·`OptionsView`는 `valid_until`을 싣는다. 거기서 `ts_utc`를
+    빼면 그것이 곧 그 판단의 유효 구간이자 다음 발행까지의 간격이다. **메시지가 자기 주기를
+    스스로 말하므로 UI가 추측할 필요가 없다.**
+
+    `valid_until`이 없으면(기여 전문가 0명이면 Aggregator가 그렇게 낸다) 유도 근거가 없으니
+    호출부의 하한을 그대로 쓴다 — 추측해서 늘리면 진짜 정지를 늦게 잡는다.
+    """
+    valid_until = getattr(message, "valid_until", None)
+    ts_utc = getattr(message, "ts_utc", None)
+    if valid_until is None or ts_utc is None:
+        return fallback, None
+    try:
+        cadence = (valid_until - ts_utc).total_seconds()
+    except (TypeError, AttributeError):
+        return fallback, None
+    if cadence <= 0:
+        return fallback, None
+    return max(fallback, cadence * _CADENCE_STALE_MULTIPLE), cadence
+
+
 def compute_badge(
     mode: DataSourceMode, age_seconds: float | None, *, stale_after_seconds: float
 ) -> FreshnessBadge:
@@ -86,7 +125,8 @@ class LiveDataSource:
     def snapshot(self, key: str) -> TopicSnapshot:
         message = self._cache.get(key)
         age = self._cache.age_seconds(key)
-        threshold = self._stale_after.get(key, self._default_stale_after)
+        floor = self._stale_after.get(key, self._default_stale_after)
+        threshold, _cadence = derived_stale_after(message, floor)
         badge = compute_badge(self.mode, age, stale_after_seconds=threshold)
         return TopicSnapshot(message=message, badge=badge, age_seconds=age)
 

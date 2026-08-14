@@ -134,11 +134,13 @@ class StatusBoard:
         components: tuple[str, ...] = DEFAULT_COMPONENTS,
         ui_probe: Callable[[], bool] | None = None,
         now: Callable[[], datetime] = now_utc,
+        symbol: str | None = None,
     ) -> None:
         self._cache = cache
         self._components = components
         self._ui_probe = ui_probe
         self._now = now
+        self._symbol = symbol
 
     def snapshot(self) -> dict[str, Any]:
         now = self._now()
@@ -197,6 +199,17 @@ class StatusBoard:
             # 것은 15:45 장후 리포트였다 — 둘은 다른 질문이고 화면에 둘 다 있어야 한다.
             "irrecoverable_loss": loss_ledger.current().to_dict(),
         }
+        if self._symbol is not None:
+            # **오늘 이 시스템이 실제로 보고 있는 종목** (2026-08-14 F-3).
+            #
+            # 화면이 이 값을 **다시 해석하지 않고 읽게** 하기 위한 자리다. 2026-08-14 첫 월물
+            # 롤에서 UI는 `DEFAULT_SYMBOL = "A05608"`(하드코딩, R4 위반)을 들고 있었고 수집은
+            # `A05609`를 하고 있었다 — 화면은 만기된 월물의 어제 차트를 그리면서 붉은 경보로
+            # *"봉 적재 정지 의심, 수집기를 먼저 확인할 것"* 을 띄웠다. 수집기는 멀쩡했다.
+            #
+            # 해석 경로를 하나 더 만들면(UI가 마스터파일을 따로 읽는 등) 갈릴 자리가 하나 더
+            # 생긴다. **해석이 아니라 조회가 되면 갈라질 수 없다.**
+            snapshot["trading_symbol"] = self._symbol
         if self._ui_probe is not None:
             # **화면 없이 화면의 생사를 안다** — 이 한 줄이 07-30의 32분·07-31의 3시간
             # 무화면을 스냅샷만 보고도 알 수 있게 만든다.
@@ -264,7 +277,7 @@ async def run_status_board_forever(
         cache,
         topic_key_fn=_cache_key_for,
     )
-    board = StatusBoard(cache, components=components, ui_probe=ui_probe)
+    board = StatusBoard(cache, components=components, ui_probe=ui_probe, symbol=symbol)
 
     async def _write_forever() -> None:
         # **한 번 미끄러진 것과 영영 죽은 것은 다른 사건이다** (2026-08-14 F-10).

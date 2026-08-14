@@ -38,6 +38,7 @@ LIVE/REPLAY의 차이는 "오늘"과 "과거 날짜 선택"뿐이다.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -94,7 +95,7 @@ from messiah.core.version import (
     head_git_sha,
     uptime_text,
 )
-from messiah.data import bar_paths
+from messiah.data import backfill, bar_paths
 from messiah.ops.status_board import DEAD_AFTER_MULTIPLE, load_snapshot
 from messiah.ui.bar_reader import BarExportError, read_day_series
 from messiah.ui.bar_series import BarSeries
@@ -103,10 +104,11 @@ from messiah.ui.data_source import (
     FreshnessBadge,
     LiveDataSource,
     ReplayDataSource,
+    derived_stale_after,
 )
 
 DEFAULT_BAR_DIR = Path("data") / "bars"
-DEFAULT_SYMBOL = "A05608"
+DEFAULT_SNAPSHOT_PATH = Path("logs") / "status_snapshot.json"
 DEFAULT_TICK_SIZE = 0.02  # 미니선물(A05608) 2026-07-22 실측값(core/config.py 동일 placeholder)
 
 # 화면에 항상 자리를 잡아둘 컴포넌트 — **고정 목록인 것이 핵심이다**. 동적으로 "수신된 것만"
@@ -122,6 +124,19 @@ _HEALTH_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("g2.pipeline", "G2 파이프라인"),
 )
 
+# ## 판단 계열 임계는 **발행 주기에서 유도한다** (2026-08-14 F-4)
+#
+# 아래 세 값은 종전에 10~15초 상수였다. 그런데 판단은 **구동 Horizon 격자**로만 나간다 —
+# 2026-08-14 기준 live 번들이 `30m` 한 종이라 `intel.futures`는 30분에 한 번 발행됐다.
+# 임계 10초 / 주기 1800초면 **거래일의 99.4%가 STALE**이다. 그날 화면 상단은 종일 앰버였고,
+# 그 앰버의 뜻("그 프로세스가 죽었거나 멈췄다", `_render_health_strip` docstring)은 틀렸다.
+#
+# `CircuitBreakerStatus`는 이 함정을 이미 알고 40초(주기 30초 대비)로 잡아 뒀다. **한 곳에서만
+# 피한 것은 설계가 아니라 우연이다.** 그래서 상수 대신 메시지가 스스로 말한 유효기간
+# (`valid_until - ts_utc` = 그 Horizon 길이)에서 계산한다(`_derived_stale_after`).
+#
+# 여기 남은 값은 **유도가 불가능할 때의 하한**이다 — `valid_until`이 None인 경우
+# (기여 전문가 0명이면 Aggregator가 그렇게 낸다)에만 쓰인다.
 _STALE_AFTER: dict[str, float] = {
     "FuturesView": 10.0,
     "RegimeState": 15.0,
@@ -374,6 +389,43 @@ def _get_live_cache(redis_url: str, symbol: str) -> StateCache:
         thread.start()
         st.session_state["live_thread_started"] = True
     return cache
+
+
+def _resolve_default_symbol(
+    snapshot_path: Path = DEFAULT_SNAPSHOT_PATH, today: date | None = None
+) -> tuple[str, str]:
+    """오늘 화면이 기본으로 볼 종목과 그 **출처** (2026-08-14 F-3).
+
+    ## 왜 상수를 지웠나
+
+    종전엔 `DEFAULT_SYMBOL = "A05608"`이 소스에 박혀 있었다(R4 위반). 2026-08-14 첫 월물
+    롤에서 수집·매매는 `A05609`로 옮겨갔는데 화면만 만기된 월물에 남아, **어제 차트를
+    그리면서 붉은 경보로 *"봉 적재 정지 의심, 수집기(l1.collector)를 먼저 확인할 것"* 을
+    띄웠다.** 같은 시각 수집기는 `age_seconds=0.4`로 완벽히 건강했고 `A05609` 봉을
+    10:56:59까지 적재하고 있었다. 화면이 운영자를 정확히 틀린 방향으로 보냈다.
+
+    ## 왜 다시 해석하지 않고 읽나
+
+    여기서 마스터파일을 따로 읽으면 **해석 경로가 하나 더 생긴다** — 그러면 갈릴 자리도
+    하나 더 생긴다. 상태판이 이미 `trading_symbol`로 "오늘 이 시스템이 실제로 보고 있는
+    종목"을 쓴다. 화면은 그것을 **조회**한다. 해석이 아니라 조회가 되면 갈라질 수 없다.
+
+    스냅샷이 없거나(프로세스 미기동·장후) 오래됐으면 만기 규칙으로 계산한다 — 그것도
+    안 되면 빈 문자열이고, 사이드바 입력은 그대로 살아 있어 사람이 직접 넣을 수 있다.
+    **부가 정보 하나 때문에 화면 전체가 죽는 것이 훨씬 나쁘다.**
+    """
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        symbol = payload.get("trading_symbol")
+        if isinstance(symbol, str) and symbol:
+            return symbol, "상태판(수집 프로세스가 기록)"
+    except (OSError, ValueError):
+        pass
+    try:
+        day = today or now_kst().date()
+        return backfill.front_month_code_for_day(day), "만기 규칙 계산(상태판 없음)"
+    except Exception:  # noqa: BLE001 — 화면을 죽이지 않는다
+        return "", "⚠ 자동 해석 실패 — 직접 입력할 것"
 
 
 def _default_redis_url() -> str:
@@ -658,6 +710,14 @@ def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
     )
     if snapshot.badge == FreshnessBadge.NO_DATA and reason:
         st.caption(reason)
+        return
+    # **마지막 수신 시각을 항상 병기한다** (2026-08-14 F-4). 배지 한 글자로는 "느려졌다"와
+    # "죽었다"를 못 가르고, 숫자를 보고 사람이 주기를 역산하게 두면 그것이 곧 오늘 아침에
+    # 사람이 세 화면을 15분간 대조한 이유다.
+    if snapshot.age_seconds is not None:
+        _thr, cadence = derived_stale_after(snapshot.message, 0.0)
+        note = f" · 주기 {cadence / 60:.0f}분" if cadence and cadence >= 60 else ""
+        st.caption(f"{snapshot.age_seconds:.0f}초 전 수신{note}")
 
 
 # ---------------------------------------------------------------- Kill Switch
@@ -966,7 +1026,11 @@ def render_ai_decision_panel(source) -> None:
 
 
 def _live_date_notice(
-    chosen: date, *, now: datetime, calendar: EventCalendar | None = None
+    chosen: date,
+    *,
+    now: datetime,
+    calendar: EventCalendar | None = None,
+    symbol: str = "",
 ) -> tuple[str, str]:
     """LIVE 차트 위에 붙일 날짜 문구 — 반환은 (severity, 문구).
 
@@ -1010,9 +1074,13 @@ def _live_date_notice(
             f"ℹ 장 개시 전({first_tick.strftime('%H:%M')} 첫 틱 예정) — 전일 {tail}"
         )
 
+    # **원인 후보를 하나로 단정하지 않는다** (2026-08-14 F-3). 종전 문구는 "수집기를 먼저
+    # 확인할 것"이라 단정했는데, 롤 당일엔 수집기가 멀쩡하고 화면이 만기된 월물을 보고
+    # 있었다 — 운영자를 정확히 틀린 방향으로 보냈다. 심볼을 문장에 넣고 후보를 둘로 연다.
     return "alert", (
-        f"🛑 {first_tick.strftime('%H:%M')}이 지났는데 오늘({today.isoformat()}) 봉이 없다 "
-        f"— 봉 적재 정지 의심, 수집기(l1.collector)를 먼저 확인할 것. {tail}"
+        f"🛑 {first_tick.strftime('%H:%M')}이 지났는데 `{symbol}`의 오늘({today.isoformat()}) "
+        f"봉이 없다 — ① 이 종목이 오늘의 근월물이 맞는지(월물 롤) ② 수집기(l1.collector) "
+        f"순으로 확인할 것. {tail}"
     )
 
 
@@ -1036,7 +1104,7 @@ def render_market_view(
     else:
         chosen = available[-1]
         severity, notice = _live_date_notice(
-            chosen, now=now_kst(), calendar=_event_calendar_or_none()
+            chosen, now=now_kst(), calendar=_event_calendar_or_none(), symbol=symbol
         )
         _NOTICE_RENDERER[severity](notice)
 
@@ -1172,7 +1240,9 @@ def main() -> None:
     # 기본값 LIVE(2026-07-29 사용자 요청 — 모듈 docstring "LIVE/STALE/REPLAY는 항상
     # 명시적이다" 참고, REPLAY로 명시 전환도 여전히 가능).
     mode_label = st.sidebar.radio("모드", ["REPLAY", "LIVE"], index=1)
-    symbol = st.sidebar.text_input("종목", DEFAULT_SYMBOL)
+    default_symbol, symbol_origin = _resolve_default_symbol()
+    symbol = st.sidebar.text_input("종목", default_symbol)
+    st.sidebar.caption(f"기본값 출처: {symbol_origin}")
     horizon = st.sidebar.selectbox("차트 Horizon", ["1m", "3m", "5m", "10m", "15m", "30m"], index=2)
     tick_size = st.sidebar.number_input("틱 크기", value=DEFAULT_TICK_SIZE, format="%.4f")
 
