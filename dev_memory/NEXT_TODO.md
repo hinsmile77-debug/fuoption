@@ -3612,3 +3612,899 @@ v2026.08-ev (08-07)  37/842        0.147         804      ← 7.4배
 - [ ] **C-1 후속** 분봉 차트 실전 도메인 — 08-13 관측 뒤
 - [ ] **성과 관문 결선** — G1 walk-forward → `validate_performance()`
       (self_eval 오늘도 `pnl_measurable: false` · `wiring_stage: 주문 미발생` — F-1이 선행)
+
+## 2026-08-13 장전 점검 — Fix 3종 + 고도화 3종 ([MW0601], 2026-08-13)
+
+정본: `logs/dailycheck/2026-08-13_pre_report.md`. **P0 없음** · 장전 코드 변경 없음(R11).
+아래 F-*/G-*는 전부 **오늘 15:35 이후** 적용.
+
+### 착수 전 차단 질문 (F-1의 선행 조건 — 이것부터)
+
+- [ ] **V-1 ★ F-1의 착수 조건** 오늘 장후 `data/option_chain/weekly_thu/2026-08-13.parquet`의
+      호가·거래량. **> 0 이면** 8/20물 상장 확정 → F-1 착수. **전부 0 이면** 캘린더는 옳고
+      폴러 단언 조건이 틀린 것 → F-1 철회, F-2만 남는다. **답 전에 판정식을 고치지 않는다.**
+- [ ] **KRX 공지 원문 확인** — 월물 만기 주 목위클리 상장일. J-2의 지시(*"면제 목록을 넓히지
+      말고 KRX 공지를 다시 확인할 것"*)를 실제로 이행한다.
+
+### Fix (P0부터 — 오늘은 P0 없음)
+
+- [ ] **F-1 (P1, 조건부)** 목위클리 상장 판정식 — `core/event_calendar.py`
+      `thursday_weekly_listed()`(274-307행)에 "`d`가 목요일이고 월물 만기일이면 다음 주
+      목요일을 본다" 분기 + docstring 282-285행 전제를 08-13 실측으로 교체.
+      **`has_thursday_weekly()`는 건드리지 않는다**(다른 질문 · EV 피처 16개 입력 · 7월부터 정상).
+      `tests/features/test_ev_core.py`의 `2026-08-13 → False`도 그쪽 단언이라 **유지**.
+      신규 테스트: `tests/test_event_calendar.py`에 08-07~08-12 False / 08-13·08-14 True.
+      검증: 아카이브 6일치 대조 + 다음 거래일 `OptionChainCalendarViolation` 0건.
+- [ ] **F-2 (P1)** 유량 예산 축 정정 — `data/option_chain_poller.py`
+      `expected_legs_per_cycle`(193-203행)이 미상장 계열에도 `legs_per_cycle`을 반환.
+      기동 문구 `단언 폴링만(수집 0)` → `단언 폴링(42다리, 예산 포함)`.
+      `tests/data/test_option_chain_poller.py`에 "미상장 계열도 예산 > 0" 케이스(기존 0 단언 정정).
+      **F-1과 독립 — F-1이 보류돼도 단독 적용한다.**
+- [ ] **F-3 (P2)** 수급 재시도 소진율 계측 — 상수는 **안 만진다**(관측 30분·4샘플).
+      수급 폴러에 재시도 소진율 카운터 → `scripts/daily_integrity_report.py`가
+      `investor_flow_retry_rate`로 수록. **임계 없음**(R18: 게이트 신설은 섀도 20거래일).
+      L18 확인: 값이 `0`인지 `미측정`인지 실데이터로 구분되는가.
+
+### 고도화
+
+- [ ] **G-2 ★ 즉시(장후 최우선)** 반복 ERROR 접기 — `core/logging.py`에 `(tag, payload_hash)`
+      반복 억제. 첫 1건 원래 레벨 + N분마다 `{tag}Repeated {n}회 (최초 HH:MM:SS)` 요약.
+      **강등하지 않는다**(08-07 `OptionChainPollEmpty` WARNING→DEBUG는 심각도 왜곡, R6).
+      해시 변경 시 즉시 원래 레벨 복귀가 안전장치. 로깅 코어 변경 → replay 검증 필수(계명 2).
+      기대: 오늘 ERROR 80건 → 8건. **F-1 보류 기간 중 U-4를 지키는 유일한 수단.**
+- [ ] **G-1 (이번 주)** 캘린더 예측 채점 — `logs/calendar_predictions.jsonl`에
+      `thursday_weekly_listed`·`resumes_on`·`monthly_expiry` 판정을 발행 시점에 1행 기록,
+      장후 배치가 실측 대조해 `hit/miss` 채움 → `daily_integrity`에 `calendar_prediction_score`.
+      선행: F-1 판정 확정(예측 축이 바뀌면 스키마도 바뀐다).
+- [ ] **G-3 (이번 주)** 검사 도입 시각 하한 — `scripts/self_check.py`에
+      `_POSTMARKET_MARKER_SINCE = date(2026,8,13)`, 그 이전 로그는 `판정 불가(마커 도입 전)`.
+      일반화: `ops/fix_verification.py` 등록부 각 항목에 `since` 필드 + **`since` 없는 항목을
+      세는 메타 검사**(잊고 넣으면 진짜 결함을 "판정 불가"로 덮는다).
+      근거: 같은 형태 오탐 3회째(`daily-axes-measured` · `LaunchWindowRefused` · 08-12 postmarket).
+
+### 2026-08-13 장후에 볼 것 — V-1~V-3, V-5, V-6, V-8~V-10
+
+- [ ] **V-2** `OptionChainCalendarViolation` 당일 누적 건수(예상 ~80건) — U-4 실패 요인 분리용
+- [ ] **V-3** `OptionChainSeriesMissing` **0건**. 뜨면 오늘 받은 체인이 도중에 사라진 것
+      = 「마스터파일 선등재」 가설 쪽이고 F-1은 철회된다
+- [ ] **V-5** 아카이브 `expiry_date` = `2026-08-20` (라벨 파서 `weekly_expiry(2026,8,3,3)`와 일치 · I-2)
+- [ ] **V-6** `InvestorFlowPollError` **0건** 유지(U-5) · 종일 `InvestorFlowPollRetried` 건수와 사이클 대비 비율
+- [ ] **V-8** `daily_integrity_20260813.json` `late_bar_drops` · `missing_minutes` **둘 다 0**
+      → clock offset +2.0초가 완성봉 규율(유예 500ms)에 영향 없음 확정
+- [ ] **V-9 ★ 오늘의 진짜 채점** `DecisionEmitted` 중 `Regime=UNKNOWN` **< 50%** (U-2와 동일).
+      오늘 `RegimeWarmStart` 200봉 충전이 어제 P0을 실제로 풀었는가
+- [ ] **V-10** `daily_integrity`에 `regime_distribution` 수록 · 2개 이상 상태 · `미측정` 아님 (U-3)
+
+### 2026-08-14(금) 장전에 볼 것
+
+- [ ] **V-4 ★ 재개일 오차의 확정 판정** `thursday_weekly_listed(08-14)=True`이고
+      `OptionChainCalendarViolation` **0건** → 오늘 위반은 **재개일 1일 오차 단건**으로 확정.
+      계속 뜨면 판정식이 더 넓게 틀린 것이다. (I-1·I-3와 함께 본다)
+- [ ] **V-7** `postmarket_20260813.log`에 `"tag": "SessionEnd"` **1건** — F-5의 진짜 첫 채점(U-6).
+      있으면 08-13 장전의 "08-12 SessionEnd 없음" 오탐이 자연 소멸한다
+
+### 오늘 완료 처리 — 장전에 이미 통과한 U-*
+
+- [x] **U-1** `RegimeWarmStart` 1건 · `bars: 200` ≥ `min_bars: 22` (g2_daily 08:25:52) — **통과**
+- [x] **U-7** 자가점검 `bar_close  1분봉 확정: timer (거래소 시각 경계 구동)` — **통과** (R-1 이월 해소)
+- [x] **U-8** `SessionStart.git_sha = e37d387` = HEAD · `code_version.stale: false` — **통과, 자연 해소 확인**
+
+### 오탐 판정 — 조치 불필요
+
+- [x] **08-12 postmarket `SessionEnd` 경고는 거짓** — 배치는 15:47:16에 5/5 완주했고,
+      F-5(`3720e31`)가 마커를 붙인 시각이 **18:04:24**로 3시간 늦었다.
+      **`run_postmarket.py --date 20260812` 재실행 불필요.** V-7이 최종 채점.
+
+### 미결 — 판정 보류 (수치 갱신)
+
+- [ ] **미커밋 179건 범위 확인** (08-12 174건 → **+5**). `git diff --stat 4825ffe -- src/`.
+      dev라 계명 10 위반은 아니나 줄지 않고 늘고 있다 → **paper 승격 차단 조건으로 격상 제안**.
+
+## 2026-08-13 장중 점검 — Fix 4종 + 고도화 2종 ([MW0601], 2026-08-13)
+
+관측 구간 09:00~12:36. **P0 없음.** 어제 P0(국면 마비)는 풀렸고(UNKNOWN 100%→12.5%),
+그것이 가리던 둘이 드러났다. 보고서: `logs/dailycheck/2026-08-13_intra_report.md`.
+
+### 적용 시점 — 전 항목 장후(15:35 이후). 장중 적용 금지 (R11 · 금지계명 3·4)
+
+### Fix (P0 없음 · P1부터)
+
+- [ ] **F-1 (P1) ★ 나머지의 판정 근거** 판단 갈래 값 계측 — `strategy/decision/meta_decision.py`
+      `_no_trade()`(:141)의 `mlog.log`에 `n_experts`·`score`·`dispersion`·`uncertainty`·
+      `model_version` 구조화 필드 추가. **`rationale` 문자열은 안 건드린다**(모듈 주석의
+      *"문구를 다듬는 순간 조용히 0이 된다"*). `GATE_PASS` 경로(:130)도 같은 필드 집합으로 통일 —
+      현재 두 경로의 관측 스키마가 다르다. 검증: `pytest -k meta_decision` 기존 rationale 단언 통과 + W-6.
+- [ ] **F-2 (P1)** `n_experts==0`을 ④에서 분리 — `meta_decision.py`에 `GATE_NO_EXPERT="no_expert"`,
+      ①(kill) 다음 **②(regime) 앞**에 `if view.n_experts == 0` 갈래. `DECISION_GATES` +
+      `ops/integrity_report.py::decision_funnel`에 편입. 모듈 docstring 규칙블록에 ⓪ 명기
+      (Ver 2.0 §3.1 원문에 없는 구현 측 선행 갈래 — 폴백 가시화, R10).
+      **R18 저촉 아님** — 차단 결과 동일, 표기만 분리. 차단 계층 3개 고정 유지.
+      착수 전 `grep -rn "DECISION_GATES\|decision_funnel" src/ scripts/` 소비처 전수 확인.
+      **F-1과 같은 커밋에** — 따로 넣으면 각각 반쪽이다.
+- [ ] **F-3 (P1)** 첫 사이클 국면 시드 — `scripts/run_g2_paper_trading.py::_build_regime_runtime()`이
+      웜스타트 직후 `classify()` 1회 → `RegimeState`를 `TOPIC_REGIME`에 발행 + `RegimeSeeded`(INFO) 1건.
+      `core/logging.py`에 `"RegimeSeeded": logging.INFO` 등록. **별도 커밋**(F-1/F-2는 관측, 이것은
+      행동 변경). 보류안(집계 건너뛰기)은 §3.2 *"침묵이 아니라 판단이다"* 위배로 **기각**.
+      **선행 판단: F-1 관측에서 `n_experts=0`이 나오면 그쪽이 F-3보다 우선.**
+- [ ] **F-4 (P2)** 점검 도구 공백 임계를 구동 주기에 맞춤 —
+      `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` 공백 판정에 프로세스별
+      기대 주기(l1=60s, g2=1800s) 테이블, 임계 `기대주기×2+5분`. 다이제스트 §5 표에 `기대주기` 열 출력.
+      검증: 오늘 다이제스트 재생성 시 g2 공백 적신호 **8건→0건**. G-3로 대체 가능(F-4는 급한 대응).
+
+### 고도화
+
+- [ ] **G-1 (이번 주)** 장중 `decision_funnel` — `status_snapshot.json`에
+      `decision: {funnel:{kill,no_expert,regime,dispersion,score,pass}, last_decision_kst, cycles}`.
+      누적 카운터는 **엔진에 심지 않고** 스냅샷 생성기가 당일 g2 로그 `gate` 필드를 센다.
+      근거: 오늘 스냅샷 최상위 키에 판단 계열 **0개** — "7/8이 한 갈래로 접힘"을 장후에야 안다.
+      선행: F-1·F-2(갈래 이름 확정).
+- [ ] **G-3 확장 (이번 주)** 프로세스가 자기 구동 주기를 선언 — `SessionStart`에 `cadence_seconds`
+      (l1=60 · g2_paper=1800 · postmarket=null). 점검 도구가 상수 테이블 대신 그 값을 읽는다.
+      **`cadence_seconds` 누락 프로세스를 세는 메타 검사** 동반(장전 G-3의 `since`와 같은 규율).
+      근거: 같은 형태 오탐 4회째 — `daily-axes-measured`·`LaunchWindowRefused`·08-12 postmarket·오늘.
+      장전 G-3(시간 하한)과 한 쌍의 다른 축(주기 하한).
+
+### 이월 — 장전 항목 중 오늘 근거가 갱신된 것
+
+- [ ] **G-2 ★ 장후 최우선 유지** 반복 ERROR 접기 — 12:33 기준 **51건**(장전 12건), 15:35까지 ~85건 궤도.
+      payload 51건이 한 글자도 다르지 않다. **오늘 l1 ERROR 51건이 전부 이 태그 하나** —
+      장전엔 "시끄럽다"였던 것이 이제 **"가린다"**(다른 ERROR가 섞여도 안 띈다).
+      `WARNING→DEBUG` 강등 금지(08-07의 실수, R6).
+- [ ] **F-3(수급 재시도 소진율, 장전 항목) — 긴급도 하향** `InvestorFlowPollRetried`가 08:51 이후
+      **3시간 45분간 0건**. 장전의 *"실패율 100% · 예산 여유 0"* 은 08:36~08:51 4샘플의 성질이었다.
+      계측은 유지, 우선순위는 P2 하단으로. 종일 확정은 W-4.
+
+### 2026-08-13 장후에 볼 것 — 장전 V-* 에 추가
+
+- [ ] **W-1 ★ 결함 ①의 확정 판정** 종일 `DecisionEmitted`의 `gate=regime`이 **1건뿐**(09:00 단건)이면
+      "첫 사이클 단건" 확정. 2건 이상이면 더 넓게 틀린 것
+- [ ] **W-2** 종일 `④ |S|=` 값의 분산. 13사이클 전부 정확히 `0.000`이면 `n_experts=0` 가설 강화.
+      하나라도 다르면 집계는 살아 있다. (확정은 F-1 필요 — 정황일 뿐)
+- [ ] **W-3** V-9 최종 채점 — `Regime=UNKNOWN` 종일 13건 중 1건 = **7.7% < 50%**
+- [ ] **W-4** `InvestorFlowPollRetried` 종일 건수. 4건에서 크게 안 늘면 장전 관측 ③은
+      장전 창의 성질로 확정 → 수급 F-3 긴급도 하향 확정
+- [ ] **W-5** `OptionChainCalendarViolation` 종일 누적 = 약 **85건** ±5 (5분 × 425분). 벗어나면 주기 외 요인
+
+### 2026-08-14(금) 장전에 볼 것 — 장전 V-4·V-7에 추가
+
+- [ ] **W-6 ★ 결함 ②의 확정 판정** (F-1 적용 후) `DecisionEmitted`에 `n_experts` 필드 존재.
+      **값 0 → "입력 없음" 확정 / 1 이상 → "진짜 우위 없음" 확정**
+- [ ] **W-7** (F-3 적용 후) 09:00 `DecisionEmitted`의 `gate`가 **`regime`이 아닐 것** +
+      `RegimeSeeded` 1건이 08:25대에 존재 + `RegimeClassified` ts < `DecisionEmitted` ts 유지
+- [ ] **W-8** (F-4 적용 후) 다이제스트 §9 적신호 중 g2 공백 **0건**
+
+### 오늘 장중 통과 — 완료 처리하지 않는다 (하루가 안 끝났다)
+
+- [ ] **V-9 장중 잠정 통과** — `Regime=UNKNOWN` 1/8 = 12.5% < 50% (어제 100%).
+      `RegimeWarmStart` bars 200 → `RegimeClassified` 8건 `bars_used: 200`, HIGH_VOL 5 → RANGE 3.
+      **상수가 아니라 분포다.** `9170ce8` 라이브 검증 성립 — **확정은 W-3(15:35 이후).**
+      섣부른 완료 처리를 하지 않는다.
+- [ ] **V-3 장중 잠정** `OptionChainSeriesMissing` **0건** → 「마스터파일 선등재」 가설 미배제,
+      **장전 F-1(캘린더 판정식)의 착수 조건 여전히 미충족**
+
+### 미결 — 판정 보류 (장전에서 변동 없음)
+
+- [ ] **미커밋 179건 범위 확인** — 장중 변동 없음. `git diff --stat 4825ffe -- src/`.
+      dev라 계명 10 위반 아니나 **paper 승격 차단 조건으로 격상 제안** 유지.
+
+## 2026-08-13 장후 점검 — P0 1종 + Fix 5종 + 고도화 3종 ([MW0601], 2026-08-13)
+
+### 적용 시점 — 장후이므로 적용 가능. 단 이 예약 실행은 보고까지만 했다
+
+각 커밋 전 `pytest`(해당 범위) + replay — 계명 2. 커밋 전 실전 반입 금지 — 계명 10.
+커밋 메시지 첫 단어 `[MW0601]`.
+
+### Fix
+
+- [ ] **F-1 (P0) ★ 재연결 후 첫 틱 시한** — `src/messiah/data/collector.py::TickStallWatchdog`.
+      `__init__`에 `self._reset_at: float | None = None`, `reset()`에서 `self._reset_at = self._monotonic()`,
+      `mark_tick()` 첫 틱에 `self._reset_at = None`.
+      `run_until_stalled()`의 `if self._last_tick_at is None: continue`를 3분기로 —
+      `_reset_at is None`이면 콜드스타트 면제(종전 동작), 유예 내면 대기,
+      유예 초과면 `CollectorReconnectNoTick`(WARNING, `core/logging.py` 등록) + `TickStallError`.
+      `configs/instance.yaml`에 `collector.reconnect_first_tick_grace_seconds: 60`(R4, 하드코딩 금지).
+      근거: 오늘 15:22:24 재연결 후 **11분간 경보 0건**. `_last_tick_at is None`을 무기한 워밍업으로 해석.
+      60초 근거: 정상 `recent_max_gap 12.6초` · `TickDeliveryLatency` 최대 1.371초 — 4배 이상.
+      회귀 위험: 08:20 기동~08:45 첫 틱 구간 오탐 → `_reset_at`을 `reset()`에서만 세팅해 명시 면제.
+      테스트 3종: 콜드스타트 면제 / 유예 초과 발화 / 유예 내 틱 도착 시 해제.
+- [ ] **F-2 (P0) ★ 재구독과 수신 재개를 가른다** — `collector.py` `_on_connected` **2곳**
+      (`TickCollector.run_forever` :396~406 · `MultiFeedCollector.run_forever` :729~741).
+      거기서는 `CollectorWSResubscribed`(INFO) `"WS 재구독 성공 — 첫 틱 대기"`,
+      `CollectorWSReconnected "수신 재개"`는 `_note_first_tick` 경로(:519 · :797)로 이동.
+      `ops/integrity_report.py::analyze_data_flow_ownership` 규칙 1을 두 갈래로 —
+      `stalls>0 and (resubscribes+reconnects)==0` / **`resubscribes > reconnects`**.
+      오늘 값(재구독 1 · 수신재개 0)이면 후자가 발화했을 것.
+      소비자는 `integrity_report.py` 한 곳뿐임을 `grep -rn CollectorWSReconnected src/`로 확인함.
+- [ ] **F-3 (P1)** 손실 축이 컴포넌트 CRITICAL을 읽게 한다 — `ops/status_board.py::snapshot()`(:134~)의
+      `irrecoverable_loss`에 `live_critical_components` 추가, 비지 않으면 `clean=false` +
+      `summary="진행 중 CRITICAL {n}건 — 손실 확정은 장후"`. `format_snapshot()`(:263~)에 노출.
+      `ops/integrity_report.py`는 스냅샷 `clean`과 자기 `irrecoverable_loss_minutes`가 어긋나면
+      `unmeasured`가 아니라 **`breaches`**에 넣는다.
+      근거: 15:34:47 스냅샷 CRITICAL 2건 ↔ `clean: true` ↔ 장후 계산 10분.
+- [ ] **F-4 (P1)** `schtasks` 조회 타임아웃 — `ops/integrity_report.py` `task_exit_codes` 생성부.
+      `subprocess.run(timeout=…)`을 `configs/instance.yaml` `ops.schtasks_timeout_seconds: 30` ·
+      `ops.schtasks_retries: 1`로 빼고, `/fo CSV /nh` 형식 고정. 실패 시 `detail`에 경과 초·시도 횟수 기록.
+      근거: 3거래일 연속 `"조회 실패: TimeoutExpired"` — `daily-axes-measured`·`exit-code-matches-log` 재발.
+      **오늘 재실행으로 즉시 채점 가능**: `python scripts/daily_integrity_report.py --date 20260813 --symbol A05608 --configs configs`
+- [ ] **F-5 (P2)** 안 낸 주문을 `OrderSubmit`으로 세지 않는다 — 게이트 정지 경로에서
+      `OrderSubmit` 대신 `OrderBlocked`(INFO, `core/logging.py` 등록), `reason` 유지.
+      착수 전 `grep -rn '"OrderSubmit"' src/messiah/`로 위치 확정(계획 단계에서 파일 단정 안 함).
+      근거: `15:24:00 [INFO] OrderSubmit "gateway halted"` 인데 `self_eval`은 `주문 0건`,
+      `tag_counts`는 `OrderSubmit: 1` — 같은 하루를 1과 0으로 센다 (R6).
+
+### 고도화
+
+- [ ] **G-1 (이번 주)** 복구 효능 계측 — `daily_integrity`에 `recovery_efficacy`
+      `{stalls, resubscribes, first_tick_after_reconnect, median_recovery_seconds, unrecovered}`.
+      `unrecovered > 0`이면 `breaches`. 같은 구조를 CB(`confirmed`/`resumed`)에도.
+      오늘 값 = `1 / 1 / 0 / — / 1`. 선행: F-2.
+- [ ] **G-2 (이번 주)** `scripts/verify_archive_volume.py`가 **캘린더 기대 분**(08:45~15:44, 420분)을
+      분모로 채점 — `expected_minutes` · `common_minutes` · `expected_but_absent_both` 3값 병기.
+      양쪽 다 없으면 `OK`가 아니라 **`판정 불가 — 공식 데이터도 없음`**.
+      근거: 오늘 15분 결손인데 `비율 1.000 · OK · 전 구간 정상`. 되면 W-9가 매일 자동 채점.
+      위험: 최종거래일·조기폐장 예외 → `configs/krx_holidays.yaml` 옆에 세션 시간표.
+- [ ] **G-3 (이번 주)** `status_snapshot.json` 최상위 `verdict`
+      `{ok, worst_level, reasons[], since_kst}` — `since_kst`는 **지속시간이 곧 손실량**이라서.
+      근거: 15:34:47 스냅샷은 CRITICAL 2건을 담고 있었다 — 정보는 있었고 요약이 없었다.
+      F-3과 같은 함수를 건드리므로 함께. L18 주의(`state`와 `level`을 합쳐 말하지 않는다).
+
+### 2026-08-14(금) 장전에 볼 것
+
+- [ ] **W-9 ★ 책임 소재의 확정 판정** 08-13 분봉을 같은 API로 재조회한 분 수.
+      **420분 → 우리 수집 결함 확정 / 395분 → 브로커 시세 공급 문제.**
+      정황: REST(`flow_intraday/K2I`)는 15:34까지 살아 있었다 ↔ 공식 분봉도 395분이었다.
+- [ ] **V-4 (장전 이월)** `thursday_weekly_listed(08-14)=True` 확인 + `OptionChainCalendarViolation` **0건**.
+      재개일인데도 뜨면 판정식이 하루가 아니라 더 넓게 틀렸다.
+
+### 2026-08-14(금) 장후에 볼 것
+
+- [ ] **W-10** (F-1 적용 후) `CollectorReconnectNoTick` **0건**이 기본. 뜨면 그 시각 실제 무틱 대조.
+      **F-1의 라이브 검증 기한 = 08-14 장후.** 판정 안 나면 08-18까지 연장하되 그때는 replay로 강제 채점.
+- [ ] **W-12** (F-4 적용 후) `task_exit_codes.available` **`true`** · `unmeasured` **0건**
+- [ ] **W-13** (F-3 적용 후) 정상일 `status_snapshot.irrecoverable_loss.clean` **`true` 유지**(오탐 0)
+
+### 코드 조사 (로그 무관)
+
+- [ ] **W-11** `px_max_ret_60`이 10m에서만 상수인 이유 — 피처 정의 창 60분과 10m 40표본(창 6봉)의 관계.
+      창 길이 문제면 정의 수정, 아니면 계산 버그. 다른 5개 Horizon은 정상.
+      `no-degenerate-features` 재발의 실체이고, 계명 6(피처 불일치 침묵 금지) 경계 항목.
+
+### 재판정 예정
+
+- [ ] **W-14 (2026-08-17)** 소급 불가 손실 4거래일 창 재판정 — 오늘 `IrrecoverableLossBudgetExceeded`
+      "4거래일에 61분(예산 20분) · 최대 08-10 41분(67%)". 오늘 10분은 F-1이 흡수한다.
+      08-10 41분이 창에서 빠진 뒤 예산 규칙 자체를 재평가.
+
+### 오늘 완료 처리 — 라이브 검증이 성립한 것
+
+- [x] **V-9 / W-3 ★ 국면은 상수가 아니라 분포다** — `regime_distribution` HIGH_VOL 5 · RANGE 8 ·
+      TREND_DOWN 1 · **UNKNOWN 0%**(어제 100%). `9170ce8`(RegimeRuntime 웜스타트) **라이브 검증 성립.**
+      장중 잠정 통과(12.5%)를 장후 종일 데이터로 확정.
+- [x] **V-7 배치도 자기 끝을 말한다** — `postmarket_20260813.log` `SessionEnd` 1건,
+      `steps_planned=5 steps_run=5 steps_failed=0`. `3720e31` **라이브 검증 성립.**
+      (SessionStart 2회는 5/5가 띄운 `daily_integrity_report.py` 자식 프로세스 — 오탐)
+- [x] **V-10** `daily_integrity`에 `regime_distribution` 수록 · 3종 · `미측정` 아님
+- [x] **W-4 수급 재시도 긴급도 하향 확정** — `InvestorFlowPollRetried` 종일 4건 전부 08:36~08:51,
+      `InvestorFlowPollError` 0건, `flow_intraday/K2I` 커버리지 99.8%. 장전 관측 ③은 장전 창의 성질.
+- [x] **W-5** 캘린더 위반 84건 = 예상 85±5 궤도 내. 주기 외 요인 없음
+- [x] **W-1 결함 ① 범위 확정** — `decision_funnel = {"regime": 1, "score": 13}`. **첫 사이클 단건 확정**,
+      더 넓게 틀린 것 아님. 장중 F-3(국면 시드)의 범위가 이로써 확정됐다.
+- [x] **V-6** `InvestorFlowPollError` 0건 유지
+
+### 미결 — 판정 보류
+
+- [ ] **W-2** `|S|=0.000` 13건 문자열까지 동일 — 분산 0. `n_experts=0` 가설 **강화**되었으나 확정 아님.
+      확정은 장중 F-1(값 계측) 적용 후 **W-6**.
+- [ ] **미커밋 179건** — 3거래일째, 종일 변동 0. dev라 계명 10 위반 아니나
+      **paper 승격 차단 조건으로 격상 제안** 유지 — 승격 시점에 계명 10이 바로 걸린다.
+- [ ] **V-3** `OptionChainSeriesMissing` 0건 유지. 다만 `series_findings`가 "미상장 판정인데 168분치 수신"을
+      독립으로 잡았으므로 **장전 F-1(캘린더 판정식) 착수 조건은 이제 충족**된다.
+
+## 2026-08-14 장전 점검 — P0 1종(첫 월물 롤) + Fix 5종 + 고도화 3종 ([MW0601], 2026-08-14)
+
+### 적용 시점 — 장전이므로 적용하지 않았다. 오늘 15:35 이후 착수
+
+코드 변경·커밋·배포·재기동 일절 없음(R11 · 계명 3·4). 각 커밋 전 `pytest`(해당 범위) + replay.
+
+### Fix
+
+- [ ] **F-1 (P0) ★ 롤 경계를 넘는 웜스타트** — `src/messiah/data/archiver.py::ParquetArchiver.load_recent_bars()`
+      에 `predecessor_symbols: Sequence[str] = ()` 추가. 주 심볼에서 `max_bars` 미달 시 부족분을
+      직전 월물에서 시간 역순으로 채운다. 호출측 `scripts/run_l1_daily.py:303` ·
+      `scripts/run_g2_paper_trading.py:242`가 `symbol_master`의 월물 계보로 선행 심볼을 구해 전달
+      (하드코딩 금지 — R4). 로그 `bars_by_source={"A05609":0,"A05608":200}` 추가 —
+      **조용히 잇지 않는다(R10)**. 이어붙인 구간은 **수익률/변동성 계열 화이트리스트에만** 허용,
+      가격 수준 피처는 롤 경계 이전을 NaN으로(통째로 이으면 계명 6 위반). **선행 심볼 1개까지**
+      (200봉=30m 약 9거래일이면 충분하고, 2개면 갭이 2개가 되어 오염이 곱해진다).
+- [ ] **F-2 (P0) ★ 롤을 자가점검이 먼저 외친다** — `scripts/self_check.py`에 `rollover` 항목 신설.
+      `front_month_future_code()`가 `data/bars/` 최신 아카이브 심볼과 다르면
+      `[WARN] rollover A05608→A05609 · 웜스타트 가용 N봉`. **FAIL 아닌 WARN** — 롤은 매달 정상적으로
+      일어나고 FAIL이면 매달 기동이 막힌다. 판정 기준은 "롤 여부"가 아니라 **"이어붙인 뒤 가용 봉 수"**.
+      오늘 자가점검은 3회 전부 PASS를 냈다 — 불변원칙 6이 못 본 결함이다.
+- [ ] **F-3 (P1)** 웜스타트 결손을 산출물이 세게 한다 — `src/messiah/ops/integrity_report.py`에
+      `warm_start_bars_by_horizon` · `warm_start_bars_by_source` · `regime_warm_start_bars` 수록.
+      지금은 오늘의 P0가 장후 리포트에 아무 자국도 안 남는다.
+      **오늘 재실행으로 즉시 채점 가능**: `python scripts/daily_integrity_report.py --date 20260814 --symbol A05609 --configs configs`
+- [ ] **F-4 (P1)** `configs/pending_verifications.yaml`에 `rollover-warmstart` 등록
+      (`metric: warm_start_bars_by_horizon.30m`, `min: 22`, `registered: 2026-08-14`).
+      **선행 F-3** — 그 파일 머리의 규칙("값이 실제로 생산된다는 것을 먼저 예측치로 적는다").
+      사람 기억은 다음 롤(2026-09-14)까지 한 달을 못 간다.
+- [ ] **F-5 (P2, 조건부)** `OptionChainSkipped`에 `reason` 열거형 필드
+      (`underlying_price_missing` 등) + `ops/integrity_report.py`에 `option_chain_skips_by_reason`.
+      **W-15 판정 전 착수 금지** — 롤 원인으로 확정되면 F-1에 흡수되어 불필요해진다.
+
+### 커밋 계획
+
+- [ ] 커밋 ① F-1+F-2 — `[MW0601] 심볼은 계약의 이름이지 시계열의 이름이 아니다 — 롤 경계 웜스타트`
+- [ ] 커밋 ② F-3+F-4 — `[MW0601] 다음 롤은 한 달 뒤다 — 기억 대신 등록부에 맡긴다`
+- [ ] 커밋 ③ F-5 (조건부, W-15 결과 대기)
+- [ ] 커밋 ④ **어제(08-13) 세운 F-1~F-5** — 내용 그대로 유효, 순서만 뒤로. 오늘 P0가 더 급하다.
+
+### 고도화
+
+- [ ] **G-1 (다음 단계 · 기한 2026-09-14)** 연속 계약 아카이브 `data/bars/KOSPI200F_C1/{horizon}/`을
+      장후 배치(`run_recompose.py` 뒤, `verify_archive_volume.py` 앞)에서 생성. 비율 조정(back-adjust),
+      **원본 심볼 아카이브 병존**(가격 수준이 필요한 소비처는 원본을 본다).
+      **선행 조사: 기존 학습 자산 "근월물 8심볼 167거래일"의 롤 경계 8곳이 어떻게 처리됐는가.**
+      이미 이어져 있다면 G-1은 소비처 통일 작업으로 축소된다. 조정 방식이 백테스트 결과를 바꾸므로
+      기존 모델과 직접 비교 불가 — R18 섀도 계측 대상.
+- [ ] **G-2 (이번 주 · 어제 G-3에 병합)** `status_snapshot.json` `verdict.reasons[]`에
+      `warm_start_short` 추가. **별도 `readiness` 키 신설 금지** — 화면이 또 나뉘면 L18의 반대편
+      실수다. 근거: 08:49:57 스냅샷이 컴포넌트 4종 전부 `state:"OK"`를 냈고 자가점검도 PASS인데
+      실제로는 국면 UNKNOWN·NaN 85%였다. 있어야 했던 값 =
+      `{ok:false, reasons:["feature_nan_ratio_exceeded","warm_start_short"], since_kst:"08:20:38"}`.
+- [ ] **G-3 (다음 단계 · F-1 효과 확인 후 재평가)** `src/messiah/strategy/meta/decision.py`에
+      `regime == UNKNOWN and warm_start_short` → NO_TRADE 사유 `regime_axis_unavailable`.
+      **R18에 따라 20거래일 섀도 후 승격** — 즉시 차단하면 오늘 같은 날의 데이터를 못 얻어
+      게이트의 옳고 그름을 영영 모른다. 근거: `decision_funnel={"regime":1,"score":13}` =
+      국면이 UNKNOWN이어도 regime 게이트는 열려 있다.
+
+### 2026-08-14(금) 장중 12:30에 볼 것
+
+- [ ] **W-15 ★ 1-2의 원인 확정** — 09:00 이후 `OptionChainSkipped` 건수.
+      **0건 → 롤 직후 기준가 부재로 확정(F-1에 흡수, F-5 불필요) / 계속 뜨면 기준가 소스
+      자체의 결함으로 별건 P1 승격.**
+
+### 2026-08-14(금) 장후에 볼 것
+
+- [ ] **V-11 ★** `RegimeClassified.regime` 종일 분포 — **UNKNOWN 100% 예상.**
+      이게 안 나오면 웜스타트 이해가 틀린 것이다(예측을 먼저 적는다).
+- [ ] **V-12** `daily_integrity_20260814.json` `nan_ratio_by_horizon` — 전 Horizon median > 0.5
+      예상(전일 0.0). 낮게 나오면 장중 자연 회복 — **회복 곡선을 F-1 설계에 반영한다.**
+- [ ] **W-18** (F-3 적용 후) `daily_integrity`에 `warm_start_bars_by_horizon` 존재 · `미측정` 아님
+- [ ] **W-9 ★ (장전에서 재이월)** 08-13 분봉을 같은 API로 재조회한 분 수.
+      **420분 → 우리 수집 결함 확정 / 395분 → 브로커 시세 공급 문제.**
+      장전 이월 사유: 개장 직전 재조회는 유량을 라이브 수집과 다툰다
+      (`run_backfill.py` docstring). **사유 없이 미루면 영구 미결이 되므로 사유를 남긴다.**
+- [ ] **W-10** (어제 F-1 적용 후) `CollectorReconnectNoTick` 0건 — **어제 F-1이 아직 미적용이므로
+      오늘 판정 연기 가능성 높음.** 연기되면 08-18까지 연장하되 그때는 replay로 강제 채점.
+- [ ] 미커밋 건수 — 179건 → 커밋 ①② 후 감소 확인
+
+### 2026-08-17(월) 장전에 볼 것
+
+- [ ] **W-16 ★ F-1의 라이브 검증** `FeatureWarmStart.bars_by_horizon` 전 Horizon ≥ 22 ·
+      `bars_by_source`에 `A05608` 등장 · `RegimeWarmStartShort` 0건 · `FeatureWarmStartShort` 0건
+- [ ] **W-17** (F-2 적용 후) 자가점검 `rollover` 줄 — 비-롤일 `[OK]`, 롤일 `[WARN]` + 가용 봉 수.
+      **롤일 채점은 2026-09-14.**
+
+### 오늘 완료 처리 — 라이브 검증이 성립한 것
+
+- [x] **V-4 ★ 목위클리 재개 판정이 실측과 일치** — `OptionChainCalendarViolation` **0건**
+      (전일 장전 8건). `weekly_thu` 계열이 08:23:20·08:33:19·08:43:20 폴링에 실제 등장.
+      08-14 재개(8/20 만기물) 예측 성립. → **장전 F-1(캘린더 판정식)을 P1→P2 하향.**
+      판정식이 하루가 아니라 더 넓게 틀린 것이 아니었다.
+- [x] **`3720e31` 장전 자가점검에서 효과 확인** — `[OK] postmarket 20260813 장후 배치 정상 종료 확인`.
+      어제까지 4회 반복되던 오탐("20260812 SessionEnd 미기록")이 오늘은 뜨지 않았다.
+
+### 무효화된 기존 완료 항목 — 커밋이 아니라 검증 범위의 결함
+
+- [ ] **V-9/W-3 재개봉** — 08-13 장후에 *"국면은 상수가 아니라 분포다 — `9170ce8` 라이브 검증
+      성립"* 으로 완료 처리했으나 오늘 롤 경계에서 성립하지 않았다. **`9170ce8` 자체는 옳다**
+      (아카이브가 있으면 200봉을 정확히 읽는다 — 08-12·08-13 실측). 틀린 것은 **"하루 통과했으니
+      검증됐다"는 판정**이다. 롤이라는 축이 등록부에 없었고, 관측 이력 전체(07-30~08-13)가 단일
+      심볼 구간이라 그 축이 관측될 기회가 없었다. `FixVerificationRecurred`는 뜨지 않았다 —
+      **그래서 F-4가 필요하다.** 재판정 기한: **2026-09-14(다음 롤) 장전.**
+
+### 미결 — 판정 보류
+
+- [ ] **1-2 장전 옵션체인 스킵 10건의 원인** — 롤인가 장전 창의 성질인가. W-15가 가른다.
+      첫 틱 시각(08:44:58)은 전일과 초 단위 동일하므로 **첫 틱은 정상이고 그 이전 기준가 부재만이
+      오늘의 차이**라는 데까지는 확정됐다.
+- [ ] **미커밋 179건** — 4거래일째, 변동 0. dev라 계명 10 위반 아니나 paper 승격 차단 조건으로
+      격상 제안 유지. 오늘 F-1~F-4가 얹히면 5거래일차.
+
+## 2026-08-14 장중 점검 — P0 2종 + Fix 8종 + 고도화 4종 ([MW0601], 2026-08-14 10:51)
+
+보고서 `logs/dailycheck/2026-08-14_intra_report.md` · 증거 `logs/dailycheck/evidence_2026-08-14_intra.md`
+
+### 적용 시점 — 장중이므로 적용하지 않았다. 오늘 15:35 이후 착수
+
+- [ ] **커밋 ① F-1+F-2** — `[MW0601] 심볼은 계약의 이름이지 시계열의 이름이 아니다 — 롤 경계 웜스타트`
+      **★ 월요일(08-17) 개장 전 필착.** 안 들어가면 월요일도 종일 UNKNOWN이 확정이다(P0-2).
+- [ ] **커밋 ② F-3+F-4** — `[MW0601] 화면이 어제 계약을 오늘이라 불렀다 — 근월물 동적 해석 + 배지 임계 유도`
+- [ ] **커밋 ③ F-5+F-6** — `[MW0601] 0은 없었다는 뜻도 안 셌다는 뜻도 된다 — 기여 0·폴링 성공 계측`
+- [ ] **커밋 ④ F-7** — `[MW0601] 이월된 숫자는 측정이 아니다 — 미커밋 두 축 분리`
+- [ ] **커밋 ⑤** 08-13 세운 F-1~F-5(재연결 첫 틱 시한 등) — 내용 그대로 유효, 순서만 뒤로
+
+### Fix
+
+- [ ] **F-1 (P0) ★ 롤 경계를 넘는 웜스타트 — 소비처 2곳이 아니라 3곳이다**
+      `src/messiah/data/archiver.py::ParquetArchiver.load_recent_bars()`에 `predecessors` 인자.
+      `src/messiah/data/symbol_master.py::preceding_front_months()` 신설(하드코딩 금지 R4).
+      호출부 3곳: `run_l1_daily._load_warmup_artifacts()` ·
+      **`run_l1_daily._seed_preopen_reference_price()` ← 장중에 추가된 세 번째 소비처** ·
+      `run_g2_paper_trading._warm_start_regime()`. 3곳 전부 `ops/canonical_consumers.py` 등록.
+      **조용히 잇지 않는다(R10)** — `bars_by_source={"A05609":4,"A05608":196}` 로그 필수.
+      비율 조정은 이 단계에서 하지 않는다(G-1이 다룬다).
+- [ ] **F-2 (P0) ★ 롤을 자가점검이 먼저 외친다** — `scripts/self_check.py`에 `rollover` 항목.
+      마스터파일 근월물 vs 직전 거래일 아카이브 심볼 대조, 다르면 `[WARN]` + 가용 봉 수.
+- [ ] **F-3 (P1) ★ UI 심볼 하드코딩 제거** — `src/messiah/ui/app.py:109 DEFAULT_SYMBOL = "A05608"`
+      **삭제**(R4 위반). `symbol_master.front_month_future_code()`로 동적 해석 —
+      **정본 `run_g2_paper_trading.py:195 _resolve_front_month_symbol()`과 같은 경로를 쓴다**
+      (두 벌 만들면 "정본 아닌 소비자"가 여섯 번째로 생긴다).
+      해석 실패 시 화면을 죽이지 않고 배지 + 수동 입력 유지.
+      `app.py:1013` 경보 문구를 `🛑 {symbol}의 오늘 봉이 없다 — ①수집기 ②심볼이 근월물과
+      일치하는지 순으로 확인할 것`으로 — **원인 후보를 하나로 단정하지 않는다.**
+      `app.py:110 DEFAULT_TICK_SIZE` 주석의 A05608 참조도 정리.
+- [ ] **F-4 (P1)** `src/messiah/ui/app.py:125-139 _STALE_AFTER` — `FuturesView`/`RegimeState`
+      임계를 구동 주기에서 유도(`주기×1.5`), `주기×2` 초과 시 "죽음" 승격(`app.py:272` 재사용),
+      배지 캡션에 `LIVE (30m 주기 · 마지막 09:30)` 근거 병기.
+      현재 10초 상수 vs 실제 발행 주기 1800초 → **거래일의 99.4%가 오탐.**
+- [ ] **F-5 (P1) ★ W-2를 확정 가능하게 만든다** —
+      `src/messiah/strategy/futures/aggregator.py:185` `total_weight<=0` 분기에
+      `AggregatorNoContribution` **INFO** 로그: `views_received` · `blocked_by_meta[]` ·
+      `blocked_by_uncertainty[]` · `blocked_by_freshness[]`.
+      WARNING 아닌 이유 — 하루 15건 이하이고 국면이 죽은 날엔 정상 동작이기도 하다.
+      `ops/integrity_report.py`에 `no_contribution_reasons` 집계.
+- [ ] **F-6 (P1)** `src/messiah/data/option_chain_poller.py::poll_once()` 말미에
+      `OptionChainPolled` **DEBUG** 사이클 요약(다리마다가 아니라 사이클당 1건, `legs`·`spot`).
+      `OptionChainPollEmpty`가 2026-08-07에 WARNING이라 22번 울고 강등된 전례를 따른다.
+      `scripts/collect_evidence.py` §9에 *"장중 `OptionChainPolled` 0건"* 축 추가.
+- [ ] **F-7 (P2)** `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` §1이
+      두 축을 **이름을 갈라** 출력: `작업트리 미커밋 {porcelain -uall}` /
+      `기준선 대비 src/ 변경 {diff --stat <baseline> -- src/} · 기준선 {sha} {날짜}`.
+      기준선 sha는 설정에서 읽는다(R4). `references/report_template.md` 머리말도 분리.
+      **결정 필요**: 기준선 `4825ffe` 유지 vs "마지막 paper 승격 심사 통과 커밋"으로 재정의.
+      **권고 후자** — 그래야 숫자가 승격 판단에 의미를 갖는다. 사용자 확인 대기.
+- [ ] **F-8 (P2)** 코드 변경 없음 — 장전 G-3 폐기 기록 + 경로 정정
+      (`strategy/meta/decision.py` → `strategy/decision/meta_decision.py`).
+
+### 폐기 — 착수하지 않는다 (판단 근거를 남긴다)
+
+- [x] ~~**장전 F-5** `OptionChainSkipped`에 `reason` 열거형~~ — **W-15 판정 완료로 폐기.**
+      롤 원인 확정(08-11·08-12 장전 스킵 0건 vs 오늘 10건 전량 장전). F-1이 흡수한다.
+      장전의 조건부 판단("W-15가 가른다")이 옳았다.
+- [x] ~~**장전 G-3** `regime_axis_unavailable` NO_TRADE 게이트 신설~~ — **불필요, 폐기.**
+      `meta_decision.py:56 _EVENT_LIKE_REGIMES = {EVENT, UNKNOWN}` + `:92-97` 게이트 ②가
+      **이미 무조건 NO_TRADE**. 오늘 `DecisionEmitted` 4/4가 `gate="regime"`으로 실증.
+      장전이 근거로 삼은 어제 퍼널 `{"regime":1,"score":13}`을 **거꾸로 읽었다** — 그것은
+      "게이트가 열려 있다"가 아니라 "어제는 국면이 UNKNOWN이 아니어서 13건이 ②를 통과해
+      ④에서 접혔다"는 뜻. 착수했다면 이미 있는 동작을 다시 구현하고 **R18 섀도 20거래일을
+      태웠다.** `e37d387`("조사가 제안의 절반을 지웠다")과 같은 교훈의 반복.
+
+### 고도화
+
+- [ ] **G-1 (다음 단계 · 기한 2026-09-14 다음 롤) 롤 D-1 사전 백필** —
+      오늘 `nan_ratio` 회복 곡선 실측: 1m 84.7→**2.2%**(129발행) · 3m →31.4% · 5m →32.8% ·
+      10m →59.9% · 15m →61.3% · **30m 84.7→84.7%(4발행, 회복 0.0%p)**.
+      회복은 시간이 아니라 **누적 봉 수**의 함수이고 판단 구동 Horizon이 하필 30m이라
+      회복이 정확히 0. **F-1이 읽는 쪽을 고쳐도 롤 당일 첫 사이클까지는 빈다.**
+      → 장후 배치에 `run_backfill.py` 조건부 결선(`EventCalendar`가 다음 거래일을 롤로 판정 시).
+      소급 한계 2025-12-12이므로 신규 월물 상장 이후 구간만 — F-1이 잇는 원월물 구간과 합산.
+      **선행 F-1**(`bars_by_source`가 백필분과 이월분을 구분해야 한다).
+- [ ] **G-2 (이번 주 · 조사만) 롤 경계 8곳 선행 조사** — `data/bars/A0560{1..9}/` 경계 8곳의
+      종가-시가 점프와 봉 연속성 실측. NEXT_TODO가 학습 자산을 *"근월물 8심볼 167거래일"* 로
+      적는데 그것은 **8번 끊긴 데이터**일 수 있고 아무도 확인한 적이 없다.
+      이어져 있으면 연속계약 구축(`data/bars/KOSPI200F_C1/`)은 소비처 통일로 축소된다.
+- [ ] **G-3 (이번 주) `status_snapshot.json` `verdict.reasons[]`** —
+      오늘 10:51:27 스냅샷은 컴포넌트 4종 중 3종을 OK로, 자가점검은 PASS를 냈다.
+      **세 화면이 각자 정상을 말하는 동안 시스템은 종일 판단 불능이었다.**
+      있어야 했던 값: `verdict.ok=false · reasons:["warm_start_short",
+      "feature_nan_ratio_exceeded","regime_unknown"] · since_kst:"08:20:38"`.
+      **별도 `readiness` 키를 신설하지 않는다**(화면이 또 나뉘면 L18의 반대편 실수).
+      F-5가 있으면 `reasons`에 한 축 추가. 없어도 착수 가능.
+- [ ] **G-4 (다음 단계 · 선행 F-4) 신선도 임계를 전 배지로 일반화** —
+      `CircuitBreakerStatus`만 이 함정을 알고 40초로 잡아 뒀고 `FuturesView`는 10초 상수로
+      남았다. **한 곳에서만 피한 것은 설계가 아니라 우연이다.**
+      발행자가 `expected_interval_seconds`를 선언하고 UI가 `임계=주기×1.5`,`죽음=주기×3` 계산.
+      `tests/test_false_positive_axes.py`에 "상수 임계가 새로 추가되면 실패하는" 테스트.
+      메시지 스키마 변경(현 `version=1 types=21`) 수반.
+
+### 2026-08-14(금) 장후에 볼 것
+
+- [ ] **V-11 ★** `RegimeClassified.regime` 종일 분포 — **UNKNOWN 100% 예상**(10:30까지 4/4 성립).
+      아니면 웜스타트 이해가 틀린 것이다(예측을 먼저 적는다).
+- [ ] **V-12** `daily_integrity_20260814.json` `nan_ratio_by_horizon` —
+      **30m median ≈ 0.847(회복 0) · 1m median < 0.10** 예상. 오늘 §3 G-1 회복 곡선 표와 대조.
+- [ ] **V-13** `decision_funnel` — `{"regime": 13~15}` 단독 예상. `score` 이하가 0이면
+      ③④⑤(Risk·Sizer·OrderGateway) 전 계층이 오늘도 미검증이라는 뜻.
+- [ ] **W-18** (F-3 적용 후) `daily_integrity`에 `warm_start_bars_by_horizon` 존재 · `미측정` 아님
+- [ ] **W-9 ★ (장전→장중 재이월, 장후 필착)** 08-13 분봉을 같은 KIS API로 재조회한 분 수.
+      **420분 → 우리 수집 결함 확정 / 395분 → 브로커 시세 공급 문제.**
+      개장 중 재조회는 유량을 라이브 수집과 다툰다(`run_backfill.py` docstring).
+      **사유 없이 미루면 영구 미결이 되므로 두 번째로 사유를 남긴다.**
+- [ ] 미커밋 실측 재확인 — 작업트리 10 files / 기준선 대비 src/ 9 files (커밋 ①~④ 후 변화)
+
+### 2026-08-17(월) 장전에 볼 것
+
+- [ ] **W-16 ★★ F-1의 라이브 검증(축 4개)** — `FeatureWarmStart.bars_by_horizon` 전 Horizon ≥ 22 ·
+      `bars_by_source`에 `A05608` 등장 · `RegimeWarmStartShort` 0건 ·
+      **`OptionChainSkipped` 0건**(장중에 추가된 네 번째 축).
+      **★ F-1 미적용이면 실패가 산술적으로 확정이다**(30m 14봉 < 22). 그 경우 **F-1의 실패가
+      아니라 미적용의 결과**로 채점한다 — 둘을 섞으면 08-13에 V-9를 "하루 통과했으니
+      검증됐다"로 잘못 닫은 것과 같은 실수를 반대 방향으로 하게 된다.
+- [ ] **W-17** (F-2 적용 후) 자가점검 `rollover` 줄 — 비-롤일 `[OK]`. **롤일 채점은 2026-09-14.**
+- [ ] **W-19** (F-3 적용 후) UI 상단 심볼 `A05609` · 붉은 경보 없음 · 차트가 당일 봉
+- [ ] **W-23** (F-7 적용 후) 점검 보고서 머리말에 "작업트리 미커밋"·"기준선 대비 src/ 변경"
+      두 축이 **실측값으로** 분리 표기
+
+### 2026-08-17(월) 장중에 볼 것
+
+- [ ] **W-20** (F-4 적용 후) `intel.futures` 배지 — 30분 주기에서 LIVE 유지, 65분 침묵 시 "죽음"
+- [ ] **W-21 ★ W-2 확정** (F-5 적용 후) `AggregatorNoContribution` 1건 이상 관측 →
+      네 갈래(views 비었음/meta_h=0/u_h=1/f_h=0) 중 무엇인지 **즉시 확정**.
+      **주의**: `REGIME_WEIGHTS[UNKNOWN]`은 비어 있지 않다(전 Horizon 0.5) —
+      "UNKNOWN이라 가중치 0"이라는 손쉬운 설명은 이미 반증됐다.
+- [ ] **W-22** (F-6 적용 후) `OptionChainPolled` — 09:00 이후 3계열(regular/weekly_mon/
+      weekly_thu) 전부 등장
+
+### 2026-08-18(화)
+
+- [ ] **W-10** `CollectorReconnectNoTick` 0건 — **오늘 재연결 0회라 판정 불성립**
+      (`CollectorFirstTick` 1건뿐). 08-18까지 연장하되 그때는 **replay로 강제 채점.**
+- [ ] **V-14** (F-1 미적용 시) 30m 웜스타트 28봉 ≥ 22 — 롤 비용이 정확히 2거래일이었는지 확인
+
+### 오늘 완료 처리 — 라이브 검증이 성립한 것
+
+- [x] **★ W-15 원인 확정** — 09:00 이후 `OptionChainSkipped` **0건** + 3계열 아카이브 정상 기록
+      (`data/option_chain/{regular,weekly_thu,weekly_mon}/2026-08-14.parquet`, 10:52~10:55).
+      대조: 08-11·08-12 장전 스킵 **0건** vs 오늘 **10건 전량 장전(08:21~08:43)**,
+      첫 틱 08:44:58 직후 정지. → **롤 원인 확정. 장전 F-5 폐기, F-1에 흡수.**
+- [x] **★ `dbe37df` 5xx 백오프 라이브 검증** — 09:33:02 `InvestorFlowPollRetried`
+      *"1회 재시도로 복구: 500 Internal Server Error"* `attempts=2`. 실전 작동 확인.
+- [x] **V-4 유지** — `weekly_thu` 오늘도 정상 수집(10:54 기록), `OptionChainCalendarViolation` 0건.
+
+### 정정 — 이월된 숫자를 실측으로 교체
+
+- [x] ~~**미커밋 179건** (4거래일째, paper 승격 차단 조건 격상 제안)~~ — **실측과 다르다. 철회.**
+      `git diff --stat 4825ffe -- src/` = **9 files**(NEXT_TODO가 스스로 명시한 측정식의 답).
+      `git diff --stat HEAD -- src/` = **변경 없음**(미커밋 src/ 0건).
+      `git status --porcelain -uall` = **10 files**(tracked 수정 3건 전부 `.md`).
+      `git rev-list --count 4825ffe..HEAD` = 10 — **4825ffe 이후 src/ 변경은 전부 커밋에 담겼다.**
+      **존재하지 않는 부채를 근거로 4거래일간 승격 차단을 제안하고 있었다.**
+      → F-7이 수집기에서 두 축을 갈라 매번 실측하게 한다.
+
+### 미결 — 판정 보류
+
+- [ ] **`n_experts=0`의 실제 갈래** — 네 갈래 중 무엇인지. F-5 적용 후 1회 관측이면 확정(W-21).
+      30m `nan_ratio`가 종일 84.7%(회복 0)라 `u_h=1`(불확실성)이 유력하나 **확정 아님.**
+- [ ] **08-13 15:23~15:33 `OptionChainSkipped` 5건** — 마감 후 꼬리. 폴러 정지 시각과 선물 틱
+      종료 시각의 불일치로 추정. 실해 없음. **P2 기록만, 오늘 fix 대상 아님.**
+
+## 2026-08-14 정기 장중(12:30) 점검 — P0 0 + Fix 5종 + 고도화 2종 ([MW0601], 2026-08-14 12:36)
+
+관측 구간 09:00~12:36. 10:51 조기 점검의 **델타**다 — F-1~F-8 · G-1~G-4는 그대로 유효하며
+여기서 다시 세지 않는다. 보고서 `logs/dailycheck/2026-08-14_intra_1230_report.md`.
+**P0 없음 — 권고 조치는 관망.**
+
+### 적용 시점 — 장중이므로 적용하지 않았다. 오늘 15:35 이후 착수
+
+### Fix
+
+- [ ] **F-9 (P1) ★ NaN 임계 초과 경보를 `warmed_up` 가드에서 분리** —
+      `src/messiah/features/engine.py:536-538`. `warmed_up = len(history) >= _MAX_HISTORY(200)`이
+      **억제**로 쓰여 롤 당일(웜스타트 0봉) 경보가 통째로 꺼졌다. 임계 초과를 **먼저** 판정하고
+      `warmed_up`이면 기존 WARNING(문구 불변), 아니면 신규 `FeatureNanWarmupExceeded`(INFO,
+      Horizon당 1회 + 30분 재고지, `bars`/`required` 동반). 억제 상태는
+      `self._warmup_exceeded_last: dict[Horizon, datetime]`.
+      **기존 WARNING에 합치지 않는다** — 2026-07-24가 없앤 잡음이 그대로 돌아온다(30m 매일 14건).
+      **커밋 ① · 월요일 개장 전 필착**(F-1·F-2와 함께 replay).
+- [ ] **F-10 (P2)** `src/messiah/ops/status_board.py` — ① `write()` 200-206행 `os.replace`를
+      3회 재시도(0.1s·0.3s)로 감싼다(`tmp.unlink` 유지) ② `_write_forever()` 241-246행에
+      `consecutive_failures` 카운터, 연속 4회(=1분) 이상이면 `StatusSnapshotStalled`(WARNING) 1회
+      ③ **253행 상태판 영구 중단 경로를 `StatusBoardHalted`(ERROR)로 개명**.
+      개명 전 `grep -rn StatusSnapshotWriteFailed` 로 `core/logging.py:225` ·
+      `ops/fix_verification.py` · `scripts/agenda.py` 소비처 전수 수정. **커밋 ⑤.**
+- [ ] **F-11 (P2) 완료** — `DECISION_LOG` G-1 근거 문구 정정(회복 0.0%p → 회복 개시 5봉,
+      12:30 실측 61.3%). 인라인 정정 블록 삽입 완료. **커밋만 장후.**
+- [ ] **F-12 (P2)** `.claude/skills/messiah-daily-check/references/report_template.md` +
+      `SKILL.md` §4 — *"같은 날 같은 국면 재점검이면 `<날짜>_<국면>_<HHMM>_report.md`.
+      기존 파일을 덮어쓰지 않는다"*. 오늘 규칙대로였으면 10:51 보고서 39.9KB가 소실될 뻔했다.
+      **커밋 ⑤.**
+- [ ] **F-13 (P2)** `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` —
+      §9 자동 적신호 11개 중 **8개가 g2의 정상 30분 공백**이라 진짜 신호(F-9·F-10)를 밀어냈다.
+      프로세스별 기대 주기를 로그에서 유도(`RegimeClassified` 인접 간격 최빈값 = 오늘 1800초)해
+      공백 임계를 **`max(10분, 최빈간격×1.5)`** 로. `9a4d4ea`(LaunchWindowRefused 오탐 제거)와 같은 종류.
+      **F-7과 같은 커밋 ④**(같은 파일).
+
+### 고도화
+
+- [ ] **G-5 (이번 주 · G-1보다 선행 · 선행 F-9) Horizon별 "회복 개시 봉 수" 계측** —
+      오늘 실측 회복 개시: 30m 5번째 · 15m 3번째 · 10m 3번째 · 5m 2번째 · 3m·1m 첫 발행 직후.
+      `engine.py`에 `min_bars_for_signal`(전 피처 요구 윈도의 최댓값) 프로퍼티 →
+      `FeatureWarmStart`에 `required_by_horizon` 동반 기록 → 웜스타트 0봉이면
+      *"N번째 발행(=HH:MM)부터 회복 시작, 임계 도달 M거래일 후"* 를 기동 시 1줄 산출.
+      **G-1의 백필 일수를 이 값이 정한다.** 사양 없이 G-1을 짜면 임의의 날짜를 고르게 된다.
+- [ ] **G-6 (다음 단계 · 선행 G-3) 관측 표면 간 불일치 자체를 신호로** —
+      G-3 `verdict.reasons[]` 각 항목에 `sources[]`/`missing_from[]`. `missing_from`이 비어
+      있지 않으면 그 자체가 관측 결함. `tests/test_false_positive_axes.py`에
+      "어떤 reason이 한 표면에만 나타나면 실패하는" 테스트.
+      **별도 `readiness` 키는 신설하지 않는다**(L18의 반대편 실수 — 10:51 G-3 판단 승계).
+
+### 2026-08-14(금) 장후에 볼 것 (12:30 점검 추가분)
+
+- [ ] **V-18** 15:35 `FeatureHealthSummary`/`FeatureHealthDegenerate` — Horizon 6종 전부 등장
+      (= "검사된 0") · 30m `always_nan` 개수. **오늘은 per-bar 임계 경보가 종일 0건이었으므로
+      이것이 유일한 로그 기록이다.**
+- [ ] **V-19** 종가 `data/bars/A05609/30m/2026-08-14/` 행 수 — **13~15행** 기대.
+      14 미만이면 "월요일 웜스타트 14 < 22" 예측을 재계산.
+- [ ] **V-11 확정** `RegimeClassified.regime` 종일 분포 — UNKNOWN 100%(12:30까지 8/8).
+- [ ] **V-13 확정** `decision_funnel` — `gate=regime` 단독(12:30까지 8/8, 타 gate 0건).
+- [ ] `delivery_latency` p99 — `run_l1_daily.py:924`가 장 마감 1회 호출. 장중 부재는 정상.
+
+### 2026-08-17(월) 장중에 볼 것 (12:30 점검 추가분)
+
+- [ ] **V-15 ★** (F-9 적용 후) `FeatureNanWarmupExceeded` — 임계 초과 Horizon마다 1회 이상 등장 ·
+      `bars`/`required` 동반 · **1m에는 미등장**(1m NaN 0.7%).
+- [ ] **V-16** (F-10 적용 후) `StatusSnapshotWriteFailed` **0건**. 발생 시
+      `StatusBoardHalted`(ERROR)와 태그가 갈리는지.
+
+### 2026-08-17(월) 장전에 볼 것 (12:30 점검 추가분)
+
+- [ ] **V-17** (F-13 적용 후) 다이제스트 §9 — g2 30분 공백이 적신호에서 제외 · l1 공백 판정 불변.
+
+### 오늘 12:30 시점 통과 — 재보고하지 않는다
+
+- [x] ERROR/CRITICAL 0건 · 4컴포넌트 `state=OK` · `code_version.stale=false` ·
+      장중 재기동/배포/학습 흔적 0(계명 3·4) · `FixVerification*` 0건.
+- [x] **데이터 연속성 무결** — 1분봉 234행 **결손 0 · 거래량 0봉 0**(08:45~12:38) ·
+      합성봉 169개 항등식 일치(유실 0) · `AggregatorLateTickDropped` **0건(측정된 0)** ·
+      `irrecoverable_loss.clean=true`.
+- [x] **`dbe37df` 5xx 백오프 표본 8건** — 전부 `attempts=2` 복구, 미복구 0.
+      빈도 정상 범위(08-11 7 · 08-12 7 · 08-13 14 · 오늘 8). **오탐으로 올리지 않는다.**
+- [x] **W-15 유지** — `OptionChainSkipped` 09:00 이후 0건 · `OptionChainCalendarViolation` 0건.
+
+### 미결 — 판정 보류 (12:30 점검)
+
+- [ ] **`WinError 5`의 상대 프로세스** — UI/백신/점검도구 중 무엇인지 사후 특정 불가.
+      **F-10은 원인 특정 없이도 유효**하므로 선행조건으로 걸지 않는다.
+- [ ] **`n_experts=0`의 갈래** — 30m `nan_ratio`가 61.3%로 **회복 중**임이 드러났으나 여전히
+      임계의 3배라 ③ `u_h=1` 가설은 강해지지도 약해지지도 않았다. F-5 적용 후 1회 관측이면 확정(W-21).
+
+### F-7 보강 (12:30 점검에서 원인 특정) — 별도 항목 아님, F-7에 흡수
+
+- [ ] **"179건"의 출처는 CRLF 개행 잡음이다** —
+      `git diff --stat HEAD -- src/ scripts/` → **83 files, 30095 insertions / 30095 deletions**
+      (삽입=삭제, 정확히 동일 = 줄 끝만 바뀐 서명).
+      `git diff --stat --ignore-all-space HEAD -- src/ scripts/` → **비어 있음**(실제 변경 0).
+      `git config --get core.autocrlf` **미설정** · `file src/messiah/ui/app.py` → **CRLF**.
+      → 개행 정규화 설정이 다른 환경에서 diff를 돌리면 전 파일이 "변경됨"으로 잡힌다.
+      **4거래일간 존재하지 않는 부채가 승격 차단 근거로 살아 있었던 진짜 이유.**
+      **F-7 사양 확정**: `--ignore-all-space` 로 산출하되, 무시 전/후가 다르면
+      *"개행 잡음 N files — 실제 변경 M files"* **두 값을 나란히** 적는다(한쪽만 적으면 반대 오해).
+      `core.autocrlf` 표준값을 리포 `.gitattributes`로 못박는 것도 함께 검토. **커밋 ④.**
+
+## 2026-08-14 정기 장후(15:45) 점검 — P0 2 + P1 2 + Fix 4종 + 고도화 4종 ([MW0601], 2026-08-14 16:05)
+
+보고서 `logs/dailycheck/2026-08-14_post_report.md`
+
+### 적용 시점 — 장후이므로 적용 가능. 단 이 예약 실행은 보고까지만 했다. 구현은 "구현해" 지시 후
+
+### Fix
+
+- [ ] **F-A (P0) ★★ 장후 배치 심볼 자동 해석 — 커밋 ① 오늘 저녁 필착** —
+      `scripts/run_postmarket.py:127` `default="A05608"` **제거** → `symbol_master.
+      front_month_future_code(day)` 해석. 1분봉 부재 시 `SymbolResolutionMismatch`(ERROR) +
+      **exit 2**로 배치 중단. 헤더(`:286`)에 해석 근거 명기. `core/logging.py` 태그 신설.
+      **착수 시 `grep -rn 'default="A056' scripts/` 전수 확인**(오늘 확인분은 1개뿐).
+      회귀 위험: 과거일 재실행 — 해석 함수에 반드시 `day`를 넘기고 넘긴 날짜와 결과를 나란히 로깅.
+- [ ] **F-A 후속 (오늘 저녁 필착)** — `run_postmarket.py --date 2026-08-14 --symbol A05609` 재실행.
+      원본은 `daily_integrity_20260814_wrong_symbol.json`으로 보존(08-05 `_pre_recompose` 선례).
+- [ ] **F-B (P0) provisional 리포트 + 채점 제외 — 커밋 ②** —
+      `ops/integrity_report.py` `build_report()` 조회 정합 가드 → **이미 스키마에 있는 `provisional`
+      사용**(오늘 False). `ops/fix_verification.py`에 `검증 보류` 상태 추가, `provisional` 날짜는
+      재발 판정 제외. `series_coverage`에 `symbol_scoped: bool` — 집계 시 심볼 종속 계열 분모 제외.
+      회귀 위험: "N거래일 연속" 카운터가 늦어짐(옳은 방향). `configs/pending_verifications.yaml` 기한 동반 점검.
+- [ ] **F-C (P1) 퇴화 판정 보류를 "0건"이라 말하지 않기 — 커밋 ④** —
+      `features/engine.py` `FeatureHealth.judged: bool` 추가(`:131-148`, `:317-338`),
+      `log_feature_health()`(`:340-367`) 3분기. 태그 둘로 분리(R6): `FeatureHealthNotJudged`(INFO,
+      평시) / `FeatureHealthJudgmentDegraded`(WARNING, 악화). `ops/integrity_report.py:642-645`,
+      `:1430-1440` 전파 + `unmeasured`에 추가. `ops/fix_verification.py:273` 분모 제외.
+      **적용은 F-1보다 뒤** — F-1이 들으면 30m 표본이 늘어 분기 빈도가 준다.
+- [ ] **F-D (P1) `task_exit_codes` 측정 실패를 위반과 구분** —
+      `ops/fix_verification.py` 채점 전 `task_exit_codes.available` 확인 → False면 `검증 보류`.
+      `ops/integrity_report.py` `schtasks` 타임아웃 설정화(R4) + 1회 재시도.
+      **`exit-code-matches-log` 재발이 진짜인지 08-11 이후 계속 측정 실패였는지 이걸로 갈린다.**
+
+### 기존 Fix — 오늘 관측이 우선순위를 바꾼 것
+
+- [ ] **F-1 (P0) ★★ 롤 경계 웜스타트 — 마감 "월요일 개장 전" → 오늘 저녁으로 당김. 커밋 ③** —
+      **근거: V-19 확정.** `data/bars/A05609/30m/2026-08-14.parquet` **15행 < 하한 22**.
+      F-1 없이 월요일 08:25 웜스타트하면 또 UNKNOWN — 2거래일째 판단 정지가 산술이 됐다.
+- [ ] **F-2 (P0) 롤 당일 자가점검 경고** — **F-A와 같은 커밋 ①로 묶는다**(둘 다 "오늘이 롤 당일임을
+      시스템이 먼저 말한다").
+- [ ] **F-13 (P2) 수집기 오탐 제거 — 범위 확대** — g2 30분 공백 + **postmarket 이중 `SessionStart`**
+      (15:45:19는 5/5 서브프로세스 자기 마커) + 미커밋 179건.
+- [ ] **F-10 (P2)** `status_board.py:200-206` `os.replace` 재시도 — 발생 **2건**으로 증가
+      (12:07:51 · 14:15:51). 12:30에는 1건이었다.
+- [ ] **F-7 (P2)** 미커밋 건수 CRLF 정정 — **5거래일차.** 오늘 저녁 커밋이 얹히면 실제 변경이 처음 생긴다.
+- [ ] **F-9 (P1)** NaN 경보를 `warmed_up` 가드에서 분리 — 커밋 ③에 F-1과 동반. F-C와 인접하나 별건.
+
+### 고도화
+
+- [ ] **G-7 (이번 주 · 선행 F-A) "오늘의 정본 심볼"을 단일 소스로** —
+      `core/symbol_resolution.py` `resolve_trading_symbol(day)` 단일 함수 +
+      `logs/trading_symbol_<날짜>.json`. **해석이 아니라 조회가 되면 갈라질 수 없다.**
+      오늘 해석 경로 최소 3갈래 확인. F-A는 응급, G-7이 구조.
+- [ ] **G-8 (다음 단계 · 선행 G-6) 축 모순을 감지에서 원인 특정까지** —
+      중재 규칙 3단(`sources[]` / 경로 차이를 원인 후보로 승격 / 소수파 경로 존재 여부 되묻기).
+      `tests/test_false_positive_axes.py`. **오늘 `breaches`가 모순을 말하고 멈춘 것이 근거.**
+- [ ] **G-9 (다음 단계 · 선행 F-C) 다일 누적 퇴화 판정** —
+      `logs/feature_health_rolling.json`, 직전 3거래일 합산 ≥ 30. 30m는 하루 **15봉이 물리적 상한**
+      (오늘 실측)이라 임계 조정으로는 영원히 해결 불가. `fix_verification`의 "N거래일 연속" 패턴 이식.
+- [ ] **G-10 (9월 롤 전 필착 · 선행 F-A·F-1) 롤 당일을 1급 개념으로** —
+      `ev_rollover_win`을 피처에서 운영 축으로 승격. 롤 캘린더 정본화 + 자가점검 `rollover` 줄(F-2 통합)
+      + **롤 당일 강제 CI 게이트 `tests/test_rollover_day.py`**(심볼 인자를 받는 모든 진입점 전수 검사).
+      **오늘 하루에 롤 결함이 독립된 두 곳에서 터졌다 — 세 번째 지점을 사람이 찾지 말게 한다.**
+
+### 2026-08-17(월) 장전에 볼 것 (장후 점검 추가분)
+
+- [ ] **W-24 ★★** (F-A 적용 후) 월요일 장후 배치 헤더 — `A05609 (근월물 자동 해석)` 등장.
+      단, 월요일은 롤 당일이 아니므로 진짜 채점은 **다음 롤(2026-09-14 근방)**.
+- [ ] **W-25** 자가점검 `postmarket 20260814 장후 배치 정상 종료 확인` — `[OK]` 유지되는가.
+      오늘 재실행(F-A 후속)이 이 판정을 흐리지 않는지.
+- [ ] **W-26 ★** (F-1 적용 후) `RegimeWarmStart.bars_by_horizon` 30m **≥ 22** ·
+      `bars_by_source`에 A05609·A05608 **두 심볼 모두 등장** · `RegimeWarmStartShort` **0건**.
+      **미적용 시 예측: 30m 15봉 → 또 UNKNOWN 100%.** 어느 쪽이든 F-1 효과의 직접 채점이다.
+
+### 2026-08-17(월) 장후에 볼 것 (장후 점검 추가분)
+
+- [ ] **W-9 재이월 (2회차)** — 08-13 분봉 **420분 vs 395분**의 책임 소재.
+      오늘도 판정 불가(P0로 장후 배치가 그 축을 못 건드림). 기준 불변: 420=우리 수집 결함 /
+      395=브로커 공급 문제. **F-A 적용 후라 정상 심볼로 돈다.**
+- [ ] **W-27** (F-B 적용 후) `FixVerificationRecurred` — `provisional` 날짜 제외로 건수가 줄었는가.
+      오늘 12건 중 `tick-collection-live`는 **허위였다**(실측 110,397행).
+- [ ] **W-28** (F-C 적용 후) 15:35 — `FeatureHealthNotJudged` 15m·30m 등장 ·
+      `unmeasured`에 2건 추가 · `FeatureHealthSummary` 문구가 `"검사된 0"`으로.
+- [ ] **W-29** (F-D 적용 후) `task_exit_codes.available` — `True`가 되는가.
+      계속 `False`면 `exit-code-matches-log`가 `재발`이 아니라 `검증 보류`로 나오는지.
+- [ ] **W-30** `delivery_latency` p99 — **오늘 기준선 1.026초**(20,000표본). 전일 대비 델타를 본다.
+- [ ] **W-31** 12:51 버킷 유실 2건 — 오늘 저녁 재합성으로 치유됐다면 `late_bar_drops`가
+      08-17 리포트에서 0으로 돌아오는가(`composer-bucket-completeness` 검증 재개).
+
+### 오늘 장후 시점 통과 — 재보고하지 않는다
+
+- [x] **종료 시퀀스 무결** — `l1_daily` 15:36:29 · `g2_daily` 15:35:00 · `postmarket` 15:46:29
+      전부 `SessionEnd` "정상 종료". `shutdown_watchdog` 15:40. 재기동 0 · 비정상 종료 0 · 크래시 0.
+- [x] **수집 무결** — 1분봉 **410행 결손 0분** · 거래량 항등식 **1.000**(118,599/118,599) ·
+      head/middle/tail missing 0 · `flow_intraday/K2I` 99.8% · 틱 **110,397행**.
+- [x] **`delivery_latency` 산출** — p50 0.507 / p90 0.925 / p99 1.026 / max 1.212 · 20,000표본.
+      12:30 「장중 부재는 정상」의 결론.
+- [x] **계명 3·4 준수** — 장중 학습·배포·재기동 0. 당일 커밋 0. `session_git_shas` 단일 `e37d387`.
+- [x] **`FixVerificationPassed` 9건** · **5xx 백오프 8건 전부 `attempts=2` 복구, 미복구 0**.
+- [x] **V-11/V-13 확정** — `regime_distribution {UNKNOWN:14}` · `decision_funnel {regime:14}`.
+- [x] **장전 「1-2의 원인」 → 롤 확정** — `OptionChainSkipped` 09:00 이후 0건. F-1에 흡수.
+- [x] **오탐 격리** — postmarket `SessionStart` 2회(서브프로세스 마커) · g2 30분 공백 14건(설계대로) ·
+      미커밋 179건(CRLF).
+
+### 미결 — 판정 보류 (장후 점검)
+
+- [ ] **`exit-code-matches-log`가 진짜 재발인가 측정 실패인가** — `task_exit_codes.available=False`
+      (`TimeoutExpired`). 08-11 이후 계속 판정 불가였을 가능성. **F-D가 이걸 가른다.**
+- [ ] **`WinError 5`의 상대 프로세스** — 미특정 유지(12:30 판단 승계). F-10은 원인 특정 없이도 유효.
+- [ ] **`n_experts=0`의 갈래** — 미확정 유지. 30m `nan_ratio` 종가 0.60으로 임계 3배.
+      F-5 적용 후 1회 관측이면 확정(W-21).
+- [ ] **`archiver-restart-restore` / `truncation-is-visible`의 진짜 심각도** — 오늘 위반은 성립하나
+      근거 수치가 오염됐다(410분→실제 33분 / 0.0%→실제 94.5%). **F-B 적용 후 재채점해야 실체가 보인다.**
+
+## 2026-08-14 장후 구현 완료 — 커밋 6개 ([MW0601], 2026-08-14 저녁)
+
+```
+1b92f1f  F-A + F-2      2386bcb  F-B + F-D      dff7f49  F-1 + F-9  ← 월요일 필착분
+80fea47  F-C            ccb2d13  F-13+F-7+F-10  0b80580  F-3 + F-4
+```
+전체 회귀 1,973건 통과 · 신규 테스트 57건.
+
+### 완료 처리 — 구현되어 커밋됨
+
+- [x] **F-A** 장후 배치 심볼 자동 해석 + 오조회 가드(`SymbolResolutionMismatch`, exit 3)
+- [x] **F-2** 자가점검 `rollover` 항목 — 실측 `A05608 → A05609. 신규 30m 0일 · 직전 25일`
+- [x] **F-B** `symbol_mismatch_suspected` + `symbol_candidates` 신설. **`provisional` 재사용
+      안 함**(그쪽은 "예비본"이라는 다른 뜻 — 재사용하면 다음 날 허위 breach)
+- [x] **F-D** `Get-WinEvent` 1회 재시도 + 시한 인자화. **계획의 절반(`available` 확인)은
+      이미 구현돼 있어 착수 안 함**(`fix_verification.py:643-645`)
+- [x] **F-1** 롤 경계 웜스타트 — `load_recent_bars_by_source()` + `warmstart_symbol_chain()`,
+      소비처 3곳 + `canonical_consumers` 등록. 실측 30m **15봉 → 200봉**
+- [x] **F-9** `FeatureNanWarmupExceeded`(INFO, Horizon당 1회 + 30분 재고지)
+- [x] **F-C** `FeatureHealth.judged` + `FeatureHealthNotJudged`(INFO) + `unmeasured` 전파 +
+      `degenerate_feature_count`가 판정된 Horizon만 계산
+- [x] **F-13** 공백 임계를 최빈간격×1.5로 유도(g2 45분) + `NestedSessionStart`로 배치 자식
+      구분. 실측 §9 적신호 **11 → 9건**
+- [x] **F-7** 미커밋 두 축 분리(`--ignore-all-space`). 실측 "179건" → "실제 변경 2파일"
+- [x] **F-10** `os.replace` 3회 재시도 + 태그 4분할(`WriteFailed`/`Stalled`/`Resumed`/
+      `StatusBoardHalted` ERROR)
+- [x] **F-3** UI `DEFAULT_SYMBOL` 삭제 → 상태판 `trading_symbol` **조회**. 경보 문구가
+      원인 후보를 둘로 연다
+- [x] **F-4** 신선도 임계를 `valid_until - ts_utc`에서 유도(`data_source.derived_stale_after`)
+
+### ★ 신규 P0 — 구현 중 발견, 같은 커밋(2386bcb)에서 처리
+
+- [x] **보존본이 정본을 9거래일간 덮었다** — `load_daily_reports()`가 파일명이 아니라 JSON
+      안의 `date`로 키를 잡아, `daily_integrity_20260805_pre_recompose.json`이 08-05 채점을
+      재합성 **이전** 값으로 되돌려 놓고 있었다(`horizon_findings` 0→5 · `unmeasured` 0→2 ·
+      `breaches` 4→9). 그날 5→0을 만든 복구가 **채점에 한 번도 반영된 적이 없다.**
+      → 파일명 규격 강제 + 파일명/내용 날짜 불일치 폐기. 보존본 2건 `logs/superseded/`로 이동.
+      **오늘 장후 보고서 F-A의 보존 권고를 그대로 따랐다가 나도 한 번 밟았다** — 그 사본이
+      정정본을 덮어 재채점이 하나도 안 바뀌었다.
+
+### 오늘 실측된 정정 효과
+
+- [x] `run_postmarket --date 2026-08-14` 재실행 — `tick_rows` **0 → 110,397** ·
+      거래량 비율 0.0% → **1.000** · `vol_scorecard` 생성 · `unmeasured` 2→1 · `breaches` 13→11
+- [x] 재채점 — **재발 12 → 11 · 통과 9 → 10**, `tick-collection-live` "8거래일 연속 충족"
+- [x] **V-11 확정** `regime_distribution = {"UNKNOWN": 14}` — 예측 성립
+- [x] **V-13 확정** `decision_funnel = {"regime": 14}` — ③④⑤ 전 계층 오늘도 미검증
+
+### 2026-08-17(월) 장전에 볼 것 — 갱신
+
+- [ ] **W-16 ★★ F-1 라이브 검증(축 4개)** — `FeatureWarmStart.bars_by_horizon` 전 Horizon
+      ≥ 22 · `bars_by_source`에 **A05608 등장** · `RegimeWarmStartShort` **0건** ·
+      `OptionChainSkipped` **0건**. **F-1이 들어갔으므로 이제 "미적용의 결과"라는 변명이
+      성립하지 않는다** — 실패하면 그것은 F-1의 실패다.
+- [ ] **W-17** 자가점검 `rollover` 줄 — 비-롤일이므로 `[OK] 비-롤일 — 근월물 A05609 유지`.
+      **롤일 채점은 2026-09-14.**
+- [ ] **W-19** UI 상단 심볼 `A05609` · 사이드바 "기본값 출처: 상태판(수집 프로세스가 기록)" ·
+      붉은 경보 없음 · 차트가 당일 봉
+- [ ] **W-23** 다이제스트 §1에 "작업트리 미커밋 N건" / "`src/`+`scripts/` 실제 변경 M파일"
+      두 축이 실측값으로 분리 표기
+- [ ] **W-24 (신규)** `code_version.stale=false` 복귀 — 월요일 기동이 오늘 6커밋을 태운다
+- [ ] **W-25 (신규)** 자가점검에 `rollover` 항목이 실제로 뜨는지(장전 3회 기동 전부)
+
+### 2026-08-17(월) 장중에 볼 것 — 갱신
+
+- [ ] **W-20** `intel.futures` 배지 — 30분 주기에서 LIVE 유지, 캡션에 "N초 전 수신 · 주기 30분"
+- [ ] **W-21 ★ W-2 확정** `AggregatorNoContribution`… **미구현**(F-5는 이번 6커밋에 없다).
+      **W-21은 F-5 착수 전까지 판정 불가로 이월한다** — 기한 2026-08-21.
+- [ ] **W-22** `OptionChainPolled`… **미구현**(F-6도 이번에 없다). 같이 이월.
+- [ ] **W-26 (신규)** `FeatureNanWarmupExceeded` — F-1이 들었으면 **안 떠야 한다**(창이 차 있음).
+      뜨면 F-1이 그 Horizon에서 안 들었다는 뜻이라 진단이 곧바로 나온다.
+- [ ] **W-27 (신규)** `NestedSessionStart` — 장후 배치에서 4건, `SessionStart`는 1건.
+      다이제스트 §9에 "중복 기동" 오탐이 안 떠야 한다.
+- [ ] **W-28 (신규)** `StatusSnapshotWriteFailed` **0건**(재시도로 흡수) ·
+      `StatusSnapshotStalled` 0건
+
+### 2026-08-17(월) 장후에 볼 것
+
+- [ ] **W-29 (신규)** `unmeasured`에 "15m/30m 피처 퇴화 판정(표본 N < 최소 30)" 등장 ·
+      `degenerate_feature_count`가 판정된 Horizon만 셈
+- [ ] **W-9 ★ (3회째 이월)** 08-13 분봉 420 vs 395. 오늘도 못 했다 — 장후 배치가 F-A 적용
+      전이라 그 축을 못 건드렸다. **월요일 장후엔 정상 심볼로 도므로 조건이 갖춰진다.**
+      420분 → 우리 수집 결함 / 395분 → 브로커 공급 문제.
+- [ ] **W-10** `CollectorReconnectNoTick` — 오늘도 재연결 0회로 판정 불성립. 08-18 replay 강제 채점.
+
+### 미착수 — 다음 순번
+
+- [ ] **F-5** `AggregatorNoContribution`(P1) — W-21의 확정 조건. **이번 6커밋에 없다.**
+- [ ] **F-6** `OptionChainPolled`(P1) — W-22의 확정 조건. **이번 6커밋에 없다.**
+- [ ] **F-11** DECISION_LOG G-1 근거 문구 정정(코드 변경 없음)
+- [ ] **F-12** 같은 날 같은 국면 2회 점검 시 보고서 파일명 규칙
+- [ ] **F-8** 장전 G-3 폐기 기록 + 경로 정정 — 본 항목으로 대체됨(폐기 사유는 기록됨)
+
+### 고도화 — 전부 미착수
+
+- [ ] **G-1** 롤 D-1 사전 백필 — **기한 2026-09-14(다음 롤).** F-1이 읽는 쪽을 고쳤으므로
+      우선순위 재평가 필요: F-1만으로 월요일이 해결되면 G-1은 "롤 당일 첫 사이클"만 남는다.
+- [ ] **G-2** 롤 경계 8곳 선행 조사 (이번 주)
+- [ ] **G-7** 심볼 해석 경로 통일 — **UI 구간은 F-3이 처리했다.** 남은 것은 `scripts/`·
+      `src/messiah/ops/`. `grep -rn 'default="A056' scripts/` 결과 아직 6곳
+      (`run_compact` · `run_vol_scorecard` · `run_backtest_harness` · `run_full_path_smoke` ·
+      `run_formal_expert_training_smoke` · `run_regime_ai_smoke`). 스모크 5개는 우선순위 낮음.
+- [ ] **G-9** 다일 누적 퇴화 판정 (선행 F-C — 완료됨)
+- [ ] **G-10** 롤 당일 CI 게이트 — `tests/test_rollover_day.py`가 이미 그 자리로 만들어졌다.
+      남은 것은 "심볼 인자를 받는 전 진입점 전수 검사"로 확장하는 것.
+
+### 재시동 — 하지 않는다 (장후 보고서 §4 유지)
+
+두 프로세스는 15:35~15:36에 정상 종료돼 지금 살아 있지 않다. 월요일 08:20/08:25 정시
+트리거가 새 코드를 태운다. **`code_version.stale`은 오늘 저녁 6커밋으로 true가 됐고**
+월요일 기동이 자동 해소한다(W-24가 검증점).
