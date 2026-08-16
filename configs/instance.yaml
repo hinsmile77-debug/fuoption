@@ -37,7 +37,9 @@ model_bundle: "none"                       # live 모드는 지정 필수 (자�
 redis_url: "redis://localhost:6380/0"
 # FeatureVector.feature_set — 정본은 `src/messiah/features/spec.py`의 FEATURE_SETS.
 #
-# 2026-08-10 B-4: v2026.07(PX+VL, 121개) → v2026.08-ev(PX+VL+EV, 133개).
+# 2026-08-10 B-4: v2026.07(PX+VL, 121개) → v2026.08-ev(PX+VL+EV, **137개**).
+# (2026-08-16 정정: 이 줄이 원래 133개라고 적고 있었다. 실제는 82+39+16=137이다.
+#  개수의 정본은 언제나 `spec.resolve(name).describe()`이고 주석이 아니다.)
 # EV 계산기 12종은 2026-08-04부터 있었고 `v2026.08-ev`도 그때 정의됐는데, 여섯 거래일간
 # 이 줄이 v2026.07이라 **한 번도 계산되지 않았다.** 그 사이 변동성 축 채점은 3개 Horizon
 # 전부에서 `ev_tod_cos 미측정 — 피처셋에 없음`을 찍고 있었다(등록부 `ev-features-measured`).

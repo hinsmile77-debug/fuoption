@@ -4753,3 +4753,43 @@ F-A·F-B·F-C·F-D · F-1·F-2·F-3·F-4·F-5·F-6·F-7·F-9·F-10·F-13 — **�
       고쳤다. 다른 소비처가 같은 함정을 밟을 수 있다. **G-7(정본 하나) 계열.**
 - [ ] **R10은 "구현됨 ≠ 결선됨"** — `consecutive_loss_limit=3`·`record_trade_result()`가
       있으나 **부르는 곳이 없다**(Position Reconciler 부재). 3순위에 흡수.
+
+## 2026-08-16 잔여 작업 분류 — D-day 전/후 ([MW0601])
+
+**결론: D-day(2026-08-18)를 막는 fix는 없다. 동결(`cc93366`) 유지.**
+
+근거 — 오늘 고친 P0 2건의 채점 수단이 이미 있다:
+
+- **P0-1(웜스타트 적재 필터)** → 등록부 `regime-not-constant`
+  (`regime_unknown_ratio ≤ 0.5` · 3거래일 연속 · 기한 2026-08-21)가 **자동 채점한다.**
+  적재가 또 버려지면 30m이 하한 22봉을 못 넘고 UNKNOWN 비율이 1.00으로 올라간다.
+- **P0-2(재생 경로 시간대)** → 일일 관측 축이 아니다(재생 경로 전용). 회귀 테스트
+  `test_meta_minutes_since_open_is_timezone_independent`가 지킨다.
+
+### 오늘 닫은 것 (코드 무관 · 런타임 영향 0)
+
+- [x] **F-12** — 같은 날 같은 국면 재점검 시 `<날짜>_<국면>_<HHMM>_report.md`,
+      기존 파일 덮어쓰기 금지. `SKILL.md` 산출 위치 절 + `report_template.md` 머리말.
+      **2026-08-14 F-12가 이로써 닫혔다**(당시 "커밋 ⑤"로 미뤄진 뒤 이월돼 있었다).
+- [x] **`configs/instance.yaml` 주석 정정** — `v2026.08-ev`를 133개라 적던 것을 137개로.
+      개수의 정본은 `spec.resolve(name).describe()`이지 주석이 아니라는 문장을 함께 박았다.
+
+### D-day 직후 착수 (고도화)
+
+- [ ] **G-A ★ `WarmStartBarsDropped`가 write-only다** — 2026-08-16에 태그를 신설하고
+      `audit_warm_start_drop()`이 발행하게 했으나 **소비처가 없다.**
+      `integrity_report`도 `collect_evidence`도 세지 않아 **울어도 리포트는 모른다.**
+      이 저장소가 반복해서 당한 형태다(G-2의 `matched_minute=None` —
+      *"표시해 왔고 docstring에 위험까지 적어 뒀는데 아무도 그 표시를 읽지 않았다"*).
+      필요한 것: 리포트 축 신설 → `METRIC_EXTRACTORS` 항목 → `pending_verifications` 등록.
+      **D-day 전에 하지 않는 이유**: `integrity_report.py`는 장후 배치가 돌리는 코드이고,
+      2026-08-14에 바로 그 리포트가 오염돼 fix 채점 전체를 오판시킨 전례가 있다.
+      관측 편의를 위해 관측기 자체를 D-day 직전에 건드리지 않는다.
+- [ ] **G-B 두 parquet 로더의 시간대 통일** — `ParquetArchiver`(KST) vs
+      `ParquetBarReplaySource`(UTC). 2026-08-16엔 `_minutes_since_session_open()` 하나만
+      고쳤다. **G-7(정본 하나) 계열.**
+
+### G2 40거래일 중 본 과제 (2026-08-16 레이블 기하 재측정이 정한 순서)
+
+- [ ] **0순위 왕복 비용 실측** → **1순위 레이블 기하 교정** → **2순위 G1 재도전** →
+      **3순위 Position Reconciler**(R10 결선 포함). 상세는 직전 절.
