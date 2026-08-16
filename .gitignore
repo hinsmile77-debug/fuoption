@@ -21,3 +21,6 @@ __pycache__/
 # ide
 .idea/
 .vscode/
+
+# 임시 작업 잔여물 (2026-08-16) — 리포에 담지 않는다
+/_to_delete/

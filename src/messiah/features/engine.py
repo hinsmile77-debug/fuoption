@@ -589,6 +589,7 @@ class FeatureEngine:
         bars_by_horizon: Mapping[Horizon, Sequence[BarClosed]],
         *,
         prev_day_close_ticks: int | None = None,
+        accept_symbols: Sequence[str] | None = None,
     ) -> dict[Horizon, int]:
         """과거 완성봉으로 롤링 윈도우를 미리 채운다 — 발행은 하지 않는다.
 
@@ -617,18 +618,38 @@ class FeatureEngine:
         그래서 전일 종가를 **명시적으로 받는다**. 창이 우연히 일자를 걸치는지에 기대지 않는다.
         웜스타트 봉이 일자를 걸치면 그쪽이 이기고(더 정확한 실측), 안 걸치면 이 인자가 채운다.
 
+        ## 롤 경계 — 심볼 필터가 F-1을 통째로 무효화하고 있었다 (2026-08-16 실측)
+
+        `ParquetArchiver.load_recent_bars_by_source()`는 롤 경계에서 직전 월물까지 이어
+        읽는데, **이어 붙인 봉의 `symbol`을 의도적으로 바꾸지 않는다**(그쪽 docstring
+        *"이어 붙였다는 사실이 데이터에 남아야 한다"*). 그런데 이 함수의 필터는
+        `b.symbol == self._symbol` 하나였다 — **로더가 건네준 직전 월물 봉을 전량 버렸다.**
+
+        2026-08-16 리허설 실측(대상일 2026-08-18): 로더는 30m 200봉(A05609 15 · A05608
+        185)을 돌려줬는데 적재된 것은 **15봉**이었다. 2026-08-14 저녁의 F-1 커밋은 체인
+        해석과 로더만 고쳤고 그 결과를 받는 쪽은 손대지 않아, 롤 이후 첫 거래일도 30m
+        15봉으로 개장할 예정이었다(= 국면 하한 22봉 미달 → 판단 전량 NO_TRADE 재현).
+
+        그래서 **받아들일 심볼을 호출측이 명시한다**. 필터를 없애지 않는 이유는 그것이
+        "남의 심볼 봉이 섞여 들어오는 것"에 대한 마지막 방어선이기 때문이다(`handle_bar`의
+        같은 줄과 짝을 이룬다) — 없애는 대신, 무엇을 허용하는지 말하게 한다.
+
         입력: Horizon별 완성봉 목록. 심볼/Horizon이 안 맞는 봉은 버린다. 시간순이 아니어도
              되며(여기서 정렬한다), 용량(`history_capacity`)을 넘으면 최신 것만 남는다.
              `prev_day_close_ticks`는 **직전 거래일의 마지막 종가**(틱 단위) — 호출측이
              아카이브에서 읽어 넘긴다(`scripts/run_l1_daily.py`의 `_load_warmup_artifacts`).
+             `accept_symbols`는 이 웜스타트에서 받아들일 심볼 목록 — 롤 경계에서 로더에
+             넘긴 것과 **같은 체인**(`data/backfill.warmstart_symbol_chain()`)을 넘긴다.
+             생략하면 자기 심볼만 받는다(롤이 아닌 날의 기존 동작과 동일).
         반환: Horizon별로 실제 적재된 봉 수 — 호출측이 로그로 남긴다.
         """
+        allowed = frozenset(accept_symbols) if accept_symbols else frozenset({self._symbol})
         for horizon, bars in bars_by_horizon.items():
             history = self._history.get(horizon)
             if history is None:
                 continue  # 이 엔진이 구독하지 않는 Horizon
             accepted = sorted(
-                (b for b in bars if b.symbol == self._symbol and b.horizon == horizon),
+                (b for b in bars if b.symbol in allowed and b.horizon == horizon),
                 key=lambda b: b.bar_open_kst,
             )
             history.clear()

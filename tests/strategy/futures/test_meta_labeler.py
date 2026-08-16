@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from messiah.core.messages import BarClosed, FeatureVector, Horizon
-from messiah.core.timeutil import KST
+from messiah.core.timeutil import KST, UTC
 from messiah.models.labeling import TripleBarrierLabel
 from messiah.strategy.futures.meta_labeler import (
     META_FEATURE_NAMES,
@@ -72,6 +72,28 @@ def test_build_meta_features_hand_computed():
         "meta_realized_vol": pytest.approx(0.03),
         "meta_minutes_since_open": pytest.approx(35.0),
     }
+
+
+def test_meta_minutes_since_open_is_timezone_independent():
+    """같은 순간이면 tzinfo가 달라도 같은 값이어야 한다 (2026-08-16 P0 회귀).
+
+    이 저장소에는 같은 봉을 다른 tzinfo로 돌려주는 로더가 둘 있다 —
+    `ParquetArchiver`(KST) vs `ParquetBarReplaySource`(UTC). `.hour`를 그대로 읽던
+    종전 구현은 재생 경로에서 이 Feature를 **540분 어긋나게** 만들었고, 학습이 본
+    범위(0~390)와 추론이 본 범위(-540~-150)가 겹치지도 않았다. 값이 NaN이 아니라
+    그럴듯한 숫자라 8거래일간 아무 흔적도 없었다(금지계명 6).
+    """
+    probs = np.array([0.2, 0.3, 0.5])
+    kst_bar = _bar(35)  # 2026-07-27 09:35 KST
+    utc_bar = kst_bar.model_copy(
+        update={"bar_open_kst": kst_bar.bar_open_kst.astimezone(UTC)}  # 00:35 UTC, 같은 순간
+    )
+
+    kst_features = build_meta_features(probs, 0.05, _feature_vector(0.03), bar=kst_bar)
+    utc_features = build_meta_features(probs, 0.05, _feature_vector(0.03), bar=utc_bar)
+
+    assert kst_features["meta_minutes_since_open"] == pytest.approx(35.0)
+    assert utc_features["meta_minutes_since_open"] == pytest.approx(35.0)
 
 
 def test_build_meta_features_missing_realized_vol_defaults_to_zero():

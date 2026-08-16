@@ -244,14 +244,17 @@ def _warm_start_regime(runtime: RegimeRuntime, symbol: str, today: date) -> None
     (`_load_regime_runtime()`의 로드 실패 처리와 같은 원칙). 다만 조용히 넘어가지 않는다.
     """
     sources: dict[str, int] = {}
+    chain = _symbol_chain(symbol, today)
     try:
         history, sources = ParquetArchiver(_BAR_DIR).load_recent_bars_by_source(
-            _symbol_chain(symbol, today),
+            chain,
             Horizon.M30,
             on_or_before=today,
             max_bars=runtime.history_capacity,
         )
-        loaded = runtime.warm_start(history)
+        # 로더에 넘긴 것과 **같은 체인**을 적재 필터에도 넘긴다 (2026-08-16 P0) —
+        # `run_l1_daily._load_warmup_artifacts()`와 같은 이유·같은 형태.
+        loaded = runtime.warm_start(history, accept_symbols=chain)
     except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 운영을 막으면 안 됨
         mlog.log(
             "RegimeWarmStartFailed",
@@ -262,6 +265,10 @@ def _warm_start_regime(runtime: RegimeRuntime, symbol: str, today: date) -> None
         return
 
     minimum = runtime.min_bars_for_classify
+    # 로더가 건넨 양 vs 적재된 양 (2026-08-16 P0) — `run_l1_daily`와 같은 대조.
+    backfill.audit_warm_start_drop(
+        offered_by_source=sources, loaded_total=loaded, consumer="regime", symbol=symbol
+    )
     mlog.log(
         "RegimeWarmStart",
         f"과거 완성봉으로 국면 이력 사전 충전 (용량 {runtime.history_capacity}봉)",

@@ -340,7 +340,12 @@ def _load_warmup_artifacts(
             for sym, count in by_source.items():
                 sources[sym] = sources.get(sym, 0) + count
         loaded = engine.warm_start(
-            history, prev_day_close_ticks=_previous_day_close(archiver, chain, today)
+            history,
+            prev_day_close_ticks=_previous_day_close(archiver, chain, today),
+            # 로더에 넘긴 것과 **같은 체인**을 적재 필터에도 넘긴다 (2026-08-16 P0).
+            # 이 인자가 없던 동안 로더가 이어 읽은 직전 월물 봉이 적재 단계에서 전량
+            # 버려졌다 — F-1이 로더까지만 고치고 받는 쪽을 안 고친 결과였다.
+            accept_symbols=chain,
         )
     except Exception as exc:  # noqa: BLE001 — 웜스타트 실패가 그날 수집을 막으면 안 됨
         mlog.log(
@@ -351,6 +356,14 @@ def _load_warmup_artifacts(
         return
 
     summary = {horizon.value: count for horizon, count in loaded.items()}
+    # 로더가 건넨 양과 적재된 양을 대조한다 (2026-08-16 P0) — 두 수가 같은 줄에 있으면서
+    # 다른 질문의 답이라는 사실을 아무도 몰라 F-1이 이틀간 안 듣는 채로 "고쳤다"로 남았다.
+    backfill.audit_warm_start_drop(
+        offered_by_source=sources,
+        loaded_total=sum(loaded.values()),
+        consumer="feature",
+        symbol=symbol,
+    )
     # **언제 회복되는가를 기동 시점에 계산해 남긴다** (2026-08-14 G-5).
     #
     # 2026-08-14엔 이 값이 어디에도 없어서 사람이 12:30까지 세 번 손으로 계산했고 그중

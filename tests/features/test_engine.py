@@ -401,6 +401,63 @@ def test_warm_start_drops_foreign_symbols_and_horizons():
     assert loaded[Horizon.M5] == 2
 
 
+def _foreign_bar(symbol: str, minute: int) -> BarClosed:
+    return BarClosed(
+        symbol=symbol,
+        horizon=Horizon.M5,
+        bar_open_kst=datetime(2026, 7, 22, 9, minute, tzinfo=KST),
+        o_ticks=1,
+        h_ticks=1,
+        l_ticks=1,
+        c_ticks=1,
+        volume=1,
+        quality_ok=True,
+    )
+
+
+def test_warm_start_accepts_the_roll_chain_when_told():
+    """롤 경계에서 **선행 월물 봉이 적재돼야 한다** (2026-08-16 P0 회귀).
+
+    `load_recent_bars_by_source()`는 이어 읽은 봉의 심볼을 바꾸지 않는다 — 그래서 적재
+    필터가 자기 심볼만 받으면 로더가 건넨 것을 전량 버린다. 실제로 그랬고, 2026-08-18
+    개장이 30m 15봉(하한 22 미달)으로 예정돼 있었다.
+    """
+    engine = FeatureEngine("A05609", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+    chain_bars = [_foreign_bar("A05608", m) for m in range(3)]
+    own_bars = [
+        BarClosed(
+            symbol="A05609",
+            horizon=Horizon.M5,
+            bar_open_kst=datetime(2026, 7, 23, 9, m, tzinfo=KST),
+            o_ticks=1,
+            h_ticks=1,
+            l_ticks=1,
+            c_ticks=1,
+            volume=1,
+            quality_ok=True,
+        )
+        for m in range(2)
+    ]
+
+    loaded = engine.warm_start(
+        {Horizon.M5: chain_bars + own_bars}, accept_symbols=["A05609", "A05608"]
+    )
+
+    assert loaded[Horizon.M5] == 5
+
+
+def test_warm_start_still_drops_symbols_outside_the_chain():
+    """체인을 줘도 **체인 밖 심볼**은 여전히 버린다 — 필터를 없앤 게 아니다."""
+    engine = FeatureEngine("A05609", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
+
+    loaded = engine.warm_start(
+        {Horizon.M5: [_foreign_bar("A05608", 0), _foreign_bar("A99999", 1)]},
+        accept_symbols=["A05609", "A05608"],
+    )
+
+    assert loaded[Horizon.M5] == 1
+
+
 def test_warm_start_ignores_unsubscribed_horizons():
     engine = FeatureEngine("A05608", FakeBus(), feature_set="v-test", horizons=[Horizon.M5])
 

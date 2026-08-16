@@ -91,9 +91,7 @@ class ScoreCalibration:
         """격차의 표준오차 — 구간이 작으면 큰 격차도 잡음이다(적중률은 이항비율)."""
         if not self.top or not self.bottom or self.top.n == 0 or self.bottom.n == 0:
             return float("inf")
-        var = sum(
-            b.hit_rate * (1.0 - b.hit_rate) / b.n for b in (self.top, self.bottom)
-        )
+        var = sum(b.hit_rate * (1.0 - b.hit_rate) / b.n for b in (self.top, self.bottom))
         return var**0.5 if var > 0 else 0.0
 
     @property
@@ -109,7 +107,8 @@ class ScoreCalibration:
         return (
             self.edge_gap >= self.MIN_EDGE_GAP
             and self.edge_sigma >= self.MIN_EDGE_SIGMA
-            and bool(self.top) and self.top.hit_rate > self.MIN_TOP_HIT_RATE
+            and bool(self.top)
+            and self.top.hit_rate > self.MIN_TOP_HIT_RATE
         )
 
     @property

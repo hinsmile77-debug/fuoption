@@ -158,6 +158,34 @@ def test_warm_start_filters_and_sorts_like_feature_engine():
     assert [b.bar_open_kst for b in bars] == sorted(b.bar_open_kst for b in bars)
 
 
+def test_warm_start_accepts_the_roll_chain_when_told():
+    """롤 경계에서 **선행 월물 봉이 적재돼야 한다** (2026-08-16 P0 회귀).
+
+    로더(`load_recent_bars_by_source`)는 이어 읽은 봉의 심볼을 바꾸지 않는데 이 필터가
+    자기 심볼만 받아 전량 버렸다. 2026-08-16 리허설 실측: 로더 200봉(A05609 15 ·
+    A05608 185) → 적재 15봉 < 하한 22봉. F-1이 고쳤다고 판정한 상태 그대로였다.
+    """
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, InProcessBus())
+
+    mixed = [*_bars(7, symbol="PRECEDING"), *_bars(5)]
+
+    assert runtime.warm_start(mixed, accept_symbols=[_SYMBOL, "PRECEDING"]) == 12
+    assert runtime.warm_start(mixed) == 5, "체인을 안 주면 기존 동작 그대로"
+
+
+def test_warm_start_still_drops_symbols_outside_the_chain():
+    """체인을 줘도 **체인 밖 심볼**은 여전히 버린다 — 필터를 없앤 게 아니다."""
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3))
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, InProcessBus())
+
+    mixed = [*_bars(3, symbol="PRECEDING"), *_bars(4, symbol="STRANGER"), *_bars(2)]
+
+    assert runtime.warm_start(mixed, accept_symbols=[_SYMBOL, "PRECEDING"]) == 5
+
+
 def test_warm_start_respects_capacity():
     """용량을 넘으면 최신 것만 남는다 — `deque(maxlen)` 계약."""
     fit_bars = _bars(100)

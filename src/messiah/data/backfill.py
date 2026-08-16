@@ -51,7 +51,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Callable, Iterable, Protocol, Sequence
+from typing import Callable, Iterable, Mapping, Protocol, Sequence
 
 from messiah.core import logging as mlog
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
@@ -189,6 +189,53 @@ def warmstart_symbol_chain(symbol: str, day: date, depth: int = 1) -> list[str]:
         )
         return [symbol]
     return [symbol, *(code for code in preceding if code != symbol)]
+
+
+def audit_warm_start_drop(
+    *,
+    offered_by_source: Mapping[str, int],
+    loaded_total: int,
+    consumer: str,
+    symbol: str,
+) -> int:
+    """로더가 건넨 봉 수와 실제 적재된 봉 수를 대조한다 — 차이가 있으면 운다 (2026-08-16 P0).
+
+    **왜 이 대조가 필요한가.** 2026-08-14 저녁 F-1은 `warmstart_symbol_chain()`과
+    `ParquetArchiver.load_recent_bars_by_source()`까지만 고쳤다. 로더는 직전 월물 봉을
+    **그 월물 코드 그대로** 돌려주는데(설계다 — 출처가 데이터에 남아야 한다), 정작 그걸
+    받는 `FeatureEngine.warm_start()`/`RegimeRuntime.warm_start()`의 필터는
+    `b.symbol == self._symbol` 하나였다. 그래서 이어 읽은 봉이 **적재 단계에서 전량
+    버려졌다.**
+
+    두 함수 모두 "적재된 봉 수"를 정직하게 돌려주고 있었으므로 거짓말한 코드는 없다.
+    문제는 **아무도 두 수를 나란히 놓지 않았다**는 것이다 — 기동 로그의 `bars_by_source`는
+    로더의 답이고 `bars_by_horizon`은 적재의 답인데, 같은 줄에 있으면서 다른 질문의
+    답이라는 사실이 어디에도 적혀 있지 않았다. 2026-08-16 리허설이 손으로 대조해서야
+    30m에서 200 vs 15가 드러났다.
+
+    이 함수는 그 대조를 **매 기동 자동으로** 한다. 정상 경로에서는 절대 울지 않아야 한다.
+
+    입력: `offered_by_source`는 로더가 돌려준 심볼별 봉 수(`bars_by_source`),
+         `loaded_total`은 소비처가 실제로 적재한 봉 수. `consumer`는 어느 웜스타트인지
+         (`feature` / `regime`) — 태그 하나를 두 소비처가 공유하므로 구분이 필요하다.
+    반환: 버려진 봉 수(0이면 정상).
+    """
+    offered = sum(offered_by_source.values())
+    dropped = offered - loaded_total
+    if dropped <= 0:
+        return 0
+    mlog.log(
+        "WarmStartBarsDropped",
+        f"{consumer} 웜스타트 — 로더가 {offered}봉을 건넸는데 {loaded_total}봉만 적재됐다"
+        f"(버려진 {dropped}봉). 체인으로 이어 읽은 선행 월물이 적재 필터에 걸리는지 확인할 것",
+        symbol=symbol,
+        consumer=consumer,
+        offered=offered,
+        loaded=loaded_total,
+        dropped=dropped,
+        offered_by_source=dict(offered_by_source),
+    )
+    return dropped
 
 
 def front_month_days(

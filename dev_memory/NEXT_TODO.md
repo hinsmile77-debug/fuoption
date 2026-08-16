@@ -4633,3 +4633,68 @@ F-A·F-B·F-C·F-D · F-1·F-2·F-3·F-4·F-5·F-6·F-7·F-9·F-10·F-13 — **�
       의도적으로 제외했다(무관한 포맷 변경이 섞이면 설계 변경과 잡음을 못 가른다).
 - [ ] **F-11** DECISION_LOG의 08-14 G-1 근거 문구 정정("30m 회복 0.0%p" → 실측 곡선)
 - [ ] **F-12** 같은 날 같은 국면 2회 점검 시 보고서 파일명 규칙(스킬 파일)
+
+## 2026-08-16 모의투자 D-2 작업 — 개장 리허설 신설 + P0 2건 ([MW0601], 2026-08-16)
+
+계획서 `Docs/동작흐름과상태/2026-08-16_모의투자_Dday_준비계획.md` · **D-day = 2026-08-18(화)**
+(08-17 월요일은 광복절 대체휴일 — `configs/krx_holidays.yaml:53`)
+
+### 완료
+
+- [x] **리포 위생** — `_to_delete/` .gitignore 등재 · `ruff format` 비준수 8파일 정리 ·
+      미커밋 3건 커밋. `git status` 청정.
+- [x] **`scripts/run_open_rehearsal.py` 신설** — 다음 거래일 아침을 아카이브만으로 미리
+      돌린다(읽기 전용·오프라인·운영과 같은 함수). **첫 실행이 P0 2건을 찾았다.**
+- [x] **P0-1 웜스타트 적재 필터** — `warm_start(..., accept_symbols=chain)` +
+      `backfill.audit_warm_start_drop()` + `WarmStartBarsDropped`(WARNING) 태그.
+      회귀 테스트 4건(engine 2 · runtime 2).
+- [x] **P0-2 재생 경로 시간대** — `_minutes_since_session_open()`이 `to_kst()` 경유.
+      회귀 테스트 1건. **생산 경로는 무사**(bar_composer가 KST 명시).
+- [x] **W-21 확정** — `n_experts=0` 갈래는 `blocked_by_meta` 15/15.
+      `blocked_by_uncertainty` 가설 **기각**.
+
+### 2026-08-17(월·휴장) D-1에 할 것
+
+- [ ] **D-1① 코드 동결** — 오늘 커밋이 마지막. D-day 아침에 새 코드를 넣지 않는다.
+- [ ] **D-1② 예행** — `scripts/self_check.py` · `scripts/verify_kill_switch.py` ·
+      (여유 시) `scripts/run_chaos_check.py` 전부 PASS 확인.
+- [ ] **D-1③ 스케줄 확인** — Messiah 08:20 / G2 08:25 / Shutdown 15:40 / Postmarket 15:45 ·
+      `check_schedule_drift` 정본 일치 · Docker/Redis(`messiah-redis`:6380) 기동 경로.
+- [ ] **D-1④ G2 40거래일 리셋 기산 결정 기록** — 기존 13일은 전량 NO_TRADE·수익률 0.0이라
+      "백테스트 대비 저하 <30%" 채점의 분모가 될 수 없다. 08-18을 1일차로.
+- [ ] **D-1⑤ 리허설 재실행** — `run_open_rehearsal.py --date 2026-08-18`. D-2와 같은 결과면
+      동결 상태가 확인된 것이다.
+
+### 2026-08-18(화) D-day에 볼 것 — 기존 W/V 항목의 날짜 정정본
+
+**08-14 보고서들이 "08-17(월)"로 적은 것은 전부 08-18(화)다.**
+
+- [ ] **W-16 ★★ (P0-1 적용 후) F-1 라이브 채점** — `FeatureWarmStart.bars_by_horizon`
+      전 Horizon **≥ 22**(리허설 예보는 200) · `bars_by_source`에 **A05608 등장** ·
+      `RegimeWarmStartShort` **0건** · `OptionChainSkipped` **0건**.
+      **`WarmStartBarsDropped` 0건**(새 축 — 울면 적재 필터가 또 어딘가 남아 있다는 뜻).
+- [ ] **W-26 ★ 국면 UNKNOWN 탈출** — 리허설 예보 `TREND_DOWN`(0.999).
+      **라이브에서 UNKNOWN 100%면 리허설과 라이브가 갈린 것이고 그 자체가 P0다.**
+- [ ] **W-21 라이브 재확인** — `AggregatorNoContribution`이 `blocked_by_meta`로 나오는가.
+      리허설과 다른 갈래가 나오면 리허설의 전제가 틀린 것이다.
+- [ ] **meta 통과확률의 라이브 분포** — 리허설 최대 0.6576 vs 임계 0.7.
+      **임계를 낮추지 않는다**(R18) — 며칠치 분포를 본 뒤 판단한다.
+- [ ] W-17 · W-19 · W-23 · W-24 · W-25 · W-9(3회차 필착) · W-10 · V-15 · V-16 · W-20 · W-22
+      — 08-14 보고서 그대로, 날짜만 08-18.
+
+### D-day Go/No-Go (계획서 §4)
+
+① 무중단 · ② 국면 UNKNOWN < 100% · ③ `n_experts ≥ 1` **또는** 0의 사유 확정 →
+**①~③이면 1일차 성립.** ④ `decision_funnel`에 `regime` 외 게이트 등장이면 이상적.
+**리허설 기준 ④는 안 날 가능성이 높다**(meta 0.658 < 0.700) — 그건 정당한 차단이지
+결함이 아니다.
+
+### 미결 — D-day 이후
+
+- [ ] **meta 임계 0.7의 적정성** — 며칠치 통과확률 분포를 모은 뒤 판단. 지금 낮추면
+      G1 관문을 통과한 적 없는 모델로 거래를 내는 것이다.
+- [ ] **1차 모델이 p_flat에 쏠려 있다** — 리허설 15사이클 p_flat 0.47~0.97.
+      meta 이전에 **Expert 자체가 방향 확신을 안 낸다.** G1 재도전의 진짜 과제.
+- [ ] **두 parquet 로더의 시간대 불일치 자체** — `_minutes_since_session_open`은 고쳤으나
+      `ParquetBarReplaySource`가 UTC를 돌려주는 것은 그대로다. 다른 소비처가 같은 함정을
+      밟을 수 있다. **G-7(정본 하나) 계열 항목으로 이관.**

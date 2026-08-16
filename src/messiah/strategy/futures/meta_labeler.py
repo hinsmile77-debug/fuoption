@@ -41,6 +41,7 @@ import lightgbm as lgb
 import numpy as np
 
 from messiah.core.messages import HORIZON_SECONDS, BarClosed, FeatureVector, Horizon
+from messiah.core.timeutil import to_kst
 from messiah.models.labeling import TripleBarrierLabel
 
 # Ver 1.2 §5.2 "모델: 얕은 LightGBM (깊이 3~4)" / Ver 1.6 §5.1 "max_depth 3~4, num_leaves
@@ -314,5 +315,28 @@ def _argmax_direction(probs: np.ndarray) -> int:
     return _CLASS_TO_LABEL[int(np.argmax(probs))]
 
 
-def _minutes_since_session_open(bar_open_kst: datetime) -> float:
-    return float((bar_open_kst.hour - _SESSION_OPEN_HOUR) * 60 + bar_open_kst.minute)
+def _minutes_since_session_open(bar_open: datetime) -> float:
+    """정규장 09:00 KST 기준 경과 분 — **넘어온 시각의 시간대를 믿지 않고 KST로 바꾼다.**
+
+    ## 왜 (2026-08-16 실측)
+
+    종전엔 인자 이름이 `bar_open_kst`라는 것에 기대어 `.hour`를 그대로 읽었다. 그런데 이
+    저장소에는 같은 순간을 **다른 tzinfo로 돌려주는 봉 로더가 둘** 있다:
+
+        ParquetArchiver.load_recent_bars_by_source() -> 2026-08-14 08:30:00+09:00 (KST)
+        ParquetBarReplaySource.load()                -> 2026-08-13 23:30:00+00:00 (UTC)
+
+    둘은 같은 시각이지만 `.hour`는 8과 23이다. 그래서 **재생 경로를 타면 이 Feature가
+    통째로 540분 어긋났다** — 학습이 본 범위(0~390)와 추론이 본 범위(-540~-150)가 겹치지도
+    않아, LightGBM은 학습에서 한 번도 본 적 없는 구간으로 매 추론을 보냈다.
+
+    재생을 쓰는 곳이 `run_replay` · `run_backtest_harness` · `run_full_path_smoke` ·
+    `run_g1_walk_forward` 계열 전부다. 즉 **금지계명 2가 요구하는 "replay 검증"이 정작 이
+    Feature에 대해서는 틀린 값으로 이뤄지고 있었다.** 조용했던 이유는 값이 NaN이 아니라
+    그럴듯한 숫자였기 때문이다(금지계명 6 — 피처 불일치 침묵 금지).
+
+    `to_kst()`는 aware 시각을 KST로 정규화하고 naive는 즉시 거부한다(R3) — 어느 로더가
+    주든 답이 같고, tzinfo가 아예 없는 봉은 조용히 틀리는 대신 소리 내며 멈춘다.
+    """
+    kst = to_kst(bar_open)
+    return float((kst.hour - _SESSION_OPEN_HOUR) * 60 + kst.minute)

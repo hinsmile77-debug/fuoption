@@ -72,29 +72,52 @@ class RegimeRuntime:
         """판정이 UNKNOWN을 벗어나려면 필요한 봉 수 — 판단의 정본은 `RegimeAI`다."""
         return self._regime_ai.min_bars_for_classify
 
-    def warm_start(self, bars: Sequence[BarClosed]) -> int:
+    def warm_start(
+        self, bars: Sequence[BarClosed], *, accept_symbols: Sequence[str] | None = None
+    ) -> int:
         """과거 완성봉으로 이력 버퍼를 미리 채운다 — **발행은 하지 않는다**.
+
+        ## 롤 경계 — 심볼 필터가 F-1을 무효화하고 있었다 (2026-08-16 실측)
+
+        `FeatureEngine.warm_start()`와 **정확히 같은 결함**이 여기에도 있었다: 로더
+        (`load_recent_bars_by_source`)는 직전 월물 봉을 그 월물 코드 그대로 돌려주는데
+        이쪽 필터가 `b.symbol == self._symbol`이라 전량 버렸다. 2026-08-16 리허설
+        실측(대상일 2026-08-18) — 로더 200봉(A05609 15 · A05608 185) → 적재 **15봉**
+        < 하한 22봉. 즉 롤 이후 첫 거래일도 2026-08-14와 똑같이 UNKNOWN으로 개장할
+        예정이었고, F-1이 고쳤다고 판정한 바로 그 상태였다.
+
+        **자가점검의 `직전 25일`은 로더의 답이지 적재된 양이 아니었다** — 두 수가 다를 수
+        있다는 것을 이 함수가 이제 계약으로 말한다.
 
         입력: 구동 Horizon의 완성봉. 심볼/Horizon이 안 맞는 봉은 버린다. 시간순이 아니어도
              되며(여기서 정렬한다), 용량(`history_capacity`)을 넘으면 최신 것만 남는다 —
-             전부 `FeatureEngine.warm_start()`와 같은 계약이다.
+             전부 `FeatureEngine.warm_start()`와 같은 계약이다. `accept_symbols`는 받아들일
+             심볼 목록으로, 로더에 넘긴 것과 **같은 체인**을 넘긴다(생략 시 자기 심볼만).
         반환: 실제 적재된 봉 수 — 호출측이 로그로 남긴다(`RegimeWarmStart`). 이 수가
              `min_bars_for_classify` 미만이면 그날 판정은 여전히 UNKNOWN으로 시작하며,
              그 사실은 조용히 지나가면 안 된다(금지계명 12).
         """
+        allowed = frozenset(accept_symbols) if accept_symbols else frozenset({self._symbol})
         accepted = sorted(
             (
                 b
                 for b in bars
-                if isinstance(b, BarClosed)
-                and b.symbol == self._symbol
-                and b.horizon == self._horizon
+                if isinstance(b, BarClosed) and b.symbol in allowed and b.horizon == self._horizon
             ),
             key=lambda b: b.bar_open_kst,
         )
         self._history.clear()
         self._history.extend(accepted)  # deque(maxlen)이 알아서 오래된 것부터 버린다
         return len(self._history)
+
+    def classify_now(self):
+        """현재 버퍼로 **판정만** 한다 — 발행도, 로깅도, 버퍼 변경도 없다.
+
+        기동 전 리허설(`scripts/run_open_rehearsal.py`)이 "오늘 아침 이 버퍼로 국면이
+        나오는가"를 물을 때 쓴다. `handle_bar()`를 부르면 있지도 않은 봉을 이력에 넣고
+        `RegimeClassified`를 남겨 그날 로그를 오염시킨다 — 진단이 관측을 바꾸면 안 된다.
+        """
+        return self._regime_ai.classify(self._bars())
 
     async def handle_bar(self, bar: BarClosed) -> None:
         # 타입부터 본다 (2026-08-07 P0-1) — `features/engine.py handle_bar`와 같은 이유.

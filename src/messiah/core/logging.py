@@ -211,6 +211,17 @@ TAG_LEVELS: dict[str, int] = {
     # 시작하고, 아카이브가 얕다는 뜻이다. 조용히 콜드스타트로 넘어가지 않는다(금지계명 12).
     "RegimeWarmStartShort": logging.WARNING,
     "RegimeWarmStartFailed": logging.WARNING,  # 웜스타트 실패 — 국면 없이라도 기동은 계속
+    # 로더가 건넨 봉 수와 **실제 적재된 봉 수**가 다르다 (2026-08-16 P0).
+    #
+    # 2026-08-14 저녁 F-1은 웜스타트 체인 해석과 로더까지만 고쳤고, 그 결과를 받는
+    # `FeatureEngine.warm_start()`/`RegimeRuntime.warm_start()`의 심볼 필터를 안 고쳤다.
+    # 로더는 직전 월물 봉을 그 월물 코드 그대로 돌려주므로(그게 설계다 — 출처가 데이터에
+    # 남아야 한다) 적재 단계가 그걸 전량 버렸고, **자가점검은 로더의 답인 `직전 25일`을
+    # 보고하고 있었다.** 두 수가 다를 수 있다는 것을 아무도 몰랐다.
+    #
+    # 그래서 두 수를 나란히 세고 다르면 여기서 운다. 정상 경로에서는 절대 안 울어야 한다 —
+    # 울면 어느 심볼이 왜 빠졌는지 `dropped_by_symbol`이 바로 말한다.
+    "WarmStartBarsDropped": logging.WARNING,
     "HealthPublishError": logging.ERROR,  # sys.health heartbeat 발행 실패 — 처리 루프는 계속(L22)
     "IntegrityReportGenerated": logging.INFO,  # 일일 무결성 리포트 산출
     "IntegrityThresholdBreached": logging.WARNING,  # 무결성 지표가 임계 초과 — 사람이 봐야 함
