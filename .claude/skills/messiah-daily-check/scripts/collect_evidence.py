@@ -181,6 +181,106 @@ def hhmm_to_minutes(s: str) -> int:
     return int(h) * 60 + int(m)
 
 
+# ---------------------------------------------------------------- 거래일 판정 (2026-08-17 F-13)
+#
+# ## 왜 이 도구가 달력을 알아야 하나
+#
+# 2026-08-17(광복절 대체공휴일)에 이 수집기가 자동 적신호 **5건**을 올렸고 그중 4건이
+# 휴장일 위양성이었다: `SessionStart 2회`(부팅+정시 트리거는 휴장일에도 발화한다),
+# `SessionEnd 없음`, 산출물 누락 3건, 장후 배치 ERROR. 계획은 *"아무것도 하지 않는 것"*
+# 이었는데 관측기는 그 계획대로 된 하루를 **이상으로** 읽었다.
+#
+# 늑대소년을 만드는 것이 이 형태다 — 휴장일마다 5건씩 찍히면 사람은 목록 자체를 안 읽는다.
+#
+# ## 왜 `src/messiah`를 import하지 않나
+#
+# 이 스크립트는 **stdlib only**가 규약이다(모듈 docstring). 리포의 `.venv` 없이도, 다른
+# 파이썬으로도 돌아야 한다 — 점검 도구가 점검 대상의 의존성을 타면 대상이 깨진 날 점검도
+# 같이 깨진다. 그래서 YAML을 **직접 읽는다**. 필요한 문법은 두 줄 모양뿐이다.
+#
+# ## 달력에 그 연도가 없으면 **필터를 끈다**
+#
+# 미등재 연도를 "거래일"로 단정하지도, "휴장일"로 단정하지도 않는다 — 기존 동작(전 항목을
+# 그대로 적신호로)을 유지하고 그 사실을 머리말에 적는다. 판정 근거가 없을 때 조용히 한쪽으로
+# 접으면, 접힌 쪽이 틀린 날을 아무도 못 찾는다.
+
+_YEAR_LINE = re.compile(r"^(?P<year>\d{4}):\s*$")
+_DATE_ITEM = re.compile(r'^\s*-\s*"?(?P<iso>\d{4}-\d{2}-\d{2})"?')
+_COVERED_LINE = re.compile(r'^covered_through:\s*"?(?P<iso>\d{4}-\d{2}-\d{2})"?')
+
+
+def read_holiday_calendar(root: Path) -> tuple[dict[_date, None], set[int], _date | None]:
+    """`configs/krx_holidays.yaml`을 stdlib로 읽는다 — (휴장일, 등재 연도, covered_through).
+
+    실패하면 `({}, set(), None)`이고 그러면 호출측이 필터를 끈다. 달력 하나 때문에 점검
+    다이제스트가 아예 안 나오는 것이 훨씬 나쁘다.
+    """
+    path = root / "configs" / "krx_holidays.yaml"
+    days: dict[_date, None] = {}
+    years: set[int] = set()
+    covered: _date | None = None
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return days, years, covered
+    year: int | None = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        m = _COVERED_LINE.match(line)
+        if m:
+            try:
+                covered = _date.fromisoformat(m.group("iso"))
+            except ValueError:
+                covered = None
+            continue
+        m = _YEAR_LINE.match(line)
+        if m:
+            year = int(m.group("year"))
+            years.add(year)
+            continue
+        m = _DATE_ITEM.match(line)
+        if m and year is not None:
+            try:
+                days[_date.fromisoformat(m.group("iso"))] = None
+            except ValueError:
+                continue
+    return days, years, covered
+
+
+def non_trading_day_note(day: _date, cal: tuple[dict, set, _date | None]) -> str | None:
+    """비거래일이면 사람이 읽을 사유, 거래일이거나 **판정 불가**면 None.
+
+    `ops/session_guard.non_trading_day_reason()`과 같은 규약이다(주말/등재 휴장일을 문장에서
+    가르고, 판정 불가는 None). 값이 갈리면 관측기가 운영과 다른 하루를 보게 된다.
+    """
+    days, years, _ = cal
+    weekday = "월화수목금토일"[day.weekday()]
+    # 굵게 표시하지 않는다 — 호출측이 이 문장을 자기 강조 안에 넣는다(중첩되면 안 렌더된다).
+    if day.weekday() >= 5:
+        return f"{day.isoformat()}({weekday})은 주말"
+    if day.year not in years:
+        return None  # 미등재 연도 — 필터를 끈다(위 절)
+    if day in days:
+        return f"{day.isoformat()}({weekday})은 KRX 휴장일(configs/krx_holidays.yaml 등재)"
+    return None
+
+
+# 비거래일에 **기대치가 뒤집히는** 적신호들 — 이 패턴에 걸리면 §9 본문에서 빼고 별도 절로
+# 옮긴다. 텍스트 매칭인 것이 이 파일 안에서만 성립하는 이유: 생산자와 소비자가 같은 함수
+# 안에 있어 문구가 바뀌면 같은 커밋에서 같이 바뀐다(다른 모듈이 이 문구를 읽으면 그때는
+# 구조화된 플래그로 바꿔야 한다).
+_NON_TRADING_DEMOTABLE = (
+    "SessionStart",  # 부팅 트리거 + 정시 트리거는 휴장일에도 발화한다
+    "SessionEnd 없음",  # 2026-08-17 이전 코드의 흔적 — 지금은 마커를 남긴다
+    "산출물 누락",  # 휴장일에 만들 산출물이 없다
+    "로그 공백",  # 종일 아무 일도 안 하는 것이 계획이다
+    "status_snapshot",  # 마지막 거래일 것이 최신이다
+    "기동 창 거절",
+)
+
+
 def fmt_bytes(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -509,10 +609,31 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     L: list[str] = []
     A = L.append
 
+    # **오늘이 어떤 날인지가 다른 모든 판정의 전제다** (2026-08-17 F-13). 이 줄이 없어서
+    # 08-17 다이제스트는 "계획대로 아무 일도 안 일어난 하루"를 적신호 5건으로 읽었다.
+    cal = read_holiday_calendar(root)
+    skip_note = non_trading_day_note(day, cal)
+    _, cal_years, cal_covered = cal
+
     A(f"# MESSIAH 증거 다이제스트 — {D} / {phase.upper()}")
     A("")
     A(f"- 생성 {now:%Y-%m-%d %H:%M:%S} KST · 리포 `{root}`")
     A(f"- 점검 범위: {', '.join(phases)} (장전=pre / 장중=intra / 장후=post)")
+    if skip_note is not None:
+        A(
+            f"- 🗓 **{skip_note} — 비거래일이다.** 기대치가 뒤집힌다: 수집·G2·장후 배치는"
+            " `SessionEnd(reason=non_trading_day)` 한 줄만 남기고 종료하는 것이 **정상**이고,"
+            " 산출물은 없는 것이 정상이다. 기대치가 뒤집히는 적신호는 §9 본문이 아니라"
+            " 그 아래 「휴장일이라 기각한 항목」으로 옮겼다."
+        )
+    elif day.year not in cal_years:
+        A(
+            f"- ⚠ **거래일 판정 불가** — `configs/krx_holidays.yaml`에 {day.year}년이 없다"
+            f"(등재 {', '.join(str(y) for y in sorted(cal_years)) or '없음'}"
+            f"{f' · covered_through={cal_covered.isoformat()}' if cal_covered else ''})."
+            " 휴장일 필터를 **끈 채로** 낸 다이제스트다 — 아래 적신호에 휴장 위양성이 섞여"
+            " 있을 수 있다."
+        )
     A("")
 
     # ---- 1. 코드 상태 ----
@@ -785,6 +906,10 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     # ---- 7. 산출물 존재 점검 ----
     A("## 7. 산출물 존재 점검")
     A("")
+    if skip_note is not None:
+        # 비거래일에 **있는** 산출물이 오히려 물어볼 것이다 — 그날 뭔가 돌았다는 뜻이다.
+        A(f"> {skip_note} — 산출물은 **없는 것이 정상**이다. 「있음」이 뜨면 그것을 물을 것.")
+        A("")
     A("| 국면 | 기대 산출물 | 상태 | 크기 | 최종기록 |")
     A("|---|---|---|---|---|")
     for ph in phases:
@@ -795,7 +920,10 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
                 st = p.stat()
                 mt = datetime.fromtimestamp(st.st_mtime, KST)
                 stale = " ⚠오래됨" if mt.date() != day else ""
-                A(f"| {ph} | `{rel}` | 있음{stale} | {fmt_bytes(st.st_size)} | {mt:%m-%d %H:%M} |")
+                mark = "있음 ⚠(휴장일인데 있다)" if skip_note is not None else f"있음{stale}"
+                A(f"| {ph} | `{rel}` | {mark} | {fmt_bytes(st.st_size)} | {mt:%m-%d %H:%M} |")
+            elif skip_note is not None:
+                A(f"| {ph} | `{rel}` | 해당 없음(휴장) | — | — |")
             else:
                 A(f"| {ph} | `{rel}` | **없음 ⚠** | — | — |")
     A("")
@@ -900,12 +1028,36 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             "금지계명 10(미커밋 수정 실전 반입 금지) 확인 필요"
         )
 
+    # 비거래일이면 **기대치가 뒤집히는 항목만** 아래 절로 옮긴다 (2026-08-17 F-13).
+    # 지우지 않는 이유: 달력이 틀린 날(거래일인데 휴장으로 등재된 날)에 그 항목들이 사라지면
+    # **그날 수집이 통째로 없어진 것을 아무도 못 본다.** 기각도 판정이므로 근거와 함께 남긴다.
+    deferred: list[str] = []
+    if skip_note is not None:
+        kept: list[str] = []
+        for f in flags:
+            (deferred if any(k in f for k in _NON_TRADING_DEMOTABLE) else kept).append(f)
+        flags = kept
+
     if flags:
         for i, f in enumerate(dict.fromkeys(flags), 1):
             A(f"{i}. {f}")
+    elif skip_note is not None:
+        A("기대치가 뒤집히지 않는 적신호 없음 — 비거래일로서 정상이다.")
     else:
         A("자동 탐지 적신호 없음. 그래도 §3~§5를 직접 읽고 판단할 것.")
     A("")
+    if deferred:
+        A(f"### 휴장일이라 기각한 항목 ({len(deferred)}건)")
+        A("")
+        A(
+            f"> {skip_note}이라 아래는 **정상 동작의 흔적**이다. "
+            "다만 달력이 틀렸다면(오늘이 실제로 거래일이라면) 이 목록이 곧 사고 보고서다 — "
+            "그때는 `configs/krx_holidays.yaml`을 먼저 확인할 것."
+        )
+        A("")
+        for i, f in enumerate(dict.fromkeys(deferred), 1):
+            A(f"{i}. {f}")
+        A("")
     A("---")
     A("")
     A(

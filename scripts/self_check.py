@@ -23,6 +23,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 # src 레이아웃 실행 지원
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from messiah.core import event_calendar as evcal  # noqa: E402
 from messiah.core import symbol_resolution  # noqa: E402
 from messiah.core.bus import registered_types  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
@@ -343,6 +344,72 @@ def check_rollover(
     )
 
 
+_CALENDAR_WARN_RUNWAY_DAYS = 45
+
+
+def check_calendar(*, today: date | None = None) -> CheckResult:
+    """**휴장일 달력이 언제 바닥나는가** — 바닥난 다음이 아니라 그 전에 묻는다 (2026-08-17).
+
+    ## 왜 연도 등록 예외로는 부족한가
+
+    `EventCalendar.is_trading_day()`는 미등록 연도를 물으면 예외를 던진다(L3 침묵 실패 금지).
+    그 신호는 옳지만 **늦다** — 2027년 첫 거래일 아침에 처음 울리고, 그때 진입점의 비거래일
+    게이트는 판정 불가를 「거래일」로 접어(`ops/session_guard.non_trading_day_reason()`의
+    비대칭) 그대로 뜬다. 즉 **신정·설날에 조용히 수집이 돈다.** 마흐디가 2026-08-17에 실측한
+    바로 그 피해다: 값이 얼어붙은 하루가 영업일보다 많은 행으로 적재되고, 행 수로는 구분이
+    안 되므로 학습·백테스트가 그 하루를 거래일로 읽는다.
+
+    수기 테이블의 실패 모드는 "안 채우는 것"이 아니라 **"안 채운 걸 아무도 모르는 것"** 이다.
+    그래서 사람이 `covered_through`로 어디까지 확인했는지 선언하고, 이 축이 매일 그 날짜를
+    본다(마흐디 `config/market_holidays.yaml`과 같은 규약).
+
+    ## 기동은 막지 않는다
+
+    `check_rollover`·`check_host`와 같은 원칙이다. 달력이 만료됐다고 그날 수집을 거부하면
+    이 축이 막으려는 손실(하루치 영구 소실)을 **이 축이 직접 일으킨다.** 항상 `ok=True`이고
+    문구로만 말한다 — 대신 `경고:` 접두사를 붙여 다이제스트·콘솔에서 눈에 띄게 한다.
+    """
+    today = today or now_kst().date()
+    try:
+        doc = evcal.load_document()
+    except Exception as exc:  # noqa: BLE001 — 달력 부재로 기동을 막지 않는다
+        return CheckResult("calendar", True, f"경고: 휴장일 달력을 못 읽었다({exc}) — 판정 불가")
+
+    holidays = evcal.holidays_from_document(doc)
+    years = sorted({d.year for d in holidays})
+    span = f"등재 연도 {years[0]}~{years[-1]} · 휴장일 {len(holidays)}일" if years else "등재 0건"
+
+    runway = evcal.coverage_runway_days(doc, today)
+    if runway is None:
+        return CheckResult(
+            "calendar",
+            True,
+            f"경고: `covered_through` 선언이 없다 — 달력이 어디까지 확인된 것인지 알 수 없다"
+            f" (configs/krx_holidays.yaml). {span}",
+        )
+    covered = evcal.covered_through(doc)
+    assert covered is not None  # runway가 not None이면 파싱에 성공한 것이다
+    if runway < 0:
+        return CheckResult(
+            "calendar",
+            True,
+            f"경고: 휴장일 달력이 {-runway}일째 만료 상태다(covered_through={covered.isoformat()})"
+            f" — KRX 공식 안내로 확인하고 옮길 것. **미등재일은 「거래일」로 접히므로 오늘이"
+            f" 휴장일이어도 그대로 뜬다.** {span}",
+        )
+    if runway <= _CALENDAR_WARN_RUNWAY_DAYS:
+        return CheckResult(
+            "calendar",
+            True,
+            f"경고: 휴장일 달력이 {runway}일 뒤 만료된다(covered_through={covered.isoformat()})"
+            f" — 만료 전에 다음 연도를 채울 것(근로자의날 05-01·연말 휴장 12-31을 빠뜨리기"
+            f" 쉽다). {span}",
+        )
+    return CheckResult(
+        "calendar", True, f"covered_through={covered.isoformat()}(D+{runway}) · {span}"
+    )
+
+
 def check_git_state(mode: str) -> CheckResult:
     """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제).
 
@@ -479,6 +546,8 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     results.append(check_prev_postmarket())
     # 오늘이 월물 롤 당일인가 — 4주에 한 번뿐이라 사람이 잊는다(2026-08-14 F-2).
     results.append(check_rollover())
+    # 휴장일 달력이 언제 바닥나는가 — 바닥난 다음이 아니라 그 전에 묻는다(2026-08-17).
+    results.append(check_calendar())
     if cfg is not None:
         results.append(check_bar_close(cfg))
         results.append(check_git_state(cfg.mode))

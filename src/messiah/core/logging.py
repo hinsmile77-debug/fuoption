@@ -47,7 +47,20 @@ TAG_LEVELS: dict[str, int] = {
     # 한계("마지막 기동 이후 조용히 사라진 경우는 안 센다, 정상 종료와 구분할 근거가 없다")가
     # 정확히 그것이고, 2026-08-07엔 그 때문에 1시간 54분 유실이 `관측 공백: 없음 ✅`으로
     # 지나갔다. 구분할 근거를 **만들면** 되는 일이었다.
+    # 프로세스가 끝난 **이유**는 `reason` 필드로 가른다 — 태그를 나누지 않는다 (2026-08-17).
+    # 허용값과 뜻:
+    #   (없음)               거래일 정상 종료
+    #   non_trading_day      주말·KRX 휴장일이라 아무것도 안 했다
+    #                        (`ops/session_guard.NON_TRADING_DAY_REASON`)
+    # 새 태그를 만들지 않는 이유: "이 프로세스가 끝났다"를 세는 소비처가 여럿이고
+    # (`ops/integrity_report._abnormal_exits`, `ops/task_exit_codes`, 일일점검 다이제스트 §2),
+    # 새 태그는 그 전부가 알아야만 맞는다. 하나만 모르면 그 소비처에서 그날은 **비정상
+    # 종료**로 남는다 — 2026-08-15~17 사흘이 정확히 그 모양이었다(마커가 아예 없어서).
     "SessionEnd": logging.INFO,
+    # 비거래일에 장후 배치를 **일부러** 돌렸다 (2026-08-17 F-2). 우회를 조용히 통과시키지
+    # 않는다(L18) — 소급 복구로 필요한 경로지만, 그 사실이 로그에 없으면 그날 산출물이
+    # 어느 날의 것인지 사후에 못 가른다. WARNING인 이유: 실패는 아니지만 정상도 아니다.
+    "PostmarketForcedOnNonTradingDay": logging.WARNING,
     "BarClosed": logging.DEBUG,
     "FeaturePublish": logging.DEBUG,
     "FeatureNaN": logging.WARNING,

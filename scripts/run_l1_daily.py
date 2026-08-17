@@ -25,10 +25,17 @@ FeatureEngine)을 실제 매매일 하루 동안 무인으로 돌리기 위한 �
 띄워주는 우연에 기대고 있었다"(`AutoStart=False`)는 취약점을 발견해 대응(`core/
 docker_bootstrap.py`). 2분 안에도 안 뜨면 self_check 실행 전에 명시적으로 중단한다.
 
-**KRX 휴장일 인식 (2026-07-27 추가)**: `main()` 시작 직후 `EventCalendar.is_trading_day()`로
-오늘이 거래일인지부터 확인한다 — 휴장일이면 self_check조차 실행하지 않고(불필요한 KIS API
-호출 회피) 즉시 종료한다. 휴장일 목록은 `configs/krx_holidays.yaml`(출처 한계는 그 파일
+**KRX 휴장일 인식 (2026-07-27 추가 · 2026-08-17 F-3 위치 교정)**: `__main__`이 **가장 먼저**
+`session_guard.non_trading_day_reason()`으로 오늘이 거래일인지 묻는다 — 비거래일이면
+Docker도 self_check도 건드리지 않고 `SessionEnd(reason="non_trading_day")` 한 줄만 남기고
+종료 코드 0으로 끝난다. 휴장일 목록은 `configs/krx_holidays.yaml`(출처 한계는 그 파일
 헤더 참고 — 공식 KRX 확인 아님).
+
+이 docstring은 2026-07-27부터 *"휴장일이면 self_check조차 실행하지 않는다"* 고 적어 뒀지만
+**실제 판정은 `main()` 안, 즉 `_ensure_docker_ready()`·`_run_self_check()` 뒤에 있었다.**
+2026-08-17(광복절 대체공휴일)에 그 대가가 관측됐다: 부팅 트리거(07:22)와 정시 트리거(08:20)
+두 번에 걸쳐 Docker 기동 21초 + self_check 14항목이 **각각 한 벌씩** 돌고 나서야 "휴장일"을
+말했다. 선언과 코드가 어긋난 자리를 코드 쪽으로 맞췄다.
 
 **Command Center UI 자동 기동 (2026-07-29 추가)**: 거래일로 확인되면 `_launch_ui()`가
 Streamlit Command Center(`src/messiah/ui/app.py`)를 완전히 별도의 백그라운드 프로세스로
@@ -1020,12 +1027,27 @@ async def _daily_close(
     await bus.close()
 
 
-async def main(cfg: InstanceConfig) -> None:
-    # 네이티브 크래시 덤프 무장 (2026-08-03) — 이 프로세스도 polars로 Parquet을 읽고 쓴다
-    # (`data/archiver.py`). UI에서 5거래일 연속 터진 access violation이 여기서 나면 지금까지는
-    # 로그에 한 줄도 안 남고 수집이 통째로 사라졌을 것이다(`core/crash_forensics.py`).
+def _arm_forensics_and_logging(instance_id: str) -> None:
+    """네이티브 크래시 덤프 무장 + 구조화 로깅 개시 — 이 프로세스의 **첫 작업**이다.
+
+    2026-08-03 신설. 이 프로세스도 polars로 Parquet을 읽고 쓴다(`data/archiver.py`). UI에서
+    5거래일 연속 터진 access violation이 여기서 나면 무장 전에는 로그에 한 줄도 안 남고
+    수집이 통째로 사라진다(`core/crash_forensics.py`).
+
+    ## 왜 `main()`에서 꺼내 함수로 만들었나 (2026-08-17 F-3)
+
+    비거래일 게이트가 `__main__`의 맨 앞으로 올라가면서, **휴장일에는 `main()`이 아예 안
+    불린다.** 무장이 `main()` 안에 남아 있으면 그날 로그에 `CrashForensicsArmed`가 없고,
+    `ops/crash_dumps.collect_crash_forensics()`가 그 부재를 *"그 세션은 네이티브 크래시가
+    나도 증거를 안 남긴다"* 로 찍는다 — 없앤 위양성(휴장일 `SessionEnd` 부재) 자리에 **새
+    위양성을 놓는 것**이라 그건 고친 게 아니다.
+
+    두 호출처가 이 함수를 부르지만 **한 프로세스에서 한 번만 불린다**: 비거래일이면 게이트가,
+    거래일이면 `main()`이 부른다(`mlog.setup()`이 `SessionStart`를 찍으므로 두 번 부르면
+    다이제스트가 "중복 기동"으로 읽는다 — 없애려는 위양성과 같은 모양이다).
+    """
     forensics_target = crash_forensics.enable(tag="l1_daily")
-    mlog.setup(cfg.instance_id)
+    mlog.setup(instance_id)
     # 무장 사실을 **구조화 로그로도** 남긴다 (2026-08-05) — stderr 마커 하나에만 의존하면
     # 호스트(PowerShell)가 그 줄에 접두사를 붙이는 것만으로 탐지가 깨진다. 실제로 08-04에
     # 그렇게 깨져 "수정이 안 들었다"는 ERROR 오탐이 났다(`ops/crash_dumps.py`).
@@ -1037,13 +1059,14 @@ async def main(cfg: InstanceConfig) -> None:
         armed=crash_forensics.is_armed(),
     )
 
+
+async def main(cfg: InstanceConfig) -> None:
+    _arm_forensics_and_logging(cfg.instance_id)
+
+    # 거래일 판정은 `__main__`이 이미 했다 (2026-08-17 F-3) — 여기서 다시 묻지 않는다.
+    # 같은 질문을 두 곳에서 하면 둘이 갈릴 수 있고(달력 파일이 그 사이에 바뀌는 경우),
+    # 무엇보다 뒤쪽 판정은 Docker·self_check가 이미 다 돈 뒤라 아낄 것이 없다.
     today = now_kst().date()
-    if not EventCalendar.from_file().is_trading_day(today):
-        print(
-            f"{today.isoformat()}은 KRX 휴장일(Event Calendar) — 수집 생략, 즉시 종료",
-            flush=True,
-        )
-        return
 
     # 기동 창 검사 (2026-08-06 P0-2) — Task Scheduler에 at-startup 트리거가 붙으면서
     # **아무 시각에나** 이 프로세스가 불릴 수 있게 됐다. 재부팅 복구(10:05 부팅 → 즉시
@@ -1244,8 +1267,29 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _instance_id_or_unset(config_dir: str) -> str:
+    """로깅에 쓸 instance_id — 설정을 못 읽어도 **마커는 남긴다** (`run_postmarket.py`와 동일).
+
+    비거래일 게이트는 `load_instance()`가 실패해도 종료 마커를 남겨야 한다. 설정 오류로
+    그날 로그가 통째로 비면 "쉬었다"와 "설정이 깨졌다"를 구분할 수 없다.
+    """
+    try:
+        return load_instance(config_dir).instance_id
+    except Exception:  # noqa: BLE001 — 마커를 남기는 것이 목적이다
+        return "unset"
+
+
 if __name__ == "__main__":
     args = _parse_args()
+    # **비거래일이면 여기서 끝난다** (2026-08-17 F-1/F-3). Docker 기동도, self_check도,
+    # KIS 마스터파일 내려받기도 없다 — 휴장일에 시장에 아무것도 물어볼 것이 없다.
+    # 종료 코드는 0이다: 안 뜨는 것이 설계된 동작이므로 스케줄러에 실패로 남으면 안 된다
+    # (기동 창 거부와 같은 판단 — 다만 그쪽은 정시 트리거만 코드를 가른다).
+    _skip = session_guard.non_trading_day_reason()
+    if _skip is not None:
+        _arm_forensics_and_logging(_instance_id_or_unset(args.configs))
+        session_guard.announce_non_trading_day("l1_daily", _skip)
+        raise SystemExit(0)
     _ensure_docker_ready()
     _run_self_check(args.configs)
     instance_cfg = load_instance(args.configs)

@@ -26,6 +26,13 @@
 (`run_l1_daily._recompose_today`) — 리포트가 그 결과를 보고 쓰여야 하기 때문이다.
 여기서 한 번 더 부르는 것은 그 프로세스가 비정상 종료했을 때를 위한 그물이다.
 
+## 비거래일에는 아무 단계도 안 돈다 (2026-08-17 F-2)
+
+`main()` 진입 직후 `session_guard.non_trading_day_reason()`으로 걸러 **exit 0**으로 끝낸다.
+그 전에는 2026-08-17(광복절 대체공휴일)에 이 배치가 정상적으로 떠서, 그날 1분봉이 없는 것을
+`_has_day()` 가드가 *"조회 대상 불일치"*(ERROR + exit 3)로 읽었다 — 같은 코드의 안내문이
+*"휴장일이면 정상이다"* 라고 적혀 있었는데도 판정에는 쓰지 않고 있었다.
+
 ## 순서가 강제되는 이유
 
     1. 조각 통합      장중 시간대 조각을 통합본으로 (네트워크 없음)
@@ -60,7 +67,7 @@
 
 그래서 종료 코드를 넷으로 읽는다:
 
-    0                      완료
+    0                      완료 (또는 **비거래일이라 생략** — 2026-08-17 F-2)
     1                      완료 — **발견한 것이 있다**(리포트를 읽어야 한다). 실패 아님
     2(REFUSED_EXIT_CODE)   session_guard가 거부 — 실패
     3                      조회 대상 심볼이 그날 아카이브에 없다 — 단계 진입 전 중단
@@ -166,6 +173,11 @@ def _parse_args() -> argparse.Namespace:
         help="KIS REST를 쓰는 단계(거래량 대조)를 건너뛴다 — 망 장애 시 나머지라도 돌리려고",
     )
     session_guard.add_force_intraday_argument(parser)
+    parser.add_argument(
+        "--force-non-trading-day",
+        action="store_true",
+        help="비거래일에도 장후 절차를 돌린다(소급 복구용 — 그 사실이 로그에 남는다)",
+    )
     return parser.parse_args()
 
 
@@ -390,6 +402,43 @@ def main() -> int:
     mlog.setup(_instance_id(args.configs))
 
     day = args.date or datetime.now().astimezone().date()  # noqa: DTZ005 — 로컬=KST 전제
+
+    # **비거래일이면 아무 단계도 돌지 않는다** (2026-08-17 F-2).
+    #
+    # ## 왜 필요했나 — 2026-08-17 실측
+    #
+    # 이 배치는 평일 15:45 트리거라 광복절 대체공휴일에도 정상적으로 떴다. 심볼은 옳게
+    # 해석됐고(A05609), 그날 1분봉이 없는 것은 **당연**했다. 그런데 아래 `_has_day()` 분기가
+    # 그것을 *"조회 대상 불일치"* 로 읽어 `SymbolResolutionMismatch`(ERROR) + exit 3을 냈다.
+    # 같은 코드의 사람용 안내문은 *"휴장일이면 정상이다"* 라고 적혀 있었다 — **아는 사실을
+    # 판정에 쓰지 않고 각주로만 달아 둔 것**이고, 그날 다이제스트의 적신호 한 줄이 그 대가다.
+    #
+    # 그 가드(2026-08-14 F-A)는 거래일의 오조회를 잡으려고 만들어졌고 그 일은 계속 해야
+    # 한다. 그래서 `_SYMBOL_MISMATCH_EXIT_CODE`(3)는 **그대로 두고**, 비거래일만 그 분기에
+    # 도달하기 전에 걷어낸다. 순서가 요점이다: "왜 데이터가 없나"를 묻기 전에 "오늘 데이터가
+    # 있어야 하는 날인가"를 먼저 묻는다.
+    #
+    # 심볼 해석보다 **앞**이다 — 비거래일에는 조회할 심볼 자체가 필요 없고, `--date`로 지난
+    # 휴장일을 가리킨 소급 실행에서도 같은 순서가 맞는다.
+    skip_reason = session_guard.non_trading_day_reason(day=day)
+    if skip_reason is not None and not args.force_non_trading_day:
+        session_guard.announce_non_trading_day("postmarket", skip_reason)
+        print(
+            "     장후 절차는 거래일 산출물을 채점하는 도구다 — 비거래일에는 채점할 것이 없다.\n"
+            "     소급 복구 등으로 정말 돌려야 하면: --force-non-trading-day",
+            flush=True,
+        )
+        return 0  # 안 뜨는 것이 설계된 동작이다 — 스케줄러에 실패로 남기지 않는다
+    if skip_reason is not None:
+        # 우회를 **조용히** 통과시키지 않는다(L18 · `refuse_if_regular_session`의 force와 동일).
+        mlog.log(
+            "PostmarketForcedOnNonTradingDay",
+            f"{skip_reason}인데 --force-non-trading-day로 장후 절차 진행",
+            date=day.isoformat(),
+            reason=session_guard.NON_TRADING_DAY_REASON,
+        )
+        print(f"  [비거래일] {skip_reason} — --force-non-trading-day로 진행", flush=True)
+
     symbol, origin = _resolve_symbol(args.symbol, day)
     print(f"=== MESSIAH 장후 절차 — {day.isoformat()} / {symbol} ({origin}) ===", flush=True)
     mlog.log(
@@ -436,8 +485,12 @@ def main() -> int:
                 symbols_holding_day=holders,
             )
             print(
+                # 종전 문구는 *"휴장일이면 정상이다"* 였다 (2026-08-17 F-2에서 삭제).
+                # 휴장일은 이제 이 분기에 **도달하지 않는다**(main() 앞쪽 게이트가 걷어낸다)
+                # — 그 문장을 남겨 두면 사람이 진짜 오조회를 "휴장일이겠지"로 넘긴다.
                 f"\n  ** 조회 대상 불일치 ** — {symbol}/1m/{day.isoformat()} 부재. {detail}.\n"
-                f"     휴장일이면 정상이다. 아니라면 --symbol로 명시하거나 해석 규칙을 확인할 것.",
+                f"     오늘은 거래일이다(게이트를 통과했다) — 그날 수집이 죽었거나 심볼 해석이\n"
+                f"     틀린 것이다. --symbol로 명시하거나 해석 규칙을 확인할 것.",
                 file=sys.stderr,
                 flush=True,
             )

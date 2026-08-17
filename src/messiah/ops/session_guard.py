@@ -37,6 +37,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Sequence
 
+from messiah.core import logging as mlog
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.timeutil import now_kst
 from messiah.ops import task_schedule
@@ -99,6 +100,86 @@ def refuse_if_regular_session(
         flush=True,
     )
     raise SystemExit(REFUSED_EXIT_CODE)
+
+
+# ------------------------------------------------ 비거래일 (2026-08-17 F-1/F-2/F-3)
+
+# `SessionEnd`의 `reason` 값. **새 태그를 만들지 않는다** — "이 프로세스가 끝났다"를 세는
+# 소비처가 여럿이고(`ops/integrity_report._abnormal_exits`, `ops/task_exit_codes`,
+# 일일점검 다이제스트 §2), 새 태그는 그 전부가 둘 다 알아야만 맞는다. 하나만 모르면 그
+# 소비처에서 이 날은 **비정상 종료**로 남는다.
+NON_TRADING_DAY_REASON = "non_trading_day"
+
+
+def non_trading_day_reason(
+    *, day: date | None = None, calendar: EventCalendar | None = None
+) -> str | None:
+    """오늘(또는 `day`)이 비거래일이면 사람이 읽을 사유, 거래일이면 None.
+
+    ## 왜 예외를 안 올리나 — 비대칭 (2026-08-17)
+
+    `EventCalendar.is_trading_day()`는 등록 연도 밖을 물으면 `ValueError`다(L3). 그 예외가
+    진입점까지 올라가면 **2027년 첫 거래일에 수집이 통째로 죽는다** — 달력 미갱신 하나로
+    하루치 체결틱·수급·옵션체인이 영구 소실되고, 그건 이 함수가 막으려는 것(휴장일 적재)
+    보다 훨씬 비싸다. 그래서 **판정 불가는 「거래일」로 접고** 그 사실을 시끄럽게 남긴다.
+    같은 판단이 `launch_window_verdict()`에도 이미 있다(그쪽 docstring "달력을 못 읽으면
+    띄우는 쪽으로").
+
+    미갱신을 조용히 넘기지 않는 축은 따로 있다 — `scripts/self_check.py`의 `calendar`가
+    `covered_through` 만료를 **만료되기 전부터** 매일 경고한다(금지계명 12는 그렇게 지킨다).
+
+    ## 주말과 등재 휴장일을 문장에서 가른다
+
+    둘 다 "안 여는 날"이지만 출처가 다르다 — 하나는 계산(`weekday() < 5`)이고 하나는 사람이
+    확인해 파일에 적은 사실이다. 섞어 적으면 로그를 읽는 사람이 "달력이 맞았는가"를 물을 수
+    없다(마흐디 `market_calendar.holiday_name()`이 주말을 None으로 두는 것과 같은 이유).
+    """
+    target = day or now_kst().date()
+    try:
+        trading = (calendar or EventCalendar.from_file()).is_trading_day(target)
+    except Exception as exc:  # noqa: BLE001 — 판정 불가는 「거래일」로 (docstring)
+        print(
+            f"[session_guard] 거래일 판정 불가({exc}) — 거래일로 보고 진행한다"
+            " (configs/krx_holidays.yaml 갱신 필요, 자가 점검 calendar 축 확인)",
+            flush=True,
+        )
+        return None
+    if trading:
+        return None
+    weekday = "월화수목금토일"[target.weekday()]
+    if target.weekday() >= 5:
+        return f"{target.isoformat()}({weekday})은 주말"
+    return f"{target.isoformat()}({weekday})은 KRX 휴장일(configs/krx_holidays.yaml 등재)"
+
+
+def announce_non_trading_day(process: str, reason: str) -> None:
+    """비거래일 종료를 **사람용 한 줄 + 구조화 마커**로 남긴다 (2026-08-17 F-1).
+
+    ## 왜 이 한 줄이 필요했나 (2026-08-15~17 실측)
+
+    휴장 조기 종료는 2026-07-27부터 있었고 `print()` 한 줄로 끝났다. 그래서 08-15(토)·
+    16(일)·17(대체공휴일) 사흘간 `SessionEnd` **0건**이었고, 거래일 5일은 각 1건이었다.
+    결과는 일일점검이 그 사흘을 읽는 방식이었다: `SessionStart` 2회(부팅 트리거 + 정시
+    트리거)만 보이고 종료 마커가 없으니 **"중복 기동" + "비정상 종료 의심"** 으로 찍혔다.
+    08-17 다이제스트의 자동 적신호 5건 중 4건이 그 계열의 위양성이었다.
+
+    `reason` 필드가 요점이다 — `msg`는 사람용이고 기계는 `reason`을 읽는다. 이 값이 있으면
+    `_abnormal_exits`가 "기동 수 == 종료 수"로 균형을 잡고, 리포트는 "쉬었다"와
+    "죽었다"를 구분할 근거를 갖는다.
+
+    전제: 호출 전에 `mlog.setup()`이 끝나 있어야 한다 — 안 그러면 이 줄이 아무 데도 안 남는다
+         (세 진입점 모두 `_arm_forensics_and_logging()`/`mlog.setup()`을 먼저 부른다).
+    호출측은 이 함수를 부른 **직후 종료 코드 0으로 끝낸다** — 비거래일에 안 뜨는 것은
+    설계된 동작이고 실패가 아니다(스케줄러에 실패로 남으면 늑대소년이 된다).
+    """
+    print(f"{reason} — {process} 운영 생략, 즉시 종료", flush=True)
+    mlog.log(
+        "SessionEnd",
+        f"{reason} — 운영 생략",
+        process=process,
+        reason=NON_TRADING_DAY_REASON,
+        calendar_source="EventCalendar",
+    )
 
 
 # ------------------------------------------------ 기동 창 (2026-08-06 P0-2, 부팅 자동 복구)

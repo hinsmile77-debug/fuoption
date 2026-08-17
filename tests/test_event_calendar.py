@@ -6,7 +6,14 @@ from datetime import date, datetime
 
 import pytest
 
-from messiah.core.event_calendar import EventCalendar, SessionHours, load_holidays
+from messiah.core.event_calendar import (
+    EventCalendar,
+    SessionHours,
+    coverage_runway_days,
+    covered_through,
+    load_document,
+    load_holidays,
+)
 from messiah.core.timeutil import KST, UTC
 
 _HOLIDAYS_2026 = frozenset(
@@ -160,3 +167,75 @@ def test_load_holidays_reads_real_config_file() -> None:
 def test_load_holidays_missing_file_raises(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         load_holidays(tmp_path / "no_such_file.yaml")
+
+
+def test_load_holidays_includes_year_end_exchange_closure() -> None:
+    """연말 휴장(12-31)은 **관공서 공휴일이 아니라 거래소 고유 휴장**이라 놓치기 쉽다.
+
+    2026-08-17에 등재했다 — 그 전까지 파일 헤더는 "조기폐장이지 휴장 아님"이라고 적고
+    있었고, 같은 파일의 2025-12-31 실측(완전 휴장)과 어긋난 채 남아 있었다.
+    """
+    holidays = load_holidays()
+    assert date(2025, 12, 31) in holidays
+    assert date(2026, 12, 31) in holidays
+
+
+def test_load_holidays_skips_non_year_keys(tmp_path) -> None:
+    """`covered_through` 같은 메타 키가 데이터로 읽히면 안 된다.
+
+    종전 로더는 `raw.values()`를 그대로 훑어서, 문자열 값을 **문자 단위로** 순회하며
+    `date.fromisoformat("2")`로 죽었다 — 메타 키를 넣는 것 자체가 불가능했다.
+    """
+    path = tmp_path / "cal.yaml"
+    path.write_text(
+        'covered_through: "2026-12-31"\nversion: "1"\n2026:\n  - "2026-01-01"\n',
+        encoding="utf-8",
+    )
+    assert load_holidays(path) == frozenset({date(2026, 1, 1)})
+
+
+def test_load_holidays_still_raises_on_broken_date(tmp_path) -> None:
+    """메타 키를 건너뛰는 것과 **깨진 날짜**를 건너뛰는 것은 다른 일이다 (L3).
+
+    조용히 넘기면 그 한 줄 때문에 그날 시스템이 휴장일에 뜬다.
+    """
+    path = tmp_path / "cal.yaml"
+    path.write_text('2026:\n  - "2026-13-99"\n  - "januaryish"\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_holidays(path)
+
+
+# ---------------------------------------------------------------- covered_through (2026-08-17)
+
+
+def test_coverage_runway_days_sign_convention(tmp_path) -> None:
+    """부호가 뜻이다 — 양수는 남은 날수, 음수는 만료된 날수, None은 선언 부재."""
+    path = tmp_path / "cal.yaml"
+    path.write_text('covered_through: "2026-12-31"\n2026:\n  - "2026-01-01"\n', encoding="utf-8")
+    doc = load_document(path)
+
+    assert covered_through(doc) == date(2026, 12, 31)
+    assert coverage_runway_days(doc, date(2026, 12, 1)) == 30
+    assert coverage_runway_days(doc, date(2026, 12, 31)) == 0  # 오늘이 마지막 확인일
+    assert coverage_runway_days(doc, date(2027, 1, 10)) == -10  # 만료 10일째
+
+
+def test_coverage_runway_days_none_without_declaration(tmp_path) -> None:
+    """**None과 과거 날짜를 가른다** — 후자는 "확인했고 만료됐다", 전자는 "확인 안 했다"다."""
+    path = tmp_path / "cal.yaml"
+    path.write_text('2026:\n  - "2026-01-01"\n', encoding="utf-8")
+    doc = load_document(path)
+    assert covered_through(doc) is None
+    assert coverage_runway_days(doc, date(2026, 12, 1)) is None
+
+
+def test_coverage_runway_days_none_on_unparseable_declaration(tmp_path) -> None:
+    path = tmp_path / "cal.yaml"
+    path.write_text('covered_through: "not-a-date"\n2026: []\n', encoding="utf-8")
+    assert coverage_runway_days(load_document(path), date(2026, 12, 1)) is None
+
+
+def test_real_config_declares_coverage() -> None:
+    """정본 파일에 선언이 **있어야** 한다 — 지우면 자가 점검이 그 사실을 경고한다."""
+    doc = load_document()
+    assert covered_through(doc) is not None, "covered_through를 지우면 만료 경고가 죽는다"

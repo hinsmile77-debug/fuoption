@@ -34,16 +34,113 @@ from messiah.core.timeutil import ensure_aware, to_kst
 
 DEFAULT_HOLIDAYS_PATH = Path("configs") / "krx_holidays.yaml"
 
+# 사람이 "여기까지는 확인해서 채웠다"고 선언하는 키 (2026-08-17 신설).
+#
+# ## 왜 연도 등록만으로는 부족한가
+#
+# `is_trading_day()`는 미등록 연도를 물으면 예외를 던진다(L3 침묵 실패 금지). 그 신호는
+# **옳지만 늦다** — 2027-01-04(월) 아침 첫 거래일에 처음 울리고, 그때는 이미 그날 수집을
+# 잃거나(예외가 진입점을 죽이면) 휴장일에 뜬 뒤다. 수기 테이블의 실패 모드는 "안 채우는
+# 것"이 아니라 **"안 채운 걸 아무도 모르는 것"** 이고, 그건 미리 물어봐야 잡힌다.
+#
+# 선행 프로젝트 마흐디가 같은 결론에 도달해 `covered_through`를 자기 달력의 핵심으로
+# 삼았다(`mahdi/config/market_holidays.yaml` — *"수기 테이블의 실패 모드는 … 안 채운 걸
+# 아무도 모르는 것"*). 여기서도 같은 규약을 쓴다. 소비처는 `scripts/self_check.py`의
+# `calendar` 축이고, **기동을 막지 않는다** — 경고만 한다.
+COVERED_THROUGH_KEY = "covered_through"
 
-def load_holidays(path: Path | str = DEFAULT_HOLIDAYS_PATH) -> frozenset[date]:
-    """`{연도: [ISO 날짜, ...]}` 형태의 YAML을 date 집합으로 평탄화."""
+
+def load_document(path: Path | str = DEFAULT_HOLIDAYS_PATH) -> dict:
+    """달력 파일 원문을 dict로. 없으면 `FileNotFoundError`.
+
+    `load_holidays()`가 date 집합만 돌려주므로 `covered_through` 같은 **연도가 아닌 키**를
+    읽을 수단이 따로 필요하다. 파일을 두 번 읽는 것을 피하려는 호출측은 이 함수를 쓰고
+    `holidays_from_document()`/`coverage_runway_days()`에 같은 dict를 넘긴다.
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
             f"KRX 휴장일 설정 없음: {p} (configs/krx_holidays.yaml 참고, 형식은 그 파일 헤더 주석)"
         )
-    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    return frozenset(date.fromisoformat(iso) for year_dates in raw.values() for iso in year_dates)
+    return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+
+
+def _as_date(value: object) -> date:
+    """`"2026-12-31"`(따옴표 있음)도 `2026-12-31`(YAML이 date로 파싱)도 받는다.
+
+    파일은 전부 따옴표를 쓰지만, 한 줄에서 따옴표가 빠지면 YAML은 조용히 `date` 객체를
+    만든다 — 그 한 줄 때문에 파일 전체가 못 읽히면 **그날 시스템이 휴장일에 뜬다**.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value).strip())
+
+
+def holidays_from_document(raw: dict) -> frozenset[date]:
+    """연도 키만 읽어 date 집합으로 평탄화 — **연도가 아닌 키는 건너뛴다**.
+
+    종전에는 `raw.values()`를 그대로 훑었다. 그래서 `covered_through: "2026-12-31"` 한 줄을
+    추가하는 순간 문자열을 문자 단위로 순회하며 `date.fromisoformat("2")`로 죽는다 —
+    메타 키를 넣는 것 자체가 불가능한 구조였다. 연도 키(정수 또는 4자리 숫자 문자열)만
+    데이터로 읽는다.
+
+    **날짜 문법 오류는 그대로 던진다.** 메타 키를 건너뛰는 것과 깨진 날짜를 건너뛰는 것은
+    다른 일이고, 후자를 조용히 넘기면 그날 시스템이 휴장일에 뜬다(L3).
+    """
+    out: set[date] = set()
+    for key, value in raw.items():
+        if not _is_year_key(key):
+            continue
+        for iso in value or []:
+            out.add(_as_date(iso))
+    return frozenset(out)
+
+
+def _is_year_key(key: object) -> bool:
+    if isinstance(key, bool):
+        return False
+    if isinstance(key, int):
+        return 1900 <= key <= 2999
+    return isinstance(key, str) and key.strip().isdigit() and len(key.strip()) == 4
+
+
+def load_holidays(path: Path | str = DEFAULT_HOLIDAYS_PATH) -> frozenset[date]:
+    """`{연도: [ISO 날짜, ...]}` 형태의 YAML을 date 집합으로 평탄화."""
+    return holidays_from_document(load_document(path))
+
+
+def covered_through(raw: dict) -> date | None:
+    """사람이 "여기까지 확인했다"고 선언한 마지막 날짜. 없거나 못 읽으면 None.
+
+    None과 과거 날짜를 **가른다**: 과거 날짜는 "확인했고 만료됐다", None은 "확인 자체를
+    안 했다"이고 후자가 더 나쁘다. 둘을 섞으면 필드를 지운 날이 정상으로 보인다.
+    """
+    value = raw.get(COVERED_THROUGH_KEY)
+    if value is None:
+        return None
+    try:
+        return _as_date(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def coverage_runway_days(raw: dict, today: date) -> int | None:
+    """`covered_through`까지 며칠 남았나 — **부호가 뜻이다**. 선언이 없으면 None.
+
+        양수 N   앞으로 N일 더 확인돼 있다 (N일 뒤 만료)
+        0        오늘이 마지막 확인일이다
+        음수     이미 만료됐다 (절댓값 = 만료된 일수)
+
+    마흐디의 같은 이름 함수(`mahdi/market_calendar.coverage_gap_days`)는 부호를 반대로
+    쓰고 유효 구간을 0으로 접는다 — 그쪽은 "만료됐나"만 묻고 이쪽은 **만료 전에 미리
+    경고**해야 해서 남은 날수가 필요하다. 같은 이름을 안 쓴 이유가 그것이다.
+    """
+    covered = covered_through(raw)
+    if covered is None:
+        return None
+    return (covered - today).days
 
 
 @dataclass(frozen=True)

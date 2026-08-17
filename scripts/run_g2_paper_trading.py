@@ -508,10 +508,18 @@ async def _daily_close(
     await bus.close()
 
 
-async def main(cfg: InstanceConfig) -> None:
-    # 네이티브 크래시 덤프 무장 — l1_daily와 같은 이유(`core/crash_forensics.py`).
+def _arm_forensics_and_logging(instance_id: str) -> None:
+    """네이티브 크래시 덤프 무장 + 구조화 로깅 개시 — l1_daily와 같은 이유·같은 구조.
+
+    함수로 꺼낸 이유는 `run_l1_daily._arm_forensics_and_logging()`과 동일하다(2026-08-17
+    F-3): 비거래일에는 `main()`이 안 불리므로, 무장이 `main()` 안에만 있으면 그날
+    `CrashForensicsArmed`가 사라지고 `ops/crash_dumps.py`가 그 부재를 위양성으로 찍는다.
+
+    두 프로젝트 파일에 같은 모양이 두 벌 있는 것은 `tag`/`process` 값이 프로세스마다 다르고
+    두 스크립트가 서로를 import하지 않기 때문이다(진입점끼리 결합하지 않는다는 기존 구조).
+    """
     forensics_target = crash_forensics.enable(tag="g2_paper")
-    mlog.setup(cfg.instance_id)
+    mlog.setup(instance_id)
     # stderr 마커와 별개의 두 번째 출처 — 이유는 `run_l1_daily.py`의 같은 자리 주석 참고.
     mlog.log(
         "CrashForensicsArmed",
@@ -521,10 +529,13 @@ async def main(cfg: InstanceConfig) -> None:
         armed=crash_forensics.is_armed(),
     )
 
+
+async def main(cfg: InstanceConfig) -> None:
+    _arm_forensics_and_logging(cfg.instance_id)
+
+    # 거래일 판정은 `__main__`이 이미 했다 (2026-08-17 F-3) — `run_l1_daily.py`와 같은 자리·
+    # 같은 이유. 둘은 같은 아침에 같은 트리거 묶음으로 뜨므로 순서도 같아야 한다.
     today = now_kst().date()
-    if not EventCalendar.from_file().is_trading_day(today):
-        print(f"{today.isoformat()}은 KRX 휴장일 — G2 운영 생략, 즉시 종료", flush=True)
-        return
 
     # 기동 창 검사 (2026-08-06 P0-2) — `run_l1_daily.py`와 같은 이유·같은 판정. 둘은
     # at-startup 트리거를 함께 받으므로 판단도 한 곳(`ops/session_guard.py`)을 써야 한다.
@@ -636,8 +647,23 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _instance_id_or_unset(config_dir: str) -> str:
+    """로깅에 쓸 instance_id — 설정을 못 읽어도 종료 마커는 남긴다(`run_l1_daily.py`와 동일)."""
+    try:
+        return load_instance(config_dir).instance_id
+    except Exception:  # noqa: BLE001 — 마커를 남기는 것이 목적이다
+        return "unset"
+
+
 if __name__ == "__main__":
     args = _parse_args()
+    # **비거래일이면 여기서 끝난다** (2026-08-17 F-1/F-3) — `run_l1_daily.py`와 같은 게이트.
+    # 이 프로세스는 자체 수집이 없고 버스만 구독하므로 휴장일에 뜨면 종일 빈 구독만 한다.
+    _skip = session_guard.non_trading_day_reason()
+    if _skip is not None:
+        _arm_forensics_and_logging(_instance_id_or_unset(args.configs))
+        session_guard.announce_non_trading_day("g2_paper", _skip)
+        raise SystemExit(0)
     _ensure_docker_ready()
     _run_self_check(args.configs)
     instance_cfg = load_instance(args.configs)
