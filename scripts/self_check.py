@@ -207,6 +207,31 @@ def check_host(*, collector=None) -> CheckResult:
     return CheckResult("host", True, " · ".join(parts))
 
 
+def _previous_delivery_latency(
+    *, today: date | None = None, log_dir: Path | None = None
+) -> tuple[float | None, str]:
+    """직전 거래일의 회선 수신 지연 `p90` — (값, 출처 설명). 못 읽으면 (None, 사유).
+
+    `fix_verification.load_daily_reports()`를 재사용한다 (2026-08-18 G-0818P-2). 그쪽은
+    **정본 선별 규칙**(잠정본 `_pre_recompose` 제외 · 오심볼 리포트 제외 · 파일명과 내용
+    날짜 불일치 제외)을 이미 갖고 있다 — 여기서 glob으로 직접 읽으면 그 규칙이 둘로 갈린다.
+    """
+    from messiah.ops import fix_verification as fv
+
+    reports = fv.load_daily_reports(log_dir or Path("logs"))
+    if not reports:
+        return None, "직전 거래일 리포트 없음"
+    cutoff = today or now_kst().date()
+    past = [day for day in sorted(reports) if day < cutoff]
+    if not past:
+        return None, "직전 거래일 리포트 없음"
+    day = past[-1]
+    latency = reports[day].get("delivery_latency")
+    if not isinstance(latency, dict) or not isinstance(latency.get("p90"), (int, float)):
+        return None, f"{day.isoformat()} 리포트에 회선 지연 없음"
+    return float(latency["p90"]), day.isoformat()
+
+
 def check_bar_close(cfg: InstanceConfig) -> CheckResult:
     """1분봉 확정 방식을 기동 로그에 노출한다 (2026-08-12 F-5 / NEXT_TODO R-1).
 
@@ -230,7 +255,49 @@ def check_bar_close(cfg: InstanceConfig) -> CheckResult:
         detail = f"1분봉 확정: {mode_value} (마지막 틱 구동 — timer 승격 대상)"
     else:
         detail = "1분봉 확정: 설정 없음(기본값 사용)"
-    return CheckResult("bar_close", True, detail)
+    return CheckResult("bar_close", True, detail + _grace_vs_latency_note())
+
+
+def _grace_vs_latency_note(*, today: date | None = None, log_dir: Path | None = None) -> str:
+    """완성봉 유예를 **전일 회선 실측**과 대조한 한 줄 (2026-08-18 G-0818P-2).
+
+    ## 왜 이 축에 붙이나
+
+    `check_clock`은 시계 오프셋을 재면서 *"경고: 완성봉 유예 500ms보다 큼"* 을 붙인다 —
+    즉 **완성봉 예산을 이미 판단 기준으로 쓰고 있다.** 그런데 정작 그 예산을 실제로 잡아먹는
+    회선 지연은 어느 축도 예산과 대조하지 않았다. 2026-08-18 실측:
+
+        delivery_latency  p50 0.5204 · p90 0.9271 · p99 1.0323   (유예 0.500)
+
+    **중앙값이 이미 예산을 넘는다.** 장중 점검이 "발행이 500ms를 상시 초과(69.6%)"를
+    발행 로직 문제로 봤는데, 원인은 발행이 아니라 회선이 예산보다 느린 것이었다.
+
+    **임계를 자동으로 바꾸지 않는다(R18)** — 말하게만 한다. 유예 조정은 며칠치 분포를 본 뒤
+    별건으로 결정할 일이고, 그 분포가 매 아침 이 줄로 쌓인다. 판정(ok)도 뒤집지 않는다:
+    이 사실로 기동을 막으면 D-day 40거래일 관문의 분모를 계측이 갉아먹는다.
+    """
+    grace = _boundary_grace_seconds()
+    p90, source = _previous_delivery_latency(today=today, log_dir=log_dir)
+    if p90 is None:
+        # 못 잰 것을 "정상"으로 접지 않는다(L18) — 다만 이 축의 판정은 아니다.
+        return f" · 회선 대조 불가({source})"
+    verdict = "경고: " if p90 > grace else ""
+    tail = " — 완성봉이 늦은 틱을 놓칠 수 있다" if p90 > grace else ""
+    return (
+        f" · {verdict}유예 {grace * 1000:.0f}ms vs 전일 회선 p90 {p90 * 1000:.0f}ms({source}){tail}"
+    )
+
+
+def _boundary_grace_seconds() -> float:
+    """완성봉 유예 — **합성기 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
+
+    `data/bar_composer.py`는 polars에 의존하지 않아 여기서 임포트해도 가볍다. 값이 저쪽에서
+    바뀌면 이 대조도 자동으로 따라간다 — 리포트가 옛 기준으로 조용히 채점하는 형태
+    (`ops/integrity_report`의 `min_samples` 처리와 같은 규율)를 피한다.
+    """
+    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+
+    return float(_BOUNDARY_GRACE_SECONDS)
 
 
 def check_prev_postmarket(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -315,3 +316,75 @@ def test_clean_tree_passes(monkeypatch) -> None:
 
     assert result.ok is True
     assert result.detail == "clean"
+
+
+# -------------------------------------- 완성봉 유예 ↔ 회선 실측 (2026-08-18 G-0818P-2)
+#
+# `check_clock`은 시계 오프셋을 재며 "완성봉 유예 500ms보다 큼"을 경고한다 — 즉 완성봉
+# 예산을 이미 판단 기준으로 쓰고 있었다. 그런데 그 예산을 실제로 잡아먹는 **회선 지연**은
+# 어느 축도 예산과 대조하지 않았다. 2026-08-18 실측 p50 0.5204 — 중앙값이 이미 예산을 넘는다.
+
+
+def _integrity_report(directory, day: str, p90: float | None) -> None:
+    import json
+
+    payload = {"date": day, "symbol": "A05609"}
+    if p90 is not None:
+        payload["delivery_latency"] = {"p50": p90 - 0.4, "p90": p90, "p99": p90 + 0.1}
+    (directory / f"daily_integrity_{day.replace('-', '')}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_the_grace_note_warns_when_the_line_is_slower_than_the_budget(tmp_path: Path) -> None:
+    """2026-08-18 실측 형태(p90 927ms > 유예 500ms) — 이 문장이 매 아침 분포를 쌓는다."""
+    _integrity_report(tmp_path, "2026-08-18", 0.9271)
+
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
+
+    assert "경고" in note
+    assert "927ms" in note
+    assert "2026-08-18" in note, "어느 날 실측인지 없으면 사람이 다시 캐야 한다"
+
+
+def test_the_grace_note_is_quiet_when_the_line_is_fast_enough(tmp_path: Path) -> None:
+    _integrity_report(tmp_path, "2026-08-18", 0.21)
+
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
+
+    assert "경고" not in note
+    assert "210ms" in note, "조용해도 값은 남긴다 — 분포는 매일 쌓여야 한다"
+
+
+def test_a_missing_report_says_so_instead_of_passing_silently(tmp_path: Path) -> None:
+    """못 잰 것을 "정상"으로 접지 않는다(L18)."""
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
+
+    assert "대조 불가" in note
+
+
+def test_a_report_without_the_latency_field_is_not_treated_as_zero(tmp_path: Path) -> None:
+    """이 필드 이전에 쓰인 옛 리포트 — 0ms로 읽으면 영원히 조용한 축이 된다."""
+    _integrity_report(tmp_path, "2026-08-18", None)
+
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
+
+    assert "회선 지연 없음" in note
+
+
+def test_today_report_is_not_used_as_yesterday(tmp_path: Path) -> None:
+    """오늘 리포트는 아직 없다 — 기동 시점에 존재하면 그건 어제 것이어야 한다."""
+    _integrity_report(tmp_path, "2026-08-19", 5.0)  # 오늘(있을 수 없는 값)
+    _integrity_report(tmp_path, "2026-08-18", 0.9271)
+
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
+
+    assert "927ms" in note
+    assert "5000ms" not in note
+
+
+def test_the_grace_comes_from_the_composer_constant() -> None:
+    """두 번째 상수를 만들지 않는다 — 합성기에서 바뀌면 이 대조도 따라가야 한다."""
+    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+
+    assert sc._boundary_grace_seconds() == float(_BOUNDARY_GRACE_SECONDS)
