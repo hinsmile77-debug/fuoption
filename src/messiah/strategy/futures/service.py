@@ -77,11 +77,23 @@ class FuturesAIService:
         self._bus = bus
         self._latest_regime: RegimeState = _UNSEEN_REGIME.model_copy(update={"symbol": symbol})
         self._latest_views: dict[Horizon, ExpertView] = {}
+        # 마지막으로 meta 판정에 쓰인 meta_features (2026-08-18 G-0818P-3). `MetaGateEvaluated`
+        # 가 확률을 남기게 됐지만(F-0818I-1) **그 확률을 만든 입력**은 여전히 계산 직후
+        # 버려지고 있었다 — pass 사이클 스냅샷이 이 캐시를 읽는다.
+        self._latest_meta_features: dict[Horizon, dict[str, float]] = {}
 
     @property
     def latest_views(self) -> dict[Horizon, ExpertView]:
         """조회 전용 사본 — 테스트·진단용."""
         return dict(self._latest_views)
+
+    @property
+    def latest_meta_features(self) -> dict[str, dict[str, float]]:
+        """Horizon값 → 마지막 meta_features 사본 — pass 사이클 스냅샷용 (G-0818P-3).
+
+        MetaLabeler가 없는 Horizon은 여기 없다 — 계산된 적 없는 값을 지어내지 않는다(L18).
+        """
+        return {h.value: dict(f) for h, f in self._latest_meta_features.items()}
 
     async def handle_regime(self, msg: BusMessage) -> None:
         if isinstance(msg, RegimeState) and msg.symbol == self._symbol:
@@ -104,6 +116,7 @@ class FuturesAIService:
             return view  # 모듈 docstring: MetaLabeler 미보유 Horizon은 필터링 없이 통과
         probs = np.array([view.p_down, view.p_flat, view.p_up])
         meta_features = build_meta_features_from_feature_vector(probs, view.ens_std, feature_vector)
+        self._latest_meta_features[feature_vector.horizon] = dict(meta_features)
         # **확률을 버리지 않는다** (2026-08-18 F-0818I-1). 종전엔 `meta.passes()`가 내부에서
         # 확률을 계산하고 bool만 돌려줘, 이 파이프라인 어디에도 확률값이 남지 않았다.
         # 그 대가: 2026-08-11~18 관측 내내 `blocked_by_meta`가 13/14 사이클을 막는 동안

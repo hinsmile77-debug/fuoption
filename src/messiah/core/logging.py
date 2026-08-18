@@ -109,6 +109,12 @@ TAG_LEVELS: dict[str, int] = {
     # 확률을 사이클마다 남긴다 — `blocked_by_meta`가 13/14를 막는 동안 "임계 0.7에 얼마나
     # 가까운가"를 아무도 몰랐다. 임계는 안 건드린다(R18) — 말하게만 한다. 하루 14줄(30m).
     "MetaGateEvaluated": logging.INFO,
+    # meta 게이트를 넘은 사이클의 입력 보존 (2026-08-18 G-0818P-3). 2026-08-18 14:30에
+    # 관측 이래 첫 통과가 나왔는데 남은 것이 로그 3줄뿐이었다 — 다음이 언제일지 모르는
+    # 사건의 입력을 그렇게 흘리면 분석할 표본이 0건이다. 하루 최대 몇 건이라 INFO.
+    "PassCycleSnapshot": logging.INFO,
+    # 그 보존이 실패했다 — 거래 경로는 계속되므로 WARNING이되 조용히는 안 된다(R10).
+    "PassCycleSnapshotFailed": logging.WARNING,
     # UI 첫 렌더가 그린 것의 신선도 (2026-08-18 G-0818I-4). **부재가 정보다**: 이 태그가
     # 없는 날은 UI가 죽은 게 아니라(그건 상태판 프로브 몫) 아무도 화면을 안 열었다는 뜻이다.
     "UISnapshotFreshness": logging.INFO,

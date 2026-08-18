@@ -130,6 +130,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable
 
 from messiah.broker.base import BrokerAdapter, BrokerPosition
@@ -150,6 +151,7 @@ from messiah.core.messages import (
     BarClosed,
     BusMessage,
     CircuitBreakerStatus,
+    DecisionIntent,
     FuturesView,
     Health,
     HealthLevel,
@@ -164,6 +166,7 @@ from messiah.core.timeutil import now_utc, to_kst
 from messiah.execution.order_gateway import OrderGateway
 from messiah.features.px_core import atr as compute_atr
 from messiah.models.labeling import DEFAULT_ATR_WINDOW
+from messiah.ops import pass_cycles
 from messiah.risk.circuit_breaker_monitor import (
     CircuitBreakerEvent,
     CircuitBreakerMonitor,
@@ -196,6 +199,13 @@ class TradingPipeline:
         event_calendar: EventCalendar | None = None,
         circuit_breaker_monitor: CircuitBreakerMonitor | None = None,
         now: Callable[[], datetime] = now_utc,
+        # pass 사이클 입력 보존 (2026-08-18 G-0818P-3). 둘 다 미지정이면 스냅샷에서 해당
+        # 항목이 빠질 뿐 보존 자체는 계속된다 — 재생·스모크처럼 서비스가 없는 경로에서도
+        # `FuturesView`·`Net ER`·결과는 남는 것이 맞다(주입 여부로 축이 꺼지면 안 된다).
+        expert_views_provider: Callable[[], dict] | None = None,
+        meta_features_provider: Callable[[], dict] | None = None,
+        # 스냅샷 저장 위치 — 테스트가 실제 `logs/`를 오염시키지 않도록 주입받는다.
+        pass_cycle_dir: Path = pass_cycles.DEFAULT_DIR,
     ) -> None:
         self._symbol = symbol
         self._broker = broker
@@ -217,6 +227,9 @@ class TradingPipeline:
         # 미지정(None)이면 CB 대응 전체가 비활성(기존 동작, 회귀 없음) — 모듈 docstring
         # "거래소 서킷브레이커 자동 대응" 절 참고.
         self._circuit_breaker_monitor = circuit_breaker_monitor
+        self._expert_views_provider = expert_views_provider
+        self._meta_features_provider = meta_features_provider
+        self._pass_cycle_dir = pass_cycle_dir
         # 벽시계 주입점 (2026-07-30). 데이터 신선도(`data_age`)와 CB 판정의 기준시각은
         # **전부 이 시계 하나**에서 온다 — `handle_futures_view()`도, 순수 벽시계 폴링인
         # `watch_circuit_breaker_forever()`도.
@@ -326,16 +339,30 @@ class TradingPipeline:
                 symbol=self._symbol,
                 side=intent.side.value,
             )
+            self._record_pass_cycle(as_of, view, intent, outcome="out_of_session")
             return
 
         bars = list(self._bars)
         atr_ticks = compute_atr(bars, self._atr_window) if bars else None
         if atr_ticks is None or atr_ticks <= 0:
-            return  # ATR 워밍업 미달 — 다른 컴포넌트의 워밍업 관례와 동일하게 조용히 대기
+            # ATR 워밍업 미달 — 다른 컴포넌트의 워밍업 관례와 동일하게 조용히 대기.
+            # 다만 **게이트를 넘은 판단이 여기서 사라진 사실**은 남긴다(G-0818P-3):
+            # 종전엔 이 `return`이 로그 한 줄도 없이 사이클을 지웠다.
+            self._record_pass_cycle(as_of, view, intent, outcome="atr_warmup")
+            return
 
         cost = self._cost_model.estimate_round_trip_from_bars(bars, qty=1)
         edge = max(0.0, min(1.0, 2.0 * intent.confidence - 1.0))
         net_expected_return_ticks = edge * atr_ticks - cost.total_ticks
+        net_er_detail = {
+            "edge": edge,
+            "atr_ticks": atr_ticks,
+            "cost_ticks": cost.total_ticks,
+            "net_expected_return_ticks": net_expected_return_ticks,
+            "confidence": intent.confidence,
+            "atr_window": self._atr_window,
+            "bars_used": len(bars),
+        }
 
         minutes_to_close = (
             self._event_calendar.minutes_to_close(as_of) if self._event_calendar else None
@@ -351,7 +378,13 @@ class TradingPipeline:
             minutes_to_close=minutes_to_close,
             circuit_breaker_active=circuit_breaker_active,
         )
+        risk_detail = {"approved": risk_decision.approved, "reason": risk_decision.reason}
         if not risk_decision.approved:
+            # **2026-08-18 14:30이 정확히 이 자리였다** — `Net ER -1.62틱 ≤ 0`으로 기각.
+            # 그날 남은 것은 로그 3줄이 전부였고, 그래서 이 스냅샷이 생겼다(G-0818P-3).
+            self._record_pass_cycle(
+                as_of, view, intent, outcome="risk_reject", net_er=net_er_detail, risk=risk_detail
+            )
             return
 
         qty = self._sizer.size(
@@ -361,6 +394,9 @@ class TradingPipeline:
             stop_distance_ticks=atr_ticks,
         )
         if qty == 0:
+            self._record_pass_cycle(
+                as_of, view, intent, outcome="zero_qty", net_er=net_er_detail, risk=risk_detail
+            )
             return
 
         order = self._sizer.build_order_request(
@@ -371,6 +407,53 @@ class TradingPipeline:
         ack = await self._gateway.submit(order)
         if ack is None:
             self._risk_engine.record_order_error(as_of)
+        self._record_pass_cycle(
+            as_of,
+            view,
+            intent,
+            outcome="submitted",
+            net_er=net_er_detail,
+            risk={**risk_detail, "qty": qty, "order_acked": ack is not None},
+        )
+
+    def _record_pass_cycle(
+        self,
+        as_of: datetime,
+        view: FuturesView,
+        intent: DecisionIntent,
+        *,
+        outcome: str,
+        net_er: dict | None = None,
+        risk: dict | None = None,
+    ) -> None:
+        """게이트를 넘은 사이클의 입력을 보존한다 (2026-08-18 G-0818P-3).
+
+        **거래 경로를 막지 않는다** — 저장 실패는 `ops/pass_cycles`가 WARNING으로 삼킨다.
+        여기서 다시 감싸는 것은 provider 콜러블(외부 주입)이 던지는 경우까지 막기 위해서다.
+        """
+        try:
+            expert_views = self._expert_views_provider() if self._expert_views_provider else None
+            meta_features = self._meta_features_provider() if self._meta_features_provider else None
+            pass_cycles.record(
+                as_of=as_of,
+                symbol=self._symbol,
+                view=view,
+                intent=intent,
+                expert_views={str(k): v for k, v in (expert_views or {}).items()},
+                meta_features=meta_features,
+                net_er=net_er,
+                outcome=outcome,
+                risk=risk,
+                base_dir=self._pass_cycle_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — 관측이 거래를 막지 않는다(R10은 지킨다)
+            log(
+                "PassCycleSnapshotFailed",
+                f"pass 사이클 스냅샷 실패 — 거래 경로는 계속: {exc}",
+                symbol=self._symbol,
+                outcome=outcome,
+                error=str(exc),
+            )
 
     def _in_regular_session(self, as_of: datetime) -> bool:
         """`event_calendar` 미주입이면 항상 True — 재생/스모크처럼 KRX 세션 개념이 없는

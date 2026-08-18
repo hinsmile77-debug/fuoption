@@ -587,6 +587,11 @@ async def main(cfg: InstanceConfig) -> None:
         bus,
         event_calendar=EventCalendar.from_file(),
         circuit_breaker_monitor=CircuitBreakerMonitor(),
+        # pass 사이클 스냅샷에 **판단을 만든 입력**까지 실린다 (2026-08-18 G-0818P-3).
+        # 파이프라인은 서비스를 모르지만 이 스크립트는 둘을 같은 프로세스에 배선하므로
+        # 여기서만 이어줄 수 있다 — 콜러블로 넘겨 파이프라인이 서비스에 의존하지 않게 한다.
+        expert_views_provider=lambda: futures_service.latest_views,
+        meta_features_provider=lambda: futures_service.latest_meta_features,
     )
     sim_feed = LiveSimBrokerFeed(symbol, broker, gateway, bus)
 

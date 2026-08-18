@@ -135,6 +135,42 @@ async def test_meta_gate_logs_the_probability_it_used_to_discard(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_meta_features_are_kept_for_the_pass_cycle_snapshot():
+    """확률을 만든 **입력**도 남긴다 (2026-08-18 G-0818P-3).
+
+    F-0818I-1이 확률을 로그로 살렸지만 그 확률을 만든 meta_features는 여전히 계산 직후
+    버려지고 있었다 — pass 사이클이 왔을 때 재현할 수 있어야 하는 것은 확률이 아니라 입력이다.
+    """
+    bus = InProcessBus()
+    service = FuturesAIService(
+        _SYMBOL,
+        {Horizon.M5: _train_expert(Horizon.M5)},
+        bus,
+        meta_labelers={Horizon.M5: _train_meta(Horizon.M5, always_pass=True)},
+    )
+
+    await service.handle_feature(_feature_vector(Horizon.M5))
+
+    cached = service.latest_meta_features
+    assert set(cached) == {"5m"}
+    assert cached["5m"], "meta_features가 비어 있으면 재현 근거가 없다"
+    # 사본이어야 한다 — 밖에서 만진 값이 다음 판정에 흘러들면 안 된다.
+    cached["5m"]["ens_std"] = -999.0
+    assert service.latest_meta_features["5m"].get("ens_std") != -999.0
+
+
+@pytest.mark.asyncio
+async def test_a_horizon_without_meta_labeler_caches_no_features():
+    """계산된 적 없는 값을 지어내지 않는다(L18)."""
+    bus = InProcessBus()
+    service = FuturesAIService(_SYMBOL, {Horizon.M5: _train_expert(Horizon.M5)}, bus)
+
+    await service.handle_feature(_feature_vector(Horizon.M5))
+
+    assert service.latest_meta_features == {}
+
+
+@pytest.mark.asyncio
 async def test_horizon_without_meta_labeler_logs_nothing(monkeypatch):
     """미배선 Horizon은 확률 자체가 없다 — 없는 값을 지어내지 않는다(L18)."""
     from messiah.strategy.futures import service as service_mod

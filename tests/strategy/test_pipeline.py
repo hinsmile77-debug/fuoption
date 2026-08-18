@@ -1,6 +1,9 @@
+import json
 import math
+import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +25,7 @@ from messiah.core.messages import (
 from messiah.core.timeutil import KST, now_utc
 from messiah.execution.order_gateway import OrderGateway
 from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor, CircuitBreakerPhase
+from messiah.risk.cost_model import CostEstimate, CostModel
 from messiah.risk.kill_switch import KillSwitch, KillSwitchConfig
 from messiah.simulator.inprocess_bus import InProcessBus
 from messiah.strategy.pipeline import TradingPipeline
@@ -93,6 +97,9 @@ _NOW = {"t": _DEFAULT_VIEW_TS}
 
 async def _make_pipeline(**overrides):
     overrides.setdefault("now", lambda: _NOW["t"])
+    # pass 사이클 스냅샷은 임시 경로로 (2026-08-18 G-0818P-3) — 테스트가 실제 `logs/`에
+    # 파일을 떨구면 그 디렉터리가 곧 신뢰할 수 없는 표본이 된다.
+    overrides.setdefault("pass_cycle_dir", Path(tempfile.mkdtemp()) / "pass_cycles")
     bus = InProcessBus()
     broker = SimBroker(cash=50_000_000)
     await broker.connect()
@@ -842,3 +849,96 @@ async def test_kill_signal_reentry_does_not_liquidate_twice():
     positions = await broker.positions()
     assert all(p.qty == 0 for p in positions), f"재청산으로 반대 포지션이 생겼다 — {positions}"
     assert gateway.halted is True
+
+
+# ---------------- pass 사이클 입력 보존 (2026-08-18 G-0818P-3)
+#
+# 2026-08-18 14:30, 관측 이래 처음으로 meta 게이트를 넘은 판단이 나왔고 리스크단이
+# `Net ER -1.62틱`으로 기각했다. 하루 14사이클 중 1건인데 **남은 것은 로그 3줄이 전부**였다 —
+# 어떤 ExpertView가 S=0.511을 만들었는지, -1.62가 어떤 ATR·비용에서 나왔는지가 없었다.
+
+
+class _ExpensiveCostModel(CostModel):
+    """왕복비용을 크게 잡아 Net ER을 음수로 만든다 — 08-18 14:30과 같은 형태의 기각 재현."""
+
+    def estimate_round_trip_from_bars(self, bars, *, qty, volume_window=20):
+        return CostEstimate(
+            commission_ticks=50.0, tax_ticks=0.0, slippage_ticks=0.0, market_impact_ticks=0.0
+        )
+
+
+def _snapshots(directory) -> list[dict]:
+    files = sorted(Path(directory).glob("*.json"))
+    return [json.loads(f.read_text(encoding="utf-8")) for f in files]
+
+
+@pytest.mark.asyncio
+async def test_a_risk_rejected_pass_cycle_is_preserved_with_its_inputs(tmp_path):
+    """**2026-08-18 14:30의 재현** — 통과했으나 리스크가 기각한 사이클."""
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        pass_cycle_dir=tmp_path / "pass_cycles",
+        expert_views_provider=lambda: {"30m": {"p_up": 0.9, "meta_passed": True}},
+        meta_features_provider=lambda: {"30m": {"ens_std": 0.02}},
+        # 비용을 크게 잡아 Net ER을 음수로 만든다 — 그날과 같은 형태의 기각.
+        cost_model=_ExpensiveCostModel(),
+    )
+    await _warm_up(pipeline, broker)
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+
+    (snap,) = _snapshots(tmp_path / "pass_cycles")
+    assert snap["outcome"] == "risk_reject", "어디서 멈췄는지가 곧 다음에 고칠 것이다"
+    assert snap["risk"]["approved"] is False
+    assert snap["risk"]["reason"], "기각 사유가 비면 재현이 안 된다"
+    # Net ER의 **구성요소**가 남아야 -1.62가 어디서 나왔는지 사후에 조립된다.
+    assert snap["net_er"]["net_expected_return_ticks"] < 0
+    for key in ("edge", "atr_ticks", "cost_ticks", "confidence", "bars_used"):
+        assert key in snap["net_er"]
+    # 판단을 만든 입력 — 주입된 provider에서 온다.
+    assert snap["expert_views"]["30m"]["p_up"] == 0.9
+    assert snap["meta_features"]["30m"]["ens_std"] == 0.02
+    assert snap["view"]["score"] == 0.5
+    assert snap["intent"]["side"] == "LONG"
+
+
+@pytest.mark.asyncio
+async def test_an_order_submitting_cycle_is_preserved_too(tmp_path):
+    """기각만 남기면 "통과한 날"의 표본이 없다 — G2 40거래일이 쌓아야 할 것이 그쪽이다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(pass_cycle_dir=tmp_path / "pass_cycles")
+    await _warm_up(pipeline, broker)
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+
+    (snap,) = _snapshots(tmp_path / "pass_cycles")
+    assert snap["outcome"] == "submitted"
+    assert snap["risk"]["qty"] >= 1
+    assert snap["risk"]["order_acked"] is True
+
+
+@pytest.mark.asyncio
+async def test_no_trade_cycles_leave_no_snapshot(tmp_path):
+    """NO_TRADE까지 남기면 하루 14건이 쌓여 이 디렉터리가 로그의 사본이 된다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(pass_cycle_dir=tmp_path / "pass_cycles")
+    await _warm_up(pipeline, broker)
+
+    await pipeline.handle_futures_view(_view(score=0.05, agg_p_up=0.5, agg_p_down=0.5))
+
+    assert _snapshots(tmp_path / "pass_cycles") == []
+
+
+@pytest.mark.asyncio
+async def test_a_broken_provider_does_not_kill_the_trade(tmp_path):
+    """관측 도구가 거래 경로를 죽이면 본말전도다 — 주문은 그대로 나가야 한다."""
+
+    def explode():
+        raise RuntimeError("provider 고장")
+
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        pass_cycle_dir=tmp_path / "pass_cycles", expert_views_provider=explode
+    )
+    await _warm_up(pipeline, broker)
+
+    await pipeline.handle_futures_view(_view(score=0.5, agg_p_up=0.9, agg_p_down=0.05))
+
+    positions = await broker.positions()
+    assert len(positions) == 1, "스냅샷이 실패해도 주문은 나간다"
