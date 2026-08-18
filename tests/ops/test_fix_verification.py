@@ -128,13 +128,48 @@ def test_not_enough_samples_stays_pending(tmp_path: Path):
 
 
 def test_deadline_passed_without_verification_is_overdue(tmp_path: Path):
+    """채점할 날은 충분히 있었는데 못 지킨 경우 — 이쪽이 진짜 `기한 초과`다."""
     registry = _registry(tmp_path)
-    reports = {date(2026, 8, 4): _report(date(2026, 8, 4))}
+    # 08-05 위반 뒤 08-06·08-07·08-10·08-11이 깨끗하지 않다(매일 크래시 1건).
+    reports = {
+        day: _report(day, native_crashes={"available": True, "count": 1, "details": []})
+        for day in (date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10))
+    }
 
     verdict = evaluate(registry, reports, today=date(2026, 8, 15))[0]
 
+    assert verdict.status == VerificationStatus.RECURRED, "마지막으로 잰 날에 위반 중"
+
+    # 위반이 아니라 "판정 불가"가 섞여 연속이 안 찬 경우 — 창은 세 날 다 있었다.
+    window_existed = {
+        date(2026, 8, 5): _report(date(2026, 8, 5)),
+        date(2026, 8, 6): _report(
+            date(2026, 8, 6), native_crashes={"available": False, "count": 0, "details": []}
+        ),
+        date(2026, 8, 7): _report(date(2026, 8, 7)),
+    }
+    verdict = evaluate(registry, window_existed, today=date(2026, 8, 15))[0]
+
     assert verdict.status == VerificationStatus.OVERDUE
     assert verdict.needs_attention
+
+
+def test_a_deadline_with_no_days_to_score_is_not_the_same_as_a_missed_one(tmp_path: Path):
+    """**"못 고쳤다"와 "잴 날이 없었다"는 다른 사건이다** (2026-08-18 F-0818P-4).
+
+    08-18에 걸린 세 건이 전부 후자였다: 08-17 휴장으로 기한(08-19)까지 남은 거래일이
+    1일인데 `consecutive_days: 3`이라 산술적으로 충족이 불가능했다. 그런데 판정은 다른
+    항목과 똑같이 `기한 초과` — 읽는 사람에게는 "수정이 안 들었다"로 보인다. 처방이
+    "고쳐라"가 아니라 "기한을 다시 잡아라"이므로 판정도 달라야 한다.
+    """
+    registry = _registry(tmp_path)  # deadline 08-14 · 3거래일 연속
+    reports = {date(2026, 8, 13): _report(date(2026, 8, 13))}
+
+    verdict = evaluate(registry, reports, today=date(2026, 8, 15))[0]
+
+    assert verdict.status == VerificationStatus.UNREACHABLE
+    assert "채점 가능일이 1일뿐" in verdict.detail
+    assert verdict.needs_attention, "재조정도 사람이 해야 하는 일이다"
 
 
 # ---------------------------------------------------------------- 못 잰 날 (L18)
@@ -343,7 +378,28 @@ def test_one_unjudged_day_is_still_just_pending(tmp_path: Path):
 
 
 def test_progress_beats_stalled(tmp_path: Path):
-    """한 번이라도 실제로 통과한 적이 있으면 정체가 아니라 진행 중이다."""
+    """아직 못 잰 날이 연속 N일에 못 미치면 정체가 아니라 진행 중이다."""
+    registry = _registry(tmp_path, metric="native_crashes", max=0, consecutive_days=3)
+    reports = {
+        date(2026, 8, 4): {"native_crashes": {"available": True, "count": 0}},
+        date(2026, 8, 5): {"native_crashes": {"available": False, "count": 0}},
+        date(2026, 8, 6): {"native_crashes": {"available": False, "count": 0}},
+    }
+
+    [verdict] = evaluate(registry, reports, today=date(2026, 8, 7))
+
+    assert verdict.status == VerificationStatus.PENDING
+    assert verdict.clean_days == 1
+
+
+def test_stalled_counts_the_recent_run_not_the_whole_history(tmp_path: Path):
+    """**정체는 "평생 한 번도 못 쟀나"가 아니라 "지금 못 재고 있나"다** (2026-08-18 F-0818P-1).
+
+    종전 조건은 "통과 0 + 판정 불가 누적"이었다. 그래서 옛날에 한 번 통과한 축은 그 뒤로
+    영영 못 재도 정체로 안 잡혔다 — 2026-08-18의 `exit-code-matches-log`가 정확히 그 자리다.
+    08-12에 한 번 통과한 뒤 08-13·08-14·08-18을 `TimeoutExpired`로 연속 실패했는데도 판정은
+    "회복 중 1/3"으로 조용했다. **축이 사흘째 눈을 감고 있다는 사실이 어디에도 안 나왔다.**
+    """
     registry = _registry(tmp_path, metric="native_crashes", max=0, consecutive_days=3)
     reports = {
         date(2026, 8, 4): {"native_crashes": {"available": True, "count": 0}},
@@ -354,8 +410,8 @@ def test_progress_beats_stalled(tmp_path: Path):
 
     [verdict] = evaluate(registry, reports, today=date(2026, 8, 8))
 
-    assert verdict.status == VerificationStatus.PENDING
-    assert verdict.clean_days == 1
+    assert verdict.status == VerificationStatus.STALLED
+    assert "최근 3거래일 연속 판정 불가" in verdict.detail
 
 
 # ------------------------- 전제 채점 (2026-08-05 2차, 고도화 4)
@@ -725,18 +781,24 @@ def test_since_moves_the_scoring_start_without_erasing_when_it_was_fixed():
     assert item.scored_after == date(2026, 8, 10)
 
 
-def test_an_old_violation_stops_being_reported_after_since():
+def test_recovery_no_longer_needs_a_manual_since_reset():
     """2026-08-10의 그 자리 — 08-07 위반이 사흘째 매일 다시 보고되고 있었다.
 
-    그 한 줄이 상단에 계속 있으면 **그날 새로 생긴 재발이 옆에 묻힌다.**
+    B-3의 처방은 `since:` **수동** 리셋이었고, 2026-08-18에 그 처방이 실패했다: 사람이
+    밀지 않으면 회복이 영원히 안 보인다(그날 재발 11건 중 9건이 이미 회복 상태였다).
+    이제 마지막 위반 이후 연속 통과가 `consecutive_days`에 닿으면 **손대지 않아도** 졸업한다.
+    `since:`를 준 결과와 안 준 결과가 같다는 것이 그 증거다.
     """
     reports = _days((5, 0), (6, 0), (7, 3), (10, 0), (11, 0), (12, 0))
 
     before = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
     after = evaluate([_restarts_item(since=date(2026, 8, 7))], reports, today=date(2026, 8, 12))[0]
 
-    assert before.status == VerificationStatus.RECURRED
-    assert after.status == VerificationStatus.VERIFIED, "재설정 뒤 3거래일이 깨끗하다"
+    assert before.status == VerificationStatus.VERIFIED, "위반 뒤 3거래일이 깨끗하다"
+    assert after.status == VerificationStatus.VERIFIED
+    # 졸업했다고 위반이 없던 일이 되지는 않는다 — 언제 무너졌었는지는 문장에 남는다.
+    assert "2026-08-07 위반에서 회복" in before.detail
+    assert before.last_violation == date(2026, 8, 7)
 
 
 def test_since_does_not_forgive_a_violation_after_it():
@@ -746,8 +808,12 @@ def test_since_does_not_forgive_a_violation_after_it():
     item = _restarts_item(since=date(2026, 8, 7))
     verdict = evaluate([item], reports, today=date(2026, 8, 12))[0]
 
-    assert verdict.status == VerificationStatus.RECURRED
+    # 08-12 하루가 깨끗하니 `회복 중`이지만(3거래일 중 1일), **면제는 아니다** —
+    # 위반일이 문장에 그대로 남고 연속 카운터는 그 위반에서 다시 시작한다.
+    assert verdict.status == VerificationStatus.RECOVERING
+    assert verdict.status != VerificationStatus.VERIFIED
     assert "2026-08-11" in verdict.detail
+    assert verdict.clean_days == 1
 
 
 def test_since_earlier_than_registered_cannot_widen_the_window():
@@ -759,11 +825,14 @@ def test_since_earlier_than_registered_cannot_widen_the_window():
 
 def test_a_recurrence_says_how_old_it_is_in_trading_days():
     """`2026-08-07에 기준 위반`만으로는 오늘 난 것과 사흘 묵은 것이 같은 무게로 읽힌다."""
-    reports = _days((5, 0), (6, 0), (7, 3), (10, 0), (11, 0), (12, 0))
+    # 08-07 위반 뒤 08-10 하루만 깨끗하다(3거래일 연속에 못 미쳐 아직 졸업 전).
+    reports = _days((5, 0), (6, 0), (7, 3), (10, 0))
 
-    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 10))[0]
 
-    assert "2026-08-07에 기준 위반(3거래일 전)" in verdict.detail
+    assert verdict.status == VerificationStatus.RECOVERING
+    assert "최초 2026-08-07" in verdict.detail
+    assert "1거래일 전" in verdict.detail
 
 
 def test_a_recurrence_that_happened_today_says_so():
@@ -772,7 +841,84 @@ def test_a_recurrence_that_happened_today_says_so():
 
     verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
 
-    assert "2026-08-12에 기준 위반(오늘)" in verdict.detail
+    assert verdict.status == VerificationStatus.RECURRED
+    assert verdict.violated_today is True
+    # **오늘이 문장 맨 앞이다** (2026-08-18 F-0818P-1) — 종전엔 위반일이 먼저 오고 "(오늘)"이
+    # 괄호로 뒤에 붙어, 사흘 묵은 줄 열 개 사이에서 오늘 것이 눈에 안 들어왔다.
+    assert verdict.detail.startswith("오늘(2026-08-12) 기준 위반")
+
+
+def test_unmeasured_count_does_not_punish_axes_that_are_still_accruing():
+    """계측을 늘리는 일이 등록부에 벌점이 되면 아무도 새 축을 안 켠다 (2026-08-18 F-0818P-2)."""
+    extract = METRIC_EXTRACTORS["unmeasured_count"]
+
+    report = {
+        "unmeasured": [
+            "15m 피처 퇴화 판정(1거래일 누적 27 < 최소 30)",
+            "30m 피처 퇴화 판정(1거래일 누적 14 < 최소 30)",
+            "진입점 종료 코드(조회 실패: TimeoutExpired (2/2회 시도))",
+        ],
+        "unmeasured_kinds": {
+            "accruing": [
+                "15m 피처 퇴화 판정(1거래일 누적 27 < 최소 30)",
+                "30m 피처 퇴화 판정(1거래일 누적 14 < 최소 30)",
+            ],
+            "failed": ["진입점 종료 코드(조회 실패: TimeoutExpired (2/2회 시도))"],
+            "absent": [],
+        },
+    }
+
+    assert extract(report) == 1.0, "고칠 것 하나 — 나머지 둘은 시간이 해결한다"
+
+
+def test_unmeasured_count_counts_everything_in_reports_without_the_classification():
+    """분류 이전에 쓰인 리포트의 과거 판정을 소급해서 뒤집지 않는다."""
+    extract = METRIC_EXTRACTORS["unmeasured_count"]
+
+    assert extract({"unmeasured": ["a", "b"]}) == 2.0
+
+
+# ---------------- 채점기가 끝까지 본다 (2026-08-18 F-0818P-1)
+#
+# 2026-08-18 장후 실측이 이 절의 출처다. `FixVerificationRecurred` 11건이 전부 옛 위반을
+# 가리키는 동안 그중 9건은 그날 기준을 충족했고, 그날 유일하게 새로 위반한 항목은 사흘 묵은
+# 문장 뒤에 숨었다. 원인은 채점 루프가 **최초 위반에서 멈춘** 것이었다.
+
+
+def test_scoring_does_not_stop_at_the_first_violation():
+    """멈추면 그 뒤에 무슨 일이 있었는지를 아무도 못 본다 — 회복도, 재악화도."""
+    # 08-05 위반 → 08-06 회복 → 08-07 재위반 → 08-10 회복.
+    reports = _days((4, 0), (5, 2), (6, 0), (7, 1), (10, 0))
+
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 10))[0]
+
+    assert verdict.first_violation == date(2026, 8, 5)
+    # **최근 위반이 따로 있다.** 종전엔 08-05에서 멈춰 08-07을 아예 못 봤다.
+    assert verdict.last_violation == date(2026, 8, 7)
+    assert verdict.violation_count == 2
+    assert verdict.clean_days == 1, "마지막 위반 이후 연속 통과 — 누적이 아니다"
+    assert verdict.status == VerificationStatus.RECOVERING
+
+
+def test_a_recovering_item_is_not_an_error_but_is_not_silent_either():
+    """회복 중은 ERROR가 아니다 — 그러나 조용히 지우지도 않는다(R10)."""
+    reports = _days((4, 0), (5, 2), (6, 0))
+
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 6))[0]
+
+    assert verdict.status == VerificationStatus.RECOVERING
+    assert verdict.needs_attention is False, "매일 사람 앞에 올리면 오늘 위반이 묻힌다"
+    assert "재발 이력 있음" in verdict.detail
+
+
+def test_a_violation_with_no_clean_day_after_it_is_still_a_recurrence():
+    """회복의 증거가 하나도 없으면 그건 회복이 아니라 재발 그대로다."""
+    reports = _days((4, 0), (5, 2))
+
+    verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 6))[0]
+
+    assert verdict.status == VerificationStatus.RECURRED
+    assert verdict.needs_attention is True
 
 
 def test_the_age_counts_trading_days_not_calendar_days():
@@ -782,7 +928,7 @@ def test_the_age_counts_trading_days_not_calendar_days():
 
     verdict = evaluate([_restarts_item()], reports, today=date(2026, 8, 12))[0]
 
-    assert "(2거래일 전)" in verdict.detail
+    assert "2거래일 전" in verdict.detail
 
 
 def test_registry_reads_since_from_yaml(tmp_path: Path):

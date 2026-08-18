@@ -257,6 +257,13 @@ TAG_LEVELS: dict[str, int] = {
     # 바로 그 순간 전제(1분봉이 경계+0.5초 안에 도착한다)가 이미 거짓이었다. 그 하루를
     # 놓친 대가가 다음 날 상위 봉 3~17% 손실이었다.
     "FixVerificationPremiseBroken": logging.ERROR,
+    # 과거 위반에서 **회복 중** (2026-08-18 F-0818P-1). 오늘은 기준을 지켰고 연속이 모자랄
+    # 뿐이라 ERROR가 아니다 — 08-18에 이 상태 9건이 재발과 같은 ERROR로 울려 그날 유일한
+    # 진짜 위반 1건을 묻었다. 조용히 지우지도 않는다(R10): WARNING으로 남긴다.
+    "FixVerificationRecovering": logging.WARNING,
+    # 기한은 지났는데 **채점할 날이 없었다** (2026-08-18 F-0818P-4). "고치지 못했다"가 아니라
+    # "기한을 다시 잡아야 한다"는 뜻이라 기한 초과와 같은 WARNING이되 문장이 다르다.
+    "FixVerificationDeadlineUnreachable": logging.WARNING,
     # 헤드리스 상태판 기록 실패 (고도화 A, `ops/status_board.py`) — 관측의 최후 보루가
     # 안 써지고 있다는 뜻이라 조용히 넘기면 안 된다. 수집 본 임무는 계속되므로 WARNING.
     "StatusSnapshotWriteFailed": logging.WARNING,

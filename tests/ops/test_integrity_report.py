@@ -1098,7 +1098,26 @@ def test_everything_unmeasured_is_collected_in_one_place(tmp_path: Path):
     assert "거래량 대조" in joined
     assert "변동성 축" in joined
     assert "피처 건강도" in joined
-    assert "❓ 미측정:" in format_summary(report)
+    assert "❓ 미측정" in format_summary(report)
+
+
+def test_unmeasured_says_which_of_them_needs_fixing(tmp_path: Path):
+    """**못 잰 것에도 성격이 셋이다** (2026-08-18 F-0818P-2).
+
+    08-18에 롤링 피처 건강도 축이 처음 켜지면서 `unmeasured`가 1 → 3이 됐다. 늘어난 2건은
+    "15m은 2거래일, 30m은 3거래일이면 30표본에 닿는다"는 **대기**였는데, 한 통에 담긴 탓에
+    등록부가 그 둘을 위반으로 세어 기한이 내일인 항목을 충족 불가로 몰았다.
+    """
+    _write_bars(tmp_path / "bars", list(range(30)))
+
+    report = _report2(tmp_path, logs={"l1_daily": [_clean_log(tmp_path)]})
+
+    kinds = report.unmeasured_kinds
+    assert set(kinds) == {"accruing", "failed", "absent"}
+    # 분류의 합은 원본과 같다 — 어느 항목도 분류 과정에서 사라지지 않는다.
+    assert sorted(sum(kinds.values(), [])) == sorted(report.unmeasured)
+    assert any("시계 스큐" in item for item in kinds["absent"])
+    assert "[산출물 없음]" in format_summary(report)
 
 
 def test_measured_axes_drop_out_of_unmeasured(tmp_path: Path):

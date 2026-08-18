@@ -74,6 +74,15 @@ class VerificationStatus:
     # 결과 지표는 아직 깨끗한데 **그 수정이 딛고 선 전제**가 무너졌다 (2026-08-05 2차,
     # 고도화 4). 재발보다 이른 신호다 — 다음 사고의 예고에 가깝다.
     PREMISE_BROKEN = "전제 붕괴"
+    # **기한은 지났는데 채점할 날이 없었다** (2026-08-18 F-0818P-4). `기한 초과`와 섞이면
+    # "고치지 못했다"로 읽히지만 실제 뜻은 "3거래일 연속을 볼 창 자체가 없었다"다 —
+    # 08-17 휴장으로 08-18 기준 남은 거래일이 1일뿐인데 `consecutive_days: 3`인 항목이
+    # 셋 있었다. 처방이 다르다: 고치는 게 아니라 **기한을 다시 잡는 것**이다.
+    UNREACHABLE = "기한 불가"
+    # 과거에 위반했지만 **그 뒤로는 기준을 지키고 있다** (2026-08-18 F-0818P-1).
+    # 종전엔 이 상태가 `RECURRED`(ERROR)와 구분되지 않아 회복 중인 항목이 매일 ERROR를
+    # 냈다 — 2026-08-18 장후에 ERROR 11건 중 9건이 그 상태였다(늑대소년의 정체).
+    RECOVERING = "회복 중"
 
 
 def _bar_1m(report: dict[str, Any]) -> dict[str, Any] | None:
@@ -105,6 +114,20 @@ def _absent_watchlist_features(report: dict[str, Any]) -> float | None:
         seen_field = True
         total += len(entry.get("absent_features") or [])
     return float(total) if seen_field else None
+
+
+def _unmeasured_count(report: dict[str, Any]) -> float:
+    """조치가 필요한 미측정 축의 수 — `accruing`(누적 대기)은 빼고 센다 (2026-08-18 F-0818P-2).
+
+    분류가 없는 옛 리포트는 **전부 센다**(종전 동작). 과거 판정을 소급해서 바꾸지 않기
+    위해서다 — 그날 실제로 어떻게 채점됐는지가 이력의 값이다.
+    """
+    items = report.get("unmeasured") or []
+    kinds = report.get("unmeasured_kinds")
+    if not isinstance(kinds, dict):
+        return float(len(items))
+    accruing = len(kinds.get("accruing") or [])
+    return float(max(len(items) - accruing, 0))
 
 
 def _regime_unknown_ratio(report: dict[str, Any]) -> float | None:
@@ -421,7 +444,13 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     "schedule_matches_registration": _schedule_matches_registration,
     # 그날 못 잰 축의 수 (2026-08-05 고도화 2). **이 지표가 이 등록부의 메타 지표다** —
     # 다른 항목들이 "판정 불가"로 정체되는 근본 원인이 여기 모여 있다.
-    "unmeasured_count": lambda r: float(len(r.get("unmeasured") or [])),
+    #
+    # **표본이 쌓이는 중인 것은 안 센다** (2026-08-18 F-0818P-2). 08-18에 롤링 피처 건강도
+    # 축이 처음 켜지면서 `unmeasured`가 1 → 3이 됐고, 늘어난 2건은 결함이 아니라 "15m은
+    # 2거래일, 30m은 3거래일이면 30표본에 닿는다"는 **대기**였다. 그런데 그 2건이 이 지표를
+    # 위반으로 만들어 기한이 내일인 항목을 산술적으로 충족 불가로 몰았다 — 계측을 늘리는
+    # 일이 등록부에 벌점이 되면 아무도 새 축을 안 켠다.
+    "unmeasured_count": _unmeasured_count,
     # 회선 수신 지연 초과분 (2026-08-05 2차, 고도화 1·4). 주로 **전제 지표**로 쓴다 —
     # 봉 확정 관련 수정들이 전부 "1분봉이 경계 뒤 얼마 안에 도착한다"를 전제하기 때문이다.
     "delivery_latency_p99_seconds": lambda r: _latency(r, "p99"),
@@ -540,18 +569,32 @@ class VerificationVerdict:
     id: str
     summary: str
     status: str
+    # **마지막 위반 이후의 연속 통과일**이다 (2026-08-18 F-0818P-1). 종전엔 "최초 위반
+    # 전까지의 누적"이었고, 그래서 회복한 항목이 영원히 0으로 남았다.
     clean_days: int
     required_days: int
     detail: str
+    # 아래 넷도 F-0818P-1. 채점기가 최초 위반에서 멈추던 시절엔 존재할 수 없던 값들이다.
+    first_violation: date | None = None
+    last_violation: date | None = None
+    violated_today: bool = False
+    violation_count: int = 0
 
     @property
     def needs_attention(self) -> bool:
-        """사람이 반드시 봐야 하는 판정 — 재발과 기한 초과."""
+        """사람이 반드시 봐야 하는 판정 — 재발과 기한 초과.
+
+        **`RECOVERING`은 넣지 않는다** (2026-08-18 F-0818P-1): 과거에 위반했지만 지금은
+        기준을 지키고 있는 상태다. 그걸 매일 사람 앞에 올리면 정작 오늘 위반한 항목이
+        같은 더미에 묻힌다 — 이 모듈이 막으려던 실패 그 자체다.
+        """
         return self.status in (
             VerificationStatus.RECURRED,
             VerificationStatus.OVERDUE,
             VerificationStatus.STALLED,
             VerificationStatus.PREMISE_BROKEN,
+            # 기한 불가도 사람 몫이다 — 다만 처방이 "고쳐라"가 아니라 "기한을 다시 잡아라"다.
+            VerificationStatus.UNREACHABLE,
         )
 
 
@@ -681,6 +724,24 @@ def evaluate(
 
     **등록일 자체는 채점하지 않는다** — 수정은 그날 장이 끝난 뒤에 들어가므로 그날 리포트는
     수정 이전의 세계다. 판정은 그 다음 거래일부터다.
+
+    ## 왜 끝까지 순회하나 (2026-08-18 F-0818P-1)
+
+    종전엔 **최초 위반에서 `break`** 했다. 그러면 그 뒤로 무슨 일이 있었는지를 아무도 못 본다:
+
+        08-13  위반   ← 여기서 멈춘다
+        08-14  ?
+        08-18  ?
+
+    2026-08-18 장후에 그 대가가 실측됐다. `FixVerificationRecurred` 11건이 전부 옛 위반을
+    가리키는 동안 **그중 9건은 그날 기준을 충족**했고(회복이 안 보인다), 그날 유일하게
+    새로 위반한 `daily-axes-measured`는 *"2026-08-13에 기준 위반"* 이라는 사흘 묵은 문장
+    뒤에 숨었다(**새 위반도 안 보인다**). 매일 상수처럼 우는 ERROR 11건이 늑대소년이 됐다.
+
+    B-3(2026-08-10)의 처방은 `since:` **수동** 리셋이었고, 사람이 밀지 않으면 이 상태가
+    그대로 이어진다. 그래서 자동으로 본다 — 전 구간을 끝까지 세고 **마지막 위반 이후의
+    연속 통과(`clean_streak`)**로 판정한다. 그 값이 `consecutive_days`에 닿으면 `since:`를
+    손대지 않아도 스스로 `검증 완료`가 된다.
     """
     verdicts: list[VerificationVerdict] = []
     for item in registry:
@@ -688,32 +749,61 @@ def evaluate(
         # `since`가 있으면 채점 시작점이 그만큼 뒤로 밀린다 (2026-08-10 B-3).
         judged_days = sorted(day for day in reports if day > item.scored_after)
 
-        clean = 0
-        violated_on: date | None = None
+        clean_streak = 0
+        violations: list[date] = []
         unjudged: list[date] = []
+        # **뒤에서부터 몇 날을 연속으로 못 쟀나** — 계측 고장(`STALLED`) 판정의 근거다.
+        # 옛 코드는 "누적 판정 불가 수 + 통과 0"으로 봤는데, 끝까지 순회하면 그 조합이
+        # 성립하지 않는다(옛날에 한 번 통과했으면 오늘 계측이 죽어도 안 걸린다).
+        trailing_unmeasured = 0
+        violated_today = False
         for day in judged_days:
             value = extractor(reports[day])
             if value is None:
                 unjudged.append(day)  # 못 잰 날 — 통과로도 위반으로도 안 센다(L18)
+                trailing_unmeasured += 1
                 continue
+            trailing_unmeasured = 0
             if item.satisfied_by(value):
-                clean += 1
+                clean_streak += 1
             else:
-                violated_on = day
-                break
+                violations.append(day)
+                clean_streak = 0
+                if day == today:
+                    violated_today = True
 
         verdicts.append(
             _verdict_for(
                 item,
-                clean,
-                violated_on,
+                clean_streak,
+                violations,
                 unjudged,
                 today,
-                _latest_premise(item, reports),
-                _trading_days_since(violated_on, reports, today),
+                premise=_latest_premise(item, reports),
+                days_since_violation=_trading_days_since(
+                    violations[-1] if violations else None, reports, today
+                ),
+                violated_today=violated_today,
+                trailing_unmeasured=trailing_unmeasured,
+                report_days=sorted(reports),
             )
         )
     return verdicts
+
+
+def _scorable_days_until(
+    item: PendingVerification, report_days: list[date], last_violation: date | None
+) -> int:
+    """기한까지 **실제로 채점할 수 있었던 거래일 수** (2026-08-18 F-0818P-4).
+
+    기산점은 마지막 위반일이다 — 연속 카운터가 거기서 다시 시작하기 때문이다. 위반이
+    없었으면 채점 시작점(`scored_after`)이 기산점이다. 달력이 아니라 **리포트가 있는 날**을
+    센다: 휴장·주말은 채점할 수 없는 날이고, 08-17이 정확히 그 자리였다.
+    """
+    if item.deadline is None:
+        return len(report_days)
+    start = max(last_violation or item.scored_after, item.scored_after)
+    return sum(1 for day in report_days if start < day <= item.deadline)
 
 
 def _trading_days_since(
@@ -753,95 +843,153 @@ def _latest_premise(
 
 def _verdict_for(
     item: PendingVerification,
-    clean: int,
-    violated_on: date | None,
+    clean_streak: int,
+    violations: list[date],
     unjudged: list[date],
     today: date,
+    *,
     premise: tuple[date, float] | None = None,
     days_since_violation: int | None = None,
+    violated_today: bool = False,
+    trailing_unmeasured: int = 0,
+    report_days: list[date] | None = None,
 ) -> VerificationVerdict:
+    """판정 하나 — **오늘 위반이 맨 앞이다** (2026-08-18 F-0818P-1).
+
+    판정 순서 자체가 규율이다:
+
+        ① 오늘 위반          재발 — 오늘 나는 유일한 ERROR
+        ② 뒤 N일 연속 못 잼   계측 고장 — "진행 중"이 아니라 정체다
+        ③ 전제 붕괴          결과는 깨끗한데 딛고 선 것이 무너졌다
+        ④ 연속 통과 ≥ N      검증 완료 — 위반 이력이 있어도 **회복으로 졸업**한다
+        ⑤ 기한 경과          기한 초과
+        ⑥ 위반 이력 있음     회복 중 — WARNING이지 ERROR가 아니다
+        ⑦ 그 외             검증 대기
+
+    ②를 ④보다 먼저 보는 이유: 옛날에 N일 연속 통과했더라도 **최근 N일을 못 재고 있으면**
+    그건 통과가 아니라 모르는 것이다. 2026-08-04에 크래시 집계가 정확히 그 자리였다.
+    """
+    first_violation = violations[0] if violations else None
+    last_violation = violations[-1] if violations else None
     note = f"({item.criterion_text()}"
     if unjudged:
         note += f", 판정 불가 {len(unjudged)}일"
     note += ")"
 
-    if violated_on is not None:
-        # **언제 위반했는지만큼 "얼마나 오래됐는지"가 중요하다** (2026-08-10 B-3). 오늘 새로
-        # 생긴 재발과 며칠 묵은 재발이 같은 문장이면 급한 것이 묻힌다.
-        when = f"{violated_on.isoformat()}에 기준 위반"
-        if days_since_violation:
-            when += f"({days_since_violation}거래일 전)"
-        elif days_since_violation == 0:
-            when += "(오늘)"
+    def _verdict(status: str, detail: str) -> VerificationVerdict:
         return VerificationVerdict(
             item.id,
             item.summary,
+            status,
+            clean_streak,
+            item.consecutive_days,
+            detail,
+            first_violation=first_violation,
+            last_violation=last_violation,
+            violated_today=violated_today,
+            violation_count=len(violations),
+        )
+
+    # ① **재발은 "마지막으로 잰 날에 위반 중"이다** (2026-08-18 F-0818P-1).
+    #
+    # 종전 조건은 "등록 이후 한 번이라도 위반"이었고, 그래서 회복한 뒤에도 영원히 재발이었다.
+    # 이제는 **연속 통과가 0**일 때만 — 즉 개선 증거가 아직 하나도 없을 때만 — 재발이다.
+    # 문구는 최초가 아니라 **가장 최근 위반**을 가리킨다: 08-18에 `daily-axes-measured`가
+    # 그날 새로 위반했는데 문장은 사흘 묵은 08-13을 말해 새 위반이 그 뒤에 숨었다.
+    if last_violation is not None and clean_streak == 0:
+        history = ""
+        if len(violations) > 1 and first_violation is not None:
+            history = f" (최초 위반 {first_violation.isoformat()} 이후 {len(violations)}회)"
+        if violated_today:
+            when = f"오늘({today.isoformat()}) 기준 위반"
+        else:
+            when = f"{last_violation.isoformat()}에 기준 위반"
+            if days_since_violation:
+                when += f"({days_since_violation}거래일 전)"
+            elif days_since_violation == 0:
+                when += "(오늘)"
+        return _verdict(
             VerificationStatus.RECURRED,
-            clean,
-            item.consecutive_days,
-            f"{when} — 수정이 듣지 않았다 {note}",
+            f"{when} — 수정이 듣지 않았다{history} {note}",
         )
 
-    # **재발 다음으로 이른 신호** (2026-08-05 2차, 고도화 4). 결과 지표는 아직 깨끗한데
-    # 이 수정이 딛고 선 전제가 무너진 상태다 — 2026-08-04에 `horizon-volume-identity`가
-    # 정확히 그랬다(통과 중이었고, 그 순간 이미 전제가 거짓이었다).
-    if premise is not None and not item.premise_holds(premise[1]):
-        measured_on, value = premise
-        return VerificationVerdict(
-            item.id,
-            item.summary,
-            VerificationStatus.PREMISE_BROKEN,
-            clean,
-            item.consecutive_days,
-            f"결과는 아직 깨끗하지만 전제가 무너졌다 — {measured_on.isoformat()} 측정 "
-            f"{item.premise_metric}={value:g} (요구: {item.premise_text()})"
-            + (f" · {item.premise_summary}" if item.premise_summary else ""),
-        )
-
-    if clean >= item.consecutive_days:
-        return VerificationVerdict(
-            item.id,
-            item.summary,
-            VerificationStatus.VERIFIED,
-            clean,
-            item.consecutive_days,
-            f"{clean}거래일 연속 기준 충족 {note}",
-        )
-    if item.deadline is not None and today > item.deadline:
-        return VerificationVerdict(
-            item.id,
-            item.summary,
-            VerificationStatus.OVERDUE,
-            clean,
-            item.consecutive_days,
-            f"기한 {item.deadline.isoformat()} 경과 — "
-            f"아직 {clean}/{item.consecutive_days}일 {note}",
-        )
-    # **판정 불가가 쌓이는 것도 사고다** (2026-08-05 고도화 2).
+    # ② **판정 불가가 쌓이는 것도 사고다** (2026-08-05 고도화 2).
     #
     # 종전에는 못 잰 날을 그냥 건너뛰었다. 통과로도 위반으로도 안 세는 것 자체는 맞지만,
     # 그 결과 **매일 판정 불가인 항목이 영원히 "검증 대기"로 조용히 남는다**. 2026-08-04가
     # 정확히 그 상태였다: `Get-WinEvent`가 크래시 0건인 날에만 실패해서 `ui-crash-isolation`은
     # 며칠이 지나도 0/3이었고, 아무도 그게 "진행 중"이 아니라 "고장"이라는 걸 몰랐다.
     #
-    # 연속으로 이만큼 못 재면 그 자체를 사람이 봐야 할 상태로 올린다.
-    if len(unjudged) >= item.consecutive_days and clean == 0:
-        return VerificationVerdict(
-            item.id,
-            item.summary,
+    # **뒤에서부터 센다** (2026-08-18 F-0818P-1): 끝까지 순회하게 되면서 "누적 판정 불가 +
+    # 통과 0"이라는 옛 조건이 성립하지 않는다. 지금 못 재고 있는지를 묻는 자리다.
+    if trailing_unmeasured >= item.consecutive_days:
+        return _verdict(
             VerificationStatus.STALLED,
-            clean,
-            item.consecutive_days,
-            f"{len(unjudged)}거래일 연속 판정 불가 — 계측이 고장 났을 수 있다 "
+            f"최근 {trailing_unmeasured}거래일 연속 판정 불가 — 계측이 고장 났을 수 있다 "
             f"(진행 중이 아니라 정체다) {note}",
         )
-    return VerificationVerdict(
-        item.id,
-        item.summary,
+
+    # ③ **재발 다음으로 이른 신호** (2026-08-05 2차, 고도화 4). 결과 지표는 아직 깨끗한데
+    # 이 수정이 딛고 선 전제가 무너진 상태다 — 2026-08-04에 `horizon-volume-identity`가
+    # 정확히 그랬다(통과 중이었고, 그 순간 이미 전제가 거짓이었다).
+    if premise is not None and not item.premise_holds(premise[1]):
+        measured_on, value = premise
+        return _verdict(
+            VerificationStatus.PREMISE_BROKEN,
+            f"결과는 아직 깨끗하지만 전제가 무너졌다 — {measured_on.isoformat()} 측정 "
+            f"{item.premise_metric}={value:g} (요구: {item.premise_text()})"
+            + (f" · {item.premise_summary}" if item.premise_summary else ""),
+        )
+
+    # ④ **위반 이력이 있어도 졸업한다** (2026-08-18 F-0818P-1). 이것이 `since:` 수동 리셋을
+    # 대체하는 자리다 — 사람이 등록부를 밀지 않아도 회복이 스스로 판정된다.
+    if clean_streak >= item.consecutive_days:
+        if last_violation is not None:
+            return _verdict(
+                VerificationStatus.VERIFIED,
+                f"{clean_streak}거래일 연속 기준 충족 — {last_violation.isoformat()} 위반에서 "
+                f"회복(위반 {len(violations)}회) {note}",
+            )
+        return _verdict(VerificationStatus.VERIFIED, f"{clean_streak}거래일 연속 기준 충족 {note}")
+
+    if item.deadline is not None and today > item.deadline:
+        # **못 고친 것과 잴 날이 없었던 것을 가른다** (2026-08-18 F-0818P-4).
+        #
+        # 종전엔 둘 다 `기한 초과`였다. 그 문구는 "수정이 안 들었다"로 읽히는데, 08-18에
+        # 실제로 걸린 세 건은 전부 **채점 창이 물리적으로 모자란** 경우였다(08-17 휴장 +
+        # 새 롤링 축 도입). 처방이 다르므로 판정도 달라야 한다 — 이걸 안 가르면 기한 연장이
+        # 매번 같은 이유로 반복되고, 반복되는 연장은 곧 기한이 없는 것과 같다.
+        usable = _scorable_days_until(item, report_days or [], last_violation)
+        if usable < item.consecutive_days:
+            return _verdict(
+                VerificationStatus.UNREACHABLE,
+                f"기한 {item.deadline.isoformat()}까지 채점 가능일이 {usable}일뿐이었다"
+                f"(필요 {item.consecutive_days}일) — 못 고친 게 아니라 잴 날이 없었다. "
+                f"기한 재조정 필요 {note}",
+            )
+        return _verdict(
+            VerificationStatus.OVERDUE,
+            f"기한 {item.deadline.isoformat()} 경과 — "
+            f"아직 {clean_streak}/{item.consecutive_days}일 {note}",
+        )
+
+    # ⑥ **회복 중은 ERROR가 아니다** (2026-08-18 F-0818P-1). 오늘은 기준을 지켰고 연속이
+    # 아직 모자랄 뿐이다. 이 상태를 재발과 같은 급으로 울리는 것이 08-18의 ERROR 11건이었다.
+    if last_violation is not None:
+        when = f"최초 {first_violation.isoformat()}"  # type: ignore[union-attr]
+        if last_violation != first_violation:
+            when += f", 최근 {last_violation.isoformat()}"
+        if days_since_violation:
+            when += f" · {days_since_violation}거래일 전"
+        return _verdict(
+            VerificationStatus.RECOVERING,
+            f"재발 이력 있음({when}) — 그 뒤 {clean_streak}/{item.consecutive_days}거래일 "
+            f"연속 충족 {note}",
+        )
+
+    return _verdict(
         VerificationStatus.PENDING,
-        clean,
-        item.consecutive_days,
-        f"{clean}/{item.consecutive_days}거래일 {note}",
+        f"{clean_streak}/{item.consecutive_days}거래일 {note}",
     )
 
 
@@ -855,6 +1003,8 @@ def format_verdicts(verdicts: list[VerificationVerdict]) -> list[str]:
         VerificationStatus.STALLED: "🚫",
         VerificationStatus.OVERDUE: "⚠",
         VerificationStatus.PREMISE_BROKEN: "🧨",
+        VerificationStatus.RECOVERING: "↗",
+        VerificationStatus.UNREACHABLE: "⏰",
     }
     return [
         f"  {marks.get(v.status, '·')} [{v.status}] {v.id} — {v.summary}\n      {v.detail}"

@@ -228,3 +228,47 @@ def test_recoverable_series_do_not_inflate_the_loss():
 def test_a_clean_day_is_zero_not_none():
     """0분도 기록해야 5거래일 이동합이 성립한다 — None이면 그날이 창에서 빠진다."""
     assert _loss(start_lag_minutes=0.4, coverages=[_cov("ticks", 0.0)]) == 0.4
+
+
+# ------------------------- F-0818P-5(2026-08-18): 카덴스는 손실이 아니다
+
+
+def _cov_with_cadence(name: str, head: float, cadence: float) -> sc.SeriesCoverage:
+    return sc.SeriesCoverage(
+        name=name, rows=100, measured=True, head_gap_minutes=head, cadence_minutes=cadence
+    )
+
+
+def test_waiting_one_cycle_is_not_a_loss():
+    """5분 카덴스 계열의 첫 행은 창 시작 5분 뒤가 정상이다 — 기다린 시간이지 잃은 시간이 아니다.
+
+    2026-08-11·08-12·08-18이 전부 이 형태로 5.0분씩 예산을 깎았고, 그동안 장중 화면은
+    **"오늘 소급 불가 손실 없음"** 이라고 말하고 있었다. 같은 이름의 두 표면이 다른 답을
+    내면 그 이름은 관측 도구가 아니다.
+    """
+    assert (
+        _loss(
+            start_lag_minutes=None, coverages=[_cov_with_cadence("option_chain/regular", 5.0, 5.0)]
+        )
+        == 0.0
+    )
+
+
+def test_a_real_truncation_survives_the_cadence_subtraction():
+    """차감이 사고까지 지우면 그건 과도한 차감이다 — 08-14 실측이 판정 기준이다.
+
+    그날 `option_chain/weekly_thu`는 카덴스 10분에 머리 33분이었다(첫 행 08:53). 23분은
+    기다림이 아니라 잃은 시간이고, 예산은 그 23분을 그대로 세야 한다.
+    """
+    coverages = [
+        _cov_with_cadence("option_chain/regular", 25.0, 5.0),
+        _cov_with_cadence("option_chain/weekly_mon", 31.0, 10.0),
+        _cov_with_cadence("option_chain/weekly_thu", 33.0, 10.0),
+    ]
+
+    assert _loss(start_lag_minutes=None, coverages=coverages) == 23.0
+
+
+def test_a_series_without_a_cadence_estimate_is_counted_whole():
+    """카덴스를 못 잰 계열에서 임의의 값을 빼면 손실을 조용히 줄이게 된다(L18)."""
+    assert _loss(start_lag_minutes=None, coverages=[_cov("flow_intraday/K2I", 39.0)]) == 39.0

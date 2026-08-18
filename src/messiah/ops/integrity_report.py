@@ -241,6 +241,15 @@ class IntegrityReport:
     # 조용히 지나갔다 — 2026-08-04에 크래시 집계가 정확히 그렇게 사라졌다. 측정 불능이
     # 한자리에 모여야 "오늘 무엇을 모르는가"를 사람이 한 번에 본다.
     unmeasured: list[str]
+    # **못 잰 것에도 성격이 셋이다** (2026-08-18 F-0818P-2). 종전엔 한 통에 담겨
+    # `unmeasured_count`가 셋을 같은 무게로 셌고, 그 대가가 08-18에 나왔다: 새 롤링 축이
+    # 켜지면서 "표본이 쌓이는 중"인 2건이 등록부 위반으로 잡혀 `daily-axes-measured`의
+    # 기한을 산술적으로 못 지키게 만들었다. 계측을 늘리는 일이 벌점이 되면 안 된다.
+    #
+    #   accruing  표본이 쌓이는 중 — **시간이 해결한다**(30m은 하루 14봉이라 3거래일 필요)
+    #   failed    도구가 실패했다 — **고쳐야 한다**(조회 시한 초과 등)
+    #   absent    산출물·로그가 없다 — 그 단계를 안 돌렸다
+    unmeasured_kinds: dict[str, list[str]]
     flat_price_minutes: int
     pre_open_minutes: int
     market_findings: list[str]
@@ -1030,10 +1039,30 @@ def irrecoverable_loss_minutes(
 
     장중 구멍(`gaps`)은 여기 안 넣는다. 그건 `series_findings`가 따로 세고, 이 값은
     **아침 잘림**이라는 한 사건의 크기를 재는 자리다 — 섞으면 5거래일 이동합의 뜻이 흐려진다.
+
+    ## 카덴스는 손실이 아니다 (2026-08-18 F-0818P-5)
+
+    머리 구멍은 **판정 창 시작 ~ 첫 행**이다. 그런데 5분 카덴스 계열의 첫 행은 창 시작
+    5분 뒤에 오는 것이 정상이다 — 첫 사이클을 기다린 시간이지 잃은 시간이 아니다. 종전엔
+    그 값을 그대로 예산에서 깎았고, 5거래일 실측이 그 대가를 보여준다:
+
+        08-11  5.0 → 0    (option_chain/regular 카덴스 5분 · 머리 5분)
+        08-12  5.0 → 0
+        08-13 10.0 → 0    (그날 카덴스 추정 10분 · 머리 10분)
+        08-14 33.0 → 23.0 ← **실제 사고는 남는다**
+        08-18  5.0 → 0
+        08-10 41.0 → 38.0 ← **실제 사고는 남는다**
+
+    5거래일 이동합 58 → 23분. 예산(20분) 경보는 여전히 울리되 이제 08-14 한 사건만
+    가리킨다. 종전엔 매일 카덴스만큼이 예산을 채워 조기 경보 기능이 죽어 있었다.
+
+    **`SeriesCoverage.head_gap_minutes` 자체는 건드리지 않는다** — 그 값은
+    `series_head_gap_minutes_max`(등록부 `archiver-restart-restore`, ≤20)가 읽으므로
+    거기서 빼면 그 축의 이력 전체가 조용히 이동한다. 차감은 이 자리에서만 한다.
     """
     head = max(
         (
-            item.head_gap_minutes
+            max(item.head_gap_minutes - (item.cadence_minutes or 0.0), 0.0)
             for item in coverages
             if item.measured and item.expected and series_coverage._is_irrecoverable(item.name)
         ),
@@ -1683,20 +1712,32 @@ def build_report(
     # 어딘가에 조용히 남았을 뿐이고, 그 결과 등록부가 매일 "판정 불가"라 영원히 안 끝났다.
     # "오늘 무엇을 모르는가"가 한 줄로 보여야 사람이 그걸 조치 대상으로 인식한다.
     unmeasured: list[str] = []
+    unmeasured_kinds: dict[str, list[str]] = {"accruing": [], "failed": [], "absent": []}
+
+    def note_unmeasured(text: str, kind: str) -> None:
+        """못 잰 것 하나를 **성격과 함께** 적는다 (2026-08-18 F-0818P-2).
+
+        기존 `unmeasured` 목록은 그대로 둔다 — 과거 리포트와 그걸 읽는 소비처를 흔들지
+        않으면서 분류만 병기한다.
+        """
+        unmeasured.append(text)
+        unmeasured_kinds[kind].append(text)
+
     if crashes.supported and not crashes.available:
-        unmeasured.append("네이티브 크래시 집계")
+        note_unmeasured("네이티브 크래시 집계", "failed")
     if clock_skew is None:
-        unmeasured.append("시계 스큐(수집 세션의 ClockSkew 로그 없음)")
+        note_unmeasured("시계 스큐(수집 세션의 ClockSkew 로그 없음)", "absent")
     if logs["delivery_latency"] is None:
-        unmeasured.append(
-            "회선 수신 지연 분포(TickDeliveryLatency 로그 없음 — 1분봉 시각 확정 승격 근거)"
+        note_unmeasured(
+            "회선 수신 지연 분포(TickDeliveryLatency 로그 없음 — 1분봉 시각 확정 승격 근거)",
+            "absent",
         )
     if volume_check is None:
-        unmeasured.append("공식 분봉 대비 거래량 대조(verify_archive_volume.py 미실행)")
+        note_unmeasured("공식 분봉 대비 거래량 대조(verify_archive_volume.py 미실행)", "absent")
     if not (vol_axis.get("horizons") if vol_axis else None):
-        unmeasured.append("변동성 축 채점(run_vol_scorecard.py 미실행)")
+        note_unmeasured("변동성 축 채점(run_vol_scorecard.py 미실행)", "absent")
     if not degenerate_features:
-        unmeasured.append("피처 건강도(장 마감 FeatureHealth 로그 없음)")
+        note_unmeasured("피처 건강도(장 마감 FeatureHealth 로그 없음)", "absent")
     # **옵션체인이 돌긴 했나** (2026-08-14 F-6).
     #
     # 종전엔 성공 경로에 로그가 없어 "0건"이 *"없었다"* 와 *"안 셌다"* 둘이었다 — 그 구분이
@@ -1718,8 +1759,8 @@ def build_report(
     # 있는데도 완주가 0인** 좁은 경우뿐이다. 그날 옵션이 실제로 쌓였는지는 `series_coverage`가
     # 아카이브로 따로 판정한다(축이 둘인 것이 맞다 — 하나는 로그, 하나는 산출물).
     if not polled and poller_alive:
-        unmeasured.append(
-            "옵션체인 성공 사이클(OptionChainPolled 0건 — F-6 이전 로그이거나 미완주)"
+        note_unmeasured(
+            "옵션체인 성공 사이클(OptionChainPolled 0건 — F-6 이전 로그이거나 미완주)", "absent"
         )
     # **판정 못 한 Horizon은 `unmeasured`가 정본이다** (2026-08-14 F-C). 로그는 INFO로
     # 조용히 두고 판정은 이 축이 진다 — 2026-08-14에 30m이 "퇴화 0건(14표본)"으로 나갔고,
@@ -1762,8 +1803,12 @@ def build_report(
         floor = logs["degenerate_features"].get(horizon, {}).get("min_samples") or 0
         got = multi.samples if multi is not None else entry.get("samples", 0)
         span = f"{len(multi.days)}거래일 누적 {got}" if multi is not None else f"표본 {got}"
-        unmeasured.append(f"{horizon} 피처 퇴화 판정({span} < 최소 {floor})")
-    unmeasured.extend(f"호스트 위생 — {item}" for item in host.unmeasured)
+        # **표본이 쌓이는 중이다** (2026-08-18 F-0818P-2). 30m은 하루 14~15봉이 물리적
+        # 상한이라 하루로는 30표본에 못 닿는다 — 결함이 아니라 대기다. 이걸 위반으로 세면
+        # 계측축을 새로 켤 때마다 등록부가 며칠씩 거짓 위반을 낸다(08-18에 실제로 그랬다).
+        note_unmeasured(f"{horizon} 피처 퇴화 판정({span} < 최소 {floor})", "accruing")
+    for item in host.unmeasured:
+        note_unmeasured(f"호스트 위생 — {item}", "failed")
 
     # ---- 고도화 2(2026-08-06): 적재 계열 전수 커버리지 ----
     #
@@ -1792,7 +1837,7 @@ def build_report(
             EventCalendar.from_file(),
         )
     except Exception as exc:  # noqa: BLE001 — 계약 없이도 리포트는 나와야 한다
-        unmeasured.append(f"적재 계열 캘린더 계약(전 계열 필수로 판정) — {exc}")
+        note_unmeasured(f"적재 계열 캘린더 계약(전 계열 필수로 판정) — {exc}", "failed")
 
     coverages = series_coverage.collect(
         day,
@@ -1811,7 +1856,7 @@ def build_report(
     # 기동을 의심한다. 2026-08-10엔 이 줄이 없어서 사고가 오후 늦게까지 안 보였다.
     start_lag = _collection_start_lag_minutes(day, session_starts)
     if start_lag is None:
-        unmeasured.append("수집 기동 지연(기동 로그 또는 등록 정본 없음)")
+        note_unmeasured("수집 기동 지연(기동 로그 또는 등록 정본 없음)", "absent")
     elif start_lag > limits["collection_start_lag_minutes"]:
         breaches.append(
             f"수집 기동이 정시 트리거보다 {start_lag:.0f}분 늦었다 "
@@ -1828,7 +1873,11 @@ def build_report(
     exited_cleanly = {name for name, result in per_process.items() if result.get("session_ends")}
     breaches.extend(task_exit_codes.findings_for(task_exits, session_ends=exited_cleanly))
     if not task_exits.available:
-        unmeasured.append(f"진입점 종료 코드({task_exits.detail})")
+        # 조회가 실패한 것과 이 OS가 아예 안 재는 것은 다르다 — 전자만 고칠 대상이다.
+        note_unmeasured(
+            f"진입점 종료 코드({task_exits.detail})",
+            "absent" if "건너뜀" in task_exits.detail else "failed",
+        )
 
     # ---- G-2(2026-08-10): 세 축이 같은 질문에 같은 답을 하는가 ----
     irrecoverable_heads = [
@@ -1896,7 +1945,7 @@ def build_report(
         if gap.minutes > limits["observation_gap_minutes"]:
             breaches.append(gap.describe())
     if not observation.events_available:
-        unmeasured.append(f"관측 공백 원인(호스트 이벤트 — {observation.events_detail})")
+        note_unmeasured(f"관측 공백 원인(호스트 이벤트 — {observation.events_detail})", "failed")
 
     return IntegrityReport(
         date=day.isoformat(),
@@ -1924,6 +1973,7 @@ def build_report(
         vol_axis=vol_axis,
         host_health=host.to_dict(),
         unmeasured=unmeasured,
+        unmeasured_kinds=unmeasured_kinds,
         flat_price_minutes=flat_minutes,
         pre_open_minutes=pre_open_minutes,
         market_findings=market_findings,
@@ -2196,8 +2246,22 @@ def format_summary(report: IntegrityReport) -> str:
     # **못 잰 것을 임계 초과 바로 앞에 둔다** — 사람이 "깨끗한 날"이라고 읽기 전에
     # "무엇을 모르는 날인지"를 먼저 보게 하는 것이 이 블록의 목적이다(고도화 2).
     if report.unmeasured:
-        lines.append("  ❓ 미측정:")
-        lines.extend(f"    - {item}" for item in report.unmeasured)
+        # **성격을 문장에 박는다** (2026-08-18 F-0818P-2). "표본이 쌓이는 중"과 "도구가
+        # 실패했다"가 같은 줄로 나가면 조치 대상이 무엇인지 매일 다시 판단해야 한다.
+        kinds = report.unmeasured_kinds or {}
+        labels = {"accruing": "누적 대기", "failed": "측정 실패", "absent": "산출물 없음"}
+        by_item = {item: labels[kind] for kind, items in kinds.items() for item in items}
+        accruing = len(kinds.get("accruing") or [])
+        counted = len(report.unmeasured) - accruing
+        lines.append(
+            f"  ❓ 미측정 {len(report.unmeasured)}건"
+            + (f" (조치 대상 {counted} · 누적 대기 {accruing})" if accruing else "")
+            + ":"
+        )
+        lines.extend(
+            f"    - [{by_item[item]}] {item}" if item in by_item else f"    - {item}"
+            for item in report.unmeasured
+        )
 
     if report.breaches:
         lines.append("  ⚠ 임계 초과:")
@@ -2389,6 +2453,8 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
         fv.VerificationStatus.OVERDUE: "FixVerificationOverdue",
         fv.VerificationStatus.STALLED: "FixVerificationStalled",
         fv.VerificationStatus.PREMISE_BROKEN: "FixVerificationPremiseBroken",
+        fv.VerificationStatus.RECOVERING: "FixVerificationRecovering",
+        fv.VerificationStatus.UNREACHABLE: "FixVerificationDeadlineUnreachable",
     }
     for verdict in verdicts:
         tag = tags.get(verdict.status)

@@ -5164,3 +5164,416 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
 - [ ] **P-9** UI 스냅샷 신선도 — 연휴 뒤 첫 기동에서 3일 묵은 값을 「지금」으로 그리는가
 - [ ] **P-10** W-9(08-13 분봉 420 vs 395분) — 08-18 장후 배치가 처음으로 이 축을 건드린다.
       **08-14 보고서가 「08-17 장후에 판정」이라 적었으나 08-17은 휴장이었다** → 판정 불가 확정, 이월
+
+## 2026-08-18 D-day 장전 점검 — 예보 4/4 성립 · 결함은 점검 자신에게 ([MW0601])
+
+보고서 `logs/dailycheck/2026-08-18_pre_report.md` · **점검 실행 13:29(예약 08:45 · 지연 284분)** ·
+**P0 없음** (mode=dev · 페이퍼 · 판단 10건 전량 NO_TRADE · `gateway_halted=false` · `lost_items=0`).
+
+### 채점 완료 — 오늘 닫힌 것
+
+- [x] **W-16** 웜스타트 — 전 Horizon **200봉/요구 180** · `bars_by_source {A05609:504, A05608:696}` ·
+      `WarmStartBarsDropped` **0건**(08:20:35). **PASS**
+- [x] **W-26** 국면 UNKNOWN 탈출 — `RegimeClassified` 10건 `{HIGH_VOL 5, RANGE 2, TREND_DOWN 2, TREND_UP 1}`
+      **UNKNOWN 0%**(08-14 라이브 14/14 → 0/10). *"라이브에서 UNKNOWN 100%면 P0"* 회피. **PASS**
+- [x] **W-21 라이브 재확인** — `blocked_by_meta` **10/10**, 다른 5갈래 전부 빈 배열. 리허설 15/15와 동형.
+      **리허설↔라이브 갈림 없음 → DECISION_LOG:6272가 예고한 P0 미발동. PASS(확정)**
+- [x] **P-1** `[OK ] postmarket 20260817 장후 배치 정상 종료 확인` — 기동 4회차 전부 출현. **코드 독해 성립**
+- [x] **P-2** 08:45 장전 보고서가 09:00 전에 나오는가 → **FAIL(13:29)**. 아래 F-P4로 이어짐
+- [x] **결론 ③ 예약 지연** — D-day 판정 완료. **거래일에도 재현**(08-17 457분 → 08-18 284분, 2거래일 연속).
+      **결정적 반증**: 같은 호스트 Windows 작업 4종은 정시(`Messiah` 08:20:30 · `Messiah-G2` 08:25:32,
+      `schedule_drift=정본 일치`). **스케줄러가 느린 게 아니라 점검 예약만 다른 경로에 있다** → 원인 리포 밖 확정
+- [x] **P-3** 동결 — `git diff --stat -w --ignore-cr-at-eol`이 `Docs/dailycheck_prompt.txt` 1파일 7줄.
+      **`src/`·`scripts/`·`configs/` 실변경 0.** 금지계명 10 미위반. **조건부 PASS**
+- [x] **P-8** 시계 — `ClockSkewMeasured +1.777s`(개장 직후, samples=30) ≈ 휴장일 1.65~1.79s.
+      **"거래일 부하가 시계를 민다" 가설 기각.** 우선순위 하향 유지
+
+### Fix — 장전 신규 (적용 전부 2026-08-18 15:35 이후 · 커밋 순서 ①~④)
+
+- [ ] **F-M1 (P1) ① Meta 통과확률을 라이브에 남긴다** — `blocked_by_meta` 10/10은 확정됐는데
+      그 판정을 만든 확률이 한 줄도 없다(`grep -ic "p_meta|meta_prob|통과확률"` → **0**).
+      `meta_labeler.py:280-281` `passes()`가 확률을 임계와 비교한 직후 버리고,
+      `core/messages.py:349` `ExpertView.meta_passed: bool`이 메시지 경계에서 소실시킨다.
+      → `meta_labeler.py`에 `pass_probability_and_verdict() -> tuple[float, bool]` 추가(기존 `passes()`는
+      얇은 래퍼로 남겨 호출부 3곳 중 `shadow_manager.py:222`·`run_formal_expert_training_smoke.py:157`는 무변경) ·
+      `service.py:106`이 신규 태그 **`MetaGateEvaluated`**(INFO) 발행: `horizon`·`p_meta`·`threshold`·`passed`·`margin` ·
+      `core/logging.py:337` 부근 태그 등록(R6) · `integrity_report.py:704` 부근에서 `min/median/max` 집계.
+      **`ExpertView`에 필드 추가 금지** — R14 3종 세트 + `schema version=1 types=21` 흔든다.
+      검증: `pytest` `strategy/futures` + `tests/ops/test_integrity_report.py`(⚠ Docker 기동 후) ·
+      `run_open_rehearsal.py --date 2026-08-18` 재실행 분포가 리허설 내부값과 일치하는가.
+- [ ] **F-P4 (P1) ② 관측창 유효성을 다이제스트가 스스로 말한다** —
+      `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` §0에
+      `설계시각 → 실행시각 → 지연(분) → 관측창 유효성` 4열 표. 국면별 설계시각 상수(`pre=08:45`/`intra=12:30`/`post=15:45`).
+      창 이탈 시 `⚠ 관측창 이탈 — 이 보고서는 사후 기록이다`를 **§9 적신호 1번**으로 승격 ·
+      `references/report_template.md` 헤더에 `지연` 필드 규격화.
+      회귀 대조: 변경 후 `--phase post --date 2026-08-14` 출력을 변경 전과 재대조해 **생성 시각 외 차이 0**.
+- [ ] **★ 결정 필요 ③ 장전 증거 채취를 Windows 스케줄러로 이관(병행)** —
+      `NEXT_TODO:5106`이 *"예약 이관 판정은 D-day 08:45 결과 이후"* 로 유보했고 **결과가 나왔다(FAIL)**.
+      권고: `scripts/install_scheduled_tasks.ps1`에 **`Messiah-Precheck`(08:40)** 5번째 작업 추가 —
+      `collect_evidence.py --phase pre`만 돌려 다이제스트를 **파일로 떨군다.** 판독은 기존 예약이 계속 맡는다.
+      **Why**: 정시성이 필요한 것은 증거 채취지 판독이 아니다. 채혈은 아침에, 판독은 오후에 해도 같은 피를 본다.
+      부작용: 자가점검 `schedule_drift` 정본이 4종 → 5종이 되므로 `self_check.py` 기대 목록도 같이 고친다.
+- [ ] **F-R5 (P2) ④ `src/messiah/ops/integrity_report.py` 2,403줄 분할** — R5 500줄 상한 **4.8배**. **신규 발견**
+      (`grep -n "500줄" dev_memory/*.md` → DECISION_LOG 0건, NEXT_TODO 2건은 리스크 규칙 R5 동명이인).
+      이 파일이 `FixVerificationRecurred`·`abnormal_exits`·`decision_funnel`을 전부 생산한다 —
+      **점검의 신뢰가 리뷰 불가능한 크기의 한 파일에 집중돼 있다.**
+      → `ops/integrity/collect.py`(로그 스캔·태그 집계) · `verdict.py`(임계 판정·breaches) ·
+      `fix_verification.py`(등록부 채점, 기존 `ops/fix_verification.py`와 경계 정리) · 본체는 조립·직렬화만(500줄 이하).
+      **회귀 위험 높음** — 검증: 분할 전후 **3일치(08-13·08-14·08-18) JSON diff 완전 일치**. 하나라도 다르면 되돌린다.
+      **다음 주** (F-M1·F-P4가 이 파일을 건드리므로 안정 후에 해야 diff가 깨끗하다).
+
+### 고도화 — 장전 신규
+
+- [ ] **G-M1 ★ `margin = p_meta − threshold`의 20거래일 분포로 처방을 가른다** (선행: F-M1) —
+      리허설은 최대 **0.6576 vs 임계 0.7**로 *"근소한 미달"* 이라 했으나 라이브엔 확률이 없어
+      **오늘의 미달이 0.68인지 0.02인지 모른다.** 두 세계는 처방이 완전히 다르다.
+      → 중앙 margin **> −0.1**: 모델은 배웠고 임계가 보수적 → `select_threshold()`의 **비용 가정(`cost_ticks`)을
+      실측 슬리피지로 재추정**. 중앙 margin **< −0.5**: 메타 피처가 신호를 못 담음 → `build_meta_features()` 재설계.
+      **임계를 손으로 낮추지 않는다(R18)** — 임계를 유도한 입력을 고치는 것이 임계를 움직이는 유일한 정당한 경로다.
+      R18 섀도 계측 불요(게이트 신설이 아니라 기존 게이트 관측). **즉시**(F-M1과 같은 묶음).
+- [ ] **G-G2 G2 40거래일 관문을 「거래일 수」가 아니라 「채점 가능일 수」로 센다** —
+      리셋 기산 **1일차(오늘)가 거래 0건**이다. 08-16 결정이 13일을 잘라낸 이유가 1일차에 그대로 재현됐다.
+      → `scripts/run_postmarket.py` G2 관문 집계를 `elapsed_trading_days`(무중단 축, 현행) /
+      `scorable_days`(거래 1건 이상인 날만 증가, Ver 2.0 §8의 성과·슬리피지 두 기준의 분모)로 분리.
+      리포트에 **`무중단 1/40 · 채점가능 0/40`을 나란히** 찍는다.
+      기대: 관문이 자기가 아무것도 안 묻고 있다는 사실을 스스로 말한다.
+      위험: `채점가능 0`이 관문 실패로 오독될 수 있다 → 두 카운터를 **같은 줄에** 두고 어느 쪽도 단독으로
+      합격/불합격을 말하지 않게 한다. **이번 주**(카운터 정의 변경은 빠를수록 소급 논쟁이 적다).
+- [ ] **G-RL 거절 회차를 값의 출처로 삼지 않는 규칙을 회차 단위로 한 번만 정의한다** (F-P2와 통합 착수 권고) —
+      오늘 07:23 회차(`LaunchWindowRefused` 즉시 종료)의 `clock offset=+2.016s`가 등록부
+      `clock-sync-restored`의 `max: 2.0`을 **0.016 넘긴다**(실기동 08:20 회차는 1.880s, 개장 실측 1.777s).
+      F-P2가 이미 같은 형태를 `abnormal_exits`에서 잡았다 — **최소 2개 지표가 같은 함정. 셋째 전에 막는 게 싸다.**
+      → `_is_refused_launch(session) -> bool` 하나를 두고 회차에서 값을 뽑는 **모든** 지표가 경유.
+      무시가 아니라 **분리**: 거절 회차는 `refused_launches`(정상 1~2건/일)로 따로 세고 급증 시 그것대로 적신호.
+
+### 확인 필요 — 무엇을 보면 판정되는가
+
+- [ ] **`clock-sync-restored`가 오늘 장후에 「재발」로 뜰 수 있다** — `daily_integrity_20260818.json`의
+      `clock_skew_abs_seconds`가 **어느 기동 회차 값을 채택하는지**. 07:23 회차(2.016)를 세면 위양성 재발이고
+      그건 G-RL의 근거가 된다.
+- [ ] **UI가 08:20:32~08:44:58(24분) 구간에 무엇을 그렸는가** (P-9) — `command_center_ui.json`은 08-18로 갱신,
+      `ui_20260818.err.log` **미생성**(오류 0). 그러나 UI 로그 7줄(377B)로는 화면 표시를 판정할 수 없다.
+      → `app.py` 신선도 임계가 「거래일 기준」인가 「경과 시간 기준」인가를 코드로 읽거나, 다음 연휴 뒤 첫 기동 캡처.
+      **오늘 실피해 0**(첫 틱 08:44:58 이후 전 구간 신선).
+
+### 2026-08-18 장후에 오늘 발견이 채점되는 것
+
+- [ ] **Q-4** `daily_integrity_20260818.json` `clock_skew_abs_seconds` — 07:23 회차 값 채택 여부
+- [ ] **Q-5** `abnormal_exits == []` (P-4 이월) — 08-17 `ends=0`이 새면 F-P2 확정
+- [ ] **Q-6** `run_postmarket` **`steps_run == 6`** — DECISION_LOG "라이브 미검증 L15" **기한 오늘**.
+      6이 아니면 비거래일 게이트가 거래일을 접은 것 → 되돌릴 지점은 `run_postmarket.main()` 게이트 블록 하나
+- [ ] **Q-7** `regime-not-constant` 연속 카운터 **`1/3`** (P-6). `0/3`이면 08-17 결론이 틀렸다
+- [ ] **P-10 이월** W-9(08-13 분봉 420 vs 395분) — 오늘 장후 배치가 처음으로 이 축을 건드린다
+
+### 2026-08-19에 채점되는 것
+
+- [ ] **Q-1** 장전 다이제스트 생성 시각이 **08:45~09:00**. 09:00 이후면 F-P4 이관(③) 즉시 착수
+- [ ] **Q-2** `MetaGateEvaluated` **≥ 10건** · `p_meta` 전부 `(0,1)`.
+      **0건이면 F-M1이 결선 안 된 것** — 폴러 셋(InvestorFlowPoller 7개월 · OptionChainPoller 수개월 · FL 피처)과 같은 형태
+- [ ] **Q-3** `p_meta` 중앙 `margin` 1일차 값 → G-M1 갈래 선택의 시작(확정은 20거래일)
+- [ ] **Q-8** 등록부 3건(`daily-axes-measured`·`composer-bucket-completeness`·`ui-restart-observability`, 기한 08-19) —
+      오늘 장후 통과 시 필요 3 중 1일차 확보. 미통과면 **기한이 아니라 처방을 다시 본다**(08-16 결정 유지)
+- [ ] **Q-9** `MetaGateEvaluated` 로그량 — 15m/5m 결선 시 사이클당 3건 초과면 dict 집약형으로 재설계
+
+### 재발 아님 — 중복 보고하지 않는다
+
+- [ ] **첫 사이클 `gate=regime` 1건** — `{regime:1, score:9}`로 08-13 `{regime:1, score:13}`과 **동형, 범위 불변**.
+      **F-3(NEXT_TODO:3724, `_build_regime_runtime()` 첫 사이클 국면 시드) 미착수**의 예상된 지속.
+      원인 `strategy/futures/service.py:77` `_latest_regime = _UNSEEN_REGIME`(DECISION_LOG:4848).
+      오늘의 기여는 *"연휴를 건너도 범위가 그대로다"* 라는 재확인뿐. **P2로 유지.**
+
+## 2026-08-18 장중 점검 (D-day 1일차) — Fix 4종 + 고도화 4종 ([MW0601])
+
+관측 구간 **09:00~13:30**(실행 13:29). **P0 없음.** 보고서:
+`logs/dailycheck/2026-08-18_intra_report.md` · 증거: `logs/dailycheck/evidence_20260818_intra.md`.
+
+**Go/No-Go ①②③ 성립 → 40거래일 관문 1일차 기산 시작.**
+**④는 판정 보류** — `gate=score` 9건이 `n_experts=0`을 흡수하고 있다(F-0818I-1 적용 전까지 채점 불가).
+
+### 적용 시점 — 전 항목 장후(15:35 이후). 장중 적용 금지 (R11 · 금지계명 3·4)
+
+**선행 조건: `run_postmarket` 6/6 완주 확인**(PRE-5 · 거래일 회귀 실측 기한이 오늘이다).
+**재시동 하지 않는다** — `code_version.stale=false`, D-day 1일차 무중단 기록이 더 값지다.
+
+> **이 절부터 Fix ID를 날짜에 묶는다** (`F-0818I-n` = 2026-08-18 Intra n번). 아래 G-3 참조.
+
+### Fix (P0 없음 · P1부터)
+
+- [ ] **F-0818I-1 (P1) ★★ 최우선 — `n_experts=0`을 판단 갈래로 분리 + 판단 값 계측**
+      **2026-08-13 장중 F-1+F-2 원안 그대로 집행**(`NEXT_TODO:3713`·`:3718`, 3거래일 미착수).
+      `strategy/decision/meta_decision.py` — `GATE_NO_EXPERT="no_expert"` 신설, `DECISION_GATES`(`:74`)
+      편입, `decide()`의 ①(kill) 다음 **②(regime) 앞**에 `if view.n_experts == 0:` 갈래
+      (**regime 앞이어야** F-0818I-2의 국면 어긋남이 이 갈래를 안 가린다).
+      `_no_trade()`의 `mlog.log`에 `n_experts`·`score`·`dispersion`·`uncertainty`·`model_version` 추가,
+      `GATE_PASS` 경로도 **같은 필드 집합으로 통일**. **`rationale` 문자열은 안 건드린다.**
+      `ops/integrity_report.py::decision_funnel`에 `no_expert` 편입.
+      `strategy/futures/aggregator.py` — `_log_no_contribution()`에 `meta_pass_prob` 추가
+      (「meta 임계 0.7 분포」의 열린 자리가 이걸로 닫힌다).
+      착수 전 `grep -rn "DECISION_GATES\|decision_funnel\|GATE_SCORE" src/ scripts/ tests/`.
+      **R18 저촉 아님**(차단 결과 동일, 표기만 분리). 적용 후 `gate=score` 급감 →
+      **불연속을 리포트에 명기**(조용히 자르면 나중에 못 푼다).
+      검증: `pytest -k meta_decision` 기존 `rationale` 단언 통과 + `n_experts=0`→`gate=="no_expert"` 신규. **커밋 ①**
+
+- [ ] **F-0818I-2a (P1) 국면 정합 계측** — `strategy/futures/service.py`
+      `handle_regime()`이 `RegimeState`의 봉 도메인 시각을 함께 보관(`_latest_regime_as_of`),
+      `_publish()`가 `trigger.valid_until`과 비교해 다르면 `RegimeStalenessDetected`(**WARNING** 신규)를
+      `regime_as_of`·`feature_as_of`·`regime` 필드와 함께 남긴다. **집계는 그대로 진행**
+      (§3.2 *"침묵이 아니라 판단이다"* — 보류안은 08-13에 기각됨).
+      `aggregator.py::_log_no_contribution()`에 `regime_as_of` 추가.
+      `core/logging.py`에 `"RegimeStalenessDetected": logging.WARNING` 등록.
+      모듈 docstring의 *"아직 한 번도 안 왔으면"* → *"같은 봉의 RegimeState가 아직 안 왔으면"* 정정.
+      `RegimeState` 스키마 변경 시 **R14 3종 세트** 점검(`grep -rn "RegimeState" src/ scripts/ tests/`).
+      검증: `pytest tests/ -k "futures_service or aggregator"` + **재생 신규 1건**
+      (`intel.regime`을 `feat.30m` 뒤에 도착 → Staleness 1건 + 집계 정상 진행). **커밋 ②**
+
+- [ ] **F-0818I-2b (P1) 첫 사이클 국면 시드** — **08-13 F-3 원안**(`NEXT_TODO:3723`, 미구현).
+      `scripts/run_g2_paper_trading.py::_load_regime_runtime()`이 `_warm_start_regime()` 직후
+      `classify()` 1회 → `TOPIC_REGIME` 발행 + `RegimeSeeded`(INFO).
+      `core/logging.py`에 `"RegimeSeeded": logging.INFO` 등록.
+      **2a와 별도 커밋** — 2a는 관측, 이쪽은 행동 변경이라 되돌릴 때 분리돼야 한다.
+      ※ 시드가 09:00 전 `AggregatorNoContribution`을 1건 추가시켜 **채점 분모가 9→10**이 될 수 있다. **커밋 ③**
+
+- [ ] **F-0818I-3 (P1) 완성봉 예산을 자가점검이 별도 축으로 판정** —
+      `scripts/self_check.py`의 `clock` 축을 ①시계 동기(임계 2초, 기존) ②**완성봉 예산**(`|offset|<500ms`)로
+      분리. ②는 `[WARN]` 표기만, **기동 거부 안 함**(R18 — 실측 1거래일뿐, 관문 분모를 갉아먹지 않는다).
+      `ops/clock_skew.py`에 `publish_offset_seconds()` 신설.
+      `scripts/run_l1_daily.py` 장 마감 절차 `collector.log_delivery_latency()` **다음 줄**에
+      `FeaturePublishOffset`(INFO): p50/p90/p99/max + 500ms 초과 비율. 못 잰 날은 못 쟀다고 남긴다(L18).
+      `ops/integrity_report.py`에 `publish_offset` 수록 + `unmeasured` 편입.
+      ※ `tests/ops/test_self_check.py`의 **축 개수 단언(현재 14축)이 깨진다.**
+      검증: `python scripts/self_check.py --skip-redis` 15축. **커밋 ④** (G-2와 합류)
+
+- [ ] **F-0818I-4 (P2) 점검이 자기 지각을 스스로 적는다** —
+      `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` 다이제스트 §1 머리에
+      `설계시각 → 실행시각 → 지연` 3연(pre=08:45·intra=12:30·post=16:00), 60분 초과 시 §9 적신호 편입.
+      `references/report_template.md` 헤더 필수 항목에 지연 명기.
+      **근본 해법**: `scripts/install_scheduled_tasks.ps1` 정본에 `Messiah-DailyCheck-Pre/Intra/Post` 등재
+      → 자가점검 `schedule_drift` 축이 점검 지연도 공짜로 감시한다. 08-14 F-12와 같은 묶음. **커밋 ⑤**
+
+### 고도화
+
+- [ ] **G-0818I-1 (이번 주) 장중 `decision_funnel`** — `status_snapshot.json`에
+      `decision: {funnel:{kill,no_expert,regime,dispersion,score,pass}, last_decision_kst, cycles}`.
+      **누적 카운터를 엔진에 심지 않는다**(R12 무상태 · 재기동 시 리셋) — 스냅샷 생성기가
+      당일 g2 로그의 `gate` 필드를 센다.
+      근거: 오늘 13:29 스냅샷 최상위에 판단 계열 **0개** — *"9/9가 한 갈래로 접혔다"* 를
+      **로그를 직접 센 뒤에야** 알았다. **선행: F-0818I-1**(갈래 이름 확정). ※ 08-13 G-1 원안
+
+- [ ] **G-0818I-2 (이번 주) `FeaturePublish`가 확정 시각과 발행 시각을 함께 말한다** —
+      `features/engine.py`의 `mlog.log`에 `bar_confirm_kst`(=`valid_until`)·`publish_offset_ms` 2필드.
+      현재 필드는 `symbol/horizon/feature_set/nan_ratio` 넷뿐.
+      근거: 오늘 +615ms 계산이 *"`ts`는 발행 완료 시각"* 이라는 **전제 하나에 기대고 있다.**
+      `service.py:110`이 *"파이프라인 전체가 같은 시각 도메인을 써야 한다"* 며 `valid_until`을 쓰는데
+      정작 로그엔 안 실린다. **F-0818I-3보다 먼저 넣으면 그 계측이 더 정확해진다.** 커밋 ④ 합류
+
+- [ ] **G-0818I-3 (즉시) Fix ID를 날짜에 묶는다** — 신규 항목 ID `F-1` → **`F-0818I-1`**
+      (날짜+국면 이니셜+일련). `references/report_template.md` §2 헤딩 규격·§5에 명기.
+      **기존 항목은 소급 개명하지 않는다**(과거 보고서 상호참조가 끊긴다) — 새로 다는 것부터.
+      근거: `NEXT_TODO:4611` *"코드 항목 전부 완료"*(08-14 분)와 `:3713`·`:3718`·`:3723`
+      (08-13 분, 미착수)이 같은 파일에 공존해 **오늘 P1 2건을 3거래일 지연시켰다.**
+      415KB 파일에서 `F-1` grep → 12곳. 커밋 ⑤ 합류
+
+- [ ] **G-0818I-4 (다음 단계) UI 스냅샷 신선도를 화면 밖에서 판정** —
+      `src/messiah/ui/app.py` 기동 직후 1회 `UISnapshotFreshness`(INFO):
+      읽은 `status_snapshot.generated_at_kst`와 현재 시각의 차 · 배지 판정 결과 ·
+      **임계가 「거래일 기준」인지 「경과 시간 기준」인지**를 필드로.
+      근거: P-9가 오늘 판정 예정이었으나 **로그로 판정 불가** — UI 기동은 남았는데(08:20:32,
+      `command_center_ui: "UP"`) 화면이 무엇을 그렸는지가 아무 파일에도 없다.
+      다음 기회는 **2026-09-24(추석)까지 5주 뒤**. R17 저촉 없음(로깅만). 오늘 실피해 0
+
+### 2026-08-18(화) 장후에 볼 것 — X-1~X-6
+
+- [ ] **X-1** `TickDeliveryLatency` 1건 존재 · `measured=true` · p99 확보.
+      **오늘 장중 0건은 정상**(장 마감 절차 산출). `measured=false`면 표본 부족
+- [ ] **X-2 ★** `postmarket_20260818.log` `steps_run == 6` — 08-17 비거래일 게이트의
+      **거래일 회귀 실측**(`DECISION_LOG` 라이브 미검증 L15, **기한 오늘**).
+      6이 아니면 되돌릴 지점은 `run_postmarket.main()`의 게이트 블록 하나
+- [ ] **X-3 ★** 종일 `DecisionEmitted` `gate` 분포 — `regime`이 **1건뿐**(09:00 단건)이면
+      F-0818I-2의 「첫 사이클 + 산발」 구조 확정. 2건 이상이면 더 넓게 틀렸다
+- [ ] **X-4** 종일 `AggregatorNoContribution` 건수 · `blocked_by_meta` 비율 —
+      13사이클 전건이면 W-21 종일 확정. 다른 갈래가 섞이면 국면 의존성이 있다는 뜻
+- [ ] **X-5 ★** `AggregatorNoContribution.regime` vs 직전 `RegimeClassified.regime` 어긋남 건수 —
+      **2/13 초과면** 경합 빈도가 오전 관측(2/10)보다 높다는 뜻
+- [ ] **X-6** `daily_integrity_20260818.json` `degenerate_feature_count` — 08-14의 **57**에서 감소.
+      0이면 08-16 P0-1(웜스타트 적재 필터)이 들었다는 강한 증거
+
+### 2026-08-19(수)에 볼 것 — X-7~X-10 (Fix 적용 후 채점)
+
+- [ ] **X-7** (F-0818I-1 후) `gate` 분포에 `no_expert` 등장 · `score`는 `n_experts ≥ 1`인 사이클만
+- [ ] **X-8** (F-0818I-2 후) `RegimeSeeded` 1건이 08:25대 존재 · `gate=regime` **0건** ·
+      `RegimeStalenessDetected` 건수가 오늘 실측 2건 대비 감소
+- [ ] **X-9** (F-0818I-3 후) `FeaturePublishOffset` 1건 · 500ms 초과 비율이 오늘 **69.6%** 대비 어떻게 움직이나
+- [ ] **X-10** 08-19 장전 점검이 **09:00 전에** 나오는가 — 또 늦으면 F-0818I-4의 「스케줄러 이관」 확정
+
+### 오늘 장중 통과 — 완료 처리하지 않는다 (하루가 안 끝났다)
+
+- [ ] **W-16 장중 잠정 통과** — `FeatureWarmStart.bars_by_horizon` 6개 Horizon 전부 **200 ≥ 22**
+      (`required_bars=180`) · `bars_by_source`에 **A05608 등장**(696봉) · `RegimeWarmStartShort`·
+      `OptionChainSkipped`·**`WarmStartBarsDropped` 전부 0**. 확정은 장후
+- [ ] **W-21 장중 확정 (예측 기각)** — `AggregatorNoContribution` 9/9 **`blocked_by_meta=['30m']`**.
+      리허설 15/15와 동일 갈래. **`blocked_by_uncertainty` 지배 예측은 기각.** 종일 확정은 X-4
+- [ ] **W-22·W-37 장중 잠정 통과** — `OptionChainPolled` **126건 전부 42/42다리**,
+      3계열 등장(`regular` 63·`weekly_mon` 32·`weekly_thu` 32). 확정은 장후
+- [ ] **W-26 장중 통과** — 국면 UNKNOWN **0%**. `RegimeClassified` 10건 전부 실판정,
+      상수 아닌 분포(TREND_DOWN 0.76→0.56 · HIGH_VOL 0.90~1.00 5건 · RANGE 0.72→0.99 · TREND_UP 0.66)
+- [ ] **P-1 적중** — 자가점검에 `[OK ] postmarket 20260817 장후 배치 정상 종료 확인` 나왔다 → 장후 P1 확정
+- [ ] **P-3 적중** — `git diff --stat -w --ignore-cr-at-eol -- src scripts configs` **빈 출력**(코드 동결 유지)
+- [ ] **P-2 판정: 아니오 (재발)** — 장전 점검이 09:00 전에 안 나왔다. 설계 08:45 대비 **4시간 44분 지연**
+      (`evidence_20260818_pre.md` 헤더 *"생성 13:29:09 · 리포 /sessions/funny-adoring-bell/..."*)
+- [ ] **G-2(반복 ERROR 접기) 근거 소멸** — 오늘 l1·g2 `ERROR`·`WARNING` **각 0건**.
+      08-14 장중의 *"l1 ERROR 51건이 전부 한 태그"* 대비 완전 소멸. **항목 폐기 여부는 장후 판단**
+- [ ] **F-3(수급 재시도 소진율) 긴급도 하향 유지** — KIS 500 4건이 08:21·08:53·10:38·12:20로
+      **종일 산발**(08-14는 08:36~08:51 집중). 장전 창의 성질이 아니라 상시 배경 잡음
+
+## 2026-08-18 장후 점검 (D-day 1일차 마감) — Fix 5종 + 고도화 4종 ([MW0601])
+
+### 적용 시점 — 장후는 적용 가능한 유일한 국면. 단 **예약 실행은 보고까지만** 했다
+사용자가 "구현해"라고 지시할 때 착수. 커밋 첫 단어 `[MW0601]` · 변경 후 `pytest`+replay(금지계명 2) ·
+미커밋 변경 실전 반입 금지(금지계명 10).
+
+### Fix (P0 없음 · P1부터)
+
+- [ ] **F-0818P-1 (P1) ★★ 최우선 — 채점기가 「최근 위반」과 「오늘 위반」을 말한다**
+      `ops/fix_verification.py::evaluate()`의 `break` 제거 → 전 구간 순회.
+      `last_violation`·`clean_streak`·`violated_today` 신설. `VerificationStatus.RECOVERING` 추가,
+      `RECURRED`를 **오늘 위반 전용**으로 좁힘. 오늘 충족+과거 위반은 **WARNING 강등**.
+      `violated_on`·`clean`은 이름·의미 보존(`daily_integrity_report.py` 소비처 보호).
+      `needs_attention()`은 `RECURRED`+`OVERDUE`만, `RECOVERING` 제외.
+      근거: 오늘 재발 11건 중 **9건이 기준 충족**인데 전부 ERROR로 울렸고, 유일한 오늘 위반
+      (`unmeasured_count=3`)은 "2026-08-13에 위반(2거래일 전)" 문장에 묻혔다
+- [ ] **F-0818P-2 (P1) `unmeasured`를 `accruing`/`failed`/`absent`로 가른다**
+      `ops/integrity_report.py`에 `unmeasured_kinds` 병기(기존 `unmeasured` 유지 — 과거 리포트 호환).
+      `fix_verification.py:424` 추출기는 `failed`+`absent`만 센다. 문구에 근거 명시:
+      `unmeasured_count=1 (누적 대기 2건 제외: 15m 27/30, 30m 14/30)`.
+      근거: `feature_health_rolling`이 오늘 처음 켜져 `unmeasured` 1→3, 기한(08-19) 충족 불가화
+- [ ] **F-0818P-3 (P1) `task_exit_codes` 지표 교체 — 연장이 아니다**
+      (a) `ops/task_exit_codes.py` `schtasks` 조회를 **배치 1단계 비동기 선조회 + 6단계 수령**으로
+      (15:45~15:48 3분 여유가 있는데 리포트 생성 시점 동기 호출로 타임아웃).
+      (b) 대안: `.bat`가 자기 종료 코드를 파일로 — `run_postmarket.bat`/l1/g2 래퍼 말미
+      `echo %ERRORLEVEL% > logs\exit_*.txt`. **OS에게 묻는 경로를 하나 더 두는 것**이 교체의 실질.
+      `configs/pending_verifications.yaml`에 교체 사유 주석. 근거: 08-13·08-14·08-18 3거래일 연속
+      `TimeoutExpired (2/2회 시도)` — 08-17 결정한 분기 조건 성립
+- [ ] **F-0818P-4 (P2) F-5 기한 재조정 적용 + `deadline_trading_days` 신설**
+      `daily-axes-measured` 08-19→08-25 · `composer-bucket-completeness` 08-19→08-24 ·
+      `no-degenerate-features` 08-20→08-26. 사유 주석 필수, **연장 1회 제한**.
+      동반: **`기한 초과`(못 고쳤다) vs `기한 불가 — 재조정 필요`(채점할 날이 없었다)** 판정 분리.
+      근거: 오늘 실측으로 셋 다 기한 내 3거래일 연속 **산술적 불가** 확정
+- [ ] **F-0818P-5 (P2) 「소급 불가 손실」 정의 단일화**
+      `ops/integrity_report.py:1017`에서 머리 구멍에 **`cadence_minutes` 차감**.
+      `status_snapshot`에 `minutes` 추가 + `clean`을 `minutes == 0`으로 재정의.
+      ⚠ **회귀 확인 필수**: 08-10(41분)·08-14(33분)은 실제 사고였고 차감 후에도 남아야 한다.
+      근거: 오늘 status_snapshot `clean=true` vs daily_integrity `5.0` — 정의 불일치(코드 확정)
+
+### 고도화
+
+- [ ] **G-0818P-1 (즉시) 등록부 일일 스코어보드** — `daily_integrity_*.json`에
+      `verification_scoreboard{today_violating, recovering[{id,streak,last_violation,value,prev_value}],
+      clean, unjudgeable}`. 장후 로그 말미 한 줄: `등록부 23건 — 오늘 위반 1 · 회복 중 9 ·
+      검증 완료 12 · 판정 불가 1`. F-0818P-1이 만드는 값 재사용(추가 계산 없음)
+- [ ] **G-0818P-2 (이번 주) 완성봉 유예를 회선 실측에 연동** — `scripts/self_check.py` `bar_close` 축이
+      직전 거래일 `delivery_latency.p90`을 읽어 유예와 대조. `p90 > 유예`면 WARN.
+      **임계 자동 변경 금지(R18) — 말하게만 한다.** 근거: 오늘 p50 **0.5204s** > 유예 500ms
+- [ ] **G-0818P-3 (즉시) `gate=pass` 사이클 입력 스냅샷 보존** —
+      `logs/pass_cycles/2026-08-18T1430_A05609.json`에 `ExpertView` 원본·`meta_features`·국면·
+      Net ER 계산 내역. 하루 최대 몇 건이라 용량 부담 없음.
+      근거: 14:30이 관측 이래 **첫 meta 게이트 통과**(1/14 사이클), 재현 기회가 드물다
+- [ ] **G-0818P-4 (다음 단계) 등록부 `warmup_trading_days`** — 새 계측축 도입 시 그만큼
+      `판정 불가` + 기한 카운터 정지. 30m은 하루 14~15표본이므로 `3`이 자연값(14×3=42 ≥ 30).
+      근거: 좋은 변경(`feature_health_rolling` 도입)이 등록부에 벌점이 됐다
+
+### 2026-08-19(수)에 볼 것 — Y-1~Y-8
+
+- [ ] **Y-1 ★** (F-0818P-1 후) 등록부 판정 — `RECURRED` 1건 이하 · `RECOVERING` 9건 등장 ·
+      오늘 위반이 문장 맨 앞. **2026-08-18 장후 보고서 §1-1 표가 정답지**
+- [ ] **Y-2 ★** (F-0818P-2 후) 15m `samples ≥ 54`로 `judged=True` 전환 · 30m은 대기(정상) ·
+      `unmeasured_count` 3 → 1
+- [ ] **Y-3 ★** (F-0818P-3 후) `task_exit_codes.available == true`. 또 `TimeoutExpired`면
+      **즉시 `.bat` 대안 경로로 전환**(W-12·W-29 동일 문장)
+- [ ] **Y-4** (F-0818P-5 후) `irrecoverable_loss_minutes` 오늘 5.0 → 0.0 ·
+      08-10(41)·08-14(33) 재산출에서 **유지되는가**
+- [ ] **Y-5** (F-0818I-1/2 후) `gate` 분포에 `no_expert` 등장 · `RegimeSeeded` 1건 08:25대 ·
+      `gate=regime` 0건 (X-7·X-8과 동일)
+- [ ] **Y-6** `gate=pass` 재출현 빈도 — 오늘 1/14. **0건이면 14:30이 예외적 사건**이었다는 뜻 →
+      G-0818P-3의 보존 가치가 더 커진다
+- [ ] **Y-7** 장전 점검이 09:00 전에 나오는가 (X-10 이월). 또 늦으면 F-0818I-4 「스케줄러 이관」 확정
+- [ ] **Y-8** `delivery_latency` p50 — 오늘 0.5204. **이틀 연속 500ms 초과면** G-0818P-2의
+      유예 재검토를 별건으로 승격
+
+### 2026-08-18 장후에 닫힌 것 — 완료 처리한다
+
+- [x] **X-1** `TickDeliveryLatency` 1건 · samples 20,000 · p99 1.0323 — 측정 확인
+- [x] **X-2 ★** `steps_run == 6` · `steps_failed 0` · `steps_with_findings 0` →
+      **DECISION_LOG 「라이브 미검증 L15」(08-17 비거래일 게이트 거래일 회귀, 기한 오늘) 통과 마감**
+- [x] **X-3 ★** `gate={score 12, regime 1, pass 1}` — `regime` 09:00:01 **단건**.
+      F-0818I-2 「첫 사이클」 구조 확정(더 넓게 틀린 것 아님)
+- [x] **X-4** `AggregatorNoContribution` 13건 전부 `blocked_by_meta=['30m']`,
+      `blocked_by_uncertainty` 전건 빈 배열. 14사이클 중 13 — 나머지 1건은 **통과**. W-21 종일 확정
+- [x] **X-5 ★** 국면 어긋남 **2/13** — 기준 "2/13 초과" **미달**. 오전 2/10 대비 증가 없음.
+      F-0818I-2a 긴급도 상향 근거 없음
+- [x] **X-6** `degenerate_feature_count` **0** (08-14 **57**) — 08-16 P0-1 웜스타트 적재 필터가
+      들었다는 강한 증거
+- [x] **P-4** `abnormal_exits: []` · `restarts: 0` · `ui_restarts: 0` — 통과
+- [x] **P-5** `task_exit_codes.exits` 빈 배열 — **판정 불가로 종결**(08-17 exit 3 혼입 여부 확인 불가)
+- [x] **P-6** `regime_unknown_ratio = 0.0` 오늘 충족. 등록부 미반영은 F-0818P-1 대상
+- [x] **P-7** 기한 경과 6건 전부 `검증 완료` — 실질 문제 없음. 위험은 **임박분**(F-0818P-4)
+- [x] **P-8** p50 0.5204/p90 0.9271/p99 1.0323 — 휴장일과 사실상 동일. **부하 가설 기각 확정**
+- [x] **P-10** 1m **410봉**(08:45~15:34) = 장전 15분 + 정규장 395분. W-9 확정
+- [x] **W-16·W-22·W-37·W-26** 장중 잠정 → **종일 확정**
+- [x] **장전 `clock-sync-restored` 위양성 우려** — 기우. `clock_skew_seconds=1.777`(개장 실측 채택),
+      `검증 완료` 8거래일 연속. 07:23 `LaunchWindowRefused` 회차는 안 셌다
+- [x] **G-2 (반복 ERROR 접기)** — l1·g2 ERROR 0건 이틀째로 **근거 소멸, 항목 폐기**.
+      단 장후 `FixVerificationRecurred` 11건이 같은 형태이므로 **F-0818P-1이 그 자리를 대신한다**
+
+### 이월 — 오늘 결론 못 냄
+
+- [ ] **P-9 / G-0818I-4 UI 스냅샷 신선도** — 세 국면 모두 판정 불가. `ui_20260818.log` 7줄(377B),
+      화면 내용이 어느 파일에도 없다. 자연 관측 기회는 **09-24(추석) 5주 뒤** → 로그화가 답
+- [ ] **meta 통과확률 라이브 분포** — 여전히 미계측. 단 14:30 `gate=pass`로
+      *"임계 0.7을 넘는 사이클이 존재한다"* 는 확정. **임계는 낮추지 않는다(R18)** → F-0818I-1
+- [ ] **F-3 (수급 재시도 소진율)** 긴급도 하향 유지 — KIS 500 9건 전부 1회 재시도 복구, 종일 산발
+- [ ] **`option_chain/regular` 머리 구멍 5분이 결함인가 카덴스인가** —
+      `series_coverage._is_irrecoverable()`·`head_gap_minutes`가 `cadence_minutes`를 차감하는지
+      코드 확인. 차감 안 하면 **F-0818P-5와 같은 뿌리이며 우선순위 P1로 상향**
+
+### 로드맵 반영 제안
+
+- [ ] **`Derivatives_AI_Master_Plan_Ver2.0.md` W단계 관측 항목에 「등록부 회복률」 추가** —
+      지금 로드맵은 결함 발생만 보고 회복을 보지 않는다. 오늘처럼 9건이 한꺼번에 회복되는 날이
+      기록되지 않으면 **수정이 듣는지를 장기적으로 판단할 근거가 없다**
+
+## 2026-08-18 장후 Fix 구현 완료 — F-0818P-1~5 ([MW0601])
+
+- [x] **F-0818P-1** 채점기 `break` 제거 · `clean_streak` 판정 · `회복 중` 신설 —
+      08-18 실측 **ERROR 11 → 0**(검증 완료 12→15 · 회복 중 8 · 재발 0), `since:` 수동 리셋 폐기
+- [x] **F-0818P-2** `unmeasured_kinds`(accruing·failed·absent) 병기 · `unmeasured_count`가
+      누적 대기를 안 센다 — 08-18 `unmeasured` 3 → 2(둘 다 accruing), 지표값 **0**
+- [x] **F-0818P-3** 종료 코드 질의를 `FilterXPath` + 작업 이름 필터로 교체 —
+      **84.4초/1591건 → 1.0초/10건**. 비동기·`.bat`·지표 교체 전부 불필요했다
+- [x] **P-5 종결(판정 불가 → 실측)** 08-17 `Messiah-Postmarket` exit `0x80070003`(Win32 3) 실재.
+      단 그날 로그도 "중단"이라 **불일치 아님** — 휴장일 심볼 부재의 정상 종료 코드,
+      비거래일 게이트(`ef9807c`) 이후로는 exit 0
+- [x] **F-0818P-4** `기한 불가` 판정 신설(채점 가능일 < 연속 요구일) + 기한 1회 연장
+      (`daily-axes-measured`·`composer-bucket-completeness` **08-21** · `no-degenerate-features` **08-24**).
+      `exit-code-matches-log`는 P-3으로 살아나 연장·교체 없음
+- [x] **F-0818P-5a** `irrecoverable_loss_minutes()`가 카덴스를 차감 — 5거래일 58 → 23분,
+      08-10(38)·08-14(23) 사고는 유지. **「머리 구멍 5분이 결함인가 카덴스인가」 이월 항목 종결**
+- [x] 오늘 리포트 재산출로 다섯 변경 실물 확인 · `pytest` 전 구간 2,053건 통과
+
+### 이 구현이 남긴 것
+
+- [ ] **F-0818P-5b 장중·장후 손실 정의 통일** — 장중 원장은 계열별 첫 행 시각·판정 창을 모른다.
+      `loss_ledger.record_first_row()` 훅 신설이 필요 → 별건. 오늘은 위양성만 걷었다
+- [ ] **`loss_budget` 5거래일 합이 아직 53.5분** — 08-11~08-14 리포트의 옛 값을 읽는다.
+      **과거 리포트는 소급 재산출하지 않기로 했다**(그날의 채점 기록이므로). 08-21에 창에서 빠진다
+- [ ] **G-0818P-4 `warmup_trading_days`** — F-0818P-2가 증상을 눌렀지만, 새 축을 켤 때 등록부가
+      대기 기간을 **미리 아는** 구조는 아직 없다
+- [ ] **07:23 회차 기동 사유 미기록** — 08-18 07:23:19 `Messiah`·`Messiah-G2` 종료(201)에 짝이 되는
+      107/110이 없다(부팅 트리거 추정). 이벤트 129/119를 질의에 넣으면 답이 나온다
+
+### 내일(08-19) 확인 — 이번 구현의 판정
+
+- [ ] **Y-1** 등록부 판정: `재발` 0~1건 · `회복 중` 다수 · 오늘 위반은 문장 맨 앞
+- [ ] **Y-2** `unmeasured`에서 15m 소멸(2거래일 누적 54 ≥ 30), 30m은 08-20까지 `accruing` 유지
+- [ ] **Y-3** `task_exit_codes.available == true` · 조회 5초 이내
+- [ ] **Y-4** `irrecoverable_loss_minutes`가 카덴스만큼 부풀지 않는지(옵션체인 정상일에 0.x분)
+- [ ] **Y-7** `daily-axes-measured` `clean_streak`가 2/3으로 오르는지 — 08-21 기한 내 졸업 궤도
