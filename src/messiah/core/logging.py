@@ -113,6 +113,10 @@ TAG_LEVELS: dict[str, int] = {
     # 관측 이래 첫 통과가 나왔는데 남은 것이 로그 3줄뿐이었다 — 다음이 언제일지 모르는
     # 사건의 입력을 그렇게 흘리면 분석할 표본이 0건이다. 하루 최대 몇 건이라 INFO.
     "PassCycleSnapshot": logging.INFO,
+    # 등록부 하루치 형세 한 줄 (2026-08-18 G-0818P-1). 항목별 판정은 `FixVerification*`이
+    # 이미 말한다 — 이 태그가 답하는 것은 "오늘 몇 개가 회복됐나"이고, 08-18엔 9건이
+    # 한꺼번에 회복된 날조차 그걸 말하는 산출물이 없었다.
+    "FixVerificationScoreboard": logging.INFO,
     # 그 보존이 실패했다 — 거래 경로는 계속되므로 WARNING이되 조용히는 안 된다(R10).
     "PassCycleSnapshotFailed": logging.WARNING,
     # UI 첫 렌더가 그린 것의 신선도 (2026-08-18 G-0818I-4). **부재가 정보다**: 이 태그가

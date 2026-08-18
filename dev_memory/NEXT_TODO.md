@@ -5607,3 +5607,34 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
 - [ ] **Z-3** 화면을 연 날이면 `ui_*.log`에 `UISnapshotFreshness` 1건 —
       `chart_lag_calendar_days=0`(당일) · 토픽 배지가 화면과 일치
 - [ ] **Z-4** 판단 로그 전건에 `n_experts` 필드 존재 — X-4류 사후 분석이 파싱 없이 가능
+
+## 2026-08-18 장후 3차 — 고도화 G-0818P-3·2·1 구현 ([MW0601])
+
+- [x] **G-0818P-3 pass 사이클 보존** — `ops/pass_cycles.py` 신설.
+      `logs/pass_cycles/{KST}_{symbol}.json`에 FuturesView·ExpertView·meta_features·
+      Net ER 구성요소·리스크 판정·**outcome**(out_of_session/atr_warmup/risk_reject/
+      zero_qty/submitted). 입력은 콜러블 주입(계층 역전 방지), 실패는 WARNING 후 거래 계속
+- [x] **G-0818P-2 유예↔회선 대조** — `check_bar_close`가 전일 정본 `delivery_latency.p90`을
+      `bar_composer._BOUNDARY_GRACE_SECONDS`와 대조. 실측 경고 실동작 확인
+      (유예 500ms vs 전일 p90 924ms). **임계 자동 변경 없음(R18) · 판정 안 뒤집음**
+- [x] **G-0818P-1 스코어보드** — `evaluate()`가 `last_value`/`prev_value` 수록,
+      `logs/verification_scoreboard_YYYYMMDD.json`(리포트 형제 파일) + 로그 한 줄.
+      08-18 실측 `등록부 23건 — 오늘 위반 0 · 회복 중 8 · 검증 완료 15 · 오늘 회복 6건`
+- [x] **G-0818P-4 미구현 결정** — 근거 소멸(F-0818P-2가 증상 제거 · F-0818P-4가 기한 분리).
+      현 등록부 23건 중 수혜 대상 0건
+
+### 트리거 대기 (조건 성립 시 착수)
+
+- [ ] **`warmup_trading_days`** — **다일 누적형 지표를 등록부에 새로 넣는 날** 함께 구현.
+      그때까지는 만들어도 쓰는 항목이 없다
+- [ ] **완성봉 유예 조정** — G-0818P-2가 쌓는 분포 **5거래일치**를 본 뒤 별건 결정(R18).
+      지금 실측: p50 0.5204 · p90 0.9271 (유예 0.500)
+- [ ] **로드맵 「등록부 회복률」** — 데이터 원천(스코어보드 파일)이 생겼으므로 이제 집계 가능.
+      마스터플랜 수정은 **사용자 문서라 승인 후** 반영
+
+### 다음 거래일(08-19) 관측 — 이번 구현의 판정
+
+- [ ] **W-1** `verification_scoreboard_20260819.json` 생성 + 장후 로그에 한 줄
+- [ ] **W-2** `bar_close` 축에 전일(08-18) p90 927ms 경고 — `daily_integrity` 값과 일치하는지
+- [ ] **W-3** pass 사이클 발생 시 `logs/pass_cycles/`에 파일 + `PassCycleSnapshot` 로그.
+      **0건이면 그 자체가 정보**(Y-6: 08-18 1/14가 예외적 사건이었다는 뜻)

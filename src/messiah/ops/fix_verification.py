@@ -579,6 +579,11 @@ class VerificationVerdict:
     last_violation: date | None = None
     violated_today: bool = False
     violation_count: int = 0
+    # 가장 최근에 **잰** 값과 그 직전 값 (2026-08-18 G-0818P-1) — `57.0 → 0.0` 같은 회복
+    # 서사가 이 둘로 성립한다. 못 잰 날은 건너뛴 뒤의 값이라 "직전 거래일"이 아니라
+    # "직전 측정"이다(L18: 못 잰 날을 값으로 세지 않는다).
+    last_value: float | None = None
+    prev_value: float | None = None
 
     @property
     def needs_attention(self) -> bool:
@@ -757,6 +762,10 @@ def evaluate(
         # 성립하지 않는다(옛날에 한 번 통과했으면 오늘 계측이 죽어도 안 걸린다).
         trailing_unmeasured = 0
         violated_today = False
+        # **지표값도 계산하고 버리고 있었다** (2026-08-18 G-0818P-1). 08-16 P0-1이
+        # `degenerate 57 → 0`을 만든 성과를 알아내려고 사람이 추출기를 손으로 다시 돌려야
+        # 했다 — 채점기가 이미 매일 계산하는 값인데 판정만 남기고 값을 버렸기 때문이다.
+        measured: list[float] = []
         for day in judged_days:
             value = extractor(reports[day])
             if value is None:
@@ -764,6 +773,7 @@ def evaluate(
                 trailing_unmeasured += 1
                 continue
             trailing_unmeasured = 0
+            measured.append(value)
             if item.satisfied_by(value):
                 clean_streak += 1
             else:
@@ -786,6 +796,8 @@ def evaluate(
                 violated_today=violated_today,
                 trailing_unmeasured=trailing_unmeasured,
                 report_days=sorted(reports),
+                last_value=measured[-1] if measured else None,
+                prev_value=measured[-2] if len(measured) >= 2 else None,
             )
         )
     return verdicts
@@ -853,6 +865,8 @@ def _verdict_for(
     violated_today: bool = False,
     trailing_unmeasured: int = 0,
     report_days: list[date] | None = None,
+    last_value: float | None = None,
+    prev_value: float | None = None,
 ) -> VerificationVerdict:
     """판정 하나 — **오늘 위반이 맨 앞이다** (2026-08-18 F-0818P-1).
 
@@ -888,6 +902,8 @@ def _verdict_for(
             last_violation=last_violation,
             violated_today=violated_today,
             violation_count=len(violations),
+            last_value=last_value,
+            prev_value=prev_value,
         )
 
     # ① **재발은 "마지막으로 잰 날에 위반 중"이다** (2026-08-18 F-0818P-1).
@@ -1010,6 +1026,93 @@ def format_verdicts(verdicts: list[VerificationVerdict]) -> list[str]:
         f"  {marks.get(v.status, '·')} [{v.status}] {v.id} — {v.summary}\n      {v.detail}"
         for v in verdicts
     ]
+
+
+def scoreboard(verdicts: list[VerificationVerdict], *, today: date) -> dict[str, Any]:
+    """등록부 하루치 채점을 **기계가 읽는 한 덩어리**로 (2026-08-18 G-0818P-1).
+
+    ## 왜 필요한가
+
+    2026-08-18 장후에 재발 11건 중 **9건이 그날 기준을 충족**했고, 그중
+    `degenerate_feature_count 57 → 0`은 08-16 P0-1(웜스타트 적재 필터)의 직접 성과였다.
+    그런데 그 사실을 말하는 산출물이 하나도 없어, 사람이 추출기를 손으로 돌려서야 알았다.
+    이 저장소는 *"측정 전까지 버그"* 를 반복해 경계해 왔는데 그날은 그 거울상이었다 —
+    **측정하지 않으면 고쳤다는 사실도 없는 것과 같다.**
+
+    ## 왜 무결성 리포트 안이 아니라 별도 산출물인가
+
+    채점은 **그날 리포트가 쓰인 뒤에** 그 파일을 포함한 이력 전체를 읽어야 성립한다(모듈
+    docstring). 같은 파일에 스코어보드를 넣으려면 쓰고 → 채점하고 → 다시 쓰는 2차 쓰기가
+    필요한데, 저장된 리포트는 **그날의 채점 기록**이라 나중에 덮어쓰지 않는다는 방침
+    (2026-08-18 F-0818P 구현 시 결정)과 정면으로 충돌한다. 그래서 형제 파일로 낸다.
+
+    회복률(로드맵 반영 제안)의 데이터 원천이 이 파일이다 — 지금은 로그 태그뿐이라
+    "며칠 만에 몇 건이 회복됐나"를 세려면 로그를 파싱해야 한다.
+    """
+
+    def entry(v: VerificationVerdict) -> dict[str, Any]:
+        return {
+            "id": v.id,
+            "summary": v.summary,
+            "status": v.status,
+            "streak": v.clean_days,
+            "required": v.required_days,
+            "first_violation": v.first_violation.isoformat() if v.first_violation else None,
+            "last_violation": v.last_violation.isoformat() if v.last_violation else None,
+            "violation_count": v.violation_count,
+            "value": v.last_value,
+            "prev_value": v.prev_value,
+        }
+
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "today_violating": [],
+        "recovering": [],
+        "clean": [],
+        "unjudgeable": [],
+        "overdue": [],
+        "pending": [],
+    }
+    for verdict in verdicts:
+        if verdict.violated_today or verdict.status == VerificationStatus.RECURRED:
+            buckets["today_violating"].append(entry(verdict))
+        elif verdict.status == VerificationStatus.RECOVERING:
+            buckets["recovering"].append(entry(verdict))
+        elif verdict.status == VerificationStatus.VERIFIED:
+            buckets["clean"].append(entry(verdict))
+        elif verdict.status in (
+            VerificationStatus.STALLED,
+            VerificationStatus.PREMISE_BROKEN,
+        ):
+            buckets["unjudgeable"].append(entry(verdict))
+        elif verdict.status in (VerificationStatus.OVERDUE, VerificationStatus.UNREACHABLE):
+            buckets["overdue"].append(entry(verdict))
+        else:
+            buckets["pending"].append(entry(verdict))
+
+    # **오늘 회복한 것**을 따로 센다 — 이 축의 존재 이유다. 마지막 위반 이후 연속 1일이면
+    # 그 회복은 오늘 처음 관측된 것이다(어제까지는 위반 중이었다는 뜻).
+    recovered_today = [e for e in buckets["recovering"] if e["streak"] == 1]
+    return {
+        "date": today.isoformat(),
+        "total": len(verdicts),
+        "counts": {name: len(items) for name, items in buckets.items()},
+        "recovered_today": [e["id"] for e in recovered_today],
+        **buckets,
+    }
+
+
+def scoreboard_line(board: dict[str, Any]) -> str:
+    """장후 로그 말미 한 줄 — 사람이 23줄을 훑지 않고 그날 형세를 읽는다."""
+    counts = board["counts"]
+    line = (
+        f"등록부 {board['total']}건 — 오늘 위반 {counts['today_violating']} · "
+        f"회복 중 {counts['recovering']} · 검증 완료 {counts['clean']} · "
+        f"판정 불가 {counts['unjudgeable']} · 기한 {counts['overdue']} · "
+        f"대기 {counts['pending']}"
+    )
+    if board["recovered_today"]:
+        line += f" · 오늘 회복 {', '.join(board['recovered_today'])}"
+    return line
 
 
 def run(

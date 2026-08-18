@@ -2530,3 +2530,26 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
             fix_id=verdict.id,
             status=verdict.status,
         )
+
+    # **오늘 몇 개가 회복됐나를 한 줄로** (2026-08-18 G-0818P-1). 항목별 판정은 위 23줄이
+    # 이미 말하지만, 그날의 형세(위반 몇 · 회복 몇 · 졸업 몇)는 사람이 23줄을 훑어야만
+    # 나왔다. 08-18에 9건이 한꺼번에 회복된 날조차 그 사실을 말하는 산출물이 없었다.
+    #
+    # 파일은 리포트의 **형제**로 낸다 — 리포트 안에 넣으려면 2차 쓰기가 필요하고, 저장된
+    # 리포트는 그날의 채점 기록이라 덮어쓰지 않는다(`ops/fix_verification.scoreboard`).
+    try:
+        board = fv.scoreboard(verdicts, today=day)
+        path = log_dir / f"verification_scoreboard_{day:%Y%m%d}.json"
+        path.write_text(json.dumps(board, ensure_ascii=False, indent=2), encoding="utf-8")
+        line = fv.scoreboard_line(board)
+        print(f"  {line}", flush=True)
+        mlog.log(
+            "FixVerificationScoreboard",
+            line,
+            date=day.isoformat(),
+            counts=board["counts"],
+            recovered_today=board["recovered_today"],
+            path=str(path),
+        )
+    except Exception as exc:  # noqa: BLE001 — 요약이 장후 절차를 막지 않는다
+        print(f"등록부 스코어보드 실패(장후 절차는 계속): {exc}", flush=True)

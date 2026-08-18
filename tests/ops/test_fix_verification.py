@@ -23,6 +23,8 @@ from messiah.ops.fix_verification import (
     load_daily_reports,
     load_registry,
     run,
+    scoreboard,
+    scoreboard_line,
 )
 
 _REGISTERED = date(2026, 8, 3)
@@ -876,6 +878,67 @@ def test_unmeasured_count_counts_everything_in_reports_without_the_classificatio
     extract = METRIC_EXTRACTORS["unmeasured_count"]
 
     assert extract({"unmeasured": ["a", "b"]}) == 2.0
+
+
+# ---------------- 등록부 스코어보드 (2026-08-18 G-0818P-1)
+#
+# 08-18 장후에 재발 11건 중 9건이 그날 기준을 충족했고 그중 `degenerate 57 → 0`은 08-16
+# P0-1의 직접 성과였다. 그런데 그 사실을 말하는 산출물이 하나도 없어 사람이 추출기를 손으로
+# 돌려서야 알았다. **측정하지 않으면 고쳤다는 사실도 없는 것과 같다.**
+
+
+def test_the_scoreboard_carries_the_recovery_story_not_just_the_verdict():
+    """`57.0 → 0.0`이 없으면 "회복했다"는 말에 크기가 없다."""
+    # 08-05 위반(57) → 08-06 회복(0).
+    reports = _days((4, 0), (5, 57), (6, 0))
+
+    verdicts = evaluate([_restarts_item()], reports, today=date(2026, 8, 6))
+    board = scoreboard(verdicts, today=date(2026, 8, 6))
+
+    (entry,) = board["recovering"]
+    assert entry["value"] == 0.0
+    assert entry["prev_value"] == 57.0, "직전 **측정**값 — 회복의 크기가 여기 있다"
+    assert entry["last_violation"] == "2026-08-05"
+    assert board["recovered_today"] == ["x"], "연속 1일 = 오늘 처음 관측된 회복"
+
+
+def test_a_second_clean_day_is_no_longer_todays_recovery():
+    """어제도 깨끗했으면 오늘의 사건이 아니다 — 매일 같은 회복을 자랑하지 않는다."""
+    reports = _days((4, 0), (5, 57), (6, 0), (7, 0))
+
+    board = scoreboard(
+        evaluate([_restarts_item()], reports, today=date(2026, 8, 7)), today=date(2026, 8, 7)
+    )
+
+    assert board["counts"]["recovering"] == 1
+    assert board["recovered_today"] == []
+
+
+def test_the_scoreboard_line_is_one_glance():
+    """사람이 23줄을 훑지 않고 그날 형세를 읽는다 — 이 한 줄이 그 목적이다."""
+    reports = _days((4, 0), (5, 57), (6, 0))
+
+    board = scoreboard(
+        evaluate([_restarts_item()], reports, today=date(2026, 8, 6)), today=date(2026, 8, 6)
+    )
+    line = scoreboard_line(board)
+
+    assert "등록부 1건" in line
+    assert "회복 중 1" in line
+    assert "오늘 회복 x" in line
+
+
+def test_today_violation_lands_in_its_own_bucket():
+    """오늘 위반은 회복·졸업과 절대 같은 칸에 들어가면 안 된다(08-18에 그래서 묻혔다)."""
+    reports = _days((4, 0), (5, 0), (6, 3))
+
+    board = scoreboard(
+        evaluate([_restarts_item()], reports, today=date(2026, 8, 6)), today=date(2026, 8, 6)
+    )
+
+    assert [e["id"] for e in board["today_violating"]] == ["x"]
+    assert board["counts"]["recovering"] == 0
+    assert board["recovered_today"] == []
 
 
 # ---------------- 채점기가 끝까지 본다 (2026-08-18 F-0818P-1)
