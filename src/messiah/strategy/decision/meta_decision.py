@@ -67,11 +67,21 @@ _EVENT_LIKE_REGIMES = frozenset({Regime.EVENT, Regime.UNKNOWN})
 # 사유 문자열(`rationale`)에 ①~⑤가 이미 들어 있지만 그것을 사후에 정규식으로 긁는 것은
 # 다른 실패다: 문구를 다듬는 순간 조용히 0이 된다. **코드가 자기 갈래를 직접 말한다.**
 GATE_KILL = "kill"  # ① sys.kill 활성
+# **입력 부재는 우위 부족이 아니다** (2026-08-18 F-0818I-1, 원안은 2026-08-13 장중 F-1).
+#
+# 기여 전문가가 0명이면 Aggregator 폴백이 `score=0.0 · dispersion=0.0`을 내고, 그 0.0이
+# ③(분산 0.25)을 무사통과해 ④에서 "|S|=0.000 — 우위 부족"으로 접혔다. 2026-08-18 실측
+# 9사이클 전부가 이 형태로 `gate=score`에 잡혀, Go/No-Go ④("우위 부족이 며칠인가") 채점이
+# 판단력과 무관한 배선 문제로 오염됐다. 의견이 약한 것과 의견이 없는 것은 다른 사건이다.
+#
+# ②(regime) **앞**에 두는 이유: 국면 전파가 어긋난 사이클(2026-08-18 장중 1-1)에서
+# regime 갈래가 이 갈래를 가리면, 입력 부재가 국면 문제로 또 한 번 위장된다.
+GATE_NO_EXPERT = "no_expert"  # ①′ 기여 전문가 0명 — 입력 부재
 GATE_REGIME = "regime"  # ② 이벤트/미판정 국면
 GATE_DISPERSION = "dispersion"  # ③ 전문가 의견 분산
 GATE_SCORE = "score"  # ④ |S| 미달
 GATE_PASS = "pass"  # ⑤ 통과 — 여기까지 와야 Risk·Sizer·OrderGateway가 돈다
-DECISION_GATES = (GATE_KILL, GATE_REGIME, GATE_DISPERSION, GATE_SCORE, GATE_PASS)
+DECISION_GATES = (GATE_KILL, GATE_NO_EXPERT, GATE_REGIME, GATE_DISPERSION, GATE_SCORE, GATE_PASS)
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,12 @@ class MetaDecisionEngine:
 
         if kill_active:
             return self._no_trade(view, "① sys.kill 활성 — 무조건 NO TRADE", gate=GATE_KILL)
+        if view.n_experts == 0:
+            return self._no_trade(
+                view,
+                "①′ n_experts=0 — 기여 의견 없음(입력 부재, 우위 부족 아님)",
+                gate=GATE_NO_EXPERT,
+            )
         if view.regime in _EVENT_LIKE_REGIMES:
             return self._no_trade(
                 view,
@@ -135,8 +151,25 @@ class MetaDecisionEngine:
             side=side.value,
             confidence=confidence,
             gate=GATE_PASS,
+            **self._view_fields(view),
         )
         return intent
+
+    @staticmethod
+    def _view_fields(view: FuturesView) -> dict[str, object]:
+        """판단 값 계측 (2026-08-18 F-0818I-1) — 모든 `DecisionEmitted`가 같은 필드를 싣는다.
+
+        종전엔 통과 경로와 차단 경로의 관측 스키마가 달랐고, 차단 경로는 값 자체를 안 실었다.
+        그래서 2026-08-18까지 `gate=score` 9건이 실제로 |S|가 얼마였는지(0.000인지 0.19인지)를
+        rationale 문자열을 파싱해야만 알 수 있었다 — 문구를 다듬는 순간 조용히 0이 되는
+        바로 그 형태다(`DECISION_GATES` 주석). rationale은 사람 몫, 필드는 집계 몫이다.
+        """
+        return {
+            "n_experts": view.n_experts,
+            "score": view.score,
+            "dispersion": view.dispersion,
+            "uncertainty": view.uncertainty,
+        }
 
     def _no_trade(self, view: FuturesView, rationale: str, *, gate: str) -> DecisionIntent:
         intent = DecisionIntent(
@@ -151,5 +184,12 @@ class MetaDecisionEngine:
             latency_trace={},
             rationale=rationale,
         )
-        mlog.log("DecisionEmitted", rationale, symbol=view.symbol, side="NO_TRADE", gate=gate)
+        mlog.log(
+            "DecisionEmitted",
+            rationale,
+            symbol=view.symbol,
+            side="NO_TRADE",
+            gate=gate,
+            **self._view_fields(view),
+        )
         return intent

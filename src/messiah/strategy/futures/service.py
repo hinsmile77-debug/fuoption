@@ -38,6 +38,7 @@ from typing import Mapping
 
 import numpy as np
 
+from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_FEAT, TOPIC_FUTURES, TOPIC_REGIME, BusLike
 from messiah.core.messages import (
     BusMessage,
@@ -103,7 +104,26 @@ class FuturesAIService:
             return view  # 모듈 docstring: MetaLabeler 미보유 Horizon은 필터링 없이 통과
         probs = np.array([view.p_down, view.p_flat, view.p_up])
         meta_features = build_meta_features_from_feature_vector(probs, view.ens_std, feature_vector)
-        passed = meta.passes(meta_features)
+        # **확률을 버리지 않는다** (2026-08-18 F-0818I-1). 종전엔 `meta.passes()`가 내부에서
+        # 확률을 계산하고 bool만 돌려줘, 이 파이프라인 어디에도 확률값이 남지 않았다.
+        # 그 대가: 2026-08-11~18 관측 내내 `blocked_by_meta`가 13/14 사이클을 막는 동안
+        # "임계 0.7에 얼마나 가까운가"를 아무도 몰랐다 — 벽이 내일 열릴지 몇 주 걸릴지를
+        # 판단할 유일한 근거가 여기서 매 사이클 계산되고 그대로 증발하고 있었다.
+        # 임계 자체는 건드리지 않는다(R18) — 말하게만 한다. 배선 Horizon이 30m 하나라
+        # 하루 14줄이다.
+        probability = meta.predict_pass_probability(meta_features)
+        passed = probability >= meta.threshold
+        mlog.log(
+            "MetaGateEvaluated",
+            f"meta {feature_vector.horizon.value} p={probability:.3f} "
+            f"(임계 {meta.threshold:g}) → {'통과' if passed else '차단'}",
+            symbol=view.symbol,
+            horizon=feature_vector.horizon.value,
+            probability=probability,
+            threshold=meta.threshold,
+            passed=passed,
+            model_version=view.model_version,
+        )
         return view.model_copy(update={"meta_passed": passed})
 
     async def _publish(self, trigger: FeatureVector) -> None:

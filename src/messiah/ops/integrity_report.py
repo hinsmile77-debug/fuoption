@@ -376,6 +376,11 @@ class IntegrityReport:
     #
     # None은 미측정(판단 0건 = 사슬 미배선)이다 — 빈 dict와 구분한다(L18).
     decision_funnel: dict[str, int] | None = None
+    # Meta-Labeler 통과확률 분포 (2026-08-18 F-0818I-1). `blocked_by_meta`가 13/14 사이클을
+    # 막는 동안 "임계 0.7에 얼마나 가까운가"가 어디에도 없어, 벽이 내일 열릴지 몇 주 걸릴지를
+    # 아무도 판단할 수 없었다. None은 미측정(`MetaGateEvaluated` 0건 — 이 계측 이전의 로그
+    # 이거나 Meta-Labeler 미배선)이다.
+    meta_gate: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -646,6 +651,10 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     # 판단 사슬의 관문별 통과·차단 건수 (2026-08-12 G-1). `regime_counts`와 같은 규율로
     # 비어 있으면 미측정이다(판단이 하루 종일 0건이면 사슬 자체가 안 붙은 것이다).
     decision_gates: dict[str, int] = {}
+    # Meta-Labeler 통과확률 (2026-08-18 F-0818I-1) — 값·통과 수·임계를 모은다.
+    meta_gate_probs: list[float] = []
+    meta_gate_passes = 0
+    meta_gate_threshold: float | None = None
 
     # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
     # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
@@ -735,6 +744,17 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             gate = record.get("gate")
             if isinstance(gate, str) and gate:
                 decision_gates[gate] = decision_gates.get(gate, 0) + 1
+        elif tag == "MetaGateEvaluated":
+            # 확률 **분포**를 모은다 (2026-08-18 F-0818I-1) — 통과/차단 건수는 이미
+            # `blocked_by_meta`가 말하고 있고, 이 축이 새로 답하는 것은 "얼마나 가까운가"다.
+            prob = record.get("probability")
+            if isinstance(prob, (int, float)):
+                meta_gate_probs.append(float(prob))
+                if record.get("passed"):
+                    meta_gate_passes += 1
+                threshold = record.get("threshold")
+                if isinstance(threshold, (int, float)):
+                    meta_gate_threshold = float(threshold)
         elif tag == "RegimeClassified":
             # 국면 **분포** (2026-08-12 F-2). 건수가 아니라 내역을 센다 — 2026-08-12엔
             # `DecisionEmitted: 14`만 남아 "14건 나왔다"는 알았지만 **그 14건이 전부 같은
@@ -788,6 +808,26 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "circuit_breaker_events": cb_events,
         "regime_counts": regime_counts,
         "decision_gates": decision_gates,
+        # 요약 통계로 접어서 낸다 — 원값 14개를 리포트에 다 실으면 이 파일이 로그의 사본이
+        # 된다. 분포의 모양(중앙·상단·최대)과 임계의 거리만 있으면 판정에 충분하다.
+        "meta_gate": (
+            {
+                "evaluations": len(meta_gate_probs),
+                "passes": meta_gate_passes,
+                "threshold": meta_gate_threshold,
+                "p50": round(median(meta_gate_probs), 4),
+                # nearest-rank p90: ceil(0.9n)번째 — int(0.9n)은 n=14에서 p82를 내놓는다.
+                "p90": round(
+                    sorted(meta_gate_probs)[
+                        min(len(meta_gate_probs), -(-9 * len(meta_gate_probs) // 10)) - 1
+                    ],
+                    4,
+                ),
+                "max": round(max(meta_gate_probs), 4),
+            }
+            if meta_gate_probs
+            else None
+        ),
     }
 
 
@@ -1601,6 +1641,9 @@ def build_report(
         dict(sorted(logs["decision_gates"].items())) if logs["decision_gates"] else None
     )
 
+    # Meta-Labeler 통과확률 (2026-08-18 F-0818I-1) — 계측 실패 감지는 `unmeasured` 블록에서.
+    meta_gate: dict[str, Any] | None = logs["meta_gate"]
+
     # **측정 불능은 0건이 아니다** (2026-08-05). 종전에는 `available=False`가 조용히
     # 지나가서, 크래시 0건인 날에만 집계가 실패하는 결함이 드러나지 않았고 그 상태로는
     # "3거래일 연속 크래시 0건" 등록부가 영원히 판정을 못 채웠다.
@@ -1738,6 +1781,14 @@ def build_report(
         note_unmeasured("변동성 축 채점(run_vol_scorecard.py 미실행)", "absent")
     if not degenerate_features:
         note_unmeasured("피처 건강도(장 마감 FeatureHealth 로그 없음)", "absent")
+    # **계측이 죽으면 시끄럽게** (2026-08-18 F-0818I-1): meta가 판정한 흔적(`blocked_by_meta`)은
+    # 있는데 확률 로그가 0건이면 확률 계측 자체가 고장 난 것이다 — meta 미배선인 날은 둘 다
+    # 없으므로 여기 안 걸린다(위양성 없음). 이 계측 이전의 과거 로그를 소급 재산출하는 경우에도
+    # 걸리는데, 그날 확률을 몰랐다는 것은 사실이므로 그대로 둔다.
+    if meta_gate is None and logs["no_contribution_reasons"].get("blocked_by_meta"):
+        note_unmeasured(
+            "meta 게이트 확률(MetaGateEvaluated 로그 없음 — 계측 이전이거나 고장)", "absent"
+        )
     # **옵션체인이 돌긴 했나** (2026-08-14 F-6).
     #
     # 종전엔 성공 경로에 로그가 없어 "0건"이 *"없었다"* 와 *"안 셌다"* 둘이었다 — 그 구분이
@@ -1992,6 +2043,7 @@ def build_report(
         host_events=[event.to_dict() for event in observation.events],
         regime_distribution=regime_distribution,
         decision_funnel=decision_funnel,
+        meta_gate=meta_gate,
         symbol_mismatch_suspected=bool(symbol_candidates),
         symbol_candidates=symbol_candidates,
         feature_health_rolling=[v.to_dict() for v in rolling],
@@ -2120,6 +2172,7 @@ def format_summary(report: IntegrityReport) -> str:
     else:
         labels = {
             "kill": "①kill",
+            "no_expert": "①′입력부재",
             "regime": "②국면",
             "dispersion": "③분산",
             "score": "④우위부족",
@@ -2131,6 +2184,16 @@ def format_summary(report: IntegrityReport) -> str:
         passed = report.decision_funnel.get("pass", 0)
         tail = "" if passed else " — Risk·Sizer·OrderGateway 미검증"
         lines.append(f"  판단 사슬: {funnel}{tail}")
+    # **임계까지의 거리** (2026-08-18 F-0818I-1) — `blocked_by_meta` 건수는 위 사슬이 이미
+    # 말하고, 이 줄이 새로 답하는 것은 "그 벽이 얼마나 두꺼운가"다. 판정은 안 한다(R18).
+    if report.meta_gate:
+        mg = report.meta_gate
+        threshold = mg.get("threshold")
+        lines.append(
+            f"  meta 게이트: 평가 {mg.get('evaluations')} · 통과 {mg.get('passes')}"
+            + (f" · 임계 {threshold:g}" if isinstance(threshold, (int, float)) else "")
+            + f" · p50 {mg.get('p50')} · p90 {mg.get('p90')} · max {mg.get('max')}"
+        )
     # 적재 계열 커버리지 (2026-08-06 고도화 2) — **정상인 계열도 전부 찍는다.**
     # 2026-08-06에 리포트가 조용했던 이유는 이 계열들을 "정상"으로 판정해서가 아니라
     # 아예 안 봐서였다. 목록 자체가 "무엇을 보고 있는가"의 증거다.

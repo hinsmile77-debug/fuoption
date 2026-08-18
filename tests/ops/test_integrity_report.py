@@ -1426,6 +1426,50 @@ def test_unreadable_host_events_land_in_unmeasured(tmp_path: Path):
 # 전부 오탐이고, `observation_gap_minutes_max max: 5` 등록부 항목을 뒤집을 값이었다.
 
 
+# ---------------- meta 게이트 확률 분포 (2026-08-18 F-0818I-1)
+#
+# `blocked_by_meta` 건수는 이미 판단 사슬이 말한다. 이 축이 새로 답하는 것은 "임계 0.7에
+# 얼마나 가까운가"다 — 그 값 없이는 벽이 내일 열릴지 몇 주 걸릴지 아무도 모른다.
+
+
+def test_meta_gate_probabilities_fold_into_a_distribution(tmp_path):
+    from messiah.ops.integrity_report import analyze_logs
+
+    log = tmp_path / "g2_daily_20260818.log"
+    probs = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.65, 0.68, 0.72, 0.75]
+    log.write_text(
+        "\n".join(
+            '{"ts": "2026-08-18T09:00:00+09:00", "level": "INFO", "tag": "MetaGateEvaluated", '
+            f'"probability": {p}, "threshold": 0.7, "passed": {"true" if p >= 0.7 else "false"}}}'
+            for p in probs
+        ),
+        encoding="utf-8",
+    )
+
+    result = analyze_logs([log])["meta_gate"]
+
+    assert result["evaluations"] == 10
+    assert result["passes"] == 2
+    assert result["threshold"] == 0.7
+    assert result["p50"] == 0.55
+    assert result["p90"] == 0.72, "nearest-rank ceil(0.9×10)=9번째"
+    assert result["max"] == 0.75
+
+
+def test_a_day_without_meta_gate_logs_is_none_not_zero(tmp_path):
+    """이 계측 이전의 로그(08-18까지 전부)는 미측정이다 — 빈 분포가 아니다(L18)."""
+    from messiah.ops.integrity_report import analyze_logs
+
+    log = tmp_path / "g2_daily_20260814.log"
+    log.write_text(
+        '{"ts": "2026-08-14T09:00:00+09:00", "level": "INFO", "tag": "DecisionEmitted", '
+        '"gate": "score"}',
+        encoding="utf-8",
+    )
+
+    assert analyze_logs([log])["meta_gate"] is None
+
+
 def test_refused_launch_is_not_counted_as_a_session_start(tmp_path):
     from messiah.ops.integrity_report import analyze_logs
 

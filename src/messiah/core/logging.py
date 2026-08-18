@@ -105,6 +105,10 @@ TAG_LEVELS: dict[str, int] = {
     "FeaturePublishError": logging.ERROR,  # FeatureEngine 발행 실패 — L22: 처리 루프는 계속
     "DailyCloseTimeout": logging.CRITICAL,  # 장후 종료 절차가 안전판 시각까지 못 끝남 — 강제 종료
     "DecisionEmitted": logging.INFO,  # Meta Decision — NO TRADE도 포함해 전부 기록(Ver 2.0 §3.2)
+    # Meta-Labeler 통과확률 (2026-08-18 F-0818I-1). `passes()`가 내부에서 계산하고 버리던
+    # 확률을 사이클마다 남긴다 — `blocked_by_meta`가 13/14를 막는 동안 "임계 0.7에 얼마나
+    # 가까운가"를 아무도 몰랐다. 임계는 안 건드린다(R18) — 말하게만 한다. 하루 14줄(30m).
+    "MetaGateEvaluated": logging.INFO,
     "SizerZeroQty": logging.INFO,  # Sizer 계산 결과 0계약 — 주문 생성 안 함(정상 동작)
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
     # 구독 루프가 메시지 하나를 처리하다 실패했다 (2026-08-07 P0-1). **루프는 살아 있다** —
