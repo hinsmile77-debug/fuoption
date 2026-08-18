@@ -167,7 +167,23 @@ def _win32_code(code: int) -> int:
     return code
 
 
-def _query_script(start: datetime, end: datetime) -> str:
+def _task_name_clause(tasks: set[str] | None) -> str:
+    """XPath의 **작업 이름 필터** — 정본을 못 읽으면 빈 문자열(넓은 질의로 폴백).
+
+    이름에 작은따옴표가 들어간 작업은 그물에서 뺀다. XPath 리터럴을 깨뜨리는 유일한
+    문자이고, 이 프로젝트의 작업 이름 규약(`Messiah`·`Messiah-G2`…)에는 나올 수 없다 —
+    조용히 이스케이프해 통과시키는 것보다 빼고 그 사실이 드러나게 두는 쪽이 낫다.
+    """
+    if not tasks:
+        return ""
+    names = sorted(name for name in tasks if "'" not in name)
+    if not names:
+        return ""
+    clause = " or ".join(f"Data[@Name='TaskName']='\\{name}'" for name in names)
+    return f" and *[EventData[{clause}]]"
+
+
+def _query_script(start: datetime, end: datetime, tasks: set[str] | None = None) -> str:
     """`ops/observation_gaps._query_script()`와 **같은 규율**의 PowerShell 스크립트.
 
     항상 `exit 0`으로 끝나고 첫 줄에 `OK <건수>` 또는 `ERR <예외형>`을 찍는다 — 종료 코드로
@@ -182,16 +198,37 @@ def _query_script(start: datetime, end: datetime) -> str:
     한 번의 질의로 셋을 다 가져온다 (2026-08-10 G-3) — 같은 로그를 두 번 열면 PowerShell
     호출이 두 배가 되고(장후 절차에 10초씩 붙는다) 무엇보다 두 결과의 시각이 어긋난다.
     줄머리에 이벤트 번호를 붙여 파이썬 쪽에서 가른다.
+
+    ## 왜 이름을 **질의에** 거나 (2026-08-18 F-0818P-3)
+
+    종전엔 이벤트 번호와 시간만 걸고 `Messiah*` 선별은 **파이썬이 받은 뒤에** 했다. 그 대가가
+    3거래일 연속 `TimeoutExpired`였다 — 이 PC 실측:
+
+        이름 필터 없음(종전)   84.4초 / 1591건(윈도우 내장 작업 전부) → 60초 시한 초과
+        이름 필터 있음(현행)    1.0초 /   10건(`Messiah` 4개)
+
+    **84배**다. 08-13·08-14·08-18 세 번의 실패는 재시도 횟수 문제가 아니라 **질의가 하루치
+    스케줄러 로그 전체를 훑고 있었기** 때문이었고, 그래서 F-D의 2회 재시도(2026-08-14)로도
+    안 나았다 — 두 번 다 같은 이유로 걸린다. 시한을 늘리는 답도 틀렸다: 장후 절차에 몇 분을
+    얹을 뿐 원인은 그대로 남는다.
+
+    `FilterHashtable`은 `EventData` 속성으로 못 거른다. 그래서 `FilterXPath`로 바꾸고 시간창을
+    XPath에 직접 적는다 — `TimeCreated/@SystemTime`은 **UTC**라 로컬 경계를 PowerShell에서
+    변환한다(파이썬에서 하면 이 PC의 로컬 존을 두 곳이 각각 가정하게 된다).
     """
-    ids = ",".join(str(i) for i in (_COMPLETED_EVENT_ID, *_LAUNCH_EVENT_IDS))
+    ids = " or ".join(f"EventID={i}" for i in (_COMPLETED_EVENT_ID, *_LAUNCH_EVENT_IDS))
+    stamp = "'yyyy-MM-ddTHH:mm:ss.000Z'"
+    parse = "[datetime]::ParseExact('{}','yyyy-MM-dd HH:mm:ss',$null).ToUniversalTime()"
     return (
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
         "$ErrorActionPreference='Stop'; $events=@(); "
-        "try { $events=@(Get-WinEvent -FilterHashtable @{"
-        "LogName='Microsoft-Windows-TaskScheduler/Operational';"
-        f"Id={ids};"
-        f"StartTime='{start:%Y-%m-%d %H:%M:%S}';EndTime='{end:%Y-%m-%d %H:%M:%S}'"
-        "} -ErrorAction Stop) } "
+        f"$s={parse.format(f'{start:%Y-%m-%d %H:%M:%S}')}.ToString({stamp}); "
+        f"$e={parse.format(f'{end:%Y-%m-%d %H:%M:%S}')}.ToString({stamp}); "
+        f'$x="*[System[({ids}) and '
+        "TimeCreated[@SystemTime>='$s' and @SystemTime<'$e']]]"
+        f'{_task_name_clause(tasks)}"; '
+        "try { $events=@(Get-WinEvent -LogName "
+        "'Microsoft-Windows-TaskScheduler/Operational' -FilterXPath $x -ErrorAction Stop) } "
         "catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $events=@() } "
         "else { Write-Output ('ERR ' + $_.Exception.GetType().Name); exit 0 } } "
         "Write-Output ('OK ' + $events.Count); "
@@ -235,6 +272,10 @@ def collect(
 
     start = datetime.combine(day, datetime.min.time())
     end = start + timedelta(days=1)
+    # **정본을 질의 앞에서 한 번만 읽는다** (2026-08-18 F-0818P-3). 종전엔 결과를 받은 뒤
+    # 파이썬이 걸렀고, 그래서 질의가 이 PC의 스케줄러 로그 전체(1591건)를 훑었다.
+    # 아래 루프에서 다시 쓰므로 여기서 잡아 둔다 — 재시도마다 파일을 다시 읽을 이유가 없다.
+    watched = _watched_tasks()
     last_error = ""
     for attempt in range(1, max(1, attempts) + 1):
         try:
@@ -244,7 +285,7 @@ def collect(
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    _query_script(start, end),
+                    _query_script(start, end, watched),
                 ],
                 capture_output=True,
                 text=True,
@@ -267,7 +308,8 @@ def collect(
 
     # 같은 작업이 하루에 여러 번 끝날 수 있다(수동 실행·재기동). 시간순으로 덮어써서
     # **마지막 것**만 남긴다 — 그게 스케줄러의 `LastTaskResult`이고 사람이 보는 값이다.
-    watched = _watched_tasks()
+    # 질의가 이미 이름으로 걸렀지만(F-0818P-3) 파이썬 쪽 그물은 남긴다 — 정본을 못 읽어
+    # 넓은 질의로 폴백한 경우가 있고, 무엇보다 **두 곳이 같은 답을 내는지**가 이 축의 성질이다.
     latest: dict[str, TaskExit] = {}
     launches: list[TaskLaunch] = []
     for line in lines[1:]:

@@ -123,6 +123,56 @@ def test_only_tasks_in_the_canonical_schedule_are_scored():
     assert [item.task for item in report.exits] == ["Messiah"]
 
 
+# ------------------- 질의가 이름으로 거른다 (2026-08-18 F-0818P-3)
+#
+# 파이썬이 받은 뒤에 거르던 시절의 대가가 3거래일 연속 `TimeoutExpired`였다. 이 PC 실측으로
+# 84.4초/1591건 → 1.0초/10건. 재시도 횟수도 시한도 원인이 아니었다.
+
+
+def test_the_query_filters_by_task_name_not_the_whole_scheduler_log(monkeypatch):
+    """이름이 **질의 안에** 있어야 한다 — 받은 뒤에 거르면 로그 전체를 훑는다."""
+    seen: dict[str, str] = {}
+
+    def spy(args, **_kwargs):
+        seen["command"] = args[-1]
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="OK 0\n", stderr="")
+
+    tec.collect(_DAY, runner=spy)
+
+    command = seen["command"]
+    assert "FilterXPath" in command, "EventData 속성은 FilterHashtable로 못 거른다"
+    assert "FilterHashtable" not in command
+    for name in ("Messiah", "Messiah-G2", "Messiah-Shutdown", "Messiah-Postmarket"):
+        assert f"Data[@Name='TaskName']='\\{name}'" in command
+
+
+def test_the_name_clause_disappears_when_the_canonical_schedule_is_unreadable(monkeypatch):
+    """정본을 못 읽으면 넓게라도 본다 — 이름 필터가 축을 끄는 스위치가 되면 안 된다."""
+
+    def unreadable(*_args, **_kwargs):
+        raise tec.task_schedule.ScheduleUnreadable("없음")
+
+    monkeypatch.setattr(tec.task_schedule, "load_schedule", unreadable)
+    seen: dict[str, str] = {}
+
+    def spy(args, **_kwargs):
+        seen["command"] = args[-1]
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="OK 0\n", stderr="")
+
+    tec.collect(_DAY, runner=spy)
+
+    assert "TaskName" not in seen["command"]
+    assert "FilterXPath" in seen["command"]
+
+
+def test_a_task_name_with_a_quote_is_dropped_from_the_clause():
+    """작은따옴표는 XPath 리터럴을 깨는 유일한 문자다 — 조용히 이스케이프하지 않는다."""
+    clause = tec._task_name_clause({"Messiah", "Bad'Name"})
+
+    assert "Messiah" in clause
+    assert "Bad" not in clause
+
+
 def test_an_unreadable_schedule_falls_back_to_the_name_prefix(monkeypatch):
     """정본을 못 읽는다고 축을 통째로 끄면, 정본이 깨진 날 종료 코드까지 못 본다."""
 
