@@ -109,6 +109,12 @@ TAG_LEVELS: dict[str, int] = {
     # 확률을 사이클마다 남긴다 — `blocked_by_meta`가 13/14를 막는 동안 "임계 0.7에 얼마나
     # 가까운가"를 아무도 몰랐다. 임계는 안 건드린다(R18) — 말하게만 한다. 하루 14줄(30m).
     "MetaGateEvaluated": logging.INFO,
+    # UI 첫 렌더가 그린 것의 신선도 (2026-08-18 G-0818I-4). **부재가 정보다**: 이 태그가
+    # 없는 날은 UI가 죽은 게 아니라(그건 상태판 프로브 몫) 아무도 화면을 안 열었다는 뜻이다.
+    "UISnapshotFreshness": logging.INFO,
+    # 신선도 로그 자체가 실패 — 관측 도구가 화면을 죽이면 본말전도라 화면은 계속 그리되,
+    # 조용히 삼키지는 않는다(R10).
+    "UISnapshotFreshnessFailed": logging.WARNING,
     "SizerZeroQty": logging.INFO,  # Sizer 계산 결과 0계약 — 주문 생성 안 함(정상 동작)
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
     # 구독 루프가 메시지 하나를 처리하다 실패했다 (2026-08-07 P0-1). **루프는 살아 있다** —

@@ -5577,3 +5577,33 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
 - [ ] **Y-3** `task_exit_codes.available == true` · 조회 5초 이내
 - [ ] **Y-4** `irrecoverable_loss_minutes`가 카덴스만큼 부풀지 않는지(옵션체인 정상일에 0.x분)
 - [ ] **Y-7** `daily-axes-measured` `clean_streak`가 2/3으로 오르는지 — 08-21 기한 내 졸업 궤도
+
+## 2026-08-18 장후 2차 — 「확인 필요」 딥다이브 구현 F-0818I-1 + G-0818I-4 ([MW0601])
+
+- [x] **확인 필요 ①(머리 구멍 5분)** — 같은 날 F-0818P-5a로 기종결(카덴스 확정)
+- [x] **확인 필요 ②(meta 통과확률) → F-0818I-1** — `MetaGateEvaluated`(INFO, 하루 14줄) 신설.
+      계측 지점은 장중 F-2 안(aggregator)이 아니라 `service._apply_meta_labeler`
+      (확률이 존재하는 유일한 지점 — ExpertView에 확률 필드가 없어 aggregator엔 도달 안 함).
+      `no_expert` 갈래(08-13 원안) + 판단 값 계측(`n_experts·score·dispersion·uncertainty`) 동반.
+      리포트 `meta_gate` 분포 필드 + 계측 사망 가드(unmeasured/absent)
+- [x] **확인 필요 ③(P-9 UI 신선도) → G-0818I-4** — `UISnapshotFreshness`(세션당 1회, 첫 렌더).
+      로그 부재 = "아무도 안 봤다"(프로세스 死 아님). `chart_lag_calendar_days`가 P-9의 값.
+      P-9 판정을 추석(5주 뒤) 대기에서 재생 1회로 단축
+- [x] 검증: pytest 신규 12건 포함 통과 · `run_full_path_smoke.py` 전 경로 관통 ·
+      오늘 로그 `analyze_logs` 스모크(`meta_gate=None`·`blocked_by_meta=13` — 가드 적중)
+
+### 주의
+
+- [ ] ⚠ **08-18 리포트 소급 재산출 금지** — 오늘 로그엔 확률이 없어 재산출 시 meta 계측
+      가드가 `unmeasured` 1을 만들어 `daily-axes-measured`가 오늘 위반으로 뒤집힌다.
+      저장본이 그날의 채점 기록이다(F-0818P 방침 그대로)
+
+### 다음 거래일(08-19) 관측 — 이번 구현의 판정
+
+- [ ] **Z-1 ★** `MetaGateEvaluated` 14건 · `daily_integrity.meta_gate` 비-null —
+      p50/p90/max로 「벽의 두께」 첫 실측. max ≥ 0.7 사이클 재출현 여부(Y-6)와 교차
+- [ ] **Z-2 ★** `gate` 분포에 `no_expert` 등장, `score`는 n_experts ≥ 1인 사이클만 —
+      **불연속 명기**: 08-18까지의 `score` 9~12건과 비교 불가(갈래 분리로 정의가 바뀜)
+- [ ] **Z-3** 화면을 연 날이면 `ui_*.log`에 `UISnapshotFreshness` 1건 —
+      `chart_lag_calendar_days=0`(당일) · 토픽 배지가 화면과 일치
+- [ ] **Z-4** 판단 로그 전건에 `n_experts` 필드 존재 — X-4류 사후 분석이 파싱 없이 가능

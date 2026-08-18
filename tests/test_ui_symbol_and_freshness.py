@@ -123,3 +123,68 @@ def test_a_faster_horizon_never_loosens_below_the_floor() -> None:
     threshold, cadence = derived_stale_after(_view(60), fallback=10.0)
     assert cadence == 60
     assert threshold == 90.0
+
+
+# ------------------------------------------------------ G-0818I-4: 첫 렌더 신선도 로그
+#
+# 2026-08-18까지 세 국면 연속 NEXT_TODO P-9("연휴 뒤 첫 기동에서 3일 묵은 값을 「지금」으로
+# 그리는가")가 판정 불가였다 — 화면이 무엇을 그렸는지가 어느 파일에도 없었다. 다음 자연
+# 관측 기회는 추석(5주 뒤)이었고, 이 로그가 그 대기를 재생 1회로 바꾼다.
+
+
+class _FakeSnapshot:
+    def __init__(self, badge, age, cadence=None):
+        from messiah.ui.data_source import FreshnessBadge
+
+        self.badge = FreshnessBadge(badge)
+        self.age_seconds = age
+        self.cadence_seconds = cadence
+
+
+class _FakeSource:
+    mode = DataSourceMode.LIVE
+
+    def __init__(self, snapshots):
+        self._snapshots = snapshots
+
+    def snapshot(self, key):
+        return self._snapshots.get(key, _FakeSnapshot("NO_DATA", None))
+
+
+def test_first_render_freshness_fields_capture_what_the_screen_drew(tmp_path: Path) -> None:
+    from messiah.ui.app import _snapshot_freshness_fields
+
+    # 연휴 형태 재현: 오늘은 08-18인데 가장 최근 봉은 08-14다.
+    bar_day = tmp_path / "A05609" / "5m"
+    bar_day.mkdir(parents=True)
+    (bar_day / "2026-08-14.parquet").write_bytes(b"PAR1PAR1")
+
+    fields = _snapshot_freshness_fields(
+        _FakeSource({"FuturesView": _FakeSnapshot("STALE", 259200.0, 1800.0)}),
+        "A05609",
+        "5m",
+        tmp_path,
+        today=date(2026, 8, 18),
+    )
+
+    assert fields["mode"] == "LIVE"
+    assert fields["threshold_basis"] == "elapsed_seconds", "P-9의 질문에 대한 명시적 답"
+    assert fields["chart_date"] == "2026-08-14"
+    assert fields["chart_lag_calendar_days"] == 4, "이것이 P-9가 재려던 값이다"
+    assert fields["topics"]["FuturesView"]["badge"] == "STALE"
+    assert fields["topics"]["FuturesView"]["age_seconds"] == 259200.0
+    # 안 받은 토픽은 NO_DATA로 남는다 — 배지 판정을 로그가 재발명하지 않는다.
+    assert fields["topics"]["DecisionIntent"]["badge"] == "NO_DATA"
+    assert fields["topics"]["DecisionIntent"]["age_seconds"] is None
+
+
+def test_freshness_fields_survive_an_empty_bar_dir(tmp_path: Path) -> None:
+    """봉이 한 장도 없는 첫날 — 없는 날짜를 지어내지 않는다(L18)."""
+    from messiah.ui.app import _snapshot_freshness_fields
+
+    fields = _snapshot_freshness_fields(
+        _FakeSource({}), "A05609", "5m", tmp_path, today=date(2026, 8, 18)
+    )
+
+    assert fields["chart_date"] is None
+    assert fields["chart_lag_calendar_days"] is None

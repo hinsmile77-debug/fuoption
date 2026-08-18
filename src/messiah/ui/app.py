@@ -1209,6 +1209,71 @@ def render_bottom_zone(source) -> None:
 _LIVE_REFRESH_SECONDS = 5
 
 
+def _snapshot_freshness_fields(
+    source, symbol: str, horizon: str, bar_dir: Path, *, today: date
+) -> dict:
+    """첫 렌더가 실제로 그리는 것들의 신선도 — 로그용 구조화 필드 (2026-08-18 G-0818I-4).
+
+    배지 계산은 렌더가 이미 쓰는 `source.snapshot()`을 그대로 재사용한다 — 여기서 다른
+    판정을 만들면 로그와 화면이 다른 말을 하는 표면이 하나 더 생긴다(F-0818P-5의 병).
+    차트 날짜는 **가장 최근 가용일**(화면 기본 선택값)이다 — 사용자가 과거 날짜를 골라
+    보는 것은 이 축의 관심사가 아니다. `threshold_basis`는 P-9의 질문("거래일 기준인가
+    경과 시간 기준인가")에 대한 명시적 답이다: 배지 임계는 전부 경과 초 기준이다.
+    """
+    topics = {}
+    for key in ("FuturesView", "DecisionIntent", "RegimeState", "CircuitBreakerStatus"):
+        snap = source.snapshot(key)
+        topics[key] = {
+            "badge": snap.badge.value,
+            "age_seconds": None if snap.age_seconds is None else round(snap.age_seconds, 1),
+            "cadence_seconds": snap.cadence_seconds,
+        }
+    dates = _available_dates(symbol, horizon, bar_dir)
+    return {
+        "mode": source.mode.value,
+        "threshold_basis": "elapsed_seconds",
+        "topics": topics,
+        "chart_date": dates[-1].isoformat() if dates else None,
+        # 달력일 기준 — "3일 묵은 값"(P-9)이 정확히 이 필드다. 연휴 뒤 첫 기동이면 3이 정상
+        # 이고, 화면은 그 사실을 STALE/NO_DATA 배지로 함께 말해야 한다(위 topics가 그 증거).
+        "chart_lag_calendar_days": (today - dates[-1]).days if dates else None,
+        "today": today.isoformat(),
+    }
+
+
+def _log_snapshot_freshness_once(source, symbol: str, horizon: str, bar_dir: Path) -> None:
+    """세션당 1회, 첫 렌더가 그린 것을 로그로 남긴다 (2026-08-18 G-0818I-4 · NEXT_TODO P-9).
+
+    ## 왜 「기동 직후」가 아니라 「첫 렌더」인가
+
+    Streamlit 스크립트는 브라우저가 붙어야 돈다 — 서버 기동만으로는 이 함수까지 오지
+    않는다. 따라서 이 로그의 **부재**는 "UI가 죽었다"가 아니라 **"떠 있었지만 아무도 안
+    봤다"**다(죽음은 상태판 프로브 `command_center_ui`가 따로 말한다). 2026-08-18까지 세
+    국면 연속 P-9가 판정 불가였던 이유가 정확히 이 로그의 부재였다 — 화면이 무엇을
+    그렸는지가 어느 파일에도 없어, 다음 자연 관측 기회(추석, 5주 뒤)를 기다려야 했다.
+    """
+    if st.session_state.get("snapshot_freshness_logged"):
+        return
+    st.session_state["snapshot_freshness_logged"] = True
+    try:
+        fields = _snapshot_freshness_fields(
+            source, symbol, horizon, bar_dir, today=now_kst().date()
+        )
+        badges = " · ".join(f"{k} {v['badge']}" for k, v in fields["topics"].items())
+        mlog.log(
+            "UISnapshotFreshness",
+            f"첫 렌더({fields['mode']}) — {badges} · 차트 {fields['chart_date']}"
+            f"(지연 {fields['chart_lag_calendar_days']}일)",
+            **fields,
+        )
+    except Exception as exc:  # noqa: BLE001 — 관측 도구가 화면을 죽이면 본말전도(R10은 지킨다)
+        mlog.log(
+            "UISnapshotFreshnessFailed",
+            f"신선도 로그 실패 — 화면은 계속 그린다: {exc}",
+            error=str(exc),
+        )
+
+
 def _render_dashboard_body(
     source,
     *,
@@ -1220,6 +1285,7 @@ def _render_dashboard_body(
 ) -> None:
     """`main()`에서 분리 — LIVE 모드에서만 `st.fragment(run_every=...)`로 감싸 이 부분만
     주기적으로 다시 그린다(전체 페이지 rerun은 사이드바 위젯 상태를 흔들 필요가 없어 과함)."""
+    _log_snapshot_freshness_once(source, symbol, horizon, bar_dir)
     render_top_bar(source, symbol, redis_url)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col1:

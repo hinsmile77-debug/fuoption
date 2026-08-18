@@ -7523,3 +7523,81 @@ exit 3("조회 대상 심볼이 그날 아카이브에 없다")의 정상 동작
 - **`판정 불가 정체`의 옛 조건이 실패를 숨기고 있었다.** "한 번이라도 통과했으면 정체가 아니다"는
   2026-08-05엔 옳았는데, 그 조건 때문에 08-13~08-18의 3일 연속 실명이 조용했다.
   **판정 조건도 이력이 쌓이면 다시 재야 한다.**
+
+---
+
+## [MW0601] 확률은 매 사이클 계산되고 있었고, 계산 직후 버려지고 있었다 — F-0818I-1 + G-0818I-4 (2026-08-18 장후 2차)
+
+장후 보고서 「확인 필요」 3건의 딥다이브와 구현. 첫 항목(머리 구멍 5분 = 카덴스)은 같은 날
+F-0818P-5a로 이미 종결됐고, 남은 둘을 오늘 닫았다.
+
+### ① meta 통과확률 — 계측 지점이 장중 계획과 달랐다 (F-0818I-1)
+
+**코드 확정**: `MetaLabeler.passes()`(meta_labeler.py:280)가 내부에서
+`predict_pass_probability()`를 부르고 **bool만 반환**한다. `_apply_meta_labeler()`가 그 bool로
+`meta_passed`를 덮어쓰는 순간 확률값은 소멸한다 — `blocked_by_meta`가 13/14 사이클을 막는
+동안 "임계 0.7에 얼마나 가까운가"가 어디에도 없던 이유다.
+
+**장중 F-2 처방을 수정했다**: 확률을 `aggregator._log_no_contribution()`에 싣자는 안은
+성립하지 않는다 — `ExpertView`에 확률 필드가 없어 aggregator에는 확률이 **도달하지 않는다**.
+그 경로는 `core/messages.py` 스키마 변경(R14 3종 세트)을 요구한다. 확률이 존재하는 유일한
+지점(`service._apply_meta_labeler`)에서 `MetaGateEvaluated`(INFO)로 남기면 스키마 변경 없이
+같은 관측이 나온다. 필드: horizon·probability·threshold·passed·model_version. 배선 Horizon이
+30m 하나라 **하루 14줄**. 섀도 경로는 제외(챔피언/섀도 혼입 방지). 임계는 안 건드린다(R18).
+
+**`no_expert` 갈래 분리(08-13 원안)도 같이 들어갔다**: `GATE_NO_EXPERT`를 ①kill 다음·
+②regime 앞에 신설 — regime 앞이어야 국면 어긋남(08-18 장중 1-1)이 입력 부재를 못 가린다.
+`_no_trade`·`GATE_PASS` 양쪽 로그에 `n_experts`·`score`·`dispersion`·`uncertainty`를 통일
+수록(`_view_fields`) — 종전엔 차단 경로가 값을 안 실어 |S|가 0.000인지 0.19인지를 rationale
+파싱으로만 알 수 있었다. rationale 문자열은 불변(기존 단언 전부 통과). `DECISION_GATES`
+소비처 전수 확인 결과 meta_decision 자신뿐, funnel 카운터는 동적이라 회귀면이 장중 보고서의
+우려보다 좁았다.
+
+**리포트가 분포를 스스로 말한다**: `daily_integrity`에 `meta_gate`
+{evaluations·passes·threshold·p50·p90(nearest-rank)·max} 신설 + 요약 1줄. **계측이 죽으면
+시끄럽게**: `blocked_by_meta` 흔적은 있는데 `MetaGateEvaluated`가 0건이면 `unmeasured`
+(absent)로 올린다 — meta 미배선일은 둘 다 없어 위양성이 없다.
+
+⚠ **08-18 리포트를 다시 산출하지 말 것**: 오늘 로그에는 확률이 없으므로 재산출하면 이
+가드가 `unmeasured`를 1로 만들어 `daily-axes-measured`가 오늘 위반으로 뒤집힌다. 그 판정
+자체는 사실이지만(오늘 확률을 못 쟀다), 저장된 리포트는 그날의 채점 기록이다 — 과거 리포트
+소급 재산출 금지 방침(F-0818P 구현 시 결정)이 여기서도 그대로 적용된다. 내일부터는 새
+코드가 확률을 남기므로 이 가드에 걸릴 일이 없다.
+
+### ② UI 첫 렌더 신선도 — 「기동 직후」는 성립하지 않는 말이었다 (G-0818I-4)
+
+**코드 확정**: 배지 계산(`TopicSnapshot`)은 매 렌더마다 살아 있는데 그 값을 적는 코드가
+0줄이었다. `ui_20260818.log` 7줄은 전부 uvicorn 배너다. 그리고 G-4 원안의 "기동 직후 1회"는
+불가능하다 — **Streamlit 스크립트는 브라우저가 붙어야 돈다.** 정직한 의미는 「첫 렌더 1회」
+이고, 따라서 이 로그의 **부재가 정보다**: `command_center_ui` UP + 로그 없음 = "떠 있었지만
+아무도 안 봤다"(프로세스 死와 다른 상태).
+
+구현: `_snapshot_freshness_fields()`(순수 함수, Streamlit 없이 테스트) +
+`_log_snapshot_freshness_once()`(세션당 1회, `st.session_state` 가드).
+`UISnapshotFreshness`(INFO)에 mode · 토픽별 badge/age/cadence · `chart_date` ·
+`chart_lag_calendar_days`(P-9가 재려던 바로 그 값) · `threshold_basis="elapsed_seconds"`
+(P-9의 "거래일 기준인가 경과 시간 기준인가"에 대한 명시적 답). 배지 판정은 렌더가 쓰는
+`source.snapshot()` 재사용 — 로그와 화면이 다른 말을 하는 표면을 안 만든다(F-0818P-5의 병).
+실패는 `UISnapshotFreshnessFailed`(WARNING)로 삼키되 화면은 계속 그린다. 장후 리포트 통합은
+스코프 밖 — `log_paths_for`가 ui 로그를 안 읽고, 넣으면 surface-gap·경보 집계 축이 함께
+흔들린다. P-9 판정은 dailycheck이 ui 로그를 직접 읽는다.
+
+**이득**: P-9 자연 관측 기회가 추석(5주 뒤)이었는데, 재생 1회로 당겨졌다.
+
+### 검증
+
+pytest: strategy·decision·ui·ops 관련 범위 전부 통과(신규 테스트 12건 — no_expert 갈래 4 ·
+meta 로그 2 · 분포 집계 2 · UI 신선도 2 외). `run_full_path_smoke.py` 전 경로 관통(판단
+21건 · Kill 경로 정상). 실데이터 스모크: 오늘 로그 `analyze_logs` → `meta_gate=None` ·
+`blocked_by_meta=13` — 가드가 정확히 이 형태를 잡는다.
+
+### 되짚을 것
+
+- **같은 날 두 번째다 — 계획서의 처방이 코드 실측과 달랐다.** 낮에는 종료 코드(동기 호출이
+  아니라 이름 필터), 지금은 확률 계측 지점(aggregator가 아니라 service). 둘 다 계획을 먼저
+  코드에 대조해서 잡았다. 처방을 실행하기 전에 처방이 딛는 전제를 코드로 확인하는 것,
+  이것이 이 저장소의 "측정 전까지 버그"의 계획 버전이다.
+- **관측의 부재를 관측으로 바꾸는 두 가지 형태가 한 커밋에 있다.** 확률은 "계산되는데
+  버려지는" 값이었고, UI 신선도는 "계산되는데 안 적히는" 값이었다. 새로 계산한 것은 없다 —
+  둘 다 이미 있던 값에 로그 한 줄을 붙였을 뿐이다. 관측 격차의 대부분은 계산 부족이 아니라
+  기록 부족이다.
