@@ -99,6 +99,24 @@ def record_day(
 
     같은 날 두 번 불려도 마지막 값이 남는다 — 장중 재기동이 실제로 그 경우다.
     실패해도 예외를 올리지 않는다: 관측 보조가 종료 절차를 죽이면 본말전도다.
+
+    ## `keep_days` 는 이 저장소의 유일한 자동 삭제다 (2026-08-19 안전장치)
+
+    산출물 보관정책을 훑다가 알았다 — 점검 산출물 전체에서 **파일을 스스로 버리는 코드는
+    여기 한 곳뿐**이다. 그런데 안전장치가 없었다. 셋을 넣는다:
+
+    1. **`keep_days < 1` 이면 아무것도 안 버린다.** 0을 「전부 지워라」로 읽지 않는다.
+       현행 `days[:-keep_days]` 는 `keep_days=0` 일 때 `[:-0]` == `[:0]` == `[]` 이라
+       우연히 안전했지만, **음수면 앞에서부터 버린다**(`keep_days=-1` → 가장 오래된 1일
+       삭제). 우연에 기대지 않는다.
+    2. **버린 날짜를 인쇄한다.** 조용한 정리는 사고가 나도 아무도 모른다 — 이 파일이
+       30m 퇴화 판정의 **유일한** 누적 상태이고, 잘리면 그 Horizon이 며칠간 판정 불가로
+       돌아간다(2026-08-18에 누적 1일이라 15m·30m이 `unmeasured` 2건을 만든 그 일).
+    3. **mtime이 아니라 날짜 키로 자른다.** `days`의 키가 `YYYY-MM-DD` 라 이미 그렇다 —
+       파일을 복사하거나 백업에서 되돌려도 「어느 날 관측인가」는 안 바뀐다. 명시해 둔다.
+
+    40일인 이유는 `window_days=3`(판정 창)보다 훨씬 길게 둬서 **창을 넓히는 실험이
+    데이터 부족으로 막히지 않게** 하기 위해서다. 읽는 비용은 40일치가 수십 KB다.
     """
     stamp = day.isoformat()
     payload = _load(path)
@@ -115,11 +133,28 @@ def record_day(
         },
     }
     # 오래된 날은 버린다 — 이 파일이 무한정 커지면 매일 읽는 비용이 된다.
-    for old in sorted(days)[:-keep_days]:
-        days.pop(old, None)
+    # 자르는 기준은 **날짜 키**(`YYYY-MM-DD`)지 mtime이 아니다. 백업에서 되돌린 파일도
+    # 어느 날 관측인지는 안 바뀐다.
+    dropped: list[str] = []
+    if keep_days >= 1:
+        dropped = sorted(days)[:-keep_days]
+        for old in dropped:
+            days.pop(old, None)
+    # keep_days < 1 은 「전부 지워라」가 아니라 「지우지 마라」다. 0을 파괴로 읽지 않는다.
+
+    # 폐기 흔적은 **이 파일 안에** 남긴다. 이 모듈은 로거를 안 쓴다(종료 절차를 죽이지
+    # 않으려고 예외도 안 올리는 설계다). 로그에 적으면 로테이션이 지우지만 이 파일은
+    # 2026-08-19부터 git 추적이라 흔적이 커밋 이력에 남는다 — 더 나은 자리다.
+    history: list[Any] = payload.get("pruned") if isinstance(payload.get("pruned"), list) else []
+    if dropped:
+        history.append({"at": stamp, "keep_days": keep_days, "dropped": dropped})
+    history = history[-20:]  # 흔적이 본문보다 커지지 않게
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"days": days}, ensure_ascii=False, indent=2), encoding="utf-8")
+        body: dict[str, Any] = {"days": days}
+        if history:
+            body["pruned"] = history
+        path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
     except OSError:
         return None

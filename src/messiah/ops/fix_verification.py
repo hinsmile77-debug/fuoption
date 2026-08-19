@@ -695,6 +695,23 @@ def load_daily_reports(log_dir: Path = DEFAULT_LOG_DIR) -> dict[date, dict[str, 
     보존 자체는 옳다(그날 무슨 일이 있었는지의 증거다). 틀린 것은 **보존본과 정본을
     같은 그물로 줍는 것**이다. 그래서 이름 규격을 강제하고, 규격에 맞더라도 파일명의
     날짜와 안의 `date`가 어긋나면 버린다 — 둘 중 어느 쪽을 믿을지 조용히 고르지 않는다.
+
+    ## 이 함수는 백업된 파일을 읽는다고 전제한다 (2026-08-19 정정)
+
+    위 두 문단은 *"보존본"* · *"9거래일간"* 처럼 **파일이 오래 남는다**는 전제 위에 쓰여
+    있다. 그 전제가 2026-08-19까지 **거짓이었다** — `.gitignore`의 `logs/*` 가 이 파일들을
+    통째로 무시하고 있었고(`git check-ignore -q logs/daily_integrity_20260818.json` → 무시),
+    `git clean -xdf` 한 번이면 등록부 채점 이력 전부가 사라지는 상태였다.
+
+    무엇을 잃을 뻔했는지가 요점이다. 이 함수를 쓰는 넷이 전부 **여러 날을 접는다**:
+    여기(전 이력 · `consecutive_days` 최대 5) · `ops/loss_budget`(5거래일 이동합) ·
+    `ops/feature_health_rolling`(3거래일 창) · `_stale_provisional_findings`(전 이력).
+    하루치가 아니라 **관측 이력 자체**가 입력이므로, 지우면 재생성 경로가 없다
+    (원본 로그로 되만들 수 있는 것은 그날 것뿐이고, 그마저 로그가 남아 있을 때다).
+
+    2026-08-19에 `.gitignore` negation으로 추적을 복원했다. **이 함수의 문장들이 참이
+    되려면 그 negation이 유지돼야 한다** — 무효한 negation은 오류를 내지 않으므로,
+    `logs/*` 규칙을 손댈 때 `git check-ignore -q` 로 양방향을 다시 확인한다.
     """
     reports: dict[date, dict[str, Any]] = {}
     for path in sorted(log_dir.glob("daily_integrity_*.json")):
