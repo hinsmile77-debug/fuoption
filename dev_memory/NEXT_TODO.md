@@ -5638,3 +5638,326 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
 - [ ] **W-2** `bar_close` 축에 전일(08-18) p90 927ms 경고 — `daily_integrity` 값과 일치하는지
 - [ ] **W-3** pass 사이클 발생 시 `logs/pass_cycles/`에 파일 + `PassCycleSnapshot` 로그.
       **0건이면 그 자체가 정보**(Y-6: 08-18 1/14가 예외적 사건이었다는 뜻)
+
+## 2026-08-19 장전 점검 — Fix/고도화 ([MW0601])
+
+보고서 `logs/dailycheck/2026-08-19_pre_report.md` · **P0 0 · P1 2 · P2 2** · 코드 변경 없음(장전).
+**적용 시점은 전부 15:35 이후.** F-1은 15:45 장후 배치보다 **먼저** 끝낼 것.
+
+### Fix (장후 적용)
+
+- [ ] **F-1 (P1) 미커밋 3파일 커밋 + `logs` 산출물 실제 인덱스 등록** —
+      `.gitignore` · `ops/feature_health_rolling.py` · `ops/fix_verification.py` 커밋,
+      이어서 `logs/dailycheck/*_report.md`·`daily_integrity_*.json`·`vol_scorecard_*`·
+      `volume_check_*`·`self_eval_*`·`verification_scoreboard_*`·`feature_health_rolling.json`·
+      `g2_daily_returns.jsonl` 을 **경로 하나씩** add(광역 `git add logs/` 금지 — `evidence_*.md`는
+      일부러 제외, CRLF 잡음 85파일도 딸려온다). **합격 조건 단 하나: `git ls-files logs | wc -l > 0`**
+- [ ] **F-2 (P1) `code_version`에 작업트리 dirty 수록** — `core/version.py:123 assess_version_drift()`에
+      `worktree_dirty`·`worktree_changed_paths` 추가(`git diff --name-only --ignore-all-space -- src scripts`,
+      기동 시 1회 캐시). `ops/status_board.py:189` summary 확장 · `scripts/self_check.py:480`
+      `dirty(dev 허용)` 문구에 실변경 건수·파일명 3개까지. **`stale` 판정은 안 뒤집는다(R18).**
+      F-1 커밋 **이후** 적용(clean 경로 실측 필요)
+- [ ] **F-3 (P2) Y-5 태그명 정정** — `NEXT_TODO.md:5494` `RegimeSeeded` → `RegimeWarmStart`,
+      `(08-19 정정: 코드의 태그명은 RegimeWarmStart · core/logging.py:242)` 병기. 원문 조용히 안 바꾼다
+- [ ] **F-4 (P2) 스케줄 대조 4종 확장** — `ops/task_schedule.py`에 `all_tasks()` 신설(기존
+      `collection_tasks()`는 그대로 — 기동 창 파생은 수집 계열만이 옳다), `ops/host_health.py:414`
+      `check_schedule_drift()`가 4종 전량 나열. **비수집(Postmarket/Shutdown)은 finding만, `ok` 안 뒤집음(R18).**
+      `check_boot_recovery` 는 `무장 2/4(…는 시각 트리거 전용)` 로 분모 표시.
+      **결정 필요**: `schedule_drift`를 `host` 라인에서 자체 축으로 분리 — **권고: 분리**(현 `host` 한 줄이 7개를 겸함, R6 정신 위배)
+
+### 고도화
+
+- [ ] **G-1 (이번 주) `check_tracked_artifacts()` 축 신설** — `.gitignore`의 `!` 줄을 파싱해
+      각 패턴에 `git ls-files` 매칭이 0건이면 `[WARN] tracked`. 판정 안 뒤집음.
+      측정: 추적 0건 패턴 수 **오늘 7/7 → 목표 0/7**(`pass_cycles`는 파일 생성 전이라 예외 허용).
+      **선행: F-1**(안 하면 첫날부터 7건 경고)
+- [ ] **G-2 (이번 주) `bar_close_budget` 필드** — `ops/integrity_report.py`에
+      `{"grace_ms":500,"prev_p90_ms":927,"delta_ms":427,"exceeded":true,"consecutive_days":n}`.
+      값은 `check_bar_close`가 이미 읽는 것의 재배치(새 계산 0). **임계 자동 변경 절대 금지(R18).**
+      **G-0818P-2의 5거래일 창이 08-25에 닫히므로 그 전에** — 지금은 08-14 924 / 08-18 927 두 점을 보려고 파일 두 개를 연다
+- [ ] **G-3 (다음 단계) 등록부에 `premarket-check-before-open` 등록** —
+      판정은 mtime이 아니라 **보고서 첫 줄 `점검 시각:` 파싱**(복사·백업 복원이 mtime을 바꾼다).
+      오늘 Y-7 회복을 아는 것이 보고서 헤더 한 줄뿐인 상태를 끝낸다. **선행: F-1**
+
+### 다음 거래일(08-20) / 당일 장후 관측 — 이번 계획의 판정
+
+- [ ] **A-1** `git ls-files logs | wc -l` **> 0** — F-1의 유일한 합격 조건 (08-19 장후)
+- [ ] **A-2** `status_snapshot.json` `code_version.worktree_dirty == false` (08-20 장전)
+- [ ] **A-3** Y-5가 `RegimeWarmStart` 기준으로 **충족**으로 뒤집힘 — 오늘 08:25:35 1건이 이미 증거 (08-19 장후)
+- [ ] **A-4** 자가점검 `schedule_drift` 4종 전량 나열 · `boot_recovery` 가 `2/4` 형태 (08-20 장전)
+- [ ] **A-5** 08-19 `delivery_latency.p90` 이 세 번째 점. **500ms 초과 3일 연속이면** G-2 착수 근거 확정 (08-20 장전)
+- [ ] **A-6** `!` 패턴 대비 추적 0건 패턴 수 7/7 → 0/7 (G-1 구현 후)
+
+### 확인 필요 — 장중/장후 재판정 (확정 결함 아님)
+
+- [ ] **C-1** `logs/pass_cycles/` 디렉터리 부재 — 장전엔 정상. 장후 `PassCycleSnapshot` 유무로 W-3 판정.
+      **0건이면 그 자체가 정보**(Y-6)
+- [ ] **C-2** `UISnapshotFreshness` 0건 · `ui_20260819.log` 377B — 08-18과 **바이트 단위 동일**.
+      서버는 떴다(`Uvicorn :::8511` · `command_center_ui.json` pid=26064). 조건이 "화면을 연 날이면"이라
+      오늘 사람이 UI를 열었는지 확인 후 재판정 (Z-3)
+- [ ] **C-3** `ui_20260819.err.log` 파일 자체가 없음 — 에러가 없어서인지 stderr 리다이렉트 미설정인지
+      구분 불가. `.bat`/스케줄 액션 확인
+- [ ] **C-4** 05:55:35 회차 기동 사유 미기록 — **기존 항목 재현**(어제 07:23, 오늘 05:55, 부팅 시각 추정).
+      신규로 세지 않는다. `boot_recovery` 트리거가 원인인지 Windows 이벤트로그 대조
+- [ ] **C-5** `SessionEnd` 부재 — 장전이라 정상. 장후에 R13·금지계명 14로 판정
+
+### 오늘 완료 처리 — 08-18 계획의 판정
+
+- [x] **Y-7 장전 점검 09:00 전 산출** — **08:50 성립**(어제 13:29, 지연 284분). 2거래일 연속 실패 끊김
+      → **F-0818I-4「스케줄러 이관」 불필요 확정**
+- [x] **W-2 `bar_close` 전일 p90 대조** — **927ms 경고 출력**, `daily_integrity_20260818.json`
+      `delivery_latency.p90 = 0.9271` 과 **일치**. G-0818P-2 설계대로 작동
+
+## 2026-08-19 장중 점검 — Fix/고도화 ([MW0601])
+
+관측 구간 09:00~12:40. 09:50 사망 자체의 F-A~F-F는
+`logs/dailycheck/2026-08-19_incident_0950_deepdive.md` §4에 이미 있다 — **중복 등록하지 않는다.**
+아래는 **12:29 재기동 이후 관측**에서 새로 나온 것. 전문: `logs/dailycheck/2026-08-19_intra_report.md`
+
+### Fix (전부 장후 15:35 이후 적용 — 장중 배포 금지, R11·금지계명 3·4)
+
+- [ ] **F-G (P1) 첫틱 판정을 세션 기준으로 분리** — `data/collector.py` 첫틱 감시:
+      기준을 `max(데드라인, 세션시작 + reconnect_first_tick_grace_seconds)`로.
+      `core/logging.py:218` 옆에 `CollectorFirstTickAfterRestart`(INFO) 신설, 메시지에서
+      `recover_now.bat` 권고 제거. **기존 태그명 유지**(참조 끊김 방지).
+      선행: `grep -rn "CollectorFirstTickOverdue\|first_tick" src/messiah/data/` 로 발화 지점 특정
+- [ ] **F-H (P1) `irrecoverable_loss`에 `mid_session_gap` 신설** —
+      `ops/integrity_report.py:956 _collection_start_lag_minutes()` **첫 세션** 기준으로 변경 +
+      `:1066 irrecoverable_loss_minutes()`에 `mid_session_gap_minutes` 인자(**합산 아님**, max 원칙 유지) +
+      `ops/status_board.py:201`·`ops/loss_budget.py:137` 필드 수록.
+      **손실 예산 5거래일 이동합에는 넣지 않는다**(R18 — 사고 당일 임계 변경 금지).
+      선행 확인: 08-11/12/13/14/18은 단일 세션일이라 영향 0
+- [ ] **F-I (P1) 창 연속성 배지 `window_gap_minutes`** — `features/engine.py` 웜스타트에
+      `max_bar_gap_minutes`·`gap_count`, 발행 `FeatureVector`에 **optional** 필드 추가 +
+      `ops/integrity_report.py`에 `discontinuous_feature_count`. 판정 안 뒤집음(R18).
+      **`core/messages.py` 스키마(v1/types=21)가 걸림 — 소비자 전부 같은 커밋**(금지계명 6·15)
+- [ ] **F-J (P2) 4xx 인증 계열 재시도** — `broker/kis/rest_client.py`: 401/403/429는 토큰 재발급 후
+      **폴 1회당 최대 1번** 재시도, 그 외 4xx는 즉시 포기. `gave_up` 문구 2분화 +
+      `OptionChainPollRecovered`(INFO) 신설
+
+### 고도화
+
+- [ ] **G-A (이번 주) 무중단을 등록부 1급 지표로** — `verification_scoreboard_*.json`에
+      `downtime` 절 `{deaths, total_down_minutes, longest_down_minutes, detection_lag_minutes,
+      restart_lag_minutes}`. 산출은 `SessionStart` 시각과 직전 세션 마지막 기록의 차 — **새 계측 0**.
+      `NEXT_TODO.md:4695` ①무중단이 졸업 조건 문구로만 있고 재는 자가 없다
+- [ ] **G-B (다음 단계) 복구창 문맥 필드 `recovery_window`** — 재기동 후 2분간 로그에 공통 필드 주입
+      (`core/logging.py` 컨텍스트). 오늘 12:29~12:31의 오탐 3건(F-G·F-J·X-5)이 같은 문맥인데
+      로그에 그 문맥이 없다. 심각도는 건드리지 않음(R6). **선행: F-G**
+- [ ] **G-C (이번 주, F-B와 동시) `app_recovery_lag_minutes`** — 인프라 회복 시각(docker `StartedAt`
+      또는 Redis PING 성공)과 앱 회복 시각(`SessionStart`)의 차. **오늘 실측 158분 27초.**
+      목표: F-A 적용 후 0분 수렴 — F-A의 효과가 숫자로 채점된다
+- [ ] **G-D (이번 주, F-E에 흡수) 장전 자가점검에 활성시간 축** — `ops/host_health.py`
+      `pending_updates` 축에 `ActiveHoursStart/End` + Store 자동갱신 정책 포함.
+      *활성 시간이 08:00~16:00을 덮지 않으면* `[WARN]`, 대기 건수는 인쇄만(R18).
+      오늘 ①로 설정을 바꿨지만 **그 설정이 유지되는지 매일 묻는 주체가 없다**
+
+### 오늘 장후 / 08-20 관측 — 이번 계획의 판정
+
+- [ ] **I-1** 12:40~15:35 `SessionStart` 추가 **0건** = 재발 없음. 1건 이상이면 ①이 안 들었다 (오늘 장후)
+- [ ] **I-2** `daily_integrity_20260819.json` `collection_start_lag_minutes` — **249.4로 봉인 전망**
+      (F-H 미적용). 다른 값이면 산출 경로가 스냅샷과 다른 것 (오늘 장후)
+- [ ] **I-3 ★** `series_findings`/계열 커버리지에 09:50~12:29 **159분 구멍이 잡히는가**.
+      안 잡히면 장중 구멍 계측 자체가 없다는 뜻 — **P1-2가 P0로 승격** (오늘 장후)
+- [ ] **I-4 ★** `degenerate_feature_count`/NaN 축에 12:30 이후 발행분이 **걸리는가**.
+      0이면 「구멍이 어느 축에도 안 남음」 확정 (오늘 장후)
+- [ ] **I-5** X-5 종일 어긋남 비율 — **오전 2/3(67%)** 유지되면 경합이 아니라 구조 문제.
+      어긋난 건들의 Δt 분포를 함께 본다 (오늘 장후)
+- [ ] **I-6** `MetaGateEvaluated` — 사망으로 3건에서 끊김. **Z-1(14건) 오늘 판정 불가**,
+      사유 명기하고 08-20 이월 (오늘 장후)
+- [ ] **I-7** 12:29 세션 `SessionEnd` 존재. 없으면 R13 재위반 (오늘 장후)
+- [ ] **I-8** `run_postmarket` 5단계 완주 — 반나절 불완전 입력으로 도는 첫 사례.
+      **완주하되 산출물에 「불완전일」 표시가 있는가**가 관건 (딥다이브 §3) (오늘 장후)
+- [ ] **I-9** A-1 `git ls-files logs | wc -l` > 0 — `.git/index.lock` 해소로 걸림돌 하나 제거됨 (오늘 장후)
+- [ ] **I-10** 다음 장전 `host` 라인에 활성시간 08:00~16:00 반영 — F-E 미구현이면 여전히 안 보임 (08-20 장전)
+
+### 확인 필요 — 장후 재판정 (확정 결함 아님)
+
+- [ ] **D-1** 호스트 설정 ①의 **변경 후** 값 확인 — 백업 파일(12:27)은 변경 전만 남겼다. G-D의 근거
+- [ ] **D-2** X-5의 두 실패(09:00 Δt=633ms / 12:31 Δt=12ms)가 같은 원인인가 — Δt 분포로 판정
+
+
+## 2026-08-19 장후 점검 — Fix/고도화 ([MW0601])
+
+보고서: `logs/dailycheck/2026-08-19_post_report.md` · 증거: `logs/dailycheck/evidence_20260819_post.md`
+**P0 없음(확정)** — mode=dev·주문 0건. 아래 다섯 중 넷은 실주문 국면이면 그대로 P0다.
+
+### Fix (전부 장후 적용 — 커밋 순서를 지킬 것)
+
+- [ ] **F-1 (P1) 비정상 종료를 세션 단위로 판정** — `ops/integrity_report.py:569 _abnormal_exits()` 전면
+      재작성. `session_starts`/`session_ends` 시각순 짝짓기, 종료 짝 없는 세션마다 1건.
+      사망 시각은 「그 세션의 마지막 로그」(다음 `SessionStart` 이전 마지막 활동). 반환에
+      `died_at_kst`·`recovered_at_kst`·`mid_session: bool` 추가. `analyze_logs()`가 `activity_kst`를
+      세션 경계로 분할해야 하므로 같은 커밋. 2026-08-07 이전 소급 방지 가드(583~585행) **유지**.
+      `configs/pending_verifications.yaml` `no-silent-process-death` summary 확장 + `since:` 리셋(이력 보존).
+      **커밋 ① — 이것이 없으면 ②의 입력이 없고 ④가 오늘 사고를 잡는 축을 지워 버린다**
+- [ ] **F-2 (P1) 소실 두 경로 통합 + 장중 사망 구간 신설** — 장중 **F-H**의 확장판.
+      `ops/integrity_report.py`에 `mid_session_gap_minutes` 신설,
+      `irrecoverable_loss_minutes = start_lag + mid_session_gap`, **분해값 병기**.
+      `ops/status_snapshot.py`의 `start_lag_minutes`(249.4 산출)를 같은 함수 호출로 교체 —
+      **두 파일이 같은 숫자를 말하게 하는 것이 핵심**. `IrrecoverableLossBudgetExceeded`에 일별 내역.
+      대푯값은 계열 최댓값(오늘 180.2). 과거일은 `axis_version`으로 구분(R18). **F-1 선행 필수. 커밋 ②**
+- [ ] **F-3 (P1) `incomplete_day` 축 신설 + 롤링 소비자 결선** — `ops/integrity_report.py`
+      `IntegrityReport`에 `incomplete_day`·`incomplete_reason`·`session_coverage_pct_min`(339행 옆).
+      판정 = `min(series_coverage[*].coverage_pct) < 95` **또는** `abnormal_exits`에 `mid_session` 존재.
+      임계 95는 `truncation-is-visible`과 **동일값**(다르면 "보이는데 불완전일은 아닌 날"이 생긴다).
+      `ops/feature_health_rolling` · `scripts/run_vol_scorecard.py` · `degenerate_features` 롤링이
+      제외/가중축소 + `excluded_days`/`usable_days` 기록. `fix_verification.py:958` 오탐 방지 —
+      불완전일로 못 잰 날은 `trailing_unmeasured`에서 제외. **커밋 ③**
+- [ ] **F-4 (P1) 등록부에 계측 축 / 결과 축 분리** — `configs/pending_verifications.yaml`에
+      `axis: instrument | outcome`. `instrument`는 metric 미산출일 때만 RECURRED, 값 위반은
+      새 상태 `MEASURED_BAD`(WARNING). `ops/fix_verification.py:932` ①번 분기 조건부화 +
+      `:1089` 버킷에 `measured_bad` 추가. **한 metric을 둘 이상 fix_id가 공유하면 로드 시 거부** —
+      `launch-window-refusal-not-counted`에 고유 metric `refused_starts_counted_as_restart`(불린) 부여.
+      `axis` 미지정은 기존 동작 유지(점진 이행). **반드시 F-1 다음. 커밋 ④**
+- [ ] **F-5 (P1) 세션 첫 사이클 국면 UNKNOWN** — ⓐ 집계기 `AggregatorNoContribution` 발행부에
+      `regime_source: "not_yet_received"` + `first_cycle_after_start` (위험 0, 값은 UNKNOWN 유지 R18)
+      ⓑ `regime/runtime.py` 웜스타트 값을 집계기에 즉시 푸시(근본 수정, 당일 아닌 값은 푸시 금지 가드)
+      ⓒ `integrity_report`에 `regime_mismatch_cycles`(오늘 2/9). **ⓐ와 ⓑ는 커밋을 나눈다. 커밋 ⑤**
+- [ ] **F-6 (P2) 사건 원인 되먹임 + logs 추적** — `configs/incident_causes.yaml` 신설
+      (`date`·`process`·`from_kst`·`cause`·`evidence_path`), `observation_gaps` 산출부가 조회해 `cause`를
+      채우고 없으면 `cause_source: "unresolved"`. 장전 F-1(`.gitignore` negation 실효 + `git add -f`)과
+      같은 커밋. **커밋 ⑥**
+- [ ] **이월(커밋 ⑦)** — 장중 **F-G**(첫틱 세션 기준 분리) · **F-I**(창 연속성 배지 `window_gap_minutes`)
+      · **F-J**(4xx 인증 계열 재시도) · 장전 **F-3**(Y-5 태그명) · **F-4**(schedule_drift 4종)
+
+### 고도화
+
+- [ ] **G-1 (이번 주, F-4와 동시) 등록부 재발을 사건 단위로 묶는다** — `FixVerificationScoreboard`에
+      `incidents` 절. 같은 날 위반 항목들의 근거 시각이 `observation_gaps` 한 건 안에 들어가면 1사건.
+      오늘 4 → 1. **R18 섀도 20거래일** 동안 `counts`는 안 건드리고 `incidents`만 병기
+- [ ] **G-2 (이번 주 착수 확정) 완성봉 유예를 회선 실측에 연동** — 착수 조건 오늘 충족
+      (p90 3거래일 연속 500ms 초과: 924.5 / 927.1 / **925.3ms**, p50 507ms ≈ 유예 500ms).
+      `configs/instance.yaml` `bar_close_grace_ms`를 전일 p90 × 1.1 자동 산출(하한 500 / 상한 1500),
+      변경 시 `BarCloseGraceAdjusted`(INFO). **상한에 닿으면 자동 조정 대신 `[WARN]`으로 사람을 부른다**
+      (불변원칙 3을 자동화가 무르게 만들지 않도록)
+- [ ] **G-3 (다음 단계, F-3 선행) 커버리지를 소비되는 값으로** — 표준 조회 함수
+      `usable_trading_days(start, end, min_coverage=95)`를 만들고 롤링 창을 만드는 **모든** 소비처
+      (`feature_health_rolling` 3일창 · `run_vol_scorecard` 20일창 · `degenerate_features` 롤링 ·
+      `fix_verification._scorable_days_until`)가 이 함수로만 날짜를 얻게 한다.
+      오늘 `series_coverage`를 읽은 코드는 등록부 하나뿐이었고, 그 하나는 자기를 실패로 채점하는 데 썼다
+- [ ] **G-4 (다음 단계 · 마스터플랜 「관측 신뢰성」 절 신설 제안) 계기가 자기를 채점하는 것을 금지** —
+      등록부 항목에 `negative_control` 필드(「이 metric이 반드시 반응해야 하는 알려진 사건」).
+      사건이 있었는데 metric이 0이면 통과가 아니라 **`INSTRUMENT_BLIND`**(ERROR).
+      초기 등록은 확실한 짝 셋만: `abnormal_exits ↔ observation_gaps` ·
+      `irrecoverable_loss ↔ series_findings` · `late_bar_drops ↔ delivery p90 > grace`. R18 섀도 20거래일.
+      **같은 함정을 세 번째 밟았다**(08-04 크래시 집계 · 08-18 늑대소년 11회 · 오늘 abnormal_exits) —
+      개별 fix로는 안 멈춘다
+
+### 08-20 / 구현 직후 관측 — 이번 계획의 판정
+
+- [ ] **J-1** F-1 적용 후 오늘 로그 리플레이에 `abnormal_exits` **2건**(둘 다 `mid_session: true`,
+      died_at 09:50:29 / 09:30:01). 0건이면 F-1이 안 들었다 (구현 직후)
+- [ ] **J-2** F-2 적용 후 `irrecoverable_loss_minutes ≈ 159.4` · `mid_session_gap ≈ 158.9` ·
+      `status_snapshot`과 **동일값**. 08-18 리플레이 0.5 유지 (구현 직후)
+- [ ] **J-3** F-3 적용 후 오늘 `incomplete_day: true` / 08-18 `false`,
+      `feature_health_rolling` 10m·15m가 `judged: false`로 전환 (구현 직후)
+- [ ] **J-4** F-4 적용 후 오늘 스코어보드 재발 **4 → 0**, `measured_bad` 4.
+      08-11·08-14 리플레이로 과거 판정 불변(R18) (구현 직후)
+- [ ] **J-5 ★** F-5ⓑ 적용 후 08-20 09:00 첫 사이클 `AggregatorNoContribution.regime != UNKNOWN`.
+      여전히 UNKNOWN이면 웜스타트 푸시가 안 닿은 것 (08-20 장중)
+- [ ] **J-6** `MetaGateEvaluated` 정상일 14건 확보 시 **Z-1** 판정 — 오늘 9건(사망으로 5사이클 소실)
+      으로 판정 불가, 사유 명기하고 이월 (08-20 장후)
+- [ ] **J-7** `git ls-files logs | wc -l` > 0 (F-6/장전 F-1 적용 후) — **I-9 미충족분 이월** (08-20 장전)
+- [ ] **J-8** 자가점검 `host` 라인에 활성시간 08:00~16:00 반영 — **I-10 이월** (08-20 장전)
+- [ ] **J-9** `code_version.worktree_dirty == false` (장전 F-2 적용 후) — **A-2 이월** (08-20 장전)
+- [ ] **J-10** `delivery_latency.p90` 4일째 500ms 초과 여부. G-2 적용했다면
+      `BarCloseGraceAdjusted` 로그 존재 (08-20 장후)
+- [ ] **J-11** UI 1회 개방 후 `UISnapshotFreshness` 줄 출현 여부 — **D-2 판정** (즉시 가능)
+- [ ] **J-12** `SessionStart` 프로세스당 정확히 1회(재기동 0). 2회면 09:50 사고 유형 재발 (08-20 장후)
+
+### 확인 필요 — 08-20 재판정 (확정 결함 아님)
+
+- [ ] **D-1** 호스트 설정 ①(활성시간)의 **변경 후** 값 — 백업(12:35)은 변경 전만 남겼고 오늘 로그에
+      `ActiveHours` 문자열 0건. 레지스트리 직접 조회 또는 G-D/F-E 구현 후 08-20 장전 출력.
+      **장중에서 이월, 오늘도 결론 못 냄**
+- [ ] **D-2** `UISnapshotFreshness` 0건의 정체 — 코드는 결선돼 있다(`ui/app.py:1264`,
+      `core/logging.py:124`, 커밋 `3a0cc93`). `ui_20260819.log` 377B로 08-18과 **바이트 단위 동일**.
+      「사람이 안 열었다」와 「렌더는 됐는데 로그가 파일에 안 닿는다」가 구분 안 됨 → J-11로 판정
+- [ ] **D-3** `logs/ui_20260819.err.log` 부재 — `scripts/install_scheduled_tasks.ps1` UI 액션의
+      stderr 리다이렉트 확인. 빈 파일이 생기는 설계면 부재 자체가 결함. **장전에서 이월, 오늘도 미해결**
+- [ ] **D-4** **Z-1** meta 게이트 — `{evaluations: 9, passes: 0, threshold: 0.7, p50: 0.376, p90/max: 0.5925}`.
+      표본 14건 미달 → J-6으로 이월
+
+### 오늘 완료 처리 — 08-19 장전·장중 계획의 판정
+
+- [x] **I-1** 12:40~15:35 추가 `SessionStart` **0건** — 09:50 복구 ①(커밋 `50eff6c`)이 들었다 ✔
+- [x] **I-3 ★** `series_findings` 11건이 5계열 전부에서 159~169분 구멍을 잡았다 — **P1-2 P0 승격 없음** ✔
+      (오늘 사망을 붙잡은 **유일한** 축. F-4에서 이 축 감시 항목을 함부로 끄면 안 되는 이유)
+- [x] **I-4 ★** `nan_ratio` 전 6 Horizon median/min/last **전부 0.0**, `degenerate_features`
+      always_nan/constant 전부 `[]` — **구멍이 피처 축에 흔적 0건 확정.** F-I 근거 확정 ✔
+- [x] **I-5** X-5 종일 어긋남 2/9(22%), 어긋남 전량이 세션 첫 사이클 — **경합 아님, 구조 문제 확정** ✔
+- [x] **I-7** 12:29 세션 `SessionEnd` 15:35:26 존재, 종료 코드 0 — R13 충족 ✔
+- [x] **I-8** `run_postmarket` 6/6 완주 — 다만 **불완전일 표시 축이 없음**(절반 충족) → F-3 ✔
+- [x] **A-5** delivery p90 3거래일 연속 500ms 초과 — **G-2 착수 근거 확정** ✔
+- [x] **장전 C-1** `PassCycleSnapshot` 0건은 `meta_gate.passes: 0`과 정합 — **부재가 정상** ✔
+- [x] **장전 C-4** 05:55:35 기동은 `host_events` boot(05:52:10/11/23) 직후 — **부팅 트리거 확정** ✔
+- [x] **장전 C-5 / 장중 C-3** `SessionEnd` 양 프로세스 존재 — R13 충족.
+      **단 09:50 세션 건은 F-1로 승계**(계기가 못 잡는다) ✔
+- [x] **장중 C-5** 장후 산출물 7종 전량 생성 · 배치 6/6 완주 ✔
+- [ ] **I-2** — 예측(249.4 봉인) **빗나감**, 실측 0.5. 「산출 경로가 스냅샷과 다르다」 갈래로 확정 → F-2
+- [ ] **I-9** `git ls-files logs` = 0 — **미충족**, F-1 미적용 → J-7로 이월
+
+---
+
+## [MW0601] 2026-08-19 장후 F-1~F-6 · G-3/G-4 구현 완료 (2026-08-20)
+
+리포트 2항·3항의 **구현 손익 조사 후 착수분**. 판정 근거는 `DECISION_LOG.md`
+「계기가 자기를 채점한다를 코드로 금지했다」 항목.
+
+### 완료
+
+- [x] **F-1** 비정상 종료를 **세션 단위**로 — `ops/integrity_report._abnormal_exits()` 재작성.
+      기동↔종료 짝짓기, 짝 없는 세션마다 1건, `mid_session`·`died_at_kst`·`recovered_at_kst`·
+      `session_index` 추가. 마커 없던 시절 소급 금지 가드 유지.
+      **리플레이 실측: 08-19 → 2건(l1 158.9분 · g2 180.2분) · 08-18 → 0건** ✔ (J-1 충족)
+- [x] **F-2a** `mid_session_gap_minutes` 신설 + `irrecoverable_loss_minutes`에 합산 ·
+      `irrecoverable_loss_breakdown`으로 분해값 보존. **08-19 0.5 → 180.7 · 08-18 0.5 유지** ✔
+- [x] **F-2b(축소)** 재기동 세션이 「기동 지연」을 말하지 않게 — `session_guard.prior_sessions_today()` +
+      `loss_ledger.record_start_lag(restarted_mid_day=)`. `start_lag_minutes: None` ·
+      `minutes_since_trigger: 249.4` · `restarted_mid_day: true`로 분리.
+      **원안(두 경로 완전 통합)은 기각** — 두 축은 의도된 이중 계측이다(DECISION_LOG 참고)
+- [x] **F-3 + G-3** `ops/incomplete_days.py` 신설(공용 판정 + `usable_days()`).
+      `integrity_report`에 `incomplete_day`·`incomplete_reason`·`session_coverage_pct_min`.
+      소비처 3곳 결선: `feature_health_rolling.judge()`(`excluded_days` 반환) ·
+      `run_vol_scorecard.load_m1_window()`(`excluded_days` 산출물 기록) ·
+      `fix_verification`의 `trailing_unmeasured` 제외 가드.
+      **08-19 `incomplete_day: true`(61.2%) · 15m·30m 롤링 `judged` true → false** ✔ (J-3 충족)
+- [x] **F-4** 등록부 `axis: instrument | outcome` + 상태 `계측 성립 · 값 위반` + 스코어보드 버킷.
+      지표 공유 로드 거부. `launch-window-refusal-not-counted`에 고유 지표
+      `refused_starts_counted_as_restart` 신설. **재발 4 → 0 · measured_bad 3** ✔ (J-4 충족)
+- [x] **F-5** `RegimeRuntime.seed()` + `RegimeSeeded`(INFO) 등록 + `run_g2_paper_trading` 결선.
+      집계기에 `regime_source`·`first_cycle_after_start`, 리포트에 `regime_unseeded_cycles`.
+      **`NEXT_TODO:3723`(08-13 F-3) / `:5331`(08-18 F-0818I-2b) 두 번 계획된 항목 — 이제 구현됨**
+- [x] **F-6** `configs/incident_causes.yaml` 신설 + `observation_gaps.apply_known_causes()`.
+      `cause_source`(auto|human|unresolved)·`evidence` 필드. **08-19 두 공백 원인이
+      「원인 불명」 → 「Windows Update 재시작」(사람 확정 · 딥다이브 경로)** ✔
+- [x] **G-4** `negative_control` + `계기 실명`(`INSTRUMENT_BLIND`) 판정 사다리 맨 위.
+      등록 2쌍: `abnormal_exits ↔ observation_gap_minutes_max(>5)` ·
+      `series_coverage_pct_min ↔ incomplete_day`.
+      **소급 검증: `since` 리셋 전 08-19 채점 시 「계기 실명」 판정** ✔
+
+### 보류 (근거 명시)
+
+- [ ] **G-1** 재발을 사건 단위로 묶기 — **보류.** F-4의 지표 공유 거부가 오늘 증상(4건 중 2건 중복)을
+      이미 없앴다. 남는 편익은 「4 → 1」 표기뿐이고 리포트 자신이 R18 섀도 20거래일을 전제로 달았다.
+      **재착수 조건**: 서로 다른 두 사건이 같은 날 겹쳐 「위반 N건」이 다시 규모를 왜곡할 때
+- [ ] **G-2** 완성봉 유예 자동 연동 — **보류.** `late_bar_drops`가 표본 20,000 · 3거래일 연속 **0**이라
+      실측 편익이 0이고, 비용은 불변원칙 3을 자동 조정에 맡기는 것이다. `_BOUNDARY_GRACE_SECONDS`가
+      코드 상수라 설정화도 선행돼야 한다. 매 아침 대조 한 줄은 이미 있다(`self_check`, 커밋 `fe15694`).
+      **재착수 조건**: `late_bar_drops` 1건이라도 관측되면 즉시. 또는 p90이 유예의 2배를 넘으면
+
+### 08-20 관측 (구현분 채점)
+
+- [ ] **J-5** 08:25대 `RegimeSeeded` **1건** 존재 · 09:00 첫 사이클 `AggregatorNoContribution`의
+      `regime != UNKNOWN`. 여전히 UNKNOWN이면 시드가 소비자에 안 닿은 것 (08-20 장중)
+- [ ] **J-5b** `daily_integrity_20260820.json`의 `regime_unseeded_cycles` **0** — 세션 수만큼
+      나오면 시드 미결선, 그보다 크면 국면 발행이 중간에 끊긴 것 (08-20 장후)
+- [ ] **J-12** `SessionStart` 프로세스당 정확히 1회 → `abnormal_exits` **0건** ·
+      `incomplete_day` **false**. 정상일에 새 축들이 조용한지 확인 (08-20 장후)
+- [ ] **J-4b** 등록부 `계측 성립·값 위반` 0 · `계기 실명` 0 · 재발 0. 정상일이면 셋 다 0이어야 한다
+- [ ] **J-2b** `irrecoverable_loss_minutes`가 정상일에 종전 값 범위(0~5분)로 돌아오는지 —
+      5거래일 예산이 08-19의 180.7로 크게 뛴다(예산 20분 대비). **경보가 08-19 하나를 가리키는지**
+      `dominant_day` 문장으로 확인 (08-20 장후)
+- [ ] **J-3b** `feature_health_rolling`의 `excluded_days`에 08-19이 남아 있고 창이 08-18·08-20으로
+      구성되는지. 30m이 다시 `judged: false`면 그건 표본 누적 문제지 이 변경 탓이 아니다

@@ -58,6 +58,7 @@ from messiah.features import spec as feature_spec
 from messiah.ops import (
     canonical_consumers,
     feature_health_rolling,
+    incomplete_days,
     observation_gaps,
     series_coverage,
     series_expectation,
@@ -313,6 +314,23 @@ class IntegrityReport:
     # `ops/loss_budget.py`가 이 값들을 5거래일 이동합으로 묶는다: 하루짜리 사고는 늘 "이번
     # 한 번"으로 읽히는데, 08-06 21분 + 08-07 114분 + 08-10 38분을 합산하는 축이 없었다.
     irrecoverable_loss_minutes: float | None = None
+    # **그 합계가 무엇으로 이뤄졌나** (2026-08-19 F-2). 2026-08-19에 「오늘 얼마를 잃었나」에
+    # 대해 같은 하루가 **세 개의 다른 숫자**를 남겼다 — 249.4(장중 스냅샷) · 0.5(확정본) ·
+    # 158.9~180.2(프로세스별 공백). 합산만 남기면 그 정체가 다시 사라지므로 **분해값을 함께**
+    # 적는다. 이 저장소가 배운 것: 어긋나는 축을 하나로 접는 것이 아니라, 어느 축이 무엇을
+    # 봤는지 나란히 두는 것이 답이다(`cross_check_head_truncation`과 같은 규율).
+    irrecoverable_loss_breakdown: dict[str, Any] = field(default_factory=dict)
+    # **장중에 죽어 있던 시간**(분) — `abnormal_exits`의 `mid_session` 건에서 유도 (F-2).
+    #
+    # 종전 `irrecoverable_loss_minutes`는 `max(계열 머리 구멍, 기동 지연)`이었고 **둘 다
+    # 아침에 관한 축**이다. 그래서 2026-08-19처럼 아침엔 정시에 떴는데 장중에 159분을 잃은
+    # 날이 사고 없는 08-18과 **똑같은 0.5분**으로 적혔다(318배 과소계상). 예산 가드가 장중
+    # 사망에 대해 구조적으로 눈이 멀어 있었다.
+    #
+    # 프로세스가 여럿 죽은 날의 대푯값은 **최댓값**이다. 합이 아닌 이유는 이 축이 세는 것이
+    # "몇 분 동안 못 봤나"이기 때문이고(같은 함수의 계열 간 규율과 동일), 겹치는 구간의
+    # 합집합이 곧 최댓값이다 — 2026-08-19의 g2 09:30~12:30이 l1 09:50~12:29를 **포함**한다.
+    mid_session_gap_minutes: float | None = None
     # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2). `breaches`에도 들어가지만 **따로 남긴다**
     # (2026-08-10 A-1). 등록부 `canonical-consumers-wired`가 그동안 넓은 그물(`breaches`)로
     # 채점했고, 그 항목 주석이 이미 예고했다 — *"남의 사고로 두 번 이상 뒤집히면 그때
@@ -337,6 +355,21 @@ class IntegrityReport:
     # 채점하지 않는다(`fix_verification.load_daily_reports`). 자세한 사유는
     # `generate_and_write()`의 `provisional` 절 참고.
     provisional: bool = False
+    # **오늘이 반쪽짜리 하루였는가** (2026-08-19 F-3, `ops/incomplete_days.py`).
+    #
+    # `provisional`과 **다른 축이다.** 그쪽은 "아직 안 만들어진 산출물이 있다"(시간 문제)고
+    # 이쪽은 "이 하루 자체가 온전하지 않다"(내용 문제)다. 2026-08-19에 커버리지 61%인 날이
+    # `provisional: false`로 저장됐고 — 그 false는 **옳았다** — 불완전일을 말할 필드가
+    # 아예 없어서 롤링 소비자들이 그날을 온전한 하루로 셌다.
+    #
+    # 이 값을 읽는 자리: `ops/feature_health_rolling.judge()`(3거래일 창) ·
+    # `scripts/run_vol_scorecard.py`(20거래일 창) · `ops/fix_verification`(판정 불가 누적).
+    # 기록만 하고 아무도 안 읽는 축을 또 만들지 않는다(G-3의 취지).
+    incomplete_day: bool = False
+    # 왜 불완전한가 — 사람이 읽는 사유들. 빈 목록이면 완전한 하루다.
+    incomplete_reason: list[str] = field(default_factory=list)
+    # 판정된 계열 커버리지의 최솟값(%) — 못 잰 날은 None(0.0이 아니다, L18).
+    session_coverage_pct_min: float | None = None
     # **조회 대상 심볼이 그날 데이터를 안 가졌고, 다른 심볼은 가졌다** (2026-08-14 F-B).
     #
     # `provisional`과 **다른 축이다.** 그쪽은 "아직 안 만들어진 산출물이 있다"(시간 문제)이고
@@ -353,6 +386,19 @@ class IntegrityReport:
     # **한 표면에만 나타난 사실** (2026-08-14 G-6). 스냅샷이 말한 사유가 로그엔 없으면
     # 다른 표면을 보는 사람은 그 사실을 영영 못 본다 — 그것 자체가 관측 결함이다.
     verdict_surface_gaps: list[dict[str, Any]] = field(default_factory=list)
+    # **국면 없이 나간 사이클 수** (2026-08-19 F-5, `AggregatorNoContribution`).
+    #
+    # 2026-08-19 종일 실측: 어긋남 2건이 **전량 세션 첫 사이클**이었고(09:00:02 · 12:31:01)
+    # 이후 7건은 전부 일치했다. 즉 경합이 아니라 구조였다 — 웜스타트가 버퍼만 채우고
+    # 발행을 안 해서, 소비자는 첫 30m 완성봉까지 `UNKNOWN`을 들고 있었다. `UNKNOWN`은
+    # 집계기에서 가중치표 폴백 + Meta 임계 +0.10을 뜻하므로 **매 세션의 첫 판단이 가장
+    # 보수적인 국면 가정으로** 나갔다.
+    #
+    # F-5의 시드가 들으면 이 값은 **0**이다. 세션 수만큼 나오면 시드가 안 닿은 것이고,
+    # 그보다 크면 국면 발행 자체가 중간에 끊긴 것이다. 필드가 없던 옛 로그는 0이다 —
+    # 그때는 이 구분이 없었으므로 「0건 관측」이 아니라 「축이 없었다」이고, 그 사실은
+    # `regime_distribution`이 같이 실려 읽힌다.
+    regime_unseeded_cycles: int = 0
     # **기여 의견 0의 사유 분포** (2026-08-14 F-5, `AggregatorNoContribution`).
     #
     # `n_experts=0`으로 가는 길이 여섯인데 어느 길이었는지 계측이 없어 `NEXT_TODO` W-2가
@@ -567,42 +613,126 @@ def _legacy_refused_starts(paths: Iterable[Path]) -> list[str]:
 
 
 def _abnormal_exits(day: date, per_process: Mapping[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """기동했는데 `SessionEnd`가 없는 프로세스 — 죽은 것이다 (2026-08-07 P0-3).
+    """`SessionEnd` 없이 끝난 **세션마다** 1건 — 죽은 것이다 (2026-08-07 P0-3 / 2026-08-19 F-1).
 
-    판정: 유효 기동 수 > 정상 종료 수 이면 마지막 세션이 안 끝났다는 뜻이다. 그 프로세스의
-         **마지막 로그 시각**부터 정규장 마감까지가 죽어 있던 구간이다.
+    ## 왜 세션 단위로 다시 썼나 (2026-08-19 장후 P1-1)
 
-    ## 아직 돌고 있는 프로세스를 사고로 읽지 않는다
+    종전 판정은 프로세스당 **한 번**이었다: `len(starts) > len(ends)` 면 "마지막 세션이 안
+    끝났다"로 읽고, 사망 시각을 `activity[-1]` — **그날 프로세스의 마지막 로그** — 로 잡았다.
 
-    장중에 리포트를 돌리면 당연히 `SessionEnd`가 없다. 그래서 **마지막 로그가 마감보다
-    한참 전일 때만** 사고로 본다 — 살아 있는 프로세스는 방금까지 로그를 냈으므로 그
-    간격이 작다. 임계는 `bar_tail_gap_minutes`와 같은 20분이다(같은 질문, 같은 값).
+    2026-08-19가 그 설계의 사각을 그대로 보여줬다. l1_daily는 09:50:29에 죽어 12:29:23에
+    사람이 되살렸고 15:35:26에 정상 종료했다. 기동 2 · 종료 1이라 불균형은 잡혔지만,
+    `activity[-1]`이 **15:35:26(정상 종료)** 이라 `lost = close - last ≈ 0분`이 되어
+    `bar_tail_gap_minutes(20)` 아래로 걸러졌다. 결과는 `abnormal_exits: []`.
+
+    더 나쁜 것은 그 빈 배열이 등록부 `no-silent-process-death`의 채점 입력이라는 점이다.
+    그날 15:45 장후 로그에 이렇게 찍혔다:
+
+        FixVerificationPassed  no-silent-process-death: 7거래일 연속 기준 충족 (abnormal_exits ≤ 0)
+
+    **계기가 자기가 못 보는 사고가 일어난 날에 통과 도장을 찍었다.** 즉 이 축이 볼 수 있는
+    사고는 실제로 한 종류("하루 끝에 안 돌아온 프로세스")뿐이었고, 장중에 죽었다 돌아오면
+    원리적으로 아무것도 안 잡혔다.
+
+    ## 지금 판정
+
+    기동과 종료를 **시각순으로 짝짓는다.** 기동 i의 짝은 「기동 i 이후, 기동 i+1 이전」의
+    첫 `SessionEnd`다. 짝이 없는 세션마다 1건을 낸다:
+
+        mid_session=True    뒤에 다음 기동이 있다 → **장중에 죽었다 돌아왔다.**
+                            사망 시각은 그 세션의 마지막 활동, 회복 시각은 다음 기동.
+                            임계를 안 건다 — `SessionEnd` 없는 재기동은 그 자체로 R13
+                            위반이고, 몇 분이었나는 `minutes_lost`가 말한다.
+
+        mid_session=False   뒤에 기동이 없다 → 종전 판정과 같은 "안 돌아온 프로세스".
+                            마지막 활동부터 마감까지가 죽어 있던 구간이고,
+                            `bar_tail_gap_minutes`(20분) 아래는 **아직 돌고 있는 것**으로
+                            본다(장중에 리포트를 돌리면 당연히 `SessionEnd`가 없다).
+
+    두 갈래를 한 목록에 내되 갈래를 필드로 남긴다 — 처방이 다르기 때문이다(전자는 왜 죽었나,
+    후자는 왜 안 돌아왔나).
 
     ## `SessionEnd`가 없던 시절의 로그
 
     2026-08-07 이전 로그에는 이 마커가 아예 없어 **모든 날이 비정상 종료로 잡힌다.**
     그래서 마커를 한 번이라도 낸 프로세스만 판정한다 — 옛 이력을 소급해 빨갛게 칠하면
-    등록부 채점이 통째로 무의미해진다(그날들은 이 축으로 판정된 적이 없다).
+    등록부 채점이 통째로 무의미해진다(그날들은 이 축으로 판정된 적이 없다). 이 가드는
+    세션 단위로 바꾼 뒤에도 **그대로 유지한다**.
+
+    ## `observation_gaps`와 무엇이 다른가
+
+    그쪽은 **재기동 사이의 빈 구간**을 재고 호스트 이벤트로 원인까지 붙인다. 이쪽은
+    **정상 종료 마커의 유무**를 본다. 오늘처럼 둘 다 우는 날이 대부분이지만 갈리는 날이
+    있다: 죽었다 1초 만에 돌아오면 공백은 0분이라 안 잡히고 이 축만 운다. 반대로 정상
+    종료 뒤 사람이 늦게 재기동하면 공백만 잡히고 이 축은 조용하다. 두 축은 대체재가
+    아니다 — 갈리는 날 그 자체가 볼 것이다.
     """
     close = datetime.combine(day, DEFAULT_SESSION.close_time, tzinfo=KST)
+
+    def _at(clock: str) -> datetime | None:
+        try:
+            parsed = datetime.strptime(clock, "%H:%M:%S").time()  # noqa: DTZ007 — KST 벽시계
+        except ValueError:
+            return None
+        return datetime.combine(day, parsed, tzinfo=KST)
+
     out: list[dict[str, Any]] = []
     for name, result in sorted(per_process.items()):
         starts = result.get("session_starts") or []
         ends = result.get("session_ends") or []
         if not starts or not ends:
             continue  # 마커를 한 번도 안 낸 프로세스는 판정 대상이 아니다(위 docstring)
-        if len(starts) <= len(ends):
+        activity = sorted(m for m in (_at(s) for s in (result.get("activity_kst") or [])) if m)
+        moments = sorted(m for m in (_at(s) for s in starts) if m)
+        finished = sorted(m for m in (_at(s) for s in ends) if m)
+        if not moments or not finished:
             continue
-        activity = result.get("activity_kst") or []
-        if not activity:
-            continue
-        # 시각만 있는 로그 문자열이라 naive로 파싱한 뒤 KST를 붙인다 — 날짜는 `day`가 준다.
-        clock = datetime.strptime(activity[-1], "%H:%M:%S").time()  # noqa: DTZ007
-        last = datetime.combine(day, clock, tzinfo=KST)
-        lost = int((close - last).total_seconds() // 60)
-        if lost <= DEFAULT_THRESHOLDS["bar_tail_gap_minutes"]:
-            continue
-        out.append({"process": name, "last_log_kst": activity[-1], "minutes_lost": lost})
+
+        for index, begin in enumerate(moments):
+            following = moments[index + 1] if index + 1 < len(moments) else None
+            # 이 세션의 짝 — 기동 이후, 다음 기동 이전의 첫 종료 마커.
+            paired = next(
+                (e for e in finished if e >= begin and (following is None or e < following)),
+                None,
+            )
+            if paired is not None:
+                continue
+            # 그 세션이 마지막으로 살아 있었다고 말한 시각. 활동이 없으면 기동 시각이 상한이다.
+            last = max(
+                (m for m in activity if begin <= m and (following is None or m < following)),
+                default=begin,
+            )
+            if following is not None:
+                minutes = round((following - last).total_seconds() / 60.0, 1)
+                if minutes <= 0:
+                    continue
+                out.append(
+                    {
+                        "process": name,
+                        "session_index": index,
+                        "died_at_kst": f"{last:%H:%M:%S}",
+                        "recovered_at_kst": f"{following:%H:%M:%S}",
+                        "mid_session": True,
+                        # 종전 이름을 그대로 둔다 — 등록부·요약 문구가 읽는 자리다.
+                        "last_log_kst": f"{last:%H:%M:%S}",
+                        "minutes_lost": minutes,
+                    }
+                )
+                continue
+            lost = round((close - last).total_seconds() / 60.0, 1)
+            if lost <= DEFAULT_THRESHOLDS["bar_tail_gap_minutes"]:
+                continue  # 아직 돌고 있는 프로세스를 사고로 읽지 않는다(위 docstring)
+            out.append(
+                {
+                    "process": name,
+                    "session_index": index,
+                    "died_at_kst": f"{last:%H:%M:%S}",
+                    "recovered_at_kst": None,
+                    "mid_session": False,
+                    "last_log_kst": f"{last:%H:%M:%S}",
+                    "minutes_lost": lost,
+                }
+            )
     return out
 
 
@@ -633,6 +763,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     # 기여 의견 0의 갈래별 관여 횟수 (2026-08-14 F-5) — W-2를 1회 관측으로 확정시키는 축.
     no_contribution_reasons: dict[str, int] = {}
     no_contribution_cycles = 0
+    # 국면을 한 번도 못 받은 상태에서 돈 사이클 수 (2026-08-19 F-5).
+    regime_unseeded_cycles = 0
     session_starts: list[str] = []
     # 기동 창 가드가 되돌려보낸 기동 (2026-08-07 P0-4) — `session_starts`에서 뺄 목록.
     refused_starts: list[str] = []
@@ -724,6 +856,11 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             # 있으므로 합이 사이클 수를 넘을 수 있다 — 그게 맞다. 우리가 알고 싶은 것은
             # "어느 갈래가 몇 번 관여했나"이지 갈래별 배타 분할이 아니다.
             no_contribution_cycles += 1
+            # **국면을 아직 못 받은 채 돈 사이클** (2026-08-19 F-5). 세션당 최대 1건이어야
+            # 한다 — 그보다 크면 시드가 안 닿았거나 국면 발행이 끊긴 것이다. 필드가 없는
+            # 옛 로그는 안 센다(그때는 이 구분 자체가 없었다).
+            if record.get("first_cycle_after_start") is True:
+                regime_unseeded_cycles += 1
             if not record.get("views_received"):
                 no_contribution_reasons["views_empty"] = (
                     no_contribution_reasons.get("views_empty", 0) + 1
@@ -793,6 +930,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "tag_counts": tag_counts,
         "no_contribution_reasons": no_contribution_reasons,
         "no_contribution_cycles": no_contribution_cycles,
+        "regime_unseeded_cycles": regime_unseeded_cycles,
         "session_starts": effective_starts,
         "refused_starts": all_refused,
         "session_ends": sorted(session_ends),
@@ -1063,10 +1201,35 @@ def cross_check_head_truncation(
     return lines
 
 
+def mid_session_gap_minutes(
+    abnormal_exits: Sequence[Mapping[str, Any]],
+) -> tuple[float, dict[str, float]]:
+    """장중에 죽어 있던 시간 — (대푯값, 프로세스별 내역) (2026-08-19 F-2).
+
+    입력은 `_abnormal_exits()`의 출력이다. `mid_session` 건만 센다 — 「하루 끝에 안 돌아온」
+    건은 그날 마감까지의 구간이라 아침 축(`start_lag`)·계열 머리 구멍과 이미 겹친다.
+
+    대푯값이 합이 아니라 **최댓값**인 이유는 `irrecoverable_loss_minutes()`의 계열 간 규율과
+    같다: 이 축이 세는 것은 "몇 분 동안 못 봤나"이고, 겹치는 구간들의 합집합은 최댓값이다.
+    같은 프로세스가 하루에 두 번 죽었으면 그 둘은 안 겹치므로 **더한다**.
+    """
+    by_process: dict[str, float] = {}
+    for item in abnormal_exits:
+        if not item.get("mid_session"):
+            continue
+        name = str(item.get("process", "?"))
+        minutes = item.get("minutes_lost")
+        if not isinstance(minutes, (int, float)):
+            continue
+        by_process[name] = round(by_process.get(name, 0.0) + float(minutes), 1)
+    return round(max(by_process.values(), default=0.0), 1), by_process
+
+
 def irrecoverable_loss_minutes(
     *,
     start_lag_minutes: float | None,
     coverages: Sequence[series_coverage.SeriesCoverage],
+    mid_session_minutes: float = 0.0,
 ) -> float:
     """그날 **소급 경로 없이 잃은 시간**(분) — 손실 예산(`ops/loss_budget.py`)의 일일 값.
 
@@ -1077,8 +1240,18 @@ def irrecoverable_loss_minutes(
     계열 사이에서도 합이 아니라 최댓값이다 — 세 계열이 동시에 39·40·41분 비었다면
     잃은 **시간**은 41분이지 120분이 아니다. 이 축이 세는 것은 "몇 분 동안 못 봤나"다.
 
-    장중 구멍(`gaps`)은 여기 안 넣는다. 그건 `series_findings`가 따로 세고, 이 값은
-    **아침 잘림**이라는 한 사건의 크기를 재는 자리다 — 섞으면 5거래일 이동합의 뜻이 흐려진다.
+    계열 **안쪽** 구멍(`gaps`)은 여기 안 넣는다. 그건 `series_findings`가 따로 세고, 폴러가
+    한두 사이클 건너뛴 것과 프로세스가 죽어 있던 것은 다른 사건이다.
+
+    ## 장중 사망은 더한다 (2026-08-19 F-2)
+
+    종전엔 위 두 축(머리 구멍·기동 지연)만 봤고 **둘 다 아침에 관한 축**이었다. 그래서
+    2026-08-19처럼 08:20에 정시로 뜬 뒤 09:50에 죽어 12:29까지 159분을 잃은 날이, 사고가
+    없던 08-18과 **똑같은 0.5분**으로 적혔다 — 318배 과소계상이다. 그날 예산 경보는 울렸지만
+    08-14의 33분 때문이었고, 오늘 하루만으로 예산을 8배 넘겼다는 사실은 어디에도 없었다.
+
+    아침 축과는 **더한다**. 위 "더하지 않는 이유"(둘은 대개 같은 사건이다)는 머리 구멍과
+    기동 지연 사이의 이야기이고, 장중 사망은 시간대부터 겹치지 않는 별개 사건이다.
 
     ## 카덴스는 손실이 아니다 (2026-08-18 F-0818P-5)
 
@@ -1108,7 +1281,10 @@ def irrecoverable_loss_minutes(
         ),
         default=0.0,
     )
-    return round(max(head, start_lag_minutes or 0.0), 1)
+    # 장중 사망은 **더한다** — 아침 축(머리 구멍·기동 지연)과 서로 다른 사건이고 시간대도
+    # 겹치지 않는다. 위 "더하지 않는 이유"는 둘 다 아침을 보는 두 축에 대한 것이지 여기엔
+    # 해당하지 않는다(2026-08-19 F-2).
+    return round(max(head, start_lag_minutes or 0.0) + max(mid_session_minutes, 0.0), 1)
 
 
 # ---------------------------------------------------------------- 네이티브 크래시
@@ -1569,6 +1745,16 @@ def build_report(
     # `관측 공백: 없음 ✅`으로 지나갔다.
     abnormal_exits = _abnormal_exits(day, per_process)
     for exit_info in abnormal_exits:
+        # **장중에 죽었다 돌아온 날을 따로 말한다** (2026-08-19 F-1). 두 갈래는 처방이
+        # 다르다 — 이쪽은 "왜 죽었나"(호스트·크래시)를 묻고, 아래쪽은 "왜 안 돌아왔나"
+        # (복구 트리거)를 묻는다. 한 문장으로 뭉치면 그날 무엇을 봐야 하는지가 사라진다.
+        if exit_info.get("mid_session"):
+            breaches.append(
+                f"{exit_info['process']}: 장중 사망 {exit_info['minutes_lost']}분 — "
+                f"{exit_info['died_at_kst']}에 정상 종료 마커 없이 끊겼고 "
+                f"{exit_info['recovered_at_kst']}에 재기동됐다(비정상 종료)"
+            )
+            continue
         breaches.append(
             f"{exit_info['process']}: 정상 종료 마커 없음 — 마지막 로그 "
             f"{exit_info['last_log_kst']} 이후 {exit_info['minutes_lost']}분간 죽어 있었다"
@@ -1829,9 +2015,6 @@ def build_report(
         ),
         _FEATURE_HEALTH_MIN_SAMPLES_FALLBACK,
     )
-    rolling = feature_health_rolling.judge(day=day, min_samples=min_samples)
-    rolling_by_horizon = {v.horizon: v for v in rolling}
-
     # **표면 간 불일치 자체가 신호다** (2026-08-14 G-6). 스냅샷은 그날 마지막 상태를 담고
     # 있으므로 여기서 로그와 대조한다 — 상태판은 로그를 안 읽어 이 판정을 못 한다.
     surface_gaps = _verdict_surface_gaps(
@@ -1842,22 +2025,6 @@ def build_report(
             f"관측 표면 불일치 — `{gap['code']}`가 {', '.join(gap['sources'])}에만 있고 "
             f"{', '.join(gap['missing_from'])}엔 없다(기대 태그: {', '.join(gap['expected_tags'])})"
         )
-    for horizon, entry in sorted(degenerate_features.items()):
-        if entry.get("judged", True):
-            continue
-        multi = rolling_by_horizon.get(horizon)
-        if multi is not None and multi.judged:
-            entry["rolling_judged"] = True
-            entry["rolling_days"] = list(multi.days)
-            entry["rolling_samples"] = multi.samples
-            continue
-        floor = logs["degenerate_features"].get(horizon, {}).get("min_samples") or 0
-        got = multi.samples if multi is not None else entry.get("samples", 0)
-        span = f"{len(multi.days)}거래일 누적 {got}" if multi is not None else f"표본 {got}"
-        # **표본이 쌓이는 중이다** (2026-08-18 F-0818P-2). 30m은 하루 14~15봉이 물리적
-        # 상한이라 하루로는 30표본에 못 닿는다 — 결함이 아니라 대기다. 이걸 위반으로 세면
-        # 계측축을 새로 켤 때마다 등록부가 며칠씩 거짓 위반을 낸다(08-18에 실제로 그랬다).
-        note_unmeasured(f"{horizon} 피처 퇴화 판정({span} < 최소 {floor})", "accruing")
     for item in host.unmeasured:
         note_unmeasured(f"호스트 위생 — {item}", "failed")
 
@@ -1958,8 +2125,61 @@ def build_report(
             },
         )
     )
+    # ---- F-3(2026-08-19): 반쪽짜리 하루를 하루로 세지 않는다 ----
+    #
+    # **커버리지 계산 뒤에 있어야 한다.** 판정 입력이 `series_coverage`와 `abnormal_exits`
+    # 둘이고, 그 판정을 롤링 창이 **입력으로** 받는다. 순서가 뒤집히면 오늘이 자기 자신을
+    # 오염시킨 창으로 판정된다 — 2026-08-19가 정확히 그랬다(2일 창의 절반이 반나절짜리인데
+    # `judged: true`).
+    incomplete, incomplete_reason, coverage_pct_min = incomplete_days.judge(
+        coverages=coverages, abnormal_exits=abnormal_exits
+    )
+    if incomplete:
+        breaches.append(
+            "오늘은 불완전일이다 — "
+            + " · ".join(incomplete_reason)
+            + " (롤링 판정 창에서 제외된다)"
+        )
+    rolling = feature_health_rolling.judge(
+        day=day,
+        min_samples=min_samples,
+        # 오늘 판정은 아직 파일에 없다 — 지금 만드는 중이다. 그래서 직접 건넨다.
+        incomplete_known={day: incomplete},
+        log_dir=resolved_log_dir,
+    )
+    rolling_by_horizon = {v.horizon: v for v in rolling}
+
+    for horizon, entry in sorted(degenerate_features.items()):
+        if entry.get("judged", True):
+            continue
+        multi = rolling_by_horizon.get(horizon)
+        if multi is not None and multi.judged:
+            entry["rolling_judged"] = True
+            entry["rolling_days"] = list(multi.days)
+            entry["rolling_samples"] = multi.samples
+            continue
+        floor = logs["degenerate_features"].get(horizon, {}).get("min_samples") or 0
+        got = multi.samples if multi is not None else entry.get("samples", 0)
+        span = f"{len(multi.days)}거래일 누적 {got}" if multi is not None else f"표본 {got}"
+        # **표본이 쌓이는 중이다** (2026-08-18 F-0818P-2). 30m은 하루 14~15봉이 물리적
+        # 상한이라 하루로는 30표본에 못 닿는다 — 결함이 아니라 대기다. 이걸 위반으로 세면
+        # 계측축을 새로 켤 때마다 등록부가 며칠씩 거짓 위반을 낸다(08-18에 실제로 그랬다).
+        note_unmeasured(f"{horizon} 피처 퇴화 판정({span} < 최소 {floor})", "accruing")
     # ---- G-6(2026-08-10): 손실 예산의 일일 값 ----
-    daily_loss = irrecoverable_loss_minutes(start_lag_minutes=start_lag, coverages=coverages)
+    #
+    # 2026-08-19 F-2로 **장중 사망분이 합산된다.** 그 전까지 이 값은 아침 축 둘만 봤고,
+    # 159분을 잃은 날과 사고 없는 날이 같은 0.5분이었다. 분해값을 함께 남기는 이유는 그
+    # 하루가 세 개의 다른 숫자를 남긴 사건 때문이다(필드 주석 참고).
+    mid_gap, mid_gap_by_process = mid_session_gap_minutes(abnormal_exits)
+    daily_loss = irrecoverable_loss_minutes(
+        start_lag_minutes=start_lag, coverages=coverages, mid_session_minutes=mid_gap
+    )
+    loss_breakdown = {
+        "start_lag_minutes": start_lag,
+        "series_head_gap_minutes": round(max(irrecoverable_heads, default=0.0), 1),
+        "mid_session_gap_minutes": mid_gap,
+        "mid_session_gap_by_process": mid_gap_by_process,
+    }
     series_contract = series_expectation.summarize(expectations)
     # 정본을 안 쓰는 소비자 (2026-08-07 고도화 2) — 코드 구조 판정이라 그날 데이터와 무관하다.
     # 그래도 여기 싣는 이유는 **매일 읽히는 문서가 이것 하나**이기 때문이다. 테스트로만
@@ -1992,6 +2212,10 @@ def build_report(
         activity_by_process=activity_for_gaps,
         events=observation.events,
     )
+    # **사람이 아는 원인을 산출물이 알게 한다** (2026-08-19 F-6). 자동 판정이 침묵한 자리만
+    # 채운다 — 2026-08-19에 사람은 12:14에 원인을 확정했는데 15:45 리포트는 "원인 불명"으로
+    # 봉인했고, 그 확정 기록은 git 추적 밖이었다(`git clean -xdf` 한 번이면 사라진다).
+    observation.gaps = observation_gaps.apply_known_causes(day, observation.gaps)
     for gap in observation.gaps:
         if gap.minutes > limits["observation_gap_minutes"]:
             breaches.append(gap.describe())
@@ -2038,6 +2262,11 @@ def build_report(
         task_exit_codes=task_exits.to_dict(),
         canonical_consumer_findings=consumer_findings,
         irrecoverable_loss_minutes=daily_loss,
+        irrecoverable_loss_breakdown=loss_breakdown,
+        mid_session_gap_minutes=mid_gap,
+        incomplete_day=incomplete,
+        incomplete_reason=incomplete_reason,
+        session_coverage_pct_min=coverage_pct_min,
         abnormal_exits=abnormal_exits,
         observation_gaps=[gap.to_dict() for gap in observation.gaps],
         host_events=[event.to_dict() for event in observation.events],
@@ -2049,6 +2278,7 @@ def build_report(
         feature_health_rolling=[v.to_dict() for v in rolling],
         verdict_surface_gaps=surface_gaps,
         no_contribution_reasons=logs["no_contribution_reasons"],
+        regime_unseeded_cycles=logs["regime_unseeded_cycles"],
         breaches=breaches,
     )
 
@@ -2217,7 +2447,35 @@ def format_summary(report: IntegrityReport) -> str:
     if report.irrecoverable_loss_minutes is not None:
         # 0분도 찍는다 — "봤는데 없다"와 "이 축이 없다"가 구분돼야 한다(G-6).
         loss = report.irrecoverable_loss_minutes
-        lines.append(f"  소급 불가 손실(오늘): {loss:.0f}분 " + ("✅" if loss == 0 else "❌"))
+        # **분해값을 같이 적는다** (2026-08-19 F-2). 합산만 적으면 그 숫자의 정체가 다시
+        # 사라진다 — 그날 같은 하루에 대해 세 개의 다른 숫자가 남았고 어느 것도 서로를
+        # 설명하지 않았다.
+        parts = report.irrecoverable_loss_breakdown or {}
+        detail = ""
+        if parts.get("mid_session_gap_minutes"):
+            by_process = parts.get("mid_session_gap_by_process") or {}
+            who = " · ".join(f"{name} {value:.0f}분" for name, value in sorted(by_process.items()))
+            detail = f" (기동 지연 {parts.get('start_lag_minutes') or 0:.0f}분 + 장중 사망 {who})"
+        lines.append(
+            f"  소급 불가 손실(오늘): {loss:.0f}분{detail} " + ("✅" if loss == 0 else "❌")
+        )
+    # **반쪽짜리 하루인가** (2026-08-19 F-3). 2026-08-19에 커버리지 61%인 날이 이 줄 없이
+    # 정상 확정본으로 저장돼 롤링 창에 정상 가중으로 들어갔다 — 되돌릴 수 없는 오염이었다.
+    if report.incomplete_day:
+        lines.append(
+            f"  ❌ 불완전일 — {' · '.join(report.incomplete_reason)} (롤링 판정 창에서 제외)"
+        )
+    elif report.session_coverage_pct_min is not None:
+        lines.append(
+            f"  불완전일: 아니다 ✅ (계열 커버리지 최솟값 {report.session_coverage_pct_min:g}%)"
+        )
+    # **국면 없이 나간 사이클** (2026-08-19 F-5). 0이어야 정상이고, 세션 수만큼 나오면
+    # 웜스타트 시드가 안 닿은 것이다.
+    if report.regime_unseeded_cycles:
+        lines.append(
+            f"  ❌ 국면 미수신 상태로 돈 사이클 {report.regime_unseeded_cycles}건 — "
+            "웜스타트 시드가 첫 사이클에 안 닿았다(RegimeSeeded 로그 확인)"
+        )
     if report.task_exit_codes:
         lines.extend(
             task_exit_codes.summarize(
