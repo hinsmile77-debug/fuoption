@@ -188,3 +188,102 @@ def test_freshness_fields_survive_an_empty_bar_dir(tmp_path: Path) -> None:
 
     assert fields["chart_date"] is None
     assert fields["chart_lag_calendar_days"] is None
+
+
+# --------------------------------------------- F-A′: 생산 형상으로 유도가 되는가 (2026-08-20)
+#
+# 위 `_view()`는 `valid_until = ts + horizon`(= 다음 갱신 시각)으로 짓는다. **생산 코드는
+# 그런 값을 만들지 않는다.** `Aggregator`는 `ts_utc = as_of = 트리거 봉의 확정 시각`을 넣고
+# `valid_until = min(기여 ExpertView.valid_until)`을 넣는데, 후자는 트리거 자신을 포함하므로
+# **항상 `as_of` 이하**다. 즉 `valid_until − ts_utc ≤ 0`이라 유도가 매번 실패했고, 2026-08-14
+# F-4가 "고쳤다"고 적은 경로는 라이브에서 **0회** 사용됐다.
+#
+# 위 테스트들이 그것을 못 잡은 이유가 정확히 픽스처다. 그래서 아래 두 테스트는 픽스처를 짓지
+# 않고 **`Aggregator.compute()`가 실제로 낸 메시지**를 먹인다.
+
+
+def _production_view(*, n_experts: int) -> FuturesView:
+    """`Aggregator.compute()`가 실제로 내는 형상 그대로 — 픽스처를 짓지 않는다."""
+    from messiah.core.messages import HORIZON_SECONDS, ExpertView, Horizon, RegimeState
+    from messiah.strategy.futures.aggregator import Aggregator
+
+    horizon = Horizon.M30
+    bar_open = datetime(2026, 8, 20, 10, 0, tzinfo=KST)
+    as_of = bar_open + timedelta(seconds=HORIZON_SECONDS[horizon])  # = 봉 확정 시각
+    views = {}
+    if n_experts:
+        views[horizon] = ExpertView(
+            symbol="A05609",
+            ts_utc=as_of,
+            horizon=horizon,
+            p_up=0.6,
+            p_flat=0.3,
+            p_down=0.1,
+            ens_std=0.01,
+            meta_passed=True,
+            model_version="test",
+            valid_until=as_of,  # 생산: FeatureVector.valid_until 그대로
+        )
+    return Aggregator().compute(
+        "A05609",
+        views,
+        RegimeState(symbol="A05609", regime=Regime.TREND_UP, confidence=0.9, state_duration_bars=3),
+        as_of=as_of,
+        cadence_seconds=float(HORIZON_SECONDS[horizon]),
+    )
+
+
+def test_production_shaped_view_derives_its_cadence() -> None:
+    """기여 전문가가 있어도 `valid_until − ts_utc`는 0이다 — 그래서 `cadence_seconds`가 있다."""
+    view = _production_view(n_experts=1)
+    assert view.valid_until is not None
+    assert (
+        (view.valid_until - view.ts_utc).total_seconds() <= 0
+    ), "생산 형상에서 이 차이가 양수가 되면 F-A′의 전제가 바뀐 것이다 — 유도식을 재검토하라"
+    threshold, cadence = derived_stale_after(view, fallback=10.0)
+    assert cadence == 1800
+    assert threshold == 2700
+
+
+def test_no_contribution_view_still_derives_its_cadence() -> None:
+    """기여 0명이어도 **다음 완성봉에 또 돈다** — 그 사실이 10초 상수로 지워지면 안 된다."""
+    view = _production_view(n_experts=0)
+    assert view.n_experts == 0
+    assert view.valid_until is None  # 기여가 없으니 봉 확정 시각은 못 정한다(종전과 동일)
+    threshold, cadence = derived_stale_after(view, fallback=10.0)
+    assert cadence == 1800
+    assert threshold == 2700
+
+
+def test_fallback_uses_are_counted() -> None:
+    """「고쳤는데 새 경로가 한 번도 안 쓰였다」를 세는 축 (2026-08-20 G-A)."""
+    from messiah.ui.data_source import (
+        reset_threshold_derivation_stats,
+        threshold_derivation_stats,
+    )
+
+    reset_threshold_derivation_stats()
+    derived_stale_after(_production_view(n_experts=1), fallback=10.0)
+    derived_stale_after(_view(None), fallback=10.0)  # 주기를 못 구하는 옛 형상
+    stats = threshold_derivation_stats()
+    assert stats == {"derived": 1, "fallback": 1}
+    reset_threshold_derivation_stats()
+
+
+def test_regime_state_cadence_is_the_driving_horizon() -> None:
+    """`RegimeState`는 `valid_until − ts_utc`가 **음수**였다 — 15초 상수가 정본이었다."""
+    from messiah.core.messages import HORIZON_SECONDS, Horizon, RegimeState
+
+    state = RegimeState(
+        symbol="A05609",
+        regime=Regime.TREND_UP,
+        confidence=0.8,
+        state_duration_bars=2,
+        valid_until=datetime(2026, 8, 20, 10, 30, tzinfo=KST),  # 봉 확정(과거)
+        ts_utc=datetime(2026, 8, 20, 10, 30, 1, tzinfo=KST),  # 발행 wall clock
+        cadence_seconds=float(HORIZON_SECONDS[Horizon.M30]),
+    )
+    assert (state.valid_until - state.ts_utc).total_seconds() < 0
+    threshold, cadence = derived_stale_after(state, fallback=15.0)
+    assert cadence == 1800
+    assert threshold == 2700

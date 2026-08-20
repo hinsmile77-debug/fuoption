@@ -135,8 +135,18 @@ _HEALTH_COMPONENTS: tuple[tuple[str, str], ...] = (
 # 피한 것은 설계가 아니라 우연이다.** 그래서 상수 대신 메시지가 스스로 말한 유효기간
 # (`valid_until - ts_utc` = 그 Horizon 길이)에서 계산한다(`_derived_stale_after`).
 #
-# 여기 남은 값은 **유도가 불가능할 때의 하한**이다 — `valid_until`이 None인 경우
-# (기여 전문가 0명이면 Aggregator가 그렇게 낸다)에만 쓰인다.
+# 여기 남은 값은 **유도가 불가능할 때의 하한**이다.
+#
+# 2026-08-20 F-A′ — 종전 이 주석은 *"`valid_until`이 None인 경우(기여 전문가 0명)에만 쓰인다"*
+# 라고 적었다. **틀렸다.** 유도식이 `valid_until − ts_utc`였는데 생산 경로에서 두 값이 같은 봉을
+# 가리켜 차이가 늘 0 이하였고, 그래서 아래 상수들이 **모든 사이클에서** 정본이었다 —
+# 기여 전문가 수와 무관하게. 고친 기록만 남고 새 경로는 엿새 동안 0회 사용됐다.
+# 지금은 메시지가 `cadence_seconds`(구동 Horizon 길이)를 직접 싣는다
+# (`ui/data_source.derived_stale_after` docstring "한 이름에 두 의미" 절).
+# 그러므로 아래 값은 **이제 정말 예외 경로**다 — 옛 메시지가 캐시에 남아 있거나 구동 주기를
+# 못 구한 경우뿐이고, 그 횟수는 `data_source.threshold_derivation_stats()`가 센다(G-A).
+#
+# 상수 자체를 30분으로 올리는 안은 **기각**한다 — 그러면 진짜 정지도 30분간 초록이다.
 _STALE_AFTER: dict[str, float] = {
     "FuturesView": 10.0,
     "RegimeState": 15.0,

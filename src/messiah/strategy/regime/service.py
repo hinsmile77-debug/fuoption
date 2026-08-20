@@ -27,7 +27,13 @@ from typing import Sequence
 
 import numpy as np
 
-from messiah.core.messages import BarClosed, Regime, RegimeState, bar_confirm_time
+from messiah.core.messages import (
+    HORIZON_SECONDS,
+    BarClosed,
+    Regime,
+    RegimeState,
+    bar_confirm_time,
+)
 from messiah.strategy.regime.hmm_model import (
     DEFAULT_N_STATES_CANDIDATES,
     OBSERVATION_WINDOW,
@@ -220,6 +226,10 @@ class RegimeAI:
             self._state_duration = 1
             self._last_regime = regime
         valid_until = bar_confirm_time(bars[-1]) if bars else None
+        # 구동 주기 — 판정에 쓰인 봉의 Horizon 길이 (2026-08-20 F-A′). `valid_until`은 그 봉의
+        # **확정 시각**(과거)이라 화면이 `valid_until − ts_utc`로 주기를 유도하면 늘 음수가 나왔고,
+        # 15초 상수로 떨어져 배지가 매 사이클 거짓 STALE이었다.
+        cadence = float(HORIZON_SECONDS[bars[-1].horizon]) if bars else None
         return RegimeState(
             symbol=symbol,
             regime=regime,
@@ -228,6 +238,7 @@ class RegimeAI:
             transition_prob=transition_prob,
             rule_override=rule_override,
             valid_until=valid_until,
+            cadence_seconds=cadence,
         )
 
     def _transition_prob_from_state(self, state: int) -> dict[str, float]:

@@ -213,12 +213,16 @@ class Aggregator:
         *,
         as_of: datetime,
         regime_received: bool = True,
+        cadence_seconds: float | None = None,
     ) -> FuturesView:
         """
         입력: `views`는 Horizon별 최신 `ExpertView`(meta_passed가 이미 실제 판정값). `as_of`는
              신선도(f_h) 계산 기준 시각 — 봉 도메인 시각(모듈 docstring "신선도" 절)을 넘길
              것(`strategy/futures/service.py`는 트리거가 된 FeatureVector의 `valid_until`을
              넘긴다), wall clock(`ts_utc`)이 아니다.
+             `cadence_seconds`는 **구동 Horizon 길이**(초) — 이 판단이 몇 초마다 갱신되는지다.
+             `valid_until`(그 봉의 확정 시각, 과거)과 **다른 축**이라 별도로 받는다. 화면 배지가
+             이 값으로 신선도 임계를 잡는다(2026-08-20 F-A′, `ui/data_source.derived_stale_after`).
         """
         weight_table = REGIME_WEIGHTS.get(regime_state.regime, REGIME_WEIGHTS[Regime.UNKNOWN])
         weighted: list[_WeightedView] = []
@@ -274,6 +278,9 @@ class Aggregator:
                 model_versions=[],
                 top_features=[],
                 valid_until=None,
+                # 기여 의견이 0이어도 **갱신 주기는 안다** — 다음 완성봉에 또 돈다
+                # (2026-08-20 F-A′). 종전엔 여기가 None이라 화면이 10초 상수로 떨어졌다.
+                cadence_seconds=cadence_seconds,
             )
 
         score = sum(w.weight * w.direction for w in weighted)
@@ -297,6 +304,7 @@ class Aggregator:
             model_versions=model_versions,
             top_features=_top_features(active, self._config.top_features_n),
             valid_until=min(valid_untils) if valid_untils else None,
+            cadence_seconds=cadence_seconds,
         )
 
 

@@ -41,6 +41,7 @@ import numpy as np
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_FEAT, TOPIC_FUTURES, TOPIC_REGIME, BusLike
 from messiah.core.messages import (
+    HORIZON_SECONDS,
     BusMessage,
     ExpertView,
     FeatureVector,
@@ -166,6 +167,10 @@ class FuturesAIService:
             self._latest_regime,
             as_of=as_of,
             regime_received=self._regime_received,
+            # **구동 주기**는 트리거가 된 Horizon의 길이다 (2026-08-20 F-A′). 이 파이프라인은
+            # 완성봉마다 정확히 한 번 발행하므로(`_publish`는 `handle_feature`에서만 불린다)
+            # 그 격자가 곧 갱신 간격이다. 화면이 추측하지 않게 **메시지가 말한다**.
+            cadence_seconds=float(HORIZON_SECONDS[trigger.horizon]),
         )
         await self._bus.publish(TOPIC_FUTURES, aggregate)
 

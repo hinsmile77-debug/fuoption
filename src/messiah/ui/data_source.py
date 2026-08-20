@@ -77,8 +77,32 @@ _CADENCE_STALE_MULTIPLE = 1.5
 _CADENCE_DEAD_MULTIPLE = 3.0
 
 
+# **폴백 상수가 몇 번 쓰였나** (2026-08-20 G-A).
+#
+# 2026-08-14 F-4는 "상수 대신 메시지가 스스로 말한 유효기간에서 유도한다"며 아래 함수를 넣고
+# 상수를 *"유도가 불가능할 때의 하한"* 으로 격하했다. **그런데 유도는 라이브에서 한 번도
+# 성공하지 못했다** — 아래 docstring의 「한 이름에 두 의미」 절 참고. 고친 기록만 남고 새 경로는
+# 0회 사용된 채 엿새가 갔고, 그 사실을 **아무 계기도 재고 있지 않았다.**
+#
+# 이 카운터가 그 자리다. 2026-08-19 G-4가 세운 negative control("사건이 있었는데 0이면 눈이
+# 먼 것")의 자매 축이다 — 이쪽은 **"고쳤다는데 새 경로가 한 번도 안 쓰였다"** 를 잡는다.
+# 판정은 하지 않는다(R18) — 세고, 사람이 읽는다.
+_threshold_uses: dict[str, int] = {"derived": 0, "fallback": 0}
+
+
+def threshold_derivation_stats() -> dict[str, int]:
+    """`{"derived": n, "fallback": n}` 사본 — 진단·회귀 테스트용 (2026-08-20 G-A)."""
+    return dict(_threshold_uses)
+
+
+def reset_threshold_derivation_stats() -> None:
+    """테스트 전용 — 카운터를 0으로 되돌린다."""
+    _threshold_uses["derived"] = 0
+    _threshold_uses["fallback"] = 0
+
+
 def derived_stale_after(message, fallback: float) -> tuple[float, float | None]:
-    """메시지가 스스로 말한 유효기간에서 신선도 임계를 계산한다 (2026-08-14 F-4).
+    """메시지가 스스로 말한 **구동 주기**에서 신선도 임계를 계산한다 (2026-08-14 F-4).
 
     반환은 `(임계 초, 유도된 주기 초 또는 None)`.
 
@@ -88,24 +112,53 @@ def derived_stale_after(message, fallback: float) -> tuple[float, float | None]:
     한 종이라 발행 주기가 1800초였는데 임계는 10초였다 — **거래일의 99.4%가 STALE**이고,
     그 앰버의 뜻("그 프로세스가 죽었거나 멈췄다")은 틀렸다. 화면이 종일 늑대소년이었다.
 
-    `FuturesView`·`RegimeState`·`OptionsView`는 `valid_until`을 싣는다. 거기서 `ts_utc`를
-    빼면 그것이 곧 그 판단의 유효 구간이자 다음 발행까지의 간격이다. **메시지가 자기 주기를
-    스스로 말하므로 UI가 추측할 필요가 없다.**
+    ## 한 이름에 두 의미가 얹혀 있었다 (2026-08-20 F-A′ — 이 함수가 엿새를 헛돌았다)
 
-    `valid_until`이 없으면(기여 전문가 0명이면 Aggregator가 그렇게 낸다) 유도 근거가 없으니
-    호출부의 하한을 그대로 쓴다 — 추측해서 늘리면 진짜 정지를 늦게 잡는다.
+    종전 구현은 `valid_until − ts_utc`로 주기를 유도했다. 그런데 생산 경로에서 두 값은
+    **같은 봉의 같은 시각**이다:
+
+        FeatureVector.valid_until = bar_open_kst + Horizon길이   ← 그 봉의 **확정 시각**(과거)
+        ExpertView.valid_until    = 위 값 그대로
+        as_of = FuturesView.ts_utc = 트리거 FeatureVector.valid_until
+        FuturesView.valid_until   = min(기여 ExpertView.valid_until)   ≤ as_of
+
+    `min(...)`은 트리거 자신을 포함하므로 **차이가 항상 0 이하**다. `RegimeState`는 더 나빠서
+    `valid_until`(봉 확정, 과거) − `ts_utc`(발행 wall clock)라 **음수**다. 즉 유도는 매번
+    실패했고 함수는 매번 상수를 돌려줬다 — **`n_experts` 값과 무관하게, 모든 사이클에서.**
+    2026-08-20 장중 점검이 "`n_experts=0`이라 폴백"이라 읽은 것은 증상의 절반만 본 것이다.
+
+    단위 테스트는 통과했다. `_view(1800)`이 `valid_until = ts + 1800`(다음 갱신 시각)으로
+    짓는데 **생산 코드는 그런 값을 만들지 않기 때문**이다. 픽스처가 생산 형상과 달랐다.
+
+    그래서 두 의미를 **필드로 갈랐다**: `valid_until`은 봉 확정 시각(신선도 계산의 입력이라
+    `aggregator._freshness`가 의존한다 — 못 바꾼다), `cadence_seconds`는 구동 주기.
+    이 함수는 **`cadence_seconds`를 먼저 본다.**
+
+    옛 메시지(필드 도입 전에 발행돼 캐시에 남은 것)를 위해 `valid_until − ts_utc` 경로는 남긴다 —
+    그쪽이 양수면 그것도 정당한 주기다. 둘 다 못 구하면 호출부의 하한을 그대로 쓰고
+    **그 사실을 센다**(G-A). 추측해서 늘리면 진짜 정지를 늦게 잡는다.
     """
+    cadence = _cadence_of(message)
+    if cadence is None or cadence <= 0:
+        _threshold_uses["fallback"] += 1
+        return fallback, None
+    _threshold_uses["derived"] += 1
+    return max(fallback, cadence * _CADENCE_STALE_MULTIPLE), cadence
+
+
+def _cadence_of(message) -> float | None:
+    """구동 주기(초) — `cadence_seconds` 우선, 없으면 옛 `valid_until − ts_utc` 경로."""
+    declared = getattr(message, "cadence_seconds", None)
+    if isinstance(declared, (int, float)) and declared > 0:
+        return float(declared)
     valid_until = getattr(message, "valid_until", None)
     ts_utc = getattr(message, "ts_utc", None)
     if valid_until is None or ts_utc is None:
-        return fallback, None
+        return None
     try:
-        cadence = (valid_until - ts_utc).total_seconds()
+        return float((valid_until - ts_utc).total_seconds())
     except (TypeError, AttributeError):
-        return fallback, None
-    if cadence <= 0:
-        return fallback, None
-    return max(fallback, cadence * _CADENCE_STALE_MULTIPLE), cadence
+        return None
 
 
 def compute_badge(

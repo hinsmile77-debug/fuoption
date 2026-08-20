@@ -335,6 +335,16 @@ class RegimeState(BusMessage):
     transition_prob: dict[str, float] = Field(default_factory=dict)  # 국면명 -> 다음 전이확률
     rule_override: str | None = None  # 규칙층이 강제한 사유(없으면 통계층 그대로)
     valid_until: datetime | None = None
+    # **다음 갱신까지의 간격**(초) — `valid_until`과 의미가 다르다 (2026-08-20 F-A′).
+    #
+    # `valid_until`은 **그 봉 자신의 확정 시각**(과거)이다(`bar_confirm_time`). 신선도 계산
+    # (`strategy/futures/aggregator._freshness`)이 그 의미에 의존하므로 바꿀 수 없다.
+    # 그런데 화면 배지는 *"다음 발행까지 얼마나 기다려야 정상인가"*를 물어서
+    # `valid_until − ts_utc`로 유도하려 했고, 두 값이 같은 봉을 가리켜 **차이가 늘 0 이하**였다
+    # — 유도가 매번 실패해 10~15초 상수로 떨어졌고 30분 격자에서 거래일의 99%가 거짓 STALE이었다
+    # (2026-08-14 F-4가 고쳤다고 적은 경로가 라이브에서 0회 사용됐다).
+    # 두 의미를 **필드로 갈라** 같은 이름에 두 뜻이 얹히는 것을 끝낸다.
+    cadence_seconds: float | None = None
 
 
 class ExpertView(BusMessage):
@@ -369,7 +379,13 @@ class FuturesView(BusMessage):
     n_experts: int  # 이번 집계에 실제로 기여한(meta 통과 + 신선) Horizon 수
     model_versions: list[str] = Field(default_factory=list)  # 기여 Expert들의 번들 ID(중복 제거)
     top_features: list[tuple[str, float]] = Field(default_factory=list)  # XAI 근거 top5
-    valid_until: datetime | None = None  # 기여 Horizon 중 가장 이른 다음 갱신 시각
+    # 기여 Horizon 중 가장 이른 **봉 확정 시각**(과거) — 신선도 계산의 입력이다.
+    # 종전 주석은 "다음 갱신 시각"이라 적었으나 실제로 채워지는 값은 그것이 아니다
+    # (`aggregator.py` 모듈 docstring). 그 어긋남이 배지 유도 실패의 원인이었다 → `cadence_seconds`.
+    valid_until: datetime | None = None
+    # 이 판단이 **몇 초마다 갱신되는가** = 구동 Horizon 길이 (2026-08-20 F-A′).
+    # 근거·배경은 `RegimeState.cadence_seconds` 주석 참고.
+    cadence_seconds: float | None = None
 
 
 class StrategyLeg(BaseModel):
@@ -413,6 +429,9 @@ class OptionsView(BusMessage):
     candidates: list[StrategyCandidate] = Field(default_factory=list)  # 상위 3개
     no_option_reason: str | None = None
     valid_until: datetime | None = None
+    # 구동 주기 (2026-08-20 F-A′) — 이 뷰는 `FuturesView` 도착과 M5 완성봉 **양쪽**에
+    # 트리거되므로 실제 갱신 간격은 둘 중 짧은 쪽이다(`strategy/options/service.py`).
+    cadence_seconds: float | None = None
 
 
 class DecisionIntent(BusMessage):

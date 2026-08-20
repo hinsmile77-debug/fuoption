@@ -36,7 +36,14 @@ from typing import Callable
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, TOPIC_FUTURES, TOPIC_OPTIONS, BusLike
 from messiah.core.event_calendar import EventCalendar
-from messiah.core.messages import BarClosed, BusMessage, FuturesView, Horizon, OptionsView
+from messiah.core.messages import (
+    HORIZON_SECONDS,
+    BarClosed,
+    BusMessage,
+    FuturesView,
+    Horizon,
+    OptionsView,
+)
 from messiah.strategy.options.config import OptionsConfig
 from messiah.strategy.options.evaluator import (
     EvaluatorConfig,
@@ -78,12 +85,17 @@ class OptionsAIService:
         self._top_n = top_n
         self._latest_score: float = 0.0
         self._has_futures_view = False
+        # 마지막 `FuturesView`가 말한 구동 주기 (2026-08-20 F-A′). 이 뷰는 `FuturesView` 도착과
+        # M5 완성봉 **양쪽**에 트리거되므로 실제 갱신 간격은 둘 중 짧은 쪽이고, 그것을
+        # `cadence_seconds`로 실어 화면이 추측하지 않게 한다.
+        self._futures_cadence_seconds: float | None = None
 
     async def handle_futures_view(self, msg: BusMessage) -> None:
         if not isinstance(msg, FuturesView) or msg.symbol != self._symbol:
             return
         self._latest_score = msg.score
         self._has_futures_view = True
+        self._futures_cadence_seconds = msg.cadence_seconds
         await self._publish_view(as_of=msg.valid_until or msg.ts_utc)
 
     async def handle_bar(self, msg: BusMessage) -> None:
@@ -156,14 +168,34 @@ class OptionsAIService:
             return
 
         ranked = rank_candidates(candidates, top_n=self._top_n)
-        view = OptionsView(symbol=self._symbol, underlying=self._underlying, candidates=ranked)
+        view = OptionsView(
+            symbol=self._symbol,
+            underlying=self._underlying,
+            candidates=ranked,
+            cadence_seconds=self._cadence_seconds(),
+        )
         await self._bus.publish(TOPIC_OPTIONS, view)
 
     async def _publish_no_option(self, reason: str) -> None:
         view = OptionsView(
-            symbol=self._symbol, underlying=self._underlying, no_option_reason=reason
+            symbol=self._symbol,
+            underlying=self._underlying,
+            no_option_reason=reason,
+            cadence_seconds=self._cadence_seconds(),
         )
         await self._bus.publish(TOPIC_OPTIONS, view)
+
+    def _cadence_seconds(self) -> float:
+        """이 뷰의 실제 갱신 간격 — 두 트리거 중 **짧은 쪽** (2026-08-20 F-A′).
+
+        M5 완성봉은 `FuturesView` 유무와 무관하게 300초마다 반드시 온다(`handle_bar`).
+        `FuturesView`가 더 빠른 격자로 구동되면 그쪽이 실질 주기다. 긴 쪽을 쓰면 임계가
+        헐거워져 진짜 정지를 늦게 잡는다 — `derived_stale_after`의 `max(fallback, ...)`와 같은
+        방향의 보수성이다.
+        """
+        bar_cadence = float(HORIZON_SECONDS[Horizon.M5])
+        futures = self._futures_cadence_seconds
+        return bar_cadence if futures is None else min(bar_cadence, futures)
 
     async def run_forever(self) -> None:
         patterns = [f"{TOPIC_BAR}.{Horizon.M5.value}.{self._symbol}", TOPIC_FUTURES]
