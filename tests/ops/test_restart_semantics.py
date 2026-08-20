@@ -20,13 +20,11 @@ from messiah.ops import loss_ledger, observation_gaps, session_guard
 _DAY = date(2026, 8, 19)
 
 
-def _log(path, *stamps: str) -> None:
-    path.write_text(
-        "\n".join(
-            json.dumps({"ts": f"2026-08-19T{s}+09:00", "tag": "SessionStart"}) for s in stamps
-        ),
-        encoding="utf-8",
-    )
+def _log(path, *stamps: str, refused: tuple[str, ...] = (), day: str = "2026-08-19") -> None:
+    records = [{"ts": f"{day}T{s}+09:00", "tag": "SessionStart"} for s in stamps]
+    records += [{"ts": f"{day}T{s}+09:00", "tag": "LaunchWindowRefused"} for s in refused]
+    records.sort(key=lambda r: r["ts"])
+    path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
 
 
 def _at(clock: str) -> datetime:
@@ -57,6 +55,45 @@ def test_the_first_launch_does_not_count_itself(tmp_path):
 def test_a_missing_log_is_not_a_restart(tmp_path):
     """판정 불가를 이유로 거짓 재기동을 만들지 않는다."""
     assert session_guard.prior_sessions_today(tmp_path / "없는파일.log", now=_at("08:20:31")) == 0
+
+
+def test_a_refused_boot_trigger_is_not_a_prior_session(tmp_path):
+    """**초판이 빠뜨려 다음 날 아침 바로 드러난 자리** (2026-08-20 장전 1-3).
+
+    PC 부팅 트리거는 매일 06:42에 `SessionStart` 한 줄을 남기고 곧바로 기동 창 가드에
+    거절된다. 그 줄을 세면 08:20 정시 기동이 **매일** 자기를 장중 재기동이라 판정하고,
+    지키려던 `start_lag_minutes`가 영원히 None으로 침묵한다 — 고치려던 것보다 나쁘다.
+
+    2026-08-20 실측: 06:42:31.327 SessionStart → 06:42:31.334 LaunchWindowRefused →
+    08:20:16.902 SessionStart(정상). 그날 09:03 스냅샷이 개장 전인데
+    `restarted_mid_day: true` · `start_lag_minutes: null` 이었다.
+    """
+    path = tmp_path / "l1_daily_20260820.log"
+    _log(path, "06:42:31", "08:20:16", refused=("06:42:31",), day="2026-08-20")
+
+    now = datetime(2026, 8, 20, 8, 20, 18, tzinfo=KST)
+    assert session_guard.prior_sessions_today(path, now=now) == 0
+
+
+def test_a_real_restart_still_counts_when_a_refusal_also_happened(tmp_path):
+    """**양방향으로 본다.** 거절을 빼는 변경이 진짜 재기동까지 지우면 계기를 죽인 것이다.
+
+    2026-08-19 실측: 05:55:35 거절 → 08:20:29 정시 → 12:29:23 재기동(진짜).
+    """
+    path = tmp_path / "l1_daily_20260819.log"
+    _log(path, "05:55:35", "08:20:29", "12:29:23", refused=("05:55:35",))
+
+    assert session_guard.prior_sessions_today(path, now=_at("12:29:25")) == 1
+    assert session_guard.prior_sessions_today(path, now=_at("08:20:31")) == 0
+
+
+def test_the_refusal_pairing_lives_in_one_place():
+    """같은 사실("기동이 몇 번이었나")을 두 곳이 따로 구현하면 어긋난다 — 2026-08-20이 그 증거다."""
+    from messiah.ops import integrity_report
+
+    pairs = (["07:23:31", "08:35:34"], ["07:23:31"])
+    assert integrity_report._drop_refused_starts(*pairs) == ["08:35:34"]
+    assert session_guard.drop_refused_starts(*pairs) == ["08:35:34"]
 
 
 # ---------------------------------------------------------------- 장부

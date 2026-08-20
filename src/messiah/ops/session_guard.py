@@ -279,6 +279,45 @@ def minutes_since_scheduled_trigger(*, now: datetime | None = None) -> float | N
     return round((moment - scheduled).total_seconds() / 60.0, 1)
 
 
+def drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[str]:
+    """기동 창 가드가 거절한 기동을 `SessionStart` 목록에서 뺀다 (2026-08-07 P0-4).
+
+    **이 판정의 정본이다** (2026-08-20 장전 1-3). 종전엔 `ops/integrity_report`에만 있었고,
+    2026-08-19 F-2로 새로 생긴 `prior_sessions_today()`는 같은 의미를 **다시 구현하지 않고
+    그냥 빠뜨렸다.** 그 대가가 다음 날 아침에 나왔다:
+
+        06:42:31.327  SessionStart          (PC 부팅 트리거)
+        06:42:31.334  LaunchWindowRefused   기동 창 이전 — 정시 트리거에 맡긴다
+        08:20:16.902  SessionStart          정시 기동 · **정상**
+
+    08:20 프로세스가 06:42 거절분을 「이전 세션」으로 세어 자기를 장중 재기동이라 판정했고,
+    손실원장은 개장 전인데 *"오늘 영구 소실 — 장중 재기동"* 을 말하며 `start_lag_minutes`를
+    None으로 눌렀다. 부팅 트리거는 **매일** 발화하므로 그 침묵은 매일 반복됐을 것이고,
+    진짜로 늦게 뜬 날 아무도 못 본다 — 2026-08-10에 38분을 놓쳐서 만든 축이 바로 그것이다.
+
+    하나의 사실("기동이 몇 번이었나")을 두 곳이 따로 구현하면 어긋난다. 그래서 여기로 모으고
+    `integrity_report`는 이 함수를 부른다.
+
+    ## 짝짓기 규칙
+
+    `HH:MM:SS` 문자열끼리 맞춘다. 거절 로그 하나마다 **그 시각 이하의 가장 늦은 기동** 하나를
+    지운다 — 가드 판정은 `SessionStart` 직후(같은 초 또는 몇 밀리초 뒤)에 나오므로 그게 짝이다.
+
+    왜 개수만 빼면 안 되나: 2026-08-07은 `07:23:31 기동(거절)` → `08:35:34 기동(정상)`
+    순서였다. 앞에서부터 개수만큼 지우면 우연히 맞지만, 반대 순서(정상 기동 뒤 장 마감
+    직후 부팅 트리거가 한 번 더 발화)에서는 **살아 있어야 할 기동**이 지워진다.
+
+    짝을 못 찾은 거절은 무시한다 — `SessionStart`보다 거절이 많은 상태는 로그가 잘린
+    경우이고, 그때 남은 기동을 마저 지우면 "그날 아무도 안 떴다"가 되어 더 나쁘다.
+    """
+    remaining = sorted(starts)
+    for moment in sorted(refused):
+        candidates = [s for s in remaining if s <= moment]
+        if candidates:
+            remaining.remove(candidates[-1])
+    return remaining
+
+
 def prior_sessions_today(
     process_log: Path, *, now: datetime | None = None, within_seconds: float = 15.0
 ) -> int:
@@ -307,6 +346,16 @@ def prior_sessions_today(
     그래서 **`now`로부터 `within_seconds` 안쪽의 줄은 이번 기동으로 보고 뺀다.** 자식
     프로세스는 `NestedSessionStart`라 애초에 안 걸린다(`core/logging.session_start`).
 
+    ## 거절된 기동도 세지 않는다 (2026-08-20 장전 1-3)
+
+    **초판이 이걸 빠뜨렸고 다음 날 아침에 바로 드러났다.** PC 부팅 트리거는 매일 06:42에
+    발화해 `SessionStart` 한 줄을 남기고 곧바로 기동 창 가드에 거절된다. 그 줄을 세면
+    08:20 정시 기동이 **매일** 자기를 장중 재기동이라 판정하고, 그러면 이 함수가 지키려던
+    `start_lag_minutes`가 영원히 None으로 침묵한다 — 고치려던 것보다 나쁜 상태다.
+
+    판정은 `drop_refused_starts()` 하나로 모았다(위 함수). 같은 사실을 두 곳이 따로
+    구현하면 어긋나고, 오늘이 그 증거다.
+
     실패 조건: 없다. 파일이 없거나 못 읽으면 0 — 판정 불가를 이유로 거짓 재기동을 만들지
               않는다(`refused_a_scheduled_launch()`와 같은 원칙).
     """
@@ -315,18 +364,23 @@ def prior_sessions_today(
         text = process_log.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return 0
-    count = 0
+    starts: list[str] = []
+    refused: list[str] = []
     for line in text.splitlines():
-        if '"SessionStart"' not in line:
+        if '"SessionStart"' not in line and '"LaunchWindowRefused"' not in line:
             continue
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        if record.get("tag") != "SessionStart":
+        tag = record.get("tag")
+        if tag not in ("SessionStart", "LaunchWindowRefused"):
             continue
         stamp = str(record.get("ts", ""))[11:19]
         if len(stamp) != 8:
+            continue
+        if tag == "LaunchWindowRefused":
+            refused.append(stamp)
             continue
         try:
             clock = datetime.strptime(stamp, "%H:%M:%S").time()  # noqa: DTZ007 — KST 벽시계
@@ -335,8 +389,11 @@ def prior_sessions_today(
         at = datetime.combine(moment.date(), clock, tzinfo=moment.tzinfo)
         if (moment - at).total_seconds() <= within_seconds:
             continue  # 이번 기동 자신
-        count += 1
-    return count
+        starts.append(stamp)
+    # **거절은 기동이 아니다** — 판정은 `drop_refused_starts()` 하나가 한다(위 docstring).
+    # 구조화 태그 없던 시절의 평문 거절은 여기서 안 읽는다: 이 함수는 **오늘** 로그만 보고,
+    # 그 시절(2026-08-07 이전)의 로그를 오늘 프로세스가 읽을 일은 없다.
+    return len(drop_refused_starts(starts, refused))
 
 
 def refused_a_scheduled_launch(*, now: datetime | None = None) -> bool:

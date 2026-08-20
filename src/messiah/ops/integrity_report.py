@@ -62,6 +62,7 @@ from messiah.ops import (
     observation_gaps,
     series_coverage,
     series_expectation,
+    session_guard,
     status_board,
     task_exit_codes,
 )
@@ -737,24 +738,16 @@ def _abnormal_exits(day: date, per_process: Mapping[str, dict[str, Any]]) -> lis
 
 
 def _drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[str]:
-    """기동 창 가드가 거절한 기동을 `SessionStart` 목록에서 뺀다 (2026-08-07 P0-4).
+    """기동 창 가드가 거절한 기동을 뺀다 — **정본은 `ops/session_guard`다** (2026-08-20).
 
-    `HH:MM:SS` 문자열끼리 맞춘다. 거절 로그 하나마다 **그 시각 이하의 가장 늦은 기동**
-    하나를 지운다 — 가드 판정은 `SessionStart` 직후에 나오므로 그게 짝이다.
+    2026-08-19 F-2로 `session_guard.prior_sessions_today()`가 같은 질문("기동이 몇 번이었나")에
+    답하기 시작했는데 이 규칙을 안 썼고, 다음 날 아침 08:20 정시 기동이 06:42 거절분을 세어
+    자기를 장중 재기동으로 판정했다. 하나의 사실을 두 곳이 구현하면 어긋난다 — 이 저장소가
+    `ops/canonical_consumers.py`를 만든 이유가 그것이다.
 
-    왜 개수만 빼면 안 되나: 2026-08-07은 `07:23:31 기동(거절)` → `08:35:34 기동(정상)`
-    순서였다. 앞에서부터 개수만큼 지우면 우연히 맞지만, 반대 순서(정상 기동 뒤 장 마감
-    직후 부팅 트리거가 한 번 더 발화)에서는 **살아 있어야 할 기동**이 지워진다.
-
-    짝을 못 찾은 거절은 무시한다 — `SessionStart`보다 거절이 많은 상태는 로그가 잘린
-    경우이고, 그때 남은 기동을 마저 지우면 "그날 아무도 안 떴다"가 되어 더 나쁘다.
+    이름과 자리는 유지한다(테스트·호출측이 이 이름을 안다). 판정만 넘긴다.
     """
-    remaining = sorted(starts)
-    for moment in sorted(refused):
-        candidates = [s for s in remaining if s <= moment]
-        if candidates:
-            remaining.remove(candidates[-1])
-    return remaining
+    return session_guard.drop_refused_starts(starts, refused)
 
 
 def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
