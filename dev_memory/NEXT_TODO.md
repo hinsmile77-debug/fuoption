@@ -6058,3 +6058,86 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
       08:25:30 이전/이후. 1-1의 인과 확정. **이전이었다면 더 심각하다**(무출력 경로)
 - [ ] **C-4 (즉시 가능)** 브라우저로 `http://localhost:8511` 1회 개방 후 `UISnapshotFreshness`
       출현 여부 → **D-2 판정**. 단 F-4 전이라 예외가 나도 안 보인다
+
+---
+
+## 2026-08-20 장중 점검 — Fix/고도화 ([MW0601])
+
+보고서: `logs/dailycheck/2026-08-20_intra_report.md` · **P0 0건** · P1 4건 · P2 2건
+**전 항목 장후 적용** (12:25 점검 · R11 · 금지계명 3·4). 오늘 코드 변경 없음.
+
+### Fix (장후 적용)
+
+- [ ] **F-A (P1 · 최우선) `n_experts=0`에서도 신선도 임계를 유도한다** —
+      `strategy/futures/aggregator.py:276`의 `n_experts=0` 분기가 `valid_until=None`을 낸다.
+      트리거가 된 `FeatureVector.valid_until`로 채운다(기여 의견이 없어도 "그 봉의 판단"은 참).
+      `ui/app.py:140` 폴백 상수는 **남긴다** — 30분으로 올리면 진짜 정지도 30분간 초록이다.
+      회귀 주의: `blocked_by_freshness`는 `ExpertView.valid_until`이라 **경로가 다르다**(테스트 고정).
+      검증: `pytest -k "aggregator or futures_service"` + 08-21 사이클 사이 30분 LIVE 유지
+- [ ] **F-B (P1) UI가 `mlog.setup()`을 부르게 한다** — **D-2 마감**.
+      `src/messiah/ui/app.py`에 1회 가드(`@st.cache_resource` 또는 `session_state`) 필수 —
+      Streamlit은 매 상호작용마다 스크립트를 재실행하므로 가드 없이 부르면 `handlers.clear()`가
+      매 렌더 돌고 `SessionStart`가 렌더 수만큼 찍힌다.
+      **선행 조건**: `core/ui_launcher.py`가 `NESTED_SESSION_ENV`를 세우는지 확인. 안 세우면
+      UI `SessionStart`가 `starts_by_process`에 잡혀 **08-20 증상 2와 같은 계열의 오판을 새로 만든다**
+- [ ] **F-C (P1) 국면 신선도를 시간이 아니라 봉 동일성으로 판정** — 08-18 F-0818I-2a 원안 재개.
+      `RegimeState`에 판정 근거 봉 시각, 집계기가 `regime_as_of`/`feature_as_of` 병기,
+      다르면 `RegimeStalenessDetected`(WARNING) + **집계는 그대로 진행**(§3.2, 08-13 보류안 기각).
+      `core/logging.py` 태그 등록 · **R14 3종 세트 점검**(`grep -rn "RegimeState" src/ scripts/ tests/`).
+      **08-21 K-3/K-4 채점 뒤 착수.** 검증: 오늘 로그 리플레이 시 11:00 1건만 검출
+- [ ] **F-D (P2) 기동 창 거절을 Docker·자가점검 앞으로** — 2026-08-17 F-3과 같은 형태.
+      `run_l1_daily.py __main__`의 `non_trading_day_reason()` 직후로 이동, `run_g2_paper_trading.py` 동일.
+      **종료 코드 분기(`refused_a_scheduled_launch()` → exit 2)를 반드시 함께 옮긴다** —
+      빠뜨리면 2026-08-10 P0(정시 트리거 거절이 성공으로 기록) 재발
+
+### 고도화
+
+- [ ] **G-A (다음 단계) 폴백 상수 사용률을 센다** — 「고쳤다는데 새 경로가 한 번도 안 쓰였다」를 잡는다.
+      `_derived_stale_after()` 유도 실패 시 카운터 → 장후 리포트 `fallback_threshold_uses`.
+      과반이면 **상수가 정본**이라는 뜻. 어제 G-4(negative control)의 자매 축.
+      초기엔 기록만, breach 승격은 20거래일 뒤. 선행: F-A.
+      **소급 적용 시 `FuturesView` 폴백 사용률 100% 검출 예상**
+- [ ] **G-B (이번 주) 기대 발행 주기를 한 곳에 둔다** — `core/cadence.py`(가칭) 신설.
+      소비처: UI `_STALE_AFTER` · `collect_evidence.py` 공백 임계 · `status_board` heartbeat.
+      임계 = `기대주기 × 2 + 여유`. **근거: 같은 실수가 세 표면에서 각각 났다**(UI 배지 ·
+      증거 수집기 · CB만 우연히 맞음 — `app.py:144` 주석이 인정). 선행: F-A
+- [ ] **G-C (이번 주 · 장전 G-1과 같은 커밋) 기동이 「어느 시점 파일을 실었나」를 말한다** —
+      `SessionStart`에 `source_mtime_max`(`src/`·`scripts/` 최신 mtime). 장후에
+      `기동 시각 < 소스 최신 mtime`이면 "기동 뒤 소스가 바뀌었다" 판정.
+      **근거: 08-20 아침 08:20 l1은 F-2b를 실었고 08:25 g2는 F-5를 못 실었다** —
+      `code_version.stale`(커밋 기준)로는 이 절반 상태를 말할 수 없다. 판정 아닌 **기록**으로 시작
+
+### 오늘 장후 관측 (L 시리즈)
+
+- [ ] **L-1** `daily_integrity_20260820.json` `abnormal_exits` **0건** — 어제 F-1이 정상일에 조용한가
+- [ ] **L-2** `incomplete_day` **false** · `session_coverage_pct_min` ≥ 95 — 어제 F-3 정상일 채점
+- [ ] **L-3** 등록부 재발 0 · `계측 성립·값 위반` 0 · `계기 실명` 0 — 어제 F-4/G-4 정상일 채점
+- [ ] **L-4** `irrecoverable_loss_minutes` 0~5분 복귀 · 5거래일 합에서 08-19의 180.7이 지배적으로 표시
+- [ ] **L-5 보류** `regime_unseeded_cycles` — F-5 미탑재이므로 설계 채점 아님(참고만)
+- [ ] **L-6** 목위클리 **만기일**(오늘) — 만기 후 `weekly_thu` 결손이 **오탐**으로 안 잡히는지
+- [ ] **L-7** `delivery_latency.p90` 4거래일째 — **1,000ms 초과면 G-2(유예 연동) 재착수 조건 충족**
+
+### 08-21 관측 (M 시리즈 · K 시리즈는 장전 계획분 유지)
+
+- [ ] **M-1** F-A 적용 후 UI 배지가 사이클 사이 30분간 LIVE 유지
+- [ ] **M-2** F-B 적용 후 UI 1회 개방 시 `UISnapshotFreshness` 1행 ·
+      **`starts_by_process`에 `ui`가 새로 안 생기는지** 리플레이 확인
+- [ ] **K-4 주의** 첫 사이클 일치가 나와도 **1-4가 닫힌 것이 아니다** — 08-20 11:00이 반례
+
+### 확인 필요 (확정 아님)
+
+- [ ] **C-1** meta 통과확률 급락(p50 0.376 → 0.053 · max 0.5925 → 0.1024)이 추세인가 장세인가.
+      표본 2거래일뿐이고 08-19는 159분 사망일이라 그 9사이클도 온전치 않다.
+      08-21·08-24로 3~4일치 확보 후 `nan_ratio`·`ens_std`와 같은 창에서 대조
+- [ ] **C-2** 08-20 11:00 어긋남의 실제 기전 — Δt 판별력 없음은 확정. F-C가 판정 축을 준다
+- [ ] **C-3** 목위클리 만기일 처리 — L-6과 동일
+- [ ] **C-4** `ui_20260820.err.log` 부재 — 장전 F-4(`install_scheduled_tasks.ps1`)로 이월. **D-3 미해결**
+
+### 정정 · 완료 처리
+
+- [x] **D-2 판정 종결 — 확정 결함.** UI 렌더는 되는데 `mlog.setup()` 미호출로 INFO 태그가
+      로거 단계에서 필터링된다. 「사람이 안 열었다」 갈래 **기각**(12:22 화면 캡처가 증거) → F-B
+- [x] **J-7 마감** — `git ls-files logs` = 76
+- [ ] **X-5 재개 · 08-19 P1-5 정정** — *"어긋남 전량이 세션 첫 사이클 · 경합 아님 · 구조 확정"*은
+      **오늘 실측으로 반증됐다.** 첫 사이클(09:00)은 F-5 없이 일치했고 11:00(세션 중간)이 어긋났다.
+      Δt는 판별력이 없다(일치 34ms·243ms, 어긋남 117ms) → F-C
