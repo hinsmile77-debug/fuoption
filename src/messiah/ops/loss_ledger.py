@@ -49,6 +49,10 @@ from dataclasses import dataclass, field
 _lock = threading.Lock()
 _start_lag_minutes: float | None = None
 _lost_by_series: dict[str, int] = {}
+# 이번 세션이 **그날 첫 기동이 아니다** (2026-08-19 F-2). 재기동한 프로세스는 이전 세션이
+# 무엇을 봤는지 모르므로(모듈 docstring "프로세스 로컬이다"), 정시 트리거와의 차를
+# 「기동 지연」이라 부르면 **이미 수집된 아침을 없던 것으로 만든다**.
+_restarted_mid_day: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,9 @@ class LossLedger:
 
     start_lag_minutes: float | None = None
     lost_by_series: dict[str, int] = field(default_factory=dict)
+    # 이번 세션이 장중 재기동인가 (2026-08-19 F-2). True면 `start_lag_minutes`는 **손실이
+    # 아니라 경과 시간**이다 — 아래 `describe()`/`clean`이 그렇게 다룬다.
+    restarted_mid_day: bool = False
 
     @property
     def lost_items(self) -> int:
@@ -64,8 +71,16 @@ class LossLedger:
 
     @property
     def clean(self) -> bool:
-        """잃은 것이 없는가 — 기동 지연은 `_LAG_FLOOR_MINUTES` 미만이면 없는 것으로 본다."""
+        """잃은 것이 없는가 — 기동 지연은 `_LAG_FLOOR_MINUTES` 미만이면 없는 것으로 본다.
+
+        **재기동 세션은 지연으로 판정하지 않는다** (2026-08-19 F-2). 그 값은 손실이 아니라
+        경과 시간이고, 그날 실제로 잃은 것은 장후 축(`abnormal_exits`의 `mid_session`)이
+        아카이브를 읽어야 알 수 있다. 다만 `clean`은 False로 둔다 — 재기동이 있었다는 것
+        자체가 「오늘 아무 일도 없었다」는 아니기 때문이다.
+        """
         if self.lost_items:
+            return False
+        if self.restarted_mid_day:
             return False
         return self.start_lag_minutes is None or self.start_lag_minutes <= _LAG_FLOOR_MINUTES
 
@@ -76,7 +91,13 @@ class LossLedger:
         *"이 자리가 아무것도 안 본다"*가 구분돼야 한다. 후자가 2026-08-10의 상태였다.
         """
         parts: list[str] = []
-        if self.start_lag_minutes is not None and self.start_lag_minutes > _LAG_FLOOR_MINUTES:
+        if self.restarted_mid_day:
+            # **숫자를 지어내지 않는다** (2026-08-19 F-2). 2026-08-19 오후 내내 화면은
+            # "오늘 영구 소실 — 기동 지연 249분"이라고 말했다. 그날 08:20~09:50은 정상
+            # 수집됐고 실제 손실은 09:50~12:29의 158.9분이었다. 이 프로세스는 그 구간을
+            # 알 수 없으므로 **모른다고 말한다**.
+            parts.append("장중 재기동 — 이전 세션 소실분은 장후 축이 판정(지금은 미상)")
+        elif self.start_lag_minutes is not None and self.start_lag_minutes > _LAG_FLOOR_MINUTES:
             parts.append(f"기동 지연 {self.start_lag_minutes:.0f}분")
         parts.extend(
             f"{name} {count}건" for name, count in sorted(self.lost_by_series.items()) if count
@@ -87,7 +108,11 @@ class LossLedger:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "start_lag_minutes": self.start_lag_minutes,
+            # 재기동 세션에서는 **기동 지연이 아니다** — 그 사실을 필드 이름으로 가른다
+            # (2026-08-19 F-2). 같은 키에 다른 뜻을 담으면 읽는 쪽이 알 방법이 없다.
+            "start_lag_minutes": None if self.restarted_mid_day else self.start_lag_minutes,
+            "minutes_since_trigger": self.start_lag_minutes,
+            "restarted_mid_day": self.restarted_mid_day,
             "lost_by_series": dict(self.lost_by_series),
             "lost_items": self.lost_items,
             "clean": self.clean,
@@ -101,14 +126,18 @@ class LossLedger:
 _LAG_FLOOR_MINUTES = 5.0
 
 
-def record_start_lag(minutes: float | None) -> None:
+def record_start_lag(minutes: float | None, *, restarted_mid_day: bool = False) -> None:
     """수집 기동이 정시 트리거보다 얼마나 늦었나 — 프로세스당 한 번.
 
     None은 **판정 불가**다(등록 정본을 못 읽음) — 0과 다르다(L18).
+
+    `restarted_mid_day`가 True면 그 차는 **지연이 아니라 경과 시간**이다 (2026-08-19 F-2) —
+    `ops/session_guard.prior_sessions_today()`가 판정한다.
     """
-    global _start_lag_minutes
+    global _start_lag_minutes, _restarted_mid_day
     with _lock:
         _start_lag_minutes = minutes
+        _restarted_mid_day = restarted_mid_day
 
 
 def record_lost(series: str, items: int = 1) -> None:
@@ -127,13 +156,16 @@ def record_lost(series: str, items: int = 1) -> None:
 def current() -> LossLedger:
     with _lock:
         return LossLedger(
-            start_lag_minutes=_start_lag_minutes, lost_by_series=dict(_lost_by_series)
+            start_lag_minutes=_start_lag_minutes,
+            lost_by_series=dict(_lost_by_series),
+            restarted_mid_day=_restarted_mid_day,
         )
 
 
 def reset() -> None:
     """테스트 전용 — 전역 상태를 쓰는 모듈이 테스트끼리 새지 않게 한다."""
-    global _start_lag_minutes
+    global _start_lag_minutes, _restarted_mid_day
     with _lock:
         _start_lag_minutes = None
+        _restarted_mid_day = False
         _lost_by_series.clear()

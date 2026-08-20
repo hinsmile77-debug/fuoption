@@ -279,6 +279,66 @@ def minutes_since_scheduled_trigger(*, now: datetime | None = None) -> float | N
     return round((moment - scheduled).total_seconds() / 60.0, 1)
 
 
+def prior_sessions_today(
+    process_log: Path, *, now: datetime | None = None, within_seconds: float = 15.0
+) -> int:
+    """오늘 이 로그 파일에 **이번 기동보다 먼저** 찍힌 `SessionStart`의 수 (2026-08-19 F-2).
+
+    ## 왜 필요한가 — 장중 재기동이 249분짜리 기동 지연으로 적혔다
+
+    `minutes_since_scheduled_trigger()`의 docstring은 이렇게 적고 있었다: *"기준점(등록
+    정본)이 하나라 두 값이 어긋날 수 없다."* 2026-08-19가 그 문장을 반증했다.
+
+        logs/status_snapshot.json (15:34:47)  start_lag_minutes 249.4
+        logs/daily_integrity_20260819.json    collection_start_lag_minutes 0.5
+
+    둘 다 자기 기준으로는 옳다. 장후 축은 **그날 첫 기동**(08:20:29)을 재고, 인프로세스
+    장부는 **자기가 뜬 시각**(12:29)을 잰다. 그런데 그날 08:20~09:50은 정상 수집됐다 —
+    「기동 지연 249분」은 그 구간을 통째로 없던 것으로 만드는 문장이고, 화면은 오후 내내
+    그렇게 말했다. 실제로 잃은 것은 09:50~12:29의 158.9분이었다.
+
+    재기동한 프로세스는 **이전 세션이 무엇을 봤는지 모른다**(`ops/loss_ledger.py` 모듈
+    docstring "프로세스 로컬이다"). 그러니 지어내지 않는 것이 옳다 — 다만 「내가 첫 기동이
+    아니다」는 로그 파일 하나로 알 수 있고, 그 사실만 있으면 거짓 숫자를 안 만들 수 있다.
+
+    ## 자기 자신을 세지 않는다
+
+    `mlog.setup()`이 이미 이번 세션의 `SessionStart`를 찍었고 그 줄이 같은 파일에 있다.
+    그래서 **`now`로부터 `within_seconds` 안쪽의 줄은 이번 기동으로 보고 뺀다.** 자식
+    프로세스는 `NestedSessionStart`라 애초에 안 걸린다(`core/logging.session_start`).
+
+    실패 조건: 없다. 파일이 없거나 못 읽으면 0 — 판정 불가를 이유로 거짓 재기동을 만들지
+              않는다(`refused_a_scheduled_launch()`와 같은 원칙).
+    """
+    moment = now or now_kst()
+    try:
+        text = process_log.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return 0
+    count = 0
+    for line in text.splitlines():
+        if '"SessionStart"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("tag") != "SessionStart":
+            continue
+        stamp = str(record.get("ts", ""))[11:19]
+        if len(stamp) != 8:
+            continue
+        try:
+            clock = datetime.strptime(stamp, "%H:%M:%S").time()  # noqa: DTZ007 — KST 벽시계
+        except ValueError:
+            continue
+        at = datetime.combine(moment.date(), clock, tzinfo=moment.tzinfo)
+        if (moment - at).total_seconds() <= within_seconds:
+            continue  # 이번 기동 자신
+        count += 1
+    return count
+
+
 def refused_a_scheduled_launch(*, now: datetime | None = None) -> bool:
     """이번 거부가 **정시 트리거로 뜬 기동**을 거부한 것인가 (2026-08-10 P0).
 

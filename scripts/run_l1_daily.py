@@ -174,6 +174,9 @@ _FLOW_POLL_SECONDS = 60.0
 # `integrity_report.DEFAULT_THRESHOLDS["collection_start_lag_minutes"]`와 **같은 값**이다 —
 # 세 자리가 같은 질문에 답하는데 임계가 다르면 화면·로그·리포트가 다른 말을 하게 된다.
 _START_LAG_ALERT_MINUTES = 5.0
+# 이 프로세스의 날짜별 로그 — `.bat`가 stdout을 tee하는 자리다
+# (`ops/integrity_report.log_paths_for()`가 읽는 것과 **같은 파일**).
+_LOG_DIR = Path("logs")
 
 # ---------------------------------------------------------------- 옵션체인 폴링 계획
 #
@@ -1098,8 +1101,21 @@ async def main(cfg: InstanceConfig) -> None:
     # 그날 손실 중 가장 큰 덩어리다 — 08-10에 38분이었다. 이 한 줄이 없어서 그 사실이
     # 사람 눈에 닿은 것이 15:45 장후 리포트였다.
     lag = session_guard.minutes_since_scheduled_trigger()
-    loss_ledger.record_start_lag(lag)
-    if lag is not None and lag > _START_LAG_ALERT_MINUTES:
+    # **장중 재기동이면 그 차는 지연이 아니다** (2026-08-19 F-2). 2026-08-19 12:29 재기동
+    # 뒤 화면은 오후 내내 "오늘 영구 소실 — 기동 지연 249분"이라 말했는데, 그날 08:20~09:50은
+    # 정상 수집됐고 실제 손실은 09:50~12:29의 158.9분이었다. 재기동한 프로세스는 이전 세션이
+    # 무엇을 봤는지 모르므로 숫자를 지어내지 않고 「미상」이라 말한다.
+    restarted = session_guard.prior_sessions_today(_LOG_DIR / f"l1_daily_{today:%Y%m%d}.log") > 0
+    loss_ledger.record_start_lag(lag, restarted_mid_day=restarted)
+    if restarted:
+        print(
+            f"[손실] 장중 재기동(정시 트리거로부터 {lag:.0f}분 경과) — "
+            "이전 세션이 무엇을 잃었는지는 이 프로세스가 모른다(장후 무결성 리포트가 판정)"
+            if lag is not None
+            else "[손실] 장중 재기동 — 이전 세션 소실분은 장후 무결성 리포트가 판정한다",
+            flush=True,
+        )
+    elif lag is not None and lag > _START_LAG_ALERT_MINUTES:
         print(
             f"[손실] 수집 기동이 정시 트리거보다 {lag:.0f}분 늦었다 — "
             "그 구간의 체결틱·수급·옵션체인은 영구 소실(소급 경로 없음)",
