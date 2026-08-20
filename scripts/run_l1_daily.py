@@ -1071,30 +1071,9 @@ async def main(cfg: InstanceConfig) -> None:
     # 무엇보다 뒤쪽 판정은 Docker·self_check가 이미 다 돈 뒤라 아낄 것이 없다.
     today = now_kst().date()
 
-    # 기동 창 검사 (2026-08-06 P0-2) — Task Scheduler에 at-startup 트리거가 붙으면서
-    # **아무 시각에나** 이 프로세스가 불릴 수 있게 됐다. 재부팅 복구(10:05 부팅 → 즉시
-    # 재개)는 살리고, 새벽 재부팅에 하루 종일 빈 프로세스가 뜨는 것은 막는다.
-    allowed, reason = session_guard.launch_window_verdict()
-    if not allowed:
-        print(f"[기동 창] {reason}", flush=True)
-        # 구조화 로그로도 남긴다 (2026-08-07 P0-4) — 무결성 리포트가 이 `SessionStart`를
-        # 기동으로 세지 않게 하는 유일한 근거다(`core/logging.py` 태그 주석).
-        mlog.log("LaunchWindowRefused", reason, process="l1_daily")
-        # 정시 트리거를 거부한 것이면 **종료 코드를 가른다** (2026-08-10 P0). 2026-08-10에
-        # 이 경로가 조용히 0으로 끝나 스케줄러에 `LastTaskResult=0`(성공)으로 남았고, 그날
-        # 오전이 통째로 사라지는 동안 모든 계기가 정상이라고 말했다. 부팅 트리거로 온 거부는
-        # 종전대로 0이다 — 그건 실패가 아니다.
-        if session_guard.refused_a_scheduled_launch():
-            print(
-                "[기동 창] 정시 트리거로 뜬 기동을 거부했다 — 오늘 수집이 통째로 없어진다. "
-                "configs/scheduled_tasks.json의 시각과 실제 등록이 어긋났을 가능성이 크다"
-                "(자가 점검 schedule_drift 항목 확인 → "
-                "scripts/install_scheduled_tasks.ps1 재실행).",
-                file=sys.stderr,
-                flush=True,
-            )
-            raise SystemExit(session_guard.REFUSED_EXIT_CODE)
-        return
+    # 기동 창 판정은 `__main__`이 이미 했다 (2026-08-20 F-D) — 비거래일 판정과 같은 자리·
+    # 같은 이유(2026-08-17 F-3). 여기서 다시 묻지 않는다: 뒤쪽 판정은 Docker·self_check가
+    # 이미 다 돈 뒤라 아낄 것이 없고, 두 곳이 같은 질문을 하면 둘이 갈릴 수 있다.
 
     # **오늘 이미 잃은 것**의 첫 항목을 여기서 적는다 (2026-08-10 B-2). 기동 지연은 프로세스가
     # 뜨는 순간 이미 확정된 손실이고(그 구간의 틱·수급·옵션체인은 소급 경로가 없다), 대개
@@ -1295,6 +1274,46 @@ def _instance_id_or_unset(config_dir: str) -> str:
         return "unset"
 
 
+def _refuse_outside_launch_window(process: str, configs: str) -> None:
+    """기동 창 밖이면 여기서 끝낸다 — Docker도 self_check도 돌리지 않는다 (2026-08-20 F-D).
+
+    ## 왜 `main()`에서 여기로 올렸나
+
+    종전 판정 자리는 `main()` 안, 즉 `_ensure_docker_ready()`·`_run_self_check()`가 **이미 다
+    돈 뒤**였다. 부팅 트리거는 매일 발화하므로(2026-08-20 아침 06:42 실측) 거절되는 날마다
+    Docker 기동 21초 + self_check 14항목이 **두 프로세스분** 헛돌았다.
+
+    2026-08-17 F-3이 비거래일 게이트에 대해 같은 이동을 이미 했다 — docstring이
+    *"휴장일이면 self_check조차 실행하지 않는다"* 라고 적어 두고 실제 판정은 뒤에 있던
+    문제였다. 여기도 같은 형태였다.
+
+    ## 종료 코드 분기를 **함께** 옮긴다
+
+    정시 트리거를 거부한 것이면 exit 2다. 2026-08-10에 이 경로가 조용히 0으로 끝나
+    스케줄러에 `LastTaskResult=0`(성공)으로 남았고, 그날 오전이 통째로 사라지는 동안 모든
+    계기가 정상이라고 말했다. 부팅 트리거로 온 거부는 종전대로 0이다 — 그건 실패가 아니다.
+    """
+    allowed, reason = session_guard.launch_window_verdict()
+    if allowed:
+        return
+    _arm_forensics_and_logging(_instance_id_or_unset(configs))
+    print(f"[기동 창] {reason}", flush=True)
+    # 구조화 로그로도 남긴다 (2026-08-07 P0-4) — 무결성 리포트가 이 `SessionStart`를
+    # 기동으로 세지 않게 하는 유일한 근거다(`core/logging.py` 태그 주석).
+    mlog.log("LaunchWindowRefused", reason, process=process)
+    if session_guard.refused_a_scheduled_launch():
+        print(
+            "[기동 창] 정시 트리거로 뜬 기동을 거부했다 — 오늘 수집이 통째로 없어진다. "
+            "configs/scheduled_tasks.json의 시각과 실제 등록이 어긋났을 가능성이 크다"
+            "(자가 점검 schedule_drift 항목 확인 → "
+            "scripts/install_scheduled_tasks.ps1 재실행).",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(session_guard.REFUSED_EXIT_CODE)
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
     args = _parse_args()
     # **비거래일이면 여기서 끝난다** (2026-08-17 F-1/F-3). Docker 기동도, self_check도,
@@ -1306,6 +1325,9 @@ if __name__ == "__main__":
         _arm_forensics_and_logging(_instance_id_or_unset(args.configs))
         session_guard.announce_non_trading_day("l1_daily", _skip)
         raise SystemExit(0)
+    # **기동 창 밖이면 여기서 끝난다** (2026-08-20 F-D). 종전엔 `main()` 안, 즉 아래 두 줄이
+    # 이미 돈 뒤에 판정했다 — 부팅 트리거가 매일 발화하므로 그만큼이 매일 헛돌았다.
+    _refuse_outside_launch_window("l1_daily", args.configs)
     _ensure_docker_ready()
     _run_self_check(args.configs)
     instance_cfg = load_instance(args.configs)
