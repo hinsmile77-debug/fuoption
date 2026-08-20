@@ -53,7 +53,7 @@ from messiah.features import sidecar  # noqa: E402
 from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models import vol_scorecard  # noqa: E402
 from messiah.models.trainer import build_feature_vectors  # noqa: E402
-from messiah.ops import session_guard  # noqa: E402
+from messiah.ops import incomplete_days, session_guard  # noqa: E402
 
 _DATA_DIR = Path("data") / "bars"
 
@@ -102,7 +102,7 @@ def load_m1_window(
     score_days: int,
     calendar: EventCalendar,
 ) -> tuple[list[BarClosed], set[date]]:
-    """(워밍업+채점 구간 전체 1분봉, 채점 대상 날짜 집합) — 대상일이 비면 둘 다 빈 값.
+    """(워밍업+채점 구간 1분봉, 채점 대상 날짜 집합, 뺀 불완전일) — 대상일이 비면 전부 빈 값.
 
     구간이 셋으로 나뉜다:
 
@@ -114,7 +114,7 @@ def load_m1_window(
     `VolScorecard.samples`에 그대로 남아 사람이 볼 수 있다.
     """
     if not archiver.read_day_bars(symbol, Horizon.M1, day):
-        return [], set()
+        return [], set(), []
 
     scored: list[date] = []
     cursor = day
@@ -126,10 +126,19 @@ def load_m1_window(
         warmup.append(cursor)
         cursor = calendar.previous_trading_day(cursor)
 
+    # **불완전일은 채점 구간에서 뺀다** (2026-08-19 F-3/G-3). 2026-08-19은 두 프로세스가
+    # 세 시간 죽어 커버리지가 61%였는데, 그날 표본이 20거래일 IC에 정상 가중으로 들어갔다.
+    # 이 오염은 되돌릴 수 없다 — 소급해서 「그날은 반쪽이었다」고 말해 줄 필드가 없었기
+    # 때문이다. 이제 그 필드가 있고(`daily_integrity_*.json`의 `incomplete_day`), 롤링 창을
+    # 만드는 **모든** 소비처가 같은 함수를 통해서만 날짜를 얻는다.
+    #
+    # **워밍업 구간은 안 거른다** — 엔진을 데우는 것이 목적이라 반쪽짜리 하루라도 봉이
+    # 있는 편이 낫다. 성적이 아니라 상태를 만드는 구간이다.
+    usable, excluded = incomplete_days.usable_days(scored)
     bars: list[BarClosed] = []
     for target_day in sorted(warmup + scored):
         bars.extend(archiver.read_day_bars(symbol, Horizon.M1, target_day) or [])
-    return bars, set(scored)
+    return bars, set(usable), sorted(d.isoformat() for d in excluded)
 
 
 async def score_day(
@@ -146,7 +155,7 @@ async def score_day(
 
     아카이브가 없으면 빈 목록(그날은 수집이 안 돌았다는 뜻).
     """
-    window, scored_days = load_m1_window(
+    window, scored_days, excluded_days = load_m1_window(
         archiver,
         symbol,
         day,
@@ -156,6 +165,12 @@ async def score_day(
     )
     if not scored_days:
         return []
+    if excluded_days:
+        # 조용히 줄이지 않는다 — 창이 왜 짧아졌는지가 산출물과 로그 양쪽에 남아야 한다.
+        print(
+            f"변동성 채점 창에서 불완전일 {len(excluded_days)}일 제외: {', '.join(excluded_days)}",
+            flush=True,
+        )
 
     # 사이드카 정본(`features/sidecar.build()`) — **이 스크립트가 채점하는 것이 바로
     # "관심 피처가 실제로 측정되는가"**(`absent_features`)라, 정본을 안 부르면 EV 같은
@@ -179,6 +194,7 @@ async def score_day(
                 [v for _, v in sliced],
                 horizon=horizon,
                 window_days=len(scored_days),
+                excluded_days=excluded_days,
             )
         )
     return cards

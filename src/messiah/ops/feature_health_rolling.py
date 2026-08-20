@@ -35,7 +35,9 @@ import json
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
+
+from messiah.ops import incomplete_days
 
 DEFAULT_PATH = Path("logs") / "feature_health_rolling.json"
 
@@ -56,6 +58,9 @@ class RollingVerdict:
     always_nan: tuple[str, ...]
     constant: tuple[str, ...]
     symbols: tuple[str, ...] = field(default_factory=tuple)
+    # **창에서 빼낸 날** (2026-08-19 F-3). 뺐다는 사실을 안 남기면 `days`가 짧아진 이유를
+    # 아무도 모른다 — 표본이 준 것과 그날 수집이 없던 것이 구분되지 않는다(L18).
+    excluded_days: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def degenerate_count(self) -> int:
@@ -76,6 +81,7 @@ class RollingVerdict:
             "constant": list(self.constant),
             "symbols": list(self.symbols),
             "spans_rollover": self.spans_rollover,
+            "excluded_days": list(self.excluded_days),
         }
 
 
@@ -166,15 +172,44 @@ def judge(
     path: Path = DEFAULT_PATH,
     window_days: int = DEFAULT_WINDOW_DAYS,
     min_samples: int,
+    incomplete_known: Mapping[date, bool] | None = None,
+    log_dir: Path | None = None,
 ) -> list[RollingVerdict]:
     """`day` 이하의 최근 `window_days`거래일을 합산해 Horizon별로 판정한다.
 
     창은 **파일에 실제로 있는 날**로 센다 — 달력상 거래일이 아니라. 수집이 안 돈 날을
     창에 넣으면 그 자리가 0표본으로 비어 판정이 늦어지기만 한다.
+
+    ## 불완전일은 창에 안 넣는다 (2026-08-19 F-3)
+
+    2026-08-19에 두 프로세스가 09:50~12:29 죽어 커버리지가 61%였다. 그런데 10m·15m의 롤링
+    창은 **2일**이고 그중 하루가 그날이었는데 `judged: true`로 확정 판정이 났다 — 창의
+    절반이 반나절짜리인 채로. 표본 수(`samples`)만 보면 하한을 넘으니 통과이고, 그 표본이
+    **어느 하루에서 왔는가**를 묻는 자리가 없었다.
+
+    제외하면 표본이 줄어 `judged: false`가 늘어난다. **그 자체는 정직해지는 것이다** —
+    임계를 낮추지 않고 창을 넓혀 답하는 이 모듈의 원칙(docstring 상단)과 같은 방향이다.
+
+    `incomplete_known`은 아직 파일에 안 쓰인 판정(주로 **오늘**)을 끼워 넣는 자리다 —
+    `ops/integrity_report.build_report()`가 오늘 리포트를 만드는 중에 이 함수를 부른다.
     """
     days: dict[str, Any] = _load(path).get("days") or {}
     stamp = day.isoformat()
-    usable = sorted(d for d in days if d <= stamp)[-window_days:]
+    # 창을 **자르기 전에** 불완전일을 뺀다. 자른 뒤에 빼면 창이 그만큼 짧아지기만 하고,
+    # 그러면 사고가 난 주에 판정이 연쇄로 멈춘다 — 원하는 것은 "덜 보는 것"이 아니라
+    # "온전한 날을 그만큼 더 거슬러 보는 것"이다.
+    candidates = sorted(d for d in days if d <= stamp)
+    parsed = [(d, date.fromisoformat(d)) for d in candidates]
+    keep, dropped = incomplete_days.usable_days(
+        [value for _stamp, value in parsed],
+        log_dir=log_dir or incomplete_days.DEFAULT_LOG_DIR,
+        known=incomplete_known,
+    )
+    kept = {value.isoformat() for value in keep}
+    usable = [d for d in candidates if d in kept][-window_days:]
+    excluded = tuple(
+        value.isoformat() for value in dropped if usable and value.isoformat() >= usable[0]
+    )
     if not usable:
         return []
 
@@ -209,6 +244,7 @@ def judge(
                         days[d].get("symbol") for d, _e in entries if days[d].get("symbol")
                     )
                 ),
+                excluded_days=excluded,
             )
         )
     return out

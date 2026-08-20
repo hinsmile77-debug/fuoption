@@ -147,6 +147,10 @@ class VolScorecard:
     samples: int
     baseline_ic: float | None  # 직전 RV 자신의 IC — 피처가 넘어야 할 선
     window_days: int = 1  # 이 채점이 덮은 거래일 수
+    # **창에서 빼낸 불완전일** (2026-08-19 F-3). 2026-08-19은 커버리지 61%인 반쪽짜리
+    # 하루였는데 20거래일 IC 창에 정상 가중으로 들어갔다. 뺐다는 사실을 안 남기면
+    # `window_days`가 줄어든 이유를 아무도 모른다 — 수집이 없던 날과 구분이 안 된다(L18).
+    excluded_days: list[str] = field(default_factory=list)
     # 실제로 통제에 쓴 기준선 피처 — 설정에 있어도 feature_set에 없으면 빠지므로,
     # "무엇을 통제한 결과인가"가 산출물에 남아야 나중에 값을 비교할 수 있다.
     baseline_used: list[str] = field(default_factory=list)
@@ -220,6 +224,7 @@ def score_horizon(
     watchlist: Sequence[str] = DEFAULT_WATCHLIST,
     baseline_features: Sequence[str] = DEFAULT_BASELINE_FEATURES,
     window_days: int = 1,
+    excluded_days: Sequence[str] = (),
 ) -> VolScorecard:
     """그 Horizon 하루치를 채점한다 — 순수 함수(네트워크·파일 접근 없음).
 
@@ -248,6 +253,7 @@ def score_horizon(
             samples=len(keep),
             baseline_ic=None,
             window_days=window_days,
+            excluded_days=list(excluded_days),
             note=f"표본 {len(keep)} < 최소 {MIN_SAMPLES} — 판정하지 않음",
         )
 
@@ -309,6 +315,7 @@ def score_horizon(
         samples=len(keep),
         baseline_ic=baseline_ic,
         window_days=window_days,
+        excluded_days=list(excluded_days),
         baseline_used=["직전RV", *baseline_used],
         features=scores,
     )
@@ -421,6 +428,7 @@ def summarise(cards: Mapping[str, VolScorecard] | Sequence[VolScorecard]) -> dic
         card.horizon: {
             "samples": card.samples,
             "window_days": card.window_days,
+            "excluded_days": list(card.excluded_days),
             "baseline_ic": card.baseline_ic,
             "baseline_used": card.baseline_used,
             "beats_baseline": card.beats_baseline,
