@@ -6141,3 +6141,241 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
 - [ ] **X-5 재개 · 08-19 P1-5 정정** — *"어긋남 전량이 세션 첫 사이클 · 경합 아님 · 구조 확정"*은
       **오늘 실측으로 반증됐다.** 첫 사이클(09:00)은 F-5 없이 일치했고 11:00(세션 중간)이 어긋났다.
       Δt는 판별력이 없다(일치 34ms·243ms, 어긋남 117ms) → F-C
+
+## 2026-08-20 장중 점검(12:36 정시분) — Fix/고도화 ([MW0601])
+
+> 12:25 장중 점검의 **후속 정시분**. F-A~F-D · G-A~G-C · L-1~L-7 · K/M/C-1~C-4는 그대로 유효하며
+> 여기서 다시 세지 않는다. 아래는 증분만. **적용 시점 전부 장후(15:35 이후).**
+
+### Fix (장후 적용)
+
+- [ ] **F-E (P1 · 오늘 장후 즉시) 발행 오프셋을 시간대 축으로 남긴다** — 대응 증상 1.
+      `features/engine.py:822~829` `FeaturePublish`에 `bar_confirm_kst`(=`vector.valid_until`) ·
+      `publish_offset_ms` 2필드 (= **`G-0818I-2` 원안 그대로, 착수 근거 확정**).
+      `scripts/run_l1_daily.py` 장 마감 `collector.log_delivery_latency()` 다음 줄 `FeaturePublishOffset`(INFO)에
+      p50/p90/p99/max **+ 09~15시 시간대별 p50·p90** (= `F-0818I-3` 원안 + **시간대 분해**).
+      `core/logging.py` 태그 등록 · `ops/integrity_report.py` `publish_offset.by_hour` 수록 · 미측정일 `unmeasured`(L18).
+      ※ `tests/ops/test_self_check.py` 축 개수 단언(14축)이 깨진다 — **F-0818I-3과 반드시 한 커밋**.
+      검증: 오늘 로그 replay가 **74/143/335/753ms 재현**. 안 되면 본 측정 폐기하고 정본으로 대체.
+      근거: 09→12시 **10.2배 악화** · 유예 초과 20.1% · 자가점검이 아침에 경고한 축
+- [ ] **F-F (P2) `MetaGateEvaluated`가 입력의 지문을 남긴다** — 대응 증상 3 · **C-5 해소**.
+      `strategy/futures/service.py:144`에 `meta_features_digest`(정렬 키 sha1[:8]) · `feature_as_of` 2필드.
+      원값 전량은 싣지 않는다. `ops/integrity_report.py:877` 블록에 `meta_probability_frozen_runs` 수록
+      (**판정 아닌 기록**으로 시작 · R18).
+      검증: 오늘 replay 불가(입력 미보존) → 08-21 N-2. 선행 없음. 우선순위: F-A·F-E·F-B·F-C 뒤
+
+### 고도화
+
+- [ ] **G-D (이번 주) 일별 단일 통계 축에 「일중 추세」를 붙인다** — `ops/integrity_report.py`에
+      `hourly_trend(series) -> {slope, first_hour_p50, last_hour_p50, ratio}` 공용 헬퍼.
+      소비처 3곳: `delivery_latency` · `publish_offset`(F-E) · `nan_ratio`. `ratio >= 3.0`이면
+      `IntradayDriftDetected`(WARNING) — 단 **20거래일 분포 뒤 breach 승격**(R18), 초기엔 기록만.
+      근거: 오늘 p90 1083ms 하나가 「회선이 나쁜 날」과 「갈수록 나빠지는 날」을 같은 값으로 접었다.
+      처방이 정반대(유예 상향 vs 내부 프로파일링)인데 그 갈림길이 숫자에서 사라진다.
+      측정: 오늘 소급 시 `publish_offset.ratio ≈ 10.2` 검출 예상. **선행: F-E.** G-B와 같은 계열
+- [ ] **G-E (다음 단계) 「값이 안 변한다」를 계기 고장 후보로 규칙화한다** —
+      `ops/integrity_report.py`에 `constant_run_length(values)` 공용 헬퍼.
+      대상: `MetaGateEvaluated.probability` · `RegimeClassified.confidence` · `FeaturePublish.nan_ratio` ·
+      `status_snapshot.age_seconds`. 런 길이가 해당 축 하루 표본의 30% 이상이면 `ValueFrozenSuspected`(INFO, 기록만).
+      근거: 오늘 meta 확률 3연속 비트 동일(08-19는 중복 0건). **G-4(0건의 두 얼굴) · G-A(안 쓰인 새 경로)에 이은
+      세 번째 얼굴** — 얼어붙은 값은 침묵보다 나쁘다(침묵은 보이지만 정상처럼 보이는 값은 안 보인다).
+      오탐 실질적(트리 모델 같은 잎 · 정상 0.0 nan_ratio) → **선행: F-F**. 지문 없이는 오탐/진탐 구분 불가
+
+### 오늘 장후 관측 (L 시리즈 추가분)
+
+- [ ] **L-8** `delivery_latency`를 **시간대별로 수동 재계산**(F-E 적용 전이므로 손으로).
+      회선 지연도 09→15시 단조 증가면 **회선 원인** · 균일하면 **프로세스 내부 원인** → C-6 판정
+- [ ] **L-9** 14~15시 `FeaturePublish` 오프셋 — 12시 753ms 추세 연장 시 **1.5초 이상 예상**.
+      `AggregatorLateTickDropped`가 이 구간에 **처음 뜨는지**. 뜨면 F-E→G-2(유예 상향) 조건 충족
+- [ ] **L-10** 12:30 이후 `RegimeClassified` vs `AggregatorNoContribution` 국면 대조 —
+      어긋남이 **국면 전환 사이클에서만** 나는 규칙성이 오후에도 유지되는지 → F-C 설계 확증
+- [ ] **L-11** `MetaGateEvaluated.probability` 오후 사이클 — `0.024909817679844813` 런이 더 길어지는지.
+      **6연속 이상이면 C-5가 「고장」쪽으로 크게 기운다**
+
+### 08-21 관측 (N 시리즈)
+
+- [ ] **N-1** F-E 적용 후 replay — 시간대별 p50이 **74/143/335/753ms 재현**
+- [ ] **N-2** F-F 적용 후 `meta_features_digest` — 확률이 같은 사이클에서 digest도 같은가 → **C-5 즉답**
+
+### 확인 필요 (확정 아님 · 추가분)
+
+- [ ] **C-5** 증상 3의 비트 동일이 **고장인가 정상인가**. GBDT면 같은 잎 = 정상.
+      ① 번들/configs에서 meta 모델 타입 확인 ② `_latest_meta_features` 3사이클 재생 대조 ③ 근본은 F-F
+- [ ] **C-6** 발행 오프셋 악화의 기전 — 회선인가 프로세스 내부인가 → L-8
+- [ ] **C-7** 오프셋 최악 구간이 14~15시인가 → L-9
+
+### 정정 · 기각
+
+- [x] **1분봉 "결손 13분" 기각** — 분 경계 버킷팅의 **착시**. 실제 간격 전량 59.9~60.2초,
+      일부가 MM:59.9x에 떨어져 다음 분이 비어 보였을 뿐. **결손 0분** — 오프셋 축(F-E)이 정본
+- [x] **K-3 태그명 확인 완료 — 오탐 위험 없음.** `RegimeWarmStart`(08:25:31, 기존 이력 사전충전)와
+      F-5의 `RegimeSeeded`(`scripts/run_g2_paper_trading.py:391`)는 **다른 태그**. 오늘 `RegimeSeeded` 0건은 예상된 결과
+
+## 2026-08-20 장후 점검 — Fix/고도화 ([MW0601])
+
+### Fix (적용 순서 = 커밋 순서)
+
+- [ ] **커밋 ① F-D 미커밋분 정리 (P2 · 오늘 중 · 최우선)** — `scripts/run_g2_paper_trading.py`(±66) ·
+      `scripts/run_l1_daily.py`(±71). 금지계명 10. 이게 안 되면 내일 로그가 어느 코드인지 모른다.
+      **검증**: `pytest tests/ops/ -k session_guard` · 다음 부팅 트리거(06:4x)에 `LaunchWindowRefused`는 남되
+      Docker 기동·self_check 로그가 **없어야** 한다 → 08-21 P-5
+- [ ] **커밋 ② F-G 세션 경계를 피처 입력에서 끊는다 (P0 · 오늘 장후)** — 대응 증상 1 · **W-11 종결**.
+      `features/px_core.py`에 `_adjacent_returns(bars)` 신설(`bar_open_kst` 날짜 바뀌는 쌍 제외) →
+      `px_max_ret`(:192)·`px_ret`·`px_mom`·`px_accel`·`px_kurt_r`·`px_skew_r`·`vl_rv`·`vl_semi_up/dn/ratio`·`vl_vov` 교체.
+      `features/engine.py`의 `SessionState`가 세션을 알고 있으므로 경계 플래그를 버퍼에 함께 싣는다.
+      **경계 쌍은 제외하지 갭 조정하지 않는다** — `px_gap_open`이 야간 정보를 전용으로 이미 들고 있다.
+      **`feature_set`을 `v2026.08-ev-sb`로 올려 섀도로만 계산**(R18, 20거래일 후 승격).
+      번들 재학습을 라이브 전환 선행조건에 추가 — 현 `real-20260811-1604-30m`은 오염 값으로 학습됐다.
+      **회귀 테스트 신설**: `tests/features/test_px_core_session_boundary.py` — 08-19 15:30 → 08-20 08:40 쌍 포함 입력에
+      `px_max_ret_60`이 **+0.017546**(현재 +0.032462). **replay**: 08-13·08-14·08-20 3일 전부 `degenerate_feature_count` 0
+- [ ] **커밋 ③ F-H 지연 계측이 자기가 잘렸다는 것을 말한다 (P1 · 오늘 장후)** — 대응 증상 2 · **C-6 해소**.
+      `ops/clock_skew.py` `delivery_latency_seconds()`(:141)에 `truncated`·`capacity`·`observed_total` 3필드 +
+      `_latency_by_hour`(시별 p50/p90만). `observe()` docstring(:117) *"세션 전체 목록"* 정정 —
+      실제는 `deque(maxlen=20000)`이다. `ops/integrity_report.py`가 `by_hour` 전달.
+      `ops/fix_verification.py`는 `truncated: true`면 **판정 불가(None)**(L18).
+      **용량은 올리지 않는다** — 문제는 용량이 아니라 침묵이다
+- [ ] **커밋 ④ F-E 발행 오프셋 시간대 축 + `step_detected` (P1)** — 대응 증상 4. 12:36 계획의 **설계 변경**:
+      단순 기울기는 오늘 형태(11시 계단+고원)를 못 잡는다. **전후 구간 p50 비율 ≥3.0인 경계 시각**을 남긴다.
+      F-H의 `by_hour`와 같은 자료구조. G-D와 같은 커밋. **검증**: 오늘 replay에서 `step_detected ≈ 11:00` ·
+      `74/140/335/664/653/885/789ms` 재현
+- [ ] **커밋 ⑤ F-F `MetaGateEvaluated` 입력 지문 (P2)** — 12:36 계획 그대로.
+      **오늘 오후 관측으로 긴급도 하락**(C-5가 정상 쪽으로 기움) → 순위를 F-E 뒤로
+
+### 고도화
+
+- [ ] **G-F (이번 주) 「세션 경계」를 피처 계약으로 승격한다** — `features/spec.py`에 `crosses_session: bool`.
+      창 길이 × Horizon > 한 세션(410분)인 피처를 기동 시 자동 열거, `_adjacent_returns` 계약 미준수면 기동 거부.
+      **오늘 기준 `W_STD=(5,20,60)` 조합 18개 중 4개가 이미 해당** — 10m·15m의 `*_60`, 30m의 `*_20`·`*_60`.
+      근거: 오늘 상위 단봉수익률 2개(+3.25% 야간·+1.93% 주말)가 둘 다 경계 봉이고 장중 최대는 3위다.
+      우연이 아니라 매일 재현되는 성질. **처음 20거래일은 WARNING만**(R18). **선행: F-G**
+- [ ] **G-G (다음 단계) 「계기가 자기 표본을 말한다」를 공용 규율로** — `ops/`에 `Sampled` dataclass
+      `{value, samples, capacity, truncated, window}`. 소비처 4곳: `delivery_latency`·`clock_skew`·
+      `nan_ratio_by_horizon`·`meta_gate`. `truncated`면 `fix_verification`이 자동 판정 불가.
+      근거: 표본이 정확히 20,000에 닿았는데 리포트가 침묵했고, 그 침묵 때문에 **L-8이 실행 불가능한 작업으로
+      하루 동안 TODO에 서 있었다.** G-4·G-A·G-E에 이은 **네 번째 얼굴 — 잘린 표본은 얼어붙은 값보다 나쁘다**
+      (값이 계속 변하므로 살아 있어 보인다). **선행: F-H**
+- [ ] **G-H (이번 주 · F-G와 같은 주) 등록부에 「기전 미상」 상태를 만든다** —
+      `configs/pending_verifications.yaml` 항목에 `fix_committed: <sha> | null`.
+      `null`이면 `FixVerificationRecurred`(ERROR)가 아니라 **`FixVerificationUndiagnosed`(WARNING)**.
+      근거: `no-degenerate-features`가 엿새 동안 *"수정이 듣지 않았다"* 를 냈는데 **애초에 수정이 없었다**
+      (`DECISION_LOG.md:5114` *"조사 먼저(W-11)"*). "고친 게 안 듣는다"와 "아직 안 고쳤다"는 대응이 완전히 다르다.
+      위험 — 미기입 시 전부 WARNING으로 내려앉는다 → **필수 입력으로 두고 기동 self-check가 지적**
+
+### 08-21 관측 (P 시리즈)
+
+- [ ] **P-1** F-G 적용 후 `FeatureHealthDegenerate` **0건** · 등록부 `no-degenerate-features` 「검증 완료」 복귀.
+      08-13·08-14 replay도 0
+- [ ] **P-2** `TickDeliveryLatency`에 `truncated`·`capacity`·`observed_total`·`by_hour` 4필드 출현.
+      `observed_total`이 `TickArchiveSummary.rows`(오늘 137,977) 대비 몇 %인지 **최초 관측**
+- [ ] **P-3** `delivery_latency.by_hour` 09시 대비 14시 p90 비율 — **≥3.0이면 회선 · <1.5면 프로세스 내부**
+      → **C-6 종결**
+- [ ] **P-4** `publish_offset.step_detected`(F-E) — 오늘과 같은 11시대 계단이 **재현되는가**.
+      재현되면 구조, 안 되면 어제만의 사건
+- [ ] **P-5** `session_git_shas`가 HEAD와 **일치** → 커밋 ① 마감 · 금지계명 10 해소
+- [ ] **L-4 연장** `irrecoverable_loss_minutes` 5거래일 합 — 08-14(33분)가 창을 벗어나는 08-21에
+      44분 → 11분으로 떨어져 예산(20분) 이하 복귀하는가
+- [ ] **N-2**(기존 유지) F-F 적용 후 `meta_features_digest` — 확률이 같은 사이클에서 digest도 같은가 → **C-5 즉답**
+
+### 확인 필요 (확정 아님)
+
+- [ ] **C-6′ (신규)** 발행 오프셋 계단이 11시대에 서는 것과 `px_*_60` 60봉 창이 그 무렵 처음 채워지는 것이
+      **같은 시각축**이다. 우연인지 인과인지 모른다. **닫으려면**: F-E 적용 후 시간대별 오프셋을 Horizon별로 분해 —
+      1m만 악화면 회선/버스, 전 Horizon 동반 악화면 피처 계산 비용(60봉 창 충전 후 연산량 증가) → 08-22
+- [ ] **C-5**(유지, 기울기 갱신) 4연속에서 종료 + 이후 분산(`0.0201→0.0802→0.6672→0.2418→0.5600`)
+      → **「정상(GBDT 같은 잎)」 쪽으로 크게 기움.** 12:36 판정선("6연속 이상")에 미달. 확정은 N-2
+
+### 정정 · 완료 처리
+
+- [x] **W-11 종결** — 가설 *"창 60분과 10m 40표본(창 6봉)의 관계"*(`NEXT_TODO.md:3868`)는 **틀렸다.**
+      창은 60**봉**(10m×60=600분≈1.46거래일)이고, 원인은 표본 수가 아니라 **세션 경계 봉**이다.
+      `DECISION_LOG.md:5114`의 *"창 길이인지 버그인지 미확정"* 은 **둘 다**가 답 — 창이 세션보다 길어서 버그가 드러났다
+- [x] **12:36 리포트 서술 정정 — *"어긋남의 Δt가 모든 일치보다 크다"* 는 오후에 반증됐다.**
+      13:00 어긋남 **72ms**는 일치 11건 중 9건보다 작다. 표본 2건짜리 우연이었다.
+      **Δt는 양방향으로 판별력이 없다 — 경합(race) 가설 완전 기각**
+- [x] **L-10 / F-C 설계 확증** — 어긋남 3건(11:00·12:30·13:00) 전부 정확히 **직전 사이클 국면**,
+      3건 전부 **국면 전환 사이클**(전환 6회 중 3회 · 전환 아닌 8회는 전량 일치).
+      "전환에서만 난다"는 참, "전환이면 항상 난다"는 거짓. **F-C replay 케이스 2건 → 3건**
+- [x] **L-8 / C-6 → 「판정 불가」로 재분류** — 수동 재계산이 전제였으나 **원자료가 링버퍼에 덮여 없다.**
+      F-H 없이는 영구 미결
+- [x] **L-9 예측 빗나감 기록** — 1.5초 예상 vs **885ms** 실측. 형태도 선형이 아니라 **11시 계단 + 고원**.
+      `AggregatorLateTickDropped` **0건** → G-2 재착수 조건 미충족
+- [x] **L-7 / J-10 판정 완료** — `delivery_latency.p90 = 921.4ms < 1,000ms` → **G-2 미충족**.
+      단 표본 편향(증상 2)으로 신뢰도 하락 — F-H 후 재판정
+- [x] **L-1 통과** `abnormal_exits: []` · [x] **L-2 통과** `incomplete_day: false`·coverage 99.3 ·
+      [x] **L-4 통과** 0.3분 · [x] **L-6 통과** 목위클리 만기일 오탐 없음 ·
+      [x] **J-12 통과** `SessionStart 2 − 거절 1 − 실계수 1 = 0`
+- [ ] **L-5 보류 유지** — `regime_unseeded_cycles: 0`이나 g2가 `50eff6c`(F-5 커밋 `05bcbd2` 09:13 이전)로
+      08:25에 떴다. **오늘 값은 설계 채점이 아니다** → 08-21 재판정
+- [ ] **L-3 부분 통과** — 계측 성립·값 위반 0 ✓ · 계기 실명 0 ✓ · **재발 1건**(증상 1) ✗
+
+---
+
+## 2026-08-20 장후 종합 구현 결과 (커밋 11개)
+
+> 근거: `logs/dailycheck/2026-08-20_synthesis_report.md` · `DECISION_LOG.md` 「리포트가 지목한
+> 자리는 맞았고 원인 진단이 두 번 틀렸다」. 전체 pytest 2,191건 통과 · ruff 통과.
+
+### 구현 완료 (라이브 미검증 — 08-21 채점)
+
+- [x] **F-A′ · G-A** (`5f5df35`) — 구동 주기를 `cadence_seconds` 필드로 가른다 + 폴백 사용률 계수.
+      2026-08-14 F-4의 유도 경로가 **라이브에서 0회 사용**됐음을 확인하고 원인을 고쳤다
+      (`valid_until − ts_utc`가 생산 경로에서 항상 0 이하). 장중 F-A 원안은 증상의 절반만 봤다
+- [x] **F-2 · G-C** (`3212499`) — `worktree_dirty_files` + `SessionStart.source_mtime_max`.
+      실측: self_check가 *"dirty 19건 중 src/scripts 4파일 미커밋"* 을 말한다
+- [x] **F-6** (`704bd4c`) — `host_health.check_active_hours`. 실측 08:00~16:00 → **J-8 · D-1 해소**
+- [x] **F-D** (`6f71cb1`) — 기동 창 게이트를 Docker·self_check 앞으로. 종료 코드 분기 동반 이동
+- [x] **F-E · G-D** (`64971cd`) — 발행 오프셋 시간대 축 + `hourly_trend`. 부분 시간대(웜업·마감 잔여) 제외
+- [x] **F-F · G-E** (`86d9640`) — meta 입력 지문 + `constant_run_length`
+- [x] **F-B** (`3b8ac3f`) — UI `mlog.setup` 개통 → **D-2 마감**. 선행 조건이던 `NESTED_SESSION_ENV`는
+      불필요함을 확인하고 그 전제를 테스트로 고정
+- [x] **G-2 · G-4 · F-4′** (`60b6d95`) — 기록↔반입 대조 + 불변원칙 2 예외 명문화 + 수집기 오탐 제거
+- [x] **F-H** (`0fa71c6`) — 지연 계측 절단 고지 + 시간대 버킷 → **C-6 답변 가능해짐**
+- [x] **F-G 1단계** (`db7bcc8`) — 세션 경계 계약·계량 + R16 회귀 테스트 → **W-11 종결**
+- [x] **G-H · F-E 승격분** (`6528bcf`) — 기전 미상 판정 + `step_detected`.
+      오늘 유일한 ERROR가 WARNING으로 정확히 재분류됐다
+
+### 기각 · 연기 · 완료 확인
+
+- [x] **F-4 기각** — 전제 오류. `install_scheduled_tasks.ps1`에 UI 액션이 없고 `ui_launcher`가
+      `stderr=subprocess.STDOUT`로 병합한다. `ui_*.err.log`는 설계상 안 생긴다 → J-11 · D-3 · C-4 종결
+- [x] **G-3 완료 확인** — `4eca9af`가 이미 `session_guard.drop_refused_starts`로 정본화
+- [ ] **F-C 연기** — 08-21 K-3/K-4 채점 뒤 착수. 지금 넣으면 F-5 효과와 뒤섞여 어느 쪽이 들었는지 못 가린다.
+      **K-3 실패 시 F-C가 아니라 F-5 재조사가 먼저다**
+- [ ] **G-B 연기** — F-A′ 후 틀린 소비처가 0이 된다(수집기는 장전 F-4로, CB는 원래 맞다).
+      소비처 없는 추상화를 미리 만들지 않는다. **네 번째 표면이 나오면 착수**
+
+### 남은 작업 (장후 리포트 §3 · 선행 조건 충족분)
+
+- [ ] **F-G 2단계 — 값 전환 + 번들 재학습** (사용자 결정 Q7). 인접 종가 차분을 쓰는 전 피처를
+      `same_session_returns()`로 교체 → 학습분포가 바뀌므로 **재학습과 같은 커밋**이어야 한다.
+      전환 시 `configs/pending_verifications.yaml`의 `no-degenerate-features.fix_committed`에 그 sha 기입
+- [ ] **G-F — 세션 경계를 피처 계약으로 승격** (선행 F-G 2단계). 창 길이 × Horizon > 410분인 피처를
+      기동 시 자동 열거. **오늘 기준 `W_STD=(5,20,60)` 조합 18개 중 4개가 이미 해당**
+      (10m `*_60` · 15m `*_60` · 30m `*_20`·`*_60`). 처음 20거래일은 WARNING만(R18)
+- [ ] **G-G — `Sampled` 공용 타입** (선행 F-H가 한 곳에서 형태를 잡음). 소비처 4곳:
+      `delivery_latency` · `clock_skew` · `nan_ratio_by_horizon` · `meta_gate`.
+      *"다 봤다고 말하지만 일부만 봤다"* — 이 저장소의 **네 번째 얼굴**
+- [ ] **G-1 게이트 승격** (사용자 결정 Q1). F-2로 관측·WARN까지는 들어갔다. 「이틀 연속 미커밋이면
+      dev에서도 기동 거부」는 오탐 비용이 작업 습관에 직접 걸려 승인 없이 안 올린다
+- [ ] **등록부 `fix_committed` 미기입 항목 채우기** — 장후 절차가 매일 그 수를 한 줄 남긴다.
+      비워 두면 「기전 미상」 축이 하루짜리 장식이 된다
+
+### 08-21 관측 예정 (신규분)
+
+- [ ] **K-2′** `status_snapshot.json` · `code_version.worktree_dirty_files` 키 존재 → **J-9 마감**
+- [ ] **K-6′** 자가점검 `host` 줄에 `active_hours=` → **J-8 · D-1 마감**(오늘 실측으로 이미 확인)
+- [ ] **M-3** `SessionStart.source_mtime_max` 출현. 기동 시각 < 그 값이면 「기동 뒤 소스 변경」
+- [ ] **M-4** UI 개방 시 `logs/ui_YYYYMMDD.log`에 `UISnapshotFreshness` 1행 ·
+      `starts_by_process`에 `ui` **미출현**
+- [ ] **M-5** 06:4x 부팅 트리거 거절 시 `l1_daily_*.log`에 `Docker Desktop 자동 기동` 줄 **없이**
+      `LaunchWindowRefused`만 (F-D 채점)
+- [ ] **M-6** 퇴화 판정이 나면 `SessionBoundaryInflation`(WARNING)이 함께 나오는지.
+      `ratio`가 08-20의 1.85와 같은 대역인지 — **매일 재현되는 성질이라는 가설의 채점**
+- [ ] **M-7** 등록부 `no-degenerate-features`가 `FixVerificationUndiagnosed`(WARNING)로 나오는지.
+      **오늘 장후 ERROR 1건 → 내일 0건**이 되어야 한다
+- [ ] **P-2′** `TickDeliveryLatency`에 `truncated`·`capacity`·`observed_total`·`by_hour` 4필드 출현.
+      `observed_total`이 `TickArchiveSummary.rows` 대비 몇 %인지 최초 관측
+- [ ] **P-3′** `delivery_latency.by_hour` 09시 대비 14시 p90 비율 → **C-6 종결**
+      (≥3.0이면 회선 · <1.5면 프로세스 내부)
+- [ ] **P-4′** `publish_offset.step_detected` — 오늘 10시 계단이 재현되는가.
+      재현되면 구조, 안 되면 어제만의 사건
