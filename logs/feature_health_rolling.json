@@ -69,6 +69,43 @@
           "constant": []
         }
       }
+    },
+    "2026-08-20": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": [
+            "px_max_ret_60"
+          ]
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
     }
   }
 }
