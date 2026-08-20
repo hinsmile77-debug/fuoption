@@ -41,7 +41,8 @@ from __future__ import annotations
 import subprocess
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Mapping
 
 from messiah.core.timeutil import now_utc
@@ -93,6 +94,98 @@ def reset_head_cache() -> None:
     global _head_cache
     with _head_lock:
         _head_cache = None
+
+
+# ## 커밋이 아니라 **워킹트리**가 실행 코드다 (2026-08-20 F-2 · G-C)
+#
+# 위 두 SHA는 "커밋한 코드가 도는가"에 답한다. 그런데 이 저장소는 워킹트리를 **직접
+# 임포트**한다 — 배치가 부르는 것은 `python scripts/run_l1_daily.py`이지 설치된
+# 패키지가 아니다. 즉 실제로 실린 것은 커밋이 아니라 **기동 시점의 파일 내용**이다.
+# 두 SHA가 같아도 워킹트리에 미커밋 변경이
+# 있으면 프로세스는 그 미커밋 코드로 돈다.
+#
+# 2026-08-19 저녁 구현 세션이 dev_memory에 "완료"라 적고 커밋을 빠뜨렸다. 다음 날 아침
+# `code_version.stale`은 false였다(커밋한 것과 HEAD가 같으니 옳다) — 그리고 그날 개장이
+# 통째로 갔다. 직전 커밋 `50eff6c`가 같은 유형이라 **이틀 연속**이었고, 그 사이 어느
+# 계기도 이것을 말하지 않았다. 워킹트리는 애초에 관측 대상이 아니었기 때문이다.
+#
+# `git status --porcelain -- src scripts` 로 경로를 **좁힌다**. 이 저장소의 `data/`는
+# 수 GB라 전체 스캔이 기동 경로에 들어가면 안 된다.
+_DIRTY_CACHE_TTL_SECONDS = 60.0
+_dirty_lock = threading.Lock()
+_dirty_cache: tuple[float, int | None] | None = None  # (조회 시각 epoch, 파일 수)
+
+# 「실행 코드의 정본」으로 보는 경로 — 커밋 여부와 무관하게 임포트되는 것들.
+SOURCE_PATHS: tuple[str, ...] = ("src", "scripts")
+
+
+def _read_dirty_count() -> int | None:
+    """`src/`·`scripts/`의 미커밋 실변경 파일 수. 못 재면 `None`(0이 아니다 — L18)."""
+    try:
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", *SOURCE_PATHS],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        )
+    except Exception:  # noqa: BLE001 — git이 없거나 리포 밖이어도 기동을 막지 않는다
+        return None
+    return len([line for line in out.splitlines() if line.strip()])
+
+
+def worktree_dirty_files(
+    *, now: datetime | None = None, ttl_seconds: float = _DIRTY_CACHE_TTL_SECONDS
+) -> int | None:
+    """미커밋 실변경 파일 수 — TTL 캐시. `None`은 **미측정**이지 0이 아니다."""
+    global _dirty_cache
+    stamp = (now or now_utc()).timestamp()
+    with _dirty_lock:
+        cached = _dirty_cache
+        if cached is not None and stamp - cached[0] < ttl_seconds:
+            return cached[1]
+    count = _read_dirty_count()
+    with _dirty_lock:
+        _dirty_cache = (stamp, count)
+    return count
+
+
+def reset_dirty_cache() -> None:
+    """테스트 전용."""
+    global _dirty_cache
+    with _dirty_lock:
+        _dirty_cache = None
+
+
+def source_mtime_max(root: Path | str = ".") -> datetime | None:
+    """`src/`·`scripts/`의 **가장 최근 수정 시각** (2026-08-20 G-C).
+
+    ## 왜 SHA로는 부족한가
+
+    2026-08-20 아침 실측: 08:20에 뜬 l1은 F-2b를 실었고, 08:25에 뜬 g2는 F-5를 못 실었다.
+    같은 커밋 상태에서 **5분 사이에 파일이 바뀌었기 때문**이다. `code_version.stale`은
+    커밋 기준이라 이 절반 상태를 말할 수 없었고, 그날 점검은 그것을 「커밋 누락」이라
+    잘못 부르고 나서야 「편집 시각 vs 기동 시각」임을 알았다(commit `e4894d5`).
+
+    `SessionStart`가 이 값을 실으면 장후 리포트가 **`기동 시각 < 소스 최신 mtime`** 을
+    판정할 수 있다 — "기동한 뒤에 소스가 바뀌었다". 판정이 아니라 **기록으로 시작**한다
+    (dev에서 편집이 잦아 오탐이 잦을 것이므로 — R18).
+    """
+    base = Path(root)
+    latest: float | None = None
+    for name in SOURCE_PATHS:
+        directory = base / name
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*.py"):
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:  # noqa: PERF203 — 파일 하나가 사라져도 나머지는 잰다
+                continue
+            if latest is None or stamp > latest:
+                latest = stamp
+    if latest is None:
+        return None
+    return datetime.fromtimestamp(latest, tz=timezone.utc)
 
 
 def uptime_text(started_at: datetime, *, now: datetime | None = None) -> str:

@@ -57,7 +57,12 @@ from messiah.core.messages import (
 )
 from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
-from messiah.core.version import PROCESS_GIT_SHA, assess_version_drift, head_git_sha
+from messiah.core.version import (
+    PROCESS_GIT_SHA,
+    assess_version_drift,
+    head_git_sha,
+    worktree_dirty_files,
+)
 from messiah.ops import loss_ledger
 from messiah.ops import verdict as verdict_mod
 
@@ -174,6 +179,7 @@ class StatusBoard:
         # 파일이 유일한 관측 수단인데(모듈 docstring), 버전 축이 없으면 "구버전이 보낸 초록"과
         # "최신 코드가 보낸 초록"이 파일에서도 똑같이 보인다 — UI의 버전 스트립과 같은 근거·
         # 같은 판정기를 쓴다(`core/version.py`).
+        dirty_files = worktree_dirty_files()
         drift = assess_version_drift(
             process_sha=PROCESS_GIT_SHA,
             head_sha=head_git_sha(),
@@ -191,6 +197,17 @@ class StatusBoard:
                 "head_git_sha": head_git_sha(),
                 "stale": drift.stale,
                 "summary": drift.summary,
+                # **커밋과 실린 코드가 같다고 말하는 계기가 커밋을 안 봤다** (2026-08-20 F-2).
+                #
+                # 위 `stale`은 두 SHA만 대조한다. 그런데 이 저장소는 워킹트리를 직접
+                # 임포트하므로, 미커밋 변경이 있으면 두 SHA가 같아도 프로세스는 그 미커밋
+                # 코드로 돈다. 2026-08-19 저녁 구현이 커밋 없이 끝난 날 `stale`은 false였고
+                # (그 자체로는 옳다) 다음 날 개장이 통째로 갔다.
+                #
+                # `None`은 **미측정**이다(git 없음/조회 실패) — 0으로 적으면 "깨끗하다"가
+                # 되어 L18을 어긴다.
+                "worktree_dirty_files": dirty_files,
+                "worktree_dirty": None if dirty_files is None else dirty_files > 0,
             },
             "components": components,
             "circuit_breaker": circuit_breaker,
@@ -397,7 +414,16 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
     version = snapshot.get("code_version") or {}
     if version:
         mark = "⚠ " if version.get("stale") else "  "
-        lines.append(f"{mark}{version.get('summary', '코드 버전 미상')}")
+        summary = version.get("summary", "코드 버전 미상")
+        # 미커밋 건수를 **같은 줄에** 붙인다 (2026-08-20 F-2). 별도 줄로 빼면 "코드 버전"을
+        # 읽은 사람이 그 아래를 안 볼 수 있다 — 두 값은 같은 질문("지금 무엇이 도는가")의
+        # 두 얼굴이다.
+        dirty = version.get("worktree_dirty_files")
+        if dirty is None:
+            summary += " · 미커밋 미측정"
+        elif dirty > 0:
+            summary += f" · ⚠ 미커밋 {dirty}파일(src/scripts)"
+        lines.append(f"{mark}{summary}")
     ui = snapshot.get("command_center_ui")
     if ui is not None:
         lines.append(f"  Command Center UI: {'정상' if ui == 'UP' else '응답 없음'}")

@@ -504,7 +504,25 @@ def session_start(instance_id: str) -> None:
         # (`core/version.py` 모듈 docstring). 장중에 커밋이 들어와도 이 줄은 안 변한다.
         git_sha=PROCESS_GIT_SHA,
         pid=os.getpid(),
+        # **어느 시점의 파일이 실렸나** (2026-08-20 G-C). SHA는 커밋 기준이라
+        # "08:20 l1은 실었고 08:25 g2는 못 실었다"는 절반 상태를 말할 수 없다 —
+        # 2026-08-20 아침이 정확히 그랬고, 그날 점검은 그것을 「커밋 누락」이라 잘못
+        # 불렀다가 「편집 시각 vs 기동 시각」임을 뒤늦게 알았다(commit e4894d5).
+        # 장후가 `기동 시각 < 이 값`이면 "기동한 뒤에 소스가 바뀌었다"를 판정한다.
+        # 판정이 아니라 **기록으로 시작**한다(R18) — dev에서는 편집이 잦다.
+        source_mtime_max=_source_mtime_text(),
     )
+
+
+def _source_mtime_text() -> str | None:
+    """`src/`·`scripts/` 최신 수정 시각(ISO) — 못 재면 None(기동을 막지 않는다)."""
+    try:
+        from messiah.core.version import source_mtime_max
+
+        stamp = source_mtime_max()
+    except Exception:  # noqa: BLE001 — 관측 필드 하나가 기동을 막으면 본말전도다
+        return None
+    return None if stamp is None else stamp.isoformat()
 
 
 def log(tag: str, msg: str, **fields: Any) -> None:

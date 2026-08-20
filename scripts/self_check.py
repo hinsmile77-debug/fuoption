@@ -30,6 +30,7 @@ from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
 from messiah.core.event_calendar import EventCalendar  # noqa: E402
 from messiah.core.messages import SCHEMA_VERSION, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst, now_utc  # noqa: E402
+from messiah.core.version import worktree_dirty_files  # noqa: E402
 from messiah.data import bar_paths  # noqa: E402
 
 
@@ -522,7 +523,26 @@ def check_git_state(mode: str) -> CheckResult:
     dirty = (completed.stdout or "").strip()
     if dirty and mode in ("live", "paper"):
         return CheckResult("git", False, f"미커밋 변경 {len(dirty.splitlines())}건 — 계명 10")
-    return CheckResult("git", True, "clean" if not dirty else f"dirty({mode} 허용)")
+    if not dirty:
+        return CheckResult("git", True, "clean")
+    # **개수를 말하게 한다** (2026-08-20 F-2). 종전 문구는 `dirty(dev 허용)` 한 마디였다 —
+    # 1파일이든 40파일이든 같은 줄이라, 2026-08-19 저녁 구현분이 통째로 미커밋인 아침에도
+    # 화면은 평소와 똑같이 보였다. 그날 개장이 옛 코드로 갔다.
+    #
+    # `src/`·`scripts/`로 좁혀 따로 센다 — 전체 개수에는 로그·산출물 잡음이 섞여 있어
+    # "실행 코드가 몇 개 안 실렸나"를 못 읽는다.
+    source_dirty = worktree_dirty_files()
+    total = len(dirty.splitlines())
+    if source_dirty is None:
+        return CheckResult("git", True, f"dirty {total}건 · src/scripts 미측정 ({mode} 허용)")
+    if source_dirty == 0:
+        return CheckResult("git", True, f"dirty {total}건 · src/scripts 0 ({mode} 허용)")
+    return CheckResult(
+        "git",
+        True,
+        f"[WARN] dirty {total}건 중 **src/scripts {source_dirty}파일 미커밋** — "
+        f"어제 완료로 적은 항목이 안 실렸을 수 있다 ({mode} 허용)",
+    )
 
 
 def check_secrets(cfg: InstanceConfig) -> CheckResult:
