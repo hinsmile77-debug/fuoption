@@ -74,8 +74,14 @@ DEFAULT_CONFIG = {
     "process_logs": {
         "l1_daily": "logs/l1_daily_{d}.log",
         "g2_daily": "logs/g2_daily_{d}.log",
+        # UI는 stderr를 stdout에 **병합**해 이 파일 하나로 받는다
+        # (`core/ui_launcher.launch_command_center`: `stderr=subprocess.STDOUT`).
+        # 종전엔 `ui_err: logs/ui_{d}.err.log`를 함께 기대했는데, 그 파일은 **설계상
+        # 생기지 않는다** — 2026-07-30자 59바이트 파일은 그 이전 기동 경로의 유물이다.
+        # 그 기대 때문에 매일 「UI stderr 없음」이 결함으로 올라왔고, 2026-08-20 장전
+        # F-4가 있지도 않은 ps1 UI 액션을 고치라는 계획으로 이어졌다(J-11·D-3·C-4 오탐).
+        # 크래시 무장 마커도 이 파일로 온다: `[crash_forensics] armed tag=ui target=stderr`.
         "ui": "logs/ui_{d}.log",
-        "ui_err": "logs/ui_{d}.err.log",
         "postmarket": "logs/postmarket_{d}.log",
     },
     "rolling_logs": {

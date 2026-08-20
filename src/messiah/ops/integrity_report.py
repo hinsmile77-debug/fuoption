@@ -231,6 +231,12 @@ class IntegrityReport:
     # 일별 단일 통계에 붙는 **일중 추세** (2026-08-20 G-D). 판정이 아니라 표시다 —
     # 임계 승격은 20거래일 분포를 본 뒤(R18).
     intraday_trend: dict[str, Any]
+    # **기록이 자기 자신을 채점하고 있었다** (2026-08-20 G-2, `ops/record_vs_commit.py`).
+    #
+    # 2026-08-19 저녁 구현이 `NEXT_TODO.md`를 `[x]`로 닫고 커밋을 빠뜨렸다. 그 어긋남을
+    # 아무 계기도 재고 있지 않았고, 다음 날 아침 개장 한 번이 통째로 옛 코드로 갔다.
+    # 「완료라 적었는데 반입되지 않은 날」이 그날 저녁에 이름을 얻는 자리다.
+    record_vs_commit: dict[str, Any]
     # 그날 프로세스가 실제로 돌던 커밋. 지금 HEAD와 다르면 그 수집분은 **그 시점 코드의
     # 산물**이라는 사실이 사후 조사에 필요하다 — 2026-08-04가 정확히 그 경우였다(WS 프레임
     # 절반 유실 수정이 12:22에 들어갔는데 수집 프로세스는 08:35에 뜬 옛 코드로 하루를 돌았다).
@@ -1163,6 +1169,16 @@ def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
             if trend is not None:
                 trends["publish_offset"] = trend
     return trends
+
+
+def _record_vs_commit(day: date) -> dict[str, Any]:
+    """기록↔반입 대조 (2026-08-20 G-2). 실패해도 리포트를 막지 않는다."""
+    from messiah.ops import record_vs_commit as rvc
+
+    try:
+        return rvc.assess(day).to_dict()
+    except Exception as exc:  # noqa: BLE001 — 관측이 장후 절차를 막으면 본말전도다
+        return {"verdict": "unresolved", "detail": f"대조 실패: {exc}"}
 
 
 def analyze_data_flow_ownership(tag_counts: Mapping[str, int]) -> list[str]:
@@ -2443,6 +2459,7 @@ def build_report(
         delivery_latency=logs["delivery_latency"],
         publish_offset=logs["publish_offset"],
         intraday_trend=_intraday_trends(logs),
+        record_vs_commit=_record_vs_commit(day),
         session_git_shas=logs["session_git_shas"],
         degenerate_features=degenerate_features,
         allowed_constant_values=allowed_constants,
@@ -2750,6 +2767,21 @@ def format_summary(report: IntegrityReport) -> str:
             )
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
+    # **어긋남이 없는 날도 한 줄 남긴다** (2026-08-20 G-2) — 측정된 0과 미검사를 가른다.
+    if report.record_vs_commit:
+        from messiah.ops import record_vs_commit as _rvc
+
+        lines.extend(
+            _rvc.summarize(
+                _rvc.RecordVsCommit(
+                    n_closed=report.record_vs_commit.get("n_closed"),
+                    n_commits=report.record_vs_commit.get("n_commits"),
+                    verdict=str(report.record_vs_commit.get("verdict", "unresolved")),
+                    detail=str(report.record_vs_commit.get("detail", "")),
+                    dirty_files=report.record_vs_commit.get("dirty_files"),
+                )
+            )
+        )
 
     if report.volume_check is not None:
         ratio = report.volume_check.get("ratio")
