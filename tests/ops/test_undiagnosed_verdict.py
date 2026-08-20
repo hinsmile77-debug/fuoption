@@ -94,15 +94,23 @@ def test_undeclared_entries_are_listed_not_blocked() -> None:
 
 
 def test_the_real_registry_declares_the_degenerate_entry() -> None:
-    """오늘 재분류한 항목이 실제 등록부에 선언돼 있어야 한다 — 안 그러면 내일 또 ERROR다."""
+    """실제 등록부가 이 항목의 수정 상태를 **선언**하고 있어야 한다.
+
+    선언이 없으면 종전 의미(무조건 `재발`)로 돌아가고, 이 축은 만들어만 두고 아무도 안 쓰는
+    상태가 된다 — 이 저장소가 반복해서 배운 실패 형태다.
+
+    값은 2026-08-20 저녁에 `f15aa58`(세션 경계 전환 + 번들 재학습)로 채워졌다. 그래서 이제
+    이 항목의 위반은 `기전 미상`(WARNING)이 아니라 `재발`(ERROR)이다 — 고친 것이 안 듣는
+    상황이 되기 때문이고, 그때는 원인을 다시 봐야 한다.
+    """
     items = {item.id: item for item in fv.load_registry()}
     entry = items.get("no-degenerate-features")
     assert entry is not None
     assert entry.fix_state_declared, "`fix_committed:` 키가 등록부에 있어야 한다"
-    assert entry.fix_is_pending, (
-        "값 전환(재학습 동반)이 아직 없으므로 비어 있어야 한다 — "
-        "전환 커밋이 들어오는 날 그 sha를 적는다"
-    )
+    assert (
+        entry.fix_committed
+    ), "2026-08-20 F-G 2단계로 값 전환과 재학습이 끝났다 — 그 sha가 적혀 있어야 한다"
+    assert not entry.fix_is_pending
 
 
 def test_undiagnosed_needs_attention_but_is_not_an_error() -> None:
