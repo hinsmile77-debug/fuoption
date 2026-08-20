@@ -221,6 +221,9 @@ def test_collect_includes_the_cpu_axis(tmp_path: Path, monkeypatch):
         "cpu",
         "boot_recovery",
         "schedule_drift",
+        # 2026-08-20 F-6 — Windows Update 활성 시간. 이 목록이 곧 리포트에 실리는 축이라
+        # 새 축을 넣고 여기를 안 고치면 그 축은 만들어만 두고 아무도 안 부르는 상태가 된다.
+        "active_hours",
     ]
 
 

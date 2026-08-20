@@ -122,6 +122,16 @@ _CPU_QUERY = (
 )
 
 
+# Windows Update 활성 시간이 **반드시 덮어야** 하는 구간 (2026-08-20 F-6).
+# 기동 창 시작(08:15)보다 앞서고 장후 배치 완료(15:45~)보다 뒤여야 하므로 08~16시로 잡는다.
+ACTIVE_HOURS_REQUIRED_START = 8
+ACTIVE_HOURS_REQUIRED_END = 16
+
+# `ActiveHoursStart-ActiveHoursEnd` 형태만 받는다 — 로케일 문장은 안 읽는다
+# (`_HEX_TOKEN`이 powercfg 출력에서 쓰는 것과 같은 회피법).
+_ACTIVE_HOURS_PATTERN = re.compile(r"^(\d{1,2})-(\d{1,2})$", re.MULTILINE)
+
+
 @dataclass
 class HostCheck:
     """호스트 항목 1개. `available=False`면 `ok`는 판정이 아니라 **미판정**이다."""
@@ -204,6 +214,74 @@ def check_power_plan(*, runner=subprocess.run) -> HostCheck:
             "AC 절전 없음"
             if minutes == 0
             else f"AC {minutes}분 후 절전 — 무인 운영 중 잠들면 그 구간은 백필 없이 영원히 빈다"
+        ),
+    )
+
+
+_ACTIVE_HOURS_QUERY = (
+    "$k='HKLM:\\SOFTWARE\\Microsoft\\WindowsUpdate\\UX\\Settings'; "
+    "$p=Get-ItemProperty -Path $k -ErrorAction Stop; "
+    "Write-Output ([string]$p.ActiveHoursStart + '-' + [string]$p.ActiveHoursEnd)"
+)
+
+
+def check_active_hours(*, runner=subprocess.run) -> HostCheck:
+    """Windows Update **활성 시간** — 이 구간 밖에서는 OS가 재부팅을 밀어붙인다.
+
+    ## 왜 호스트 위생 항목인가
+
+    2026-08-10에 오전 38분이 사라졌고, 그 뒤로 이 저장소는 「관측 공백의 원인」을 계속 쫓았다.
+    원인 후보 중 사람이 **설정 하나로 막을 수 있는** 것이 이것이다 — 활성 시간이 거래 시간을
+    덮지 않으면 Windows Update가 장중에 재부팅을 걸 수 있고, 그 구간의 틱·수급·옵션체인은
+    소급 경로가 없다.
+
+    그런데 이 값은 `configs/instance.yaml`에 안 적힌다(SYSTEM.md §4-6 "인스턴스 차이는 그
+    파일뿐"의 사각지대다 — `check_power_plan`이 절전을 재는 것과 같은 이유).
+
+    **기동은 막지 않는다.** 레지스트리 접근이 실패해도 `available=False`(미판정)로 두고
+    `ok=True`를 유지한다 — 관측 항목 하나가 그날 수집을 통째로 포기시키면 본말전도다
+    (`check_host` docstring의 원칙).
+
+    판정 기준: 거래일 기동 창~장 마감(08:00~16:00)을 **덮어야** ok. 그보다 좁으면 그 바깥
+    구간에 재부팅이 걸릴 수 있다는 뜻이라 detail에 그 사실을 적는다.
+    """
+    if sys.platform != "win32":
+        return HostCheck("active_hours", available=False, ok=True, detail="Windows 전용 — 건너뜀")
+    try:
+        result = runner(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _ACTIVE_HOURS_QUERY],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except Exception as exc:  # noqa: BLE001 — 못 재는 것과 정상은 다르다
+        return HostCheck(
+            "active_hours", available=False, ok=True, detail=f"조회 실패({type(exc).__name__})"
+        )
+
+    raw = (result.stdout or "").strip()
+    match = _ACTIVE_HOURS_PATTERN.search(raw)
+    if result.returncode != 0 or match is None:
+        return HostCheck(
+            "active_hours", available=False, ok=True, detail="조회 실패(레지스트리 값 없음)"
+        )
+    start, end = int(match.group(1)), int(match.group(2))
+    covers = start <= ACTIVE_HOURS_REQUIRED_START and end >= ACTIVE_HOURS_REQUIRED_END
+    text = f"{start:02d}:00~{end:02d}:00"
+    return HostCheck(
+        "active_hours",
+        available=True,
+        ok=covers,
+        detail=(
+            text
+            if covers
+            else (
+                f"{text} — 거래 구간"
+                f"({ACTIVE_HOURS_REQUIRED_START:02d}:00~{ACTIVE_HOURS_REQUIRED_END:02d}:00)을"
+                " 안 덮는다. 그 바깥에서 Windows Update 재부팅이 걸릴 수 있다"
+            )
         ),
     )
 
@@ -558,5 +636,6 @@ def collect(
             check_cpu_contention(runner=runner, project_root=project_root),
             check_boot_recovery(runner=runner),
             check_schedule_drift(runner=runner),
+            check_active_hours(runner=runner),
         ]
     )
