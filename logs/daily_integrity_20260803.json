@@ -1,0 +1,98 @@
+{
+  "date": "2026-08-03",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 410,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 0,
+      "longest_gap_minutes": 0,
+      "gaps": []
+    }
+  ],
+  "restarts": 1,
+  "restarts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:35:09"
+    ],
+    "g2_paper": [
+      "08:36:14"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.0165,
+      "samples": 41
+    },
+    "15m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.0165,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.0165,
+      "samples": 409
+    },
+    "30m": {
+      "median": 0.0496,
+      "min": 0.0496,
+      "last": 0.0496,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.0165,
+      "samples": 136
+    },
+    "5m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.0165,
+      "samples": 81
+    }
+  },
+  "log_level_counts": {
+    "INFO": 13,
+    "DEBUG": 708,
+    "WARNING": 2
+  },
+  "tag_counts": {
+    "SessionStart": 2,
+    "FeatureWarmStart": 1,
+    "CollectorFirstTick": 1,
+    "FeaturePublish": 708,
+    "CommandCenterUIDown": 2,
+    "CommandCenterUIRestarted": 2,
+    "ArchiveCompacted": 6,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 2,
+    "details": [
+      "14:20:18 _polars_runtime.pyd c0000005 +0x00000000083973c7",
+      "11:25:18 _polars_runtime.pyd c0000005 +0x00000000083973c7"
+    ]
+  },
+  "breaches": [
+    "네이티브 크래시 2건"
+  ]
+}

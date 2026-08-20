@@ -42,8 +42,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Mapping, Sequence
 
 # 공백의 원인으로 인용할 Windows 시스템 이벤트.
@@ -90,15 +91,33 @@ class ObservationGap:
     # 추정했으면 False(그 경우 실제 공백은 이보다 **짧다**).
     exact: bool
     cause: str = "원인 불명"
+    # 이 원인을 **누가** 말했나 (2026-08-19 F-6).
+    #
+    #   auto        호스트 이벤트로 기계가 특정했다 — 또는 특정 못 했다("원인 불명")
+    #   unresolved  자동 판정이 원인을 못 찾았고 사람이 적어 둔 것도 없다
+    #   human       `configs/incident_causes.yaml`에 사람이 근거와 함께 적었다
+    #
+    # 2026-08-19에 사람은 12:14에 원인을 확정(Windows Update)했는데 산출물은 15:45까지
+    # "원인 불명"으로 봉인했다. 두 앎이 만나는 자리가 없었다.
+    cause_source: str = "auto"
+    # 사람이 적은 근거 문서 — `cause_source == "human"`일 때만 채워진다.
+    evidence: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
+    def model_replace(self, **changes: object) -> "ObservationGap":
+        """일부 필드만 바꾼 새 값 — 이 dataclass는 변경 가능하지만 교체로 다룬다."""
+        return replace(self, **changes)  # type: ignore[arg-type]
+
     def describe(self) -> str:
         bound = "" if self.exact else " 이하"
+        # 사람이 적은 원인은 **근거와 함께** 읽혀야 한다 — 출처 없는 단정은 자동 판정보다
+        # 신뢰도가 낮다(`configs/incident_causes.yaml` 상단 주석).
+        tail = f" (사람 확정 · {self.evidence})" if self.cause_source == "human" else ""
         return (
             f"{self.process}: {self.from_kst}~{self.to_kst} "
-            f"{self.minutes:.0f}분{bound} 관측 공백 — {self.cause}"
+            f"{self.minutes:.0f}분{bound} 관측 공백 — {self.cause}{tail}"
         )
 
 
@@ -313,6 +332,98 @@ def find_gaps(
                 )
             )
     return gaps
+
+
+DEFAULT_CAUSES_PATH = Path("configs") / "incident_causes.yaml"
+
+# 사람이 적은 시각과 리포트가 잰 시각이 이만큼 안쪽이면 같은 공백으로 본다.
+# 로그가 갱신되면 추정 시각이 몇 분 움직일 수 있는데, 그때마다 짝이 끊기면 사람이 매번
+# 파일을 고쳐야 한다 — 그러면 아무도 안 고친다.
+_CAUSE_MATCH_TOLERANCE_MINUTES = 5.0
+
+
+def apply_known_causes(
+    day: date, gaps: Sequence[ObservationGap], *, path: Path | None = None
+) -> list[ObservationGap]:
+    """사람이 확정한 원인을 공백에 붙인다 (2026-08-19 F-6, `configs/incident_causes.yaml`).
+
+    ## 왜 필요한가
+
+    2026-08-19에 두 프로세스가 세 시간 가까이 사라졌고, 호스트 이벤트 로그엔 그 시각
+    부근에 아무것도 없었다(05:52 부팅 3건뿐). 그래서 리포트는 두 건 다 *"원인 불명 —
+    호스트 종료 이벤트 없음"* 으로 봉인했다. 그런데 그날 12:14에 사람이 조사를 끝내
+    Windows Update로 원인을 확정해 딥다이브 문서에 적어 두었다 — **두 앎이 만나는 자리가
+    없었다.**
+
+    ## 자동 판정이 이긴다
+
+    `_cause_for()`가 호스트 이벤트로 원인을 특정했으면 그걸 덮지 않는다. 기계가 본 증거가
+    사람의 기억보다 강하고, 무엇보다 이 파일이 자동 판정을 가리기 시작하면 자동 판정이
+    틀렸을 때 아무도 모른다. 이 통로는 **자동이 침묵한 자리**만 채운다.
+
+    실패 조건: 없다. 파일이 없거나 못 읽으면 원본을 그대로 돌려준다 — 보조 입력이 리포트
+              산출을 막으면 본말전도다(`ops/session_guard`류와 같은 원칙).
+    """
+    entries = _load_causes(path or DEFAULT_CAUSES_PATH, day)
+    if not entries:
+        return [g.model_replace(cause_source="unresolved") if _unresolved(g) else g for g in gaps]
+
+    out: list[ObservationGap] = []
+    for gap in gaps:
+        if not _unresolved(gap):
+            out.append(gap)  # 기계가 이미 원인을 특정했다 — 덮지 않는다(위 docstring)
+            continue
+        match = _match(day, gap, entries)
+        if match is None:
+            out.append(gap.model_replace(cause_source="unresolved"))
+            continue
+        out.append(
+            gap.model_replace(
+                cause=str(match.get("cause", "")),
+                cause_source="human",
+                evidence=str(match.get("evidence", "")),
+            )
+        )
+    return out
+
+
+def _unresolved(gap: ObservationGap) -> bool:
+    """자동 판정이 원인을 못 찾았는가 — `_cause_for()`가 내는 두 문장으로 판정한다."""
+    return gap.cause.startswith("원인 불명")
+
+
+def _load_causes(path: Path, day: date) -> list[dict]:
+    try:
+        import yaml
+
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, ImportError):
+        return []
+    entries = payload.get("incidents")
+    if not isinstance(entries, list):
+        return []
+    stamp = day.isoformat()
+    return [e for e in entries if isinstance(e, dict) and str(e.get("date", "")).strip() == stamp]
+
+
+def _match(day: date, gap: ObservationGap, entries: Sequence[dict]) -> dict | None:
+    """같은 프로세스 · 시각이 허용 오차 안 — 가장 가까운 항목."""
+    target = _to_dt(day, gap.from_kst)
+    if target is None:
+        return None
+    best: tuple[float, dict] | None = None
+    for entry in entries:
+        if str(entry.get("process", "")) != gap.process:
+            continue
+        moment = _to_dt(day, str(entry.get("from_kst", "")))
+        if moment is None:
+            continue
+        distance = abs((moment - target).total_seconds()) / 60.0
+        if distance > _CAUSE_MATCH_TOLERANCE_MINUTES:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, entry)
+    return None if best is None else best[1]
 
 
 def parse_ui_starts(log_text: str) -> list[str]:

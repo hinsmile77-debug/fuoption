@@ -1,0 +1,118 @@
+{
+  "date": "2026-07-30",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 409,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 1,
+      "longest_gap_minutes": 1,
+      "gaps": [
+        [
+          "12:11",
+          "12:13",
+          1
+        ]
+      ]
+    }
+  ],
+  "restarts": 4,
+  "restarts_by_process": {
+    "l1_daily": 3,
+    "g2_paper": 4
+  },
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:35:10",
+      "12:12:58",
+      "14:30:09"
+    ],
+    "g2_paper": [
+      "08:36:15",
+      "12:13:37",
+      "12:30:13",
+      "14:30:54"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.4835,
+      "min": 0.0248,
+      "last": 0.0248,
+      "samples": 40
+    },
+    "15m": {
+      "median": 0.3719,
+      "min": 0.0579,
+      "last": 0.0579,
+      "samples": 26
+    },
+    "1m": {
+      "median": 0.0248,
+      "min": 0.0248,
+      "last": 0.0248,
+      "samples": 408
+    },
+    "30m": {
+      "median": 0.6942,
+      "min": 0.3471,
+      "last": 0.3471,
+      "samples": 13
+    },
+    "3m": {
+      "median": 0.0579,
+      "min": 0.0248,
+      "last": 0.0248,
+      "samples": 135
+    },
+    "5m": {
+      "median": 0.3595,
+      "min": 0.0248,
+      "last": 0.0248,
+      "samples": 80
+    }
+  },
+  "log_level_counts": {
+    "INFO": 24,
+    "DEBUG": 702,
+    "WARNING": 6,
+    "ERROR": 1
+  },
+  "tag_counts": {
+    "SessionStart": 7,
+    "FeaturePublish": 702,
+    "FeatureWarmStart": 2,
+    "CollectorFirstTick": 2,
+    "CommandCenterUIDown": 6,
+    "CommandCenterUIRestarted": 6,
+    "CommandCenterUIRestartGaveUp": 1,
+    "ArchiveCompacted": 6,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 10,
+    "details": [
+      "15:07:56 _polars_runtime.pyd",
+      "12:50:37 _polars_runtime.pyd",
+      "12:45:22 _polars_runtime.pyd",
+      "12:39:49 _polars_runtime.pyd",
+      "12:33:44 _polars_runtime.pyd",
+      "12:27:18 _polars_runtime.pyd",
+      "12:20:25 _polars_runtime.pyd",
+      "10:19:41 _polars_runtime.pyd",
+      "10:01:21 _polars_runtime.pyd",
+      "08:57:05 _polars_runtime.pyd"
+    ]
+  },
+  "breaches": [
+    "g2_paper 재기동 4회 > 임계 1회",
+    "l1_daily 재기동 3회 > 임계 1회",
+    "네이티브 크래시 10건"
+  ]
+}

@@ -1,0 +1,269 @@
+{
+  "date": "2026-08-05",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 408,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 2,
+      "longest_gap_minutes": 2,
+      "gaps": [
+        [
+          "14:10",
+          "14:13",
+          2
+        ]
+      ]
+    }
+  ],
+  "restarts": 1,
+  "starts_by_process": {
+    "l1_daily": 2,
+    "g2_paper": 2
+  },
+  "restarts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:35:09",
+      "14:12:53"
+    ],
+    "g2_paper": [
+      "08:36:11",
+      "14:13:26"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0083,
+      "samples": 41
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0083,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0083,
+      "samples": 407
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0083,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0083,
+      "samples": 135
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0083,
+      "samples": 81
+    }
+  },
+  "log_level_counts": {
+    "INFO": 54,
+    "WARNING": 190,
+    "DEBUG": 705,
+    "ERROR": 1
+  },
+  "tag_counts": {
+    "SessionStart": 4,
+    "CrashForensicsArmed": 4,
+    "FeatureWarmStart": 2,
+    "OptionChainSkipped": 5,
+    "CollectorFirstTick": 2,
+    "ClockSkewMeasured": 2,
+    "FeaturePublish": 705,
+    "ComposerLateBarDropped": 103,
+    "OptionChainPollError": 69,
+    "InvestorFlowPollError": 3,
+    "OptionChainPollRetried": 25,
+    "DailyCloseBarNotDrained": 1,
+    "FeatureHealthDegenerate": 1,
+    "FeatureHealthSummary": 5,
+    "TickDeliveryLatency": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "IntegrityReportGenerated": 1,
+    "IntegrityThresholdBreached": 9,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 103,
+  "clock_skew_seconds": -1.106,
+  "delivery_latency": {
+    "p50": 0.5065,
+    "p90": 0.9208,
+    "p99": 1.0239,
+    "max": 1.2973,
+    "samples": 9115.0
+  },
+  "session_git_shas": [
+    "2d61f55",
+    "bb60f19"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [
+        "px_gap_open"
+      ],
+      "constant": []
+    },
+    "3m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "5m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "10m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": []
+    }
+  },
+  "volume_check": {
+    "date": "2026-08-05",
+    "symbol": "A05608",
+    "ratio": 0.9997497413994461,
+    "common_minutes": 408,
+    "archived_volume": 119846,
+    "official_volume": 119876,
+    "warn_ratio": 0.95,
+    "ok": true
+  },
+  "vol_axis": {
+    "date": "2026-08-05",
+    "symbol": "A05608",
+    "horizons": {
+      "5m": {
+        "samples": 1529,
+        "window_days": 20,
+        "baseline_ic": 0.38706017468679615,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      },
+      "15m": {
+        "samples": 505,
+        "window_days": 20,
+        "baseline_ic": 0.32710688741732347,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      },
+      "30m": {
+        "samples": 249,
+        "window_days": 20,
+        "baseline_ic": 0.09528099494753206,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 543.2GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 15% · 외부 파이썬 0개"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [],
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 107255,
+  "breaches": [
+    "g2_paper 재기동 1회 > 임계 0회",
+    "l1_daily 재기동 1회 > 임계 0회",
+    "상위 Horizon 버킷에서 1분봉 103개 유실 — 합성봉이 그만큼 짧게 확정됐다(장 종료 후 `run_recompose.py`로 재합성 필요, 원인은 수집 경로에 있다)",
+    "1m 피처 1개가 세션 내내 죽어 있었다(px_gap_open) — 모델에 죽은 입력이 들어간다"
+  ]
+}

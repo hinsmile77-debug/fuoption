@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "msg_id": "9834ea0d8adf4567b64f21d65de3fbbd",
+  "ts_utc": "2026-07-29T06:35:00.023405Z",
+  "instance_id": "unset",
+  "date": "2026-07-29",
+  "symbol": "A05608",
+  "n_trades": 1,
+  "win_rate": 0.0,
+  "profit_factor": 0.0,
+  "sharpe": 0.0,
+  "max_drawdown": 0.0,
+  "n_shadow_bundles": 0,
+  "slippage_predicted_ticks": 1.0,
+  "slippage_realized_ticks": 0.0
+}

@@ -2,8 +2,18 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      # `logs/`는 **기계가 쓴 산출물**이라 제외한다 (2026-08-20).
+      #
+      # 2026-08-19 .gitignore 철회로 지표 JSON 55종이 추적 대상이 됐는데, 그 파일들은
+      # `json.dumps()`가 끝 개행 없이 쓴다. 훅이 개행을 붙이면 **다음 장후 배치가 다시
+      # 떼어내고**, 그러면 매일 56파일이 「수정됨」으로 뜬다. 그 잡음이 진짜 미커밋 변경을
+      # 가린다 — 2026-08-19 장전 1-1이 CRLF 잡음 87파일로 지적한 것과 같은 형태다.
+      #
+      # 이 훅들은 사람이 쓰는 소스의 위생 도구다. 산출물의 바이트를 고치는 자리가 아니다.
       - id: trailing-whitespace
+        exclude: ^logs/
       - id: end-of-file-fixer
+        exclude: ^logs/
       - id: check-yaml
       - id: check-added-large-files
       - id: check-merge-conflict

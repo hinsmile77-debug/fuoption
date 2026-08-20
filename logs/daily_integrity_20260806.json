@@ -1,0 +1,487 @@
+{
+  "date": "2026-08-06",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 389,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 21,
+      "longest_gap_minutes": 21,
+      "gaps": [
+        [
+          "10:03",
+          "10:25",
+          21
+        ]
+      ]
+    }
+  ],
+  "restarts": 1,
+  "starts_by_process": {
+    "l1_daily": 2,
+    "g2_paper": 2
+  },
+  "restarts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:35:23",
+      "10:25:31"
+    ],
+    "g2_paper": [
+      "08:36:16",
+      "10:26:05"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 39
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 26
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 388
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 129
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 76
+    }
+  },
+  "log_level_counts": {
+    "INFO": 72,
+    "WARNING": 22,
+    "DEBUG": 672,
+    "ERROR": 3
+  },
+  "tag_counts": {
+    "SessionStart": 4,
+    "CrashForensicsArmed": 4,
+    "FeatureWarmStart": 2,
+    "InvestorFlowPollError": 4,
+    "CollectorFirstTick": 2,
+    "ClockSkewMeasured": 2,
+    "FeaturePublish": 672,
+    "OptionChainPollRetried": 43,
+    "DailyCloseBarHandedOff": 1,
+    "FeatureHealthDegenerate": 4,
+    "FeatureHealthSummary": 2,
+    "TickDeliveryLatency": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "IntegrityReportGenerated": 1,
+    "IntegrityThresholdBreached": 13,
+    "FixVerificationPassed": 3,
+    "FixVerificationRecurred": 3,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 0,
+  "clock_skew_seconds": -0.445,
+  "delivery_latency": {
+    "p50": 0.5121,
+    "p90": 0.9312,
+    "p99": 1.0322,
+    "max": 1.1297,
+    "samples": 20000.0
+  },
+  "session_git_shas": [
+    "63724e9"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [],
+      "constant": [
+        "px_gap_open"
+      ]
+    },
+    "3m": {
+      "always_nan": [],
+      "constant": [
+        "px_ema_cross_20",
+        "px_ema_cross_60",
+        "px_gap_open"
+      ]
+    },
+    "5m": {
+      "always_nan": [],
+      "constant": [
+        "px_ema_cross_20",
+        "px_gap_open"
+      ]
+    },
+    "10m": {
+      "always_nan": [],
+      "constant": [
+        "px_breakout_60",
+        "px_ema_cross_20",
+        "px_ema_cross_5",
+        "px_gap_open"
+      ]
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": []
+    }
+  },
+  "volume_check": {
+    "date": "2026-08-06",
+    "symbol": "A05608",
+    "ratio": 0.9973957867229869,
+    "common_minutes": 389,
+    "archived_volume": 111451,
+    "official_volume": 111742,
+    "warn_ratio": 0.95,
+    "ok": true
+  },
+  "vol_axis": {
+    "date": "2026-08-06",
+    "symbol": "A05608",
+    "horizons": {
+      "5m": {
+        "samples": 1607,
+        "window_days": 20,
+        "baseline_ic": 0.3854180842744979,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      },
+      "15m": {
+        "samples": 531,
+        "window_days": 20,
+        "baseline_ic": 0.34032496256330635,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      },
+      "30m": {
+        "samples": 262,
+        "window_days": 20,
+        "baseline_ic": 0.08760660449968323,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 546.9GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 31% · 외부 파이썬 0개"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [],
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [
+      {
+        "process": "ui",
+        "kind": "access violation",
+        "thread_count": 10,
+        "crashing_frames": [],
+        "survived": false,
+        "after_kst": "08:35:29"
+      },
+      {
+        "process": "l1_daily",
+        "kind": "access violation",
+        "thread_count": 3,
+        "crashing_frames": [],
+        "survived": true,
+        "after_kst": "08:36:01"
+      },
+      {
+        "process": "g2_paper",
+        "kind": "access violation",
+        "thread_count": 2,
+        "crashing_frames": [],
+        "survived": false,
+        "after_kst": "08:36:16"
+      }
+    ],
+    "findings": [
+      "덤프 뒤 재기동이 뒤따른 프로세스(g2_paper, ui)가 있는데 이벤트로그 크래시는 0건 — 스스로 죽은 것이 아니라 밖에서 종료됐을 수 있다(호스트 종료·워치독·수동 kill). 관측 공백 원인과 대조할 것"
+    ]
+  },
+  "tick_rows": 99505,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 309,
+      "measured": true,
+      "first_kst": "10:26",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 110.6,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "10:26~15:34 · 카덴스 1분"
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 67,
+      "measured": true,
+      "first_kst": "10:30",
+      "last_kst": "15:30",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 114.6,
+      "tail_gap_minutes": 5.0,
+      "longest_gap_minutes": 10.0,
+      "gaps": [],
+      "detail": "10:30~15:30 · 카덴스 10분"
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 76,
+      "measured": true,
+      "first_kst": "10:31",
+      "last_kst": "15:32",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 115.6,
+      "tail_gap_minutes": 3.0,
+      "longest_gap_minutes": 9.0,
+      "gaps": [],
+      "detail": "10:31~15:32 · 카덴스 10분"
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 138,
+      "measured": true,
+      "first_kst": "10:28",
+      "last_kst": "15:34",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 112.6,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 4.0,
+      "gaps": [],
+      "detail": "10:28~15:34 · 카덴스 5분"
+    },
+    {
+      "name": "ticks",
+      "rows": 389,
+      "measured": true,
+      "first_kst": "08:45",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 9.6,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 22.0,
+      "gaps": [
+        [
+          "10:03",
+          "10:25",
+          22
+        ]
+      ],
+      "detail": "08:45~15:34 · 카덴스 1분"
+    }
+  ],
+  "series_findings": [
+    "flow_intraday/K2I: 세션 시작 후 111분간 적재 없음(첫 행 10:26) — 그 구간은 소급 불가",
+    "option_chain/regular: 세션 시작 후 115분간 적재 없음(첫 행 10:30) — 그 구간은 소급 불가",
+    "option_chain/weekly_mon: 세션 시작 후 116분간 적재 없음(첫 행 10:31) — 그 구간은 소급 불가",
+    "option_chain/weekly_thu: 세션 시작 후 113분간 적재 없음(첫 행 10:28) — 그 구간은 소급 불가",
+    "ticks: 10:03~10:25 22분 구멍 — 그 구간은 소급 불가"
+  ],
+  "observation_gaps": [
+    {
+      "process": "g2_paper",
+      "from_kst": "10:04:31",
+      "to_kst": "10:26:05",
+      "minutes": 21.6,
+      "exact": true,
+      "cause": "호스트 OS 종료 (RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음))"
+    },
+    {
+      "process": "l1_daily",
+      "from_kst": "10:04:31",
+      "to_kst": "10:25:31",
+      "minutes": 21.0,
+      "exact": true,
+      "cause": "호스트 OS 종료 (RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음))"
+    },
+    {
+      "process": "ui",
+      "from_kst": "10:04:31",
+      "to_kst": "10:25:36",
+      "minutes": 21.1,
+      "exact": true,
+      "cause": "호스트 OS 종료 (RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음))"
+    }
+  ],
+  "host_events": [
+    {
+      "event_id": 12,
+      "at_kst": "07:20:39",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "07:20:40",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "07:20:47",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 1074,
+      "at_kst": "10:03:49",
+      "kind": "shutdown",
+      "detail": "RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음)"
+    },
+    {
+      "event_id": 6006,
+      "at_kst": "10:04:25",
+      "kind": "shutdown",
+      "detail": ""
+    },
+    {
+      "event_id": 13,
+      "at_kst": "10:04:31",
+      "kind": "shutdown",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "10:05:03",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "10:05:04",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "10:05:12",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [
+    "1분봉 결손 21분 > 임계 5분",
+    "최장 공백 21분 > 임계 3분",
+    "g2_paper 재기동 1회 > 임계 0회",
+    "l1_daily 재기동 1회 > 임계 0회",
+    "10m 피처 4개가 세션 내내 죽어 있었다(px_breakout_60, px_ema_cross_20, px_ema_cross_5, px_gap_open) — 모델에 죽은 입력이 들어간다",
+    "1m 피처 1개가 세션 내내 죽어 있었다(px_gap_open) — 모델에 죽은 입력이 들어간다",
+    "3m 피처 3개가 세션 내내 죽어 있었다(px_ema_cross_20, px_ema_cross_60, px_gap_open) — 모델에 죽은 입력이 들어간다",
+    "5m 피처 2개가 세션 내내 죽어 있었다(px_ema_cross_20, px_gap_open) — 모델에 죽은 입력이 들어간다",
+    "덤프 뒤 재기동이 뒤따른 프로세스(g2_paper, ui)가 있는데 이벤트로그 크래시는 0건 — 스스로 죽은 것이 아니라 밖에서 종료됐을 수 있다(호스트 종료·워치독·수동 kill). 관측 공백 원인과 대조할 것",
+    "flow_intraday/K2I: 세션 시작 후 111분간 적재 없음(첫 행 10:26) — 그 구간은 소급 불가",
+    "option_chain/regular: 세션 시작 후 115분간 적재 없음(첫 행 10:30) — 그 구간은 소급 불가",
+    "option_chain/weekly_mon: 세션 시작 후 116분간 적재 없음(첫 행 10:31) — 그 구간은 소급 불가",
+    "option_chain/weekly_thu: 세션 시작 후 113분간 적재 없음(첫 행 10:28) — 그 구간은 소급 불가",
+    "ticks: 10:03~10:25 22분 구멍 — 그 구간은 소급 불가",
+    "g2_paper: 10:04:31~10:26:05 22분 관측 공백 — 호스트 OS 종료 (RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음))",
+    "l1_daily: 10:04:31~10:25:31 21분 관측 공백 — 호스트 OS 종료 (RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음))",
+    "ui: 10:04:31~10:25:36 21분 관측 공백 — 호스트 OS 종료 (RuntimeBroker.exe / 다시 시작 / 기타(계획되지 않음))"
+  ]
+}

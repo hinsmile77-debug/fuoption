@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "msg_id": "0cb25f7a33804585a6a227857403a076",
+  "ts_utc": "2026-07-30T06:35:00.027107Z",
+  "instance_id": "messiah-dev-01",
+  "date": "2026-07-30",
+  "symbol": "A05608",
+  "n_trades": 2,
+  "win_rate": 0.0,
+  "profit_factor": 0.0,
+  "sharpe": 0.0,
+  "max_drawdown": 0.0,
+  "n_shadow_bundles": 0,
+  "slippage_predicted_ticks": 1.0,
+  "slippage_realized_ticks": 0.0
+}

@@ -1,0 +1,719 @@
+{
+  "date": "2026-08-19",
+  "symbol": "A05609",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 251,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 159,
+      "longest_gap_minutes": 159,
+      "gaps": [
+        [
+          "09:49",
+          "12:29",
+          159
+        ]
+      ],
+      "tail_gap_minutes": 0
+    }
+  ],
+  "restarts": 1,
+  "starts_by_process": {
+    "l1_daily": 2,
+    "g2_paper": 2
+  },
+  "restarts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:20:29",
+      "12:29:23"
+    ],
+    "g2_paper": [
+      "08:25:34",
+      "12:30:14"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 26
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 18
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 250
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 10
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 84
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 50
+    }
+  },
+  "log_level_counts": {
+    "INFO": 97,
+    "DEBUG": 548,
+    "ERROR": 2,
+    "WARNING": 20
+  },
+  "tag_counts": {
+    "SessionStart": 6,
+    "CrashForensicsArmed": 6,
+    "LaunchWindowRefused": 2,
+    "FeatureWarmStart": 2,
+    "OptionChainPolled": 110,
+    "InvestorFlowPollRetried": 9,
+    "CollectorFirstTick": 2,
+    "ClockSkewMeasured": 2,
+    "FeaturePublish": 438,
+    "CollectorProcessingError": 1,
+    "CommandCenterUIPortConfirmed": 3,
+    "ComposerBucketsRestored": 1,
+    "CollectorFirstTickOverdue": 1,
+    "InvestorFlowArchiveRestored": 1,
+    "OptionChainPollError": 1,
+    "OptionChainArchiveRestored": 3,
+    "OptionChainPollRetried": 3,
+    "DailyCloseBarHandedOff": 1,
+    "FeatureHealthSummary": 3,
+    "FeatureHealthNotJudged": 3,
+    "TickDeliveryLatency": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "Recomposed": 1,
+    "IntegrityReportGenerated": 1,
+    "IntegrityThresholdBreached": 18,
+    "SessionEnd": 2,
+    "RegimeWarmStart": 2,
+    "RegimeClassified": 9,
+    "MetaGateEvaluated": 9,
+    "AggregatorNoContribution": 9,
+    "DecisionEmitted": 9,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 0,
+  "clock_skew_seconds": -0.988,
+  "delivery_latency": {
+    "p50": 0.5071,
+    "p90": 0.9253,
+    "p99": 1.0308,
+    "max": 4.0554,
+    "samples": 20000.0
+  },
+  "session_git_shas": [
+    "40e9968",
+    "50eff6c"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 185
+    },
+    "3m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 63
+    },
+    "5m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 37
+    },
+    "10m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 19,
+      "rolling_judged": true,
+      "rolling_days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "rolling_samples": 60
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 14,
+      "rolling_judged": true,
+      "rolling_days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "rolling_samples": 41
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 8
+    }
+  },
+  "allowed_constant_values": {
+    "ev_dow_fri": 0.0,
+    "ev_dow_mon": 0.0,
+    "ev_dow_thu": 0.0,
+    "ev_dow_tue": 0.0,
+    "ev_dow_wed": 1.0,
+    "ev_dte_fut": 16.0,
+    "ev_dte_opt_m": 16.0,
+    "ev_dte_opt_w": 1.0,
+    "ev_expiry_flag": 0.0,
+    "ev_holiday_adj": 0.0,
+    "ev_rollover_win": 0.0,
+    "px_gap_open": -0.05121067365796244
+  },
+  "volume_check": {
+    "date": "2026-08-19",
+    "symbol": "A05609",
+    "ratio": 0.9989758295780418,
+    "common_minutes": 251,
+    "archived_volume": 78032,
+    "official_volume": 78112,
+    "missing_minutes": 159,
+    "head_missing_minutes": 0,
+    "middle_missing_minutes": 159,
+    "tail_missing_minutes": 0,
+    "warn_ratio": 0.95,
+    "missing_minutes_limit": 20,
+    "head_missing_minutes_limit": 0,
+    "ok": false
+  },
+  "vol_axis": {
+    "date": "2026-08-19",
+    "symbol": "A05609",
+    "horizons": {
+      "5m": {
+        "samples": 208,
+        "window_days": 20,
+        "baseline_ic": 0.21719794317048322,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "vl_atr_rel_5"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "15m": {
+        "samples": 65,
+        "window_days": 20,
+        "baseline_ic": 0.3645541958041958,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "30m": {
+        "samples": 29,
+        "window_days": 20,
+        "baseline_ic": null,
+        "baseline_used": [],
+        "beats_baseline": [],
+        "measurable": false,
+        "absent_features": [],
+        "undefined_after_control": []
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 544.6GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 14% · 외부 파이썬 2개(누적 CPU 9567초)"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      },
+      {
+        "name": "schedule_drift",
+        "available": true,
+        "ok": true,
+        "detail": "정본 일치 Messiah=08:20, Messiah-G2=08:25 (기동 창 08:15~)"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [
+    "30m 피처 퇴화 판정(2거래일 누적 22 < 최소 30)"
+  ],
+  "unmeasured_kinds": {
+    "accruing": [
+      "30m 피처 퇴화 판정(2거래일 누적 22 < 최소 30)"
+    ],
+    "failed": [],
+    "absent": []
+  },
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 70817,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 275,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 63.2,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 160.0,
+      "gaps": [
+        [
+          "09:50",
+          "12:30",
+          160
+        ]
+      ],
+      "detail": "08:21~15:34 · 카덴스 1분",
+      "window_start_kst": "08:20",
+      "expected_legs": null,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 58,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 63.0,
+      "expectation_note": "",
+      "first_kst": "08:25",
+      "last_kst": "15:31",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 5.0,
+      "tail_gap_minutes": 4.0,
+      "longest_gap_minutes": 165.0,
+      "gaps": [
+        [
+          "09:45",
+          "12:30",
+          165
+        ]
+      ],
+      "detail": "08:25~15:31 · 카덴스 5분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": [
+        [
+          "12:30",
+          41
+        ]
+      ]
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 56,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 70.8,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:32",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 3.0,
+      "longest_gap_minutes": 169.0,
+      "gaps": [
+        [
+          "09:42",
+          "12:31",
+          169
+        ]
+      ],
+      "detail": "08:21~15:32 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 56,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 70.8,
+      "expectation_note": "",
+      "first_kst": "08:23",
+      "last_kst": "15:34",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 3.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 169.0,
+      "gaps": [
+        [
+          "09:44",
+          "12:33",
+          169
+        ]
+      ],
+      "detail": "08:23~15:34 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "ticks",
+      "rows": 251,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 61.2,
+      "expectation_note": "",
+      "first_kst": "08:45",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 160.0,
+      "gaps": [
+        [
+          "09:49",
+          "12:29",
+          160
+        ]
+      ],
+      "detail": "08:45~15:34 · 카덴스 1분",
+      "window_start_kst": "08:45",
+      "expected_legs": null,
+      "short_cycles": []
+    }
+  ],
+  "series_findings": [
+    "flow_intraday/K2I: 세션 커버리지 63% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 09:50~12:30 160분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 커버리지 63% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 12:30 사이클 41/42다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 09:45~12:30 165분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 커버리지 71% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 09:42~12:31 169분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_thu: 세션 커버리지 71% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_thu: 09:44~12:33 169분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 세션 커버리지 61% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 09:49~12:29 160분 구멍 — 그 구간은 영구 소실(소급 경로 없음)"
+  ],
+  "observation_gaps": [
+    {
+      "process": "g2_paper",
+      "from_kst": "09:30:01",
+      "to_kst": "12:30:14",
+      "minutes": 180.2,
+      "exact": false,
+      "cause": "원인 불명 — 호스트 종료 이벤트 없음"
+    },
+    {
+      "process": "l1_daily",
+      "from_kst": "09:50:29",
+      "to_kst": "12:29:23",
+      "minutes": 158.9,
+      "exact": false,
+      "cause": "원인 불명 — 호스트 종료 이벤트 없음"
+    }
+  ],
+  "host_events": [
+    {
+      "event_id": 12,
+      "at_kst": "05:52:10",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "05:52:11",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "05:52:23",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [
+    "1분봉 결손 159분 > 임계 5분",
+    "최장 공백 159분 > 임계 3분",
+    "g2_paper 재기동 1회 > 임계 0회",
+    "l1_daily 재기동 1회 > 임계 0회",
+    "공식 분봉에는 있고 아카이브엔 없는 분 159분 — 수집 중단 의심(백필로 복구 가능: run_backfill.py --start 2026-08-19 --end 2026-08-19 --allow-today)",
+    "flow_intraday/K2I: 세션 커버리지 63% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 09:50~12:30 160분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 커버리지 63% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 12:30 사이클 41/42다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 09:45~12:30 165분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 커버리지 71% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 09:42~12:31 169분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_thu: 세션 커버리지 71% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_thu: 09:44~12:33 169분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 세션 커버리지 61% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 09:49~12:29 160분 구멍 — 그 구간은 영구 소실(소급 경로 없음)",
+    "g2_paper: 09:30:01~12:30:14 180분 이하 관측 공백 — 원인 불명 — 호스트 종료 이벤트 없음",
+    "l1_daily: 09:50:29~12:29:23 159분 이하 관측 공백 — 원인 불명 — 호스트 종료 이벤트 없음"
+  ],
+  "series_contract": [],
+  "abnormal_exits": [],
+  "collection_start_lag_minutes": 0.5,
+  "task_exit_codes": {
+    "exits": [
+      {
+        "task": "Messiah",
+        "at_kst": "15:35:27",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "15:34:59",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:01",
+        "code": 0,
+        "win32_code": 0
+      }
+    ],
+    "available": true,
+    "detail": "작업 3개 · 기동 6회",
+    "launches": [
+      {
+        "task": "Messiah",
+        "at_kst": "08:20:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "08:25:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah",
+        "at_kst": "12:28:51",
+        "event_id": 110,
+        "reason": "사람이 실행"
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "12:29:45",
+        "event_id": 110,
+        "reason": "사람이 실행"
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-Postmarket",
+        "at_kst": "15:45:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      }
+    ]
+  },
+  "irrecoverable_loss_minutes": 0.5,
+  "canonical_consumer_findings": [],
+  "regime_distribution": {
+    "HIGH_VOL": 3,
+    "RANGE": 6
+  },
+  "provisional": false,
+  "symbol_mismatch_suspected": false,
+  "symbol_candidates": [],
+  "verdict_surface_gaps": [],
+  "no_contribution_reasons": {
+    "blocked_by_meta": 9
+  },
+  "feature_health_rolling": [
+    {
+      "horizon": "10m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "samples": 60,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false
+    },
+    {
+      "horizon": "15m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "samples": 41,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false
+    },
+    {
+      "horizon": "1m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "samples": 594,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false
+    },
+    {
+      "horizon": "30m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "samples": 22,
+      "judged": false,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false
+    },
+    {
+      "horizon": "3m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "samples": 199,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false
+    },
+    {
+      "horizon": "5m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19"
+      ],
+      "samples": 118,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false
+    }
+  ],
+  "decision_funnel": {
+    "no_expert": 9
+  },
+  "meta_gate": {
+    "evaluations": 9,
+    "passes": 0,
+    "threshold": 0.7,
+    "p50": 0.376,
+    "p90": 0.5925,
+    "max": 0.5925
+  }
+}

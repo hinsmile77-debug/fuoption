@@ -1,0 +1,54 @@
+{
+  "date": "2026-08-13",
+  "symbol": "A05608",
+  "horizons": {
+    "5m": {
+      "samples": 1606,
+      "window_days": 20,
+      "baseline_ic": 0.38865798050905864,
+      "baseline_used": [
+        "직전RV",
+        "vl_gk_5"
+      ],
+      "beats_baseline": [
+        "ev_tod_cos",
+        "px_high_dist_5"
+      ],
+      "measurable": true,
+      "absent_features": [],
+      "undefined_after_control": []
+    },
+    "15m": {
+      "samples": 531,
+      "window_days": 20,
+      "baseline_ic": 0.3198497651167319,
+      "baseline_used": [
+        "직전RV",
+        "vl_gk_5"
+      ],
+      "beats_baseline": [
+        "ev_tod_cos",
+        "ev_close_remain"
+      ],
+      "measurable": true,
+      "absent_features": [],
+      "undefined_after_control": []
+    },
+    "30m": {
+      "samples": 262,
+      "window_days": 20,
+      "baseline_ic": 0.05534276080257262,
+      "baseline_used": [
+        "직전RV",
+        "vl_gk_5"
+      ],
+      "beats_baseline": [
+        "ev_tod_cos",
+        "ev_close_remain"
+      ],
+      "measurable": true,
+      "absent_features": [],
+      "undefined_after_control": []
+    }
+  }
+}

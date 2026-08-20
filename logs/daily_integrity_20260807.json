@@ -1,0 +1,345 @@
+{
+  "date": "2026-08-07",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 410,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 0,
+      "longest_gap_minutes": 0,
+      "gaps": [],
+      "tail_gap_minutes": 0
+    }
+  ],
+  "restarts": 0,
+  "starts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "restarts_by_process": {
+    "l1_daily": 0,
+    "g2_paper": 0
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:35:34"
+    ],
+    "g2_paper": [
+      "08:36:29"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 30
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 19
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 296
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 10
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 98
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 59
+    }
+  },
+  "log_level_counts": {
+    "INFO": 43,
+    "WARNING": 33,
+    "DEBUG": 512
+  },
+  "tag_counts": {
+    "SessionStart": 4,
+    "CrashForensicsArmed": 4,
+    "FeatureWarmStart": 1,
+    "OptionChainPollEmpty": 30,
+    "CollectorFirstTick": 2,
+    "ClockSkewMeasured": 1,
+    "FeaturePublish": 512,
+    "OptionChainPollRetried": 28,
+    "CollectorWSDisconnected": 1,
+    "CollectorWSReconnected": 1,
+    "CircuitBreakerSuspected": 1,
+    "CircuitBreakerConfirmed": 1,
+    "OrderSubmit": 1,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {
+    "CircuitBreakerSuspected": 1,
+    "CircuitBreakerConfirmed": 1
+  },
+  "data_flow_findings": [
+    "CB 확정 1회 대 해제 0회 — 1회가 해제 없이 남음(주문 게이트 잔류 정지 의심)"
+  ],
+  "horizon_findings": [],
+  "late_bar_drops": 0,
+  "clock_skew_seconds": 1.168,
+  "delivery_latency": null,
+  "session_git_shas": [
+    "ee0918c"
+  ],
+  "degenerate_features": {},
+  "volume_check": {
+    "date": "2026-08-07",
+    "symbol": "A05608",
+    "ratio": 1.0,
+    "common_minutes": 410,
+    "archived_volume": 131077,
+    "official_volume": 131077,
+    "warn_ratio": 0.95,
+    "ok": true
+  },
+  "vol_axis": {
+    "date": "2026-08-07",
+    "symbol": "A05608",
+    "horizons": {
+      "5m": {
+        "samples": 1584,
+        "window_days": 20,
+        "baseline_ic": 0.37848949280066135,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      },
+      "15m": {
+        "samples": 523,
+        "window_days": 20,
+        "baseline_ic": 0.3391458613671045,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      },
+      "30m": {
+        "samples": 258,
+        "window_days": 20,
+        "baseline_ic": 0.12842772837343464,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [],
+        "measurable": true,
+        "absent_features": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ]
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 544.9GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 13% · 외부 파이썬 0개"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [
+    "회선 수신 지연 분포(TickDeliveryLatency 로그 없음 — 1분봉 시각 확정 승격 근거)",
+    "피처 건강도(장 마감 FeatureHealth 로그 없음)"
+  ],
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 95000,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 306,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 73.0,
+      "expectation_note": "",
+      "first_kst": "08:36",
+      "last_kst": "13:41",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 0.4,
+      "tail_gap_minutes": 114.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:36~13:41 · 카덴스 1분"
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 117,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 86.1,
+      "expectation_note": "",
+      "first_kst": "08:40",
+      "last_kst": "13:40",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 4.4,
+      "tail_gap_minutes": 115.0,
+      "longest_gap_minutes": 5.0,
+      "gaps": [],
+      "detail": "08:40~13:40 · 카덴스 5분"
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 68,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 80.6,
+      "expectation_note": "",
+      "first_kst": "08:41",
+      "last_kst": "13:32",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 5.4,
+      "tail_gap_minutes": 123.0,
+      "longest_gap_minutes": 9.0,
+      "gaps": [],
+      "detail": "08:41~13:32 · 카덴스 10분"
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 0,
+      "measured": true,
+      "expected": false,
+      "coverage_pct": 100.0,
+      "expectation_note": "미상장(먼슬리 만기 주(08-13 만기) — KRX 미상장) · 08-14 재개 예정",
+      "first_kst": null,
+      "last_kst": null,
+      "cadence_minutes": null,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 0.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "미상장일이라 0행이 정상 — 미상장(먼슬리 만기 주(08-13 만기) — KRX 미상장) · 08-14 재개 예정"
+    },
+    {
+      "name": "ticks",
+      "rows": 294,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 70.1,
+      "expectation_note": "",
+      "first_kst": "08:45",
+      "last_kst": "13:38",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 9.4,
+      "tail_gap_minutes": 117.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:45~13:38 · 카덴스 1분"
+    }
+  ],
+  "series_findings": [
+    "flow_intraday/K2I: 세션 커버리지 73% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 마지막 행(13:41) 이후 114분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 커버리지 86% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 마지막 행(13:40) 이후 115분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 커버리지 81% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 마지막 행(13:32) 이후 123분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 세션 커버리지 70% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 마지막 행(13:38) 이후 117분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)"
+  ],
+  "observation_gaps": [],
+  "host_events": [
+    {
+      "event_id": 6005,
+      "at_kst": "07:21:02",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [
+    "CB 확정 1회 대 해제 0회 — 1회가 해제 없이 남음(주문 게이트 잔류 정지 의심)",
+    "flow_intraday/K2I: 세션 커버리지 73% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 마지막 행(13:41) 이후 114분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 커버리지 86% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 마지막 행(13:40) 이후 115분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 커버리지 81% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 마지막 행(13:32) 이후 123분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 세션 커버리지 70% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "ticks: 마지막 행(13:38) 이후 117분간 적재 없음 — 그 구간은 영구 소실(소급 경로 없음)"
+  ],
+  "series_contract": [
+    "option_chain/weekly_thu: 미상장(먼슬리 만기 주(08-13 만기) — KRX 미상장) · 08-14 재개 예정"
+  ],
+  "abnormal_exits": []
+}

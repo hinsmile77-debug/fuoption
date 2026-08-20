@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "msg_id": "3af9004e16b94be491f5d571e2d195f0",
+  "ts_utc": "2026-08-05T06:35:00.043558Z",
+  "instance_id": "messiah-dev-01",
+  "date": "2026-08-05",
+  "symbol": "A05608",
+  "n_return_samples": 6,
+  "win_rate": null,
+  "profit_factor": null,
+  "sharpe": null,
+  "max_drawdown": null,
+  "n_shadow_bundles": 0,
+  "slippage_predicted_ticks": 1.0,
+  "slippage_realized_ticks": null,
+  "n_fills": null,
+  "pnl_measurable": false,
+  "wiring_stage": "번들 미결선",
+  "wiring_summary": "손익 측정 단계 아님(번들 미결선) — 승률·PF·Sharpe·MDD는 자리표시자 · live 번들 없음 · shadow 0개 · 판단 0건 · 주문 0건 · 체결집계 불가"
+}

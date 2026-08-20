@@ -1,0 +1,183 @@
+{
+  "date": "2026-07-31",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 380,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 30,
+      "longest_gap_minutes": 8,
+      "gaps": [
+        [
+          "08:46",
+          "08:48",
+          1
+        ],
+        [
+          "08:48",
+          "08:52",
+          3
+        ],
+        [
+          "08:54",
+          "08:56",
+          1
+        ],
+        [
+          "09:00",
+          "09:02",
+          1
+        ],
+        [
+          "14:23",
+          "14:25",
+          1
+        ],
+        [
+          "14:30",
+          "14:32",
+          1
+        ],
+        [
+          "14:42",
+          "14:44",
+          1
+        ],
+        [
+          "14:48",
+          "14:50",
+          1
+        ],
+        [
+          "14:50",
+          "14:56",
+          5
+        ],
+        [
+          "14:56",
+          "15:00",
+          3
+        ],
+        [
+          "15:00",
+          "15:04",
+          3
+        ],
+        [
+          "15:04",
+          "15:13",
+          8
+        ],
+        [
+          "15:13",
+          "15:15",
+          1
+        ]
+      ]
+    }
+  ],
+  "restarts": 1,
+  "restarts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:35:22"
+    ],
+    "g2_paper": [
+      "08:36:18"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.157,
+      "samples": 41
+    },
+    "15m": {
+      "median": 0.0331,
+      "min": 0.0165,
+      "last": 0.0413,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.3306,
+      "samples": 379
+    },
+    "30m": {
+      "median": 0.0496,
+      "min": 0.0496,
+      "last": 0.0496,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.1653,
+      "samples": 132
+    },
+    "5m": {
+      "median": 0.0165,
+      "min": 0.0165,
+      "last": 0.1653,
+      "samples": 80
+    }
+  },
+  "log_level_counts": {
+    "INFO": 36,
+    "DEBUG": 673,
+    "WARNING": 47,
+    "ERROR": 1
+  },
+  "tag_counts": {
+    "SessionStart": 2,
+    "FeatureWarmStart": 1,
+    "CollectorFirstTick": 7,
+    "FeaturePublish": 673,
+    "CollectorTickStall": 6,
+    "CollectorWSDisconnected": 6,
+    "CollectorWSReconnected": 6,
+    "CommandCenterUIDown": 5,
+    "CommandCenterUIRestarted": 5,
+    "CommandCenterUIRestartGaveUp": 1,
+    "FeatureNaN": 15,
+    "ArchiveCompacted": 6,
+    "CircuitBreakerSuspected": 10,
+    "CircuitBreakerConfirmed": 5,
+    "OrderSubmit": 5,
+    "CircuitBreakerResumed": 3,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {
+    "CircuitBreakerSuspected": 10,
+    "CircuitBreakerConfirmed": 5,
+    "CircuitBreakerResumed": 3
+  },
+  "data_flow_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 8,
+    "details": [
+      "12:35:35 _polars_runtime.pyd",
+      "12:31:20 _polars_runtime.pyd",
+      "12:21:08 _polars_runtime.pyd",
+      "12:13:23 _polars_runtime.pyd",
+      "11:58:53 _polars_runtime.pyd",
+      "10:42:26 _polars_runtime.pyd",
+      "06:36:19 KERNELBASE.dll",
+      "06:34:53 KERNELBASE.dll"
+    ]
+  },
+  "breaches": [
+    "1분봉 결손 30분 > 임계 5분",
+    "최장 공백 8분 > 임계 3분",
+    "네이티브 크래시 8건"
+  ]
+}

@@ -4,8 +4,89 @@
 
 # data / models / logs
 /data/
-logs/
+logs/*
 *.log
+
+# ⚠ **2026-08-19 부분 철회 — 점검 보고서만 추적으로 되돌린다.**
+#
+# `logs/` 규칙이 `logs/dailycheck/` 까지 삼키고 있었다. 그 폴더에 든 것은 로그가 아니라
+# **사람이 쓴 일일 점검 보고서 14편(514KB)** 이다 — 즉 이 저장소에서 「오늘 무엇이 잘못됐고
+# 왜 그렇게 결정했나」를 담은 유일한 서술이 **백업 없이** 있었다. `git clean -xdf` 한 번이면
+# 사라지고, 로그와 달리 재생성도 안 된다(사람이 판단해서 쓴 글이다).
+#
+# 실측 근거(2026-08-19): 보고서끼리의 소급 인용 꼬리가 **21일**이고 7일 안이 71.4%다.
+# 하루 쓰고 버리는 문서가 아니라 3주를 거슬러 읽히는 문서다.
+#
+# 증거 다이제스트(`evidence_*.md`)는 **일부러 제외한다** — 재생성 가능하고, 과거분 인용이
+# 49건 중 1건뿐이다. 다만 0은 아니므로 **삭제 대상으로도 두지 않는다**(그냥 둔다).
+#
+# ⚠ **`logs/` 가 아니라 `logs/*` 로 적어야 한다.** 디렉터리 자체를 제외하면 git이 그 안으로
+# 들어가지 않아서 아래 `!` 줄들이 **조용히 무효**가 된다. 무효인 negation은 오류를 내지 않고
+# 그냥 아무 일도 안 하므로, 고쳤다고 믿은 채 몇 달이 지날 수 있는 자리다.
+# 그리고 **부모 디렉터리를 한 단계씩 되살려야** 한다 — `!logs/dailycheck/` 없이
+# `!logs/dailycheck/*_report.md` 만 적으면 역시 무효다.
+!logs/dailycheck/
+logs/dailycheck/*
+# ⚠ **2026-08-20 정정 — `*_report.md`로는 부족했다.**
+#
+# 1차 철회는 `!logs/dailycheck/*_report.md` 였다. 그런데 그 패턴이 놓친 파일이 하필
+# **2026-08-19 09:50 사고의 유일한 원인 기록**이었다:
+#
+#     2026-08-19_incident_0950_deepdive.md    ← 사람이 12:14에 Windows Update로 원인 확정
+#     2026-08-19_recovery_order_tradeoff.md   ← 복구 순서 판단의 근거
+#
+# 즉 「사람이 쓴 글을 구한다」고 적어 놓고 정기 보고서 형식의 파일만 구했다. 정작 가장
+# 구해야 할 것은 **정기 보고서가 아닌 글**이다 — 사고가 났을 때만 쓰이므로 재현도 안 된다.
+# 그리고 지금은 `configs/incident_causes.yaml`이 그 파일을 `evidence`로 가리킨다.
+#
+# 그래서 규칙을 뜻대로 적는다: **사람이 쓴 마크다운은 전부 살리고, 재생성 가능한 증거
+# 다이제스트만 뺀다.** 파일 종류가 하나 늘 때마다 패턴을 늘리는 방식은 같은 실수를 반복한다.
+!logs/dailycheck/*.md
+# 증거 다이제스트는 **일부러 제외한다** — 원본 로그가 있는 한 재생성 가능하고, 과거분
+# 인용이 49건 중 1건뿐이다(2026-08-19 실측). 삭제 대상으로도 두지 않는다(그냥 둔다).
+logs/dailycheck/evidence_*.md
+
+# ⚠ **2026-08-19 2차 철회 — 시계열 원자재를 추적으로 되돌린다.**
+#
+# 위 1차 철회는 「사람이 쓴 글」을 구했다. 그런데 **기계가 쓴 글 중에도 재생성 불가가
+# 있었다** — 아래 파일들은 여러 날을 접는 모듈 넷의 **입력**이고, 그 사실을 코드가 이미
+# 전제하고 있는데 백업은 없었다.
+#
+#   ops/fix_verification.load_daily_reports()  전 이력 글롭 · consecutive_days 최대 5
+#   ops/loss_budget.summarize()                5거래일 이동합
+#   ops/feature_health_rolling.judge()         3거래일 창 (30m은 이것 없이는 영원히 판정 불가)
+#   ops/session_guard / integrity_report       전 이력 글롭 (예비본 잔류 탐지)
+#
+# **실측 근거(2026-08-19)**: `git check-ignore -q` 로 12종을 판정한 결과 `logs/dailycheck/
+# *_report.md` 하나만 추적 대상이었고 지표 JSON은 **전부 무시**였다. 즉 `git clean -xdf`
+# 한 번이면 등록부 채점 이력이 통째로 사라지고, 그러면 `fix_verification`은 위반도 회복도
+# 말할 수 없게 된다 — 2026-08-18 장후에 「9건이 회복됐는데 아무도 못 봤다」를 겪은 직후다.
+#
+# **용량은 이유가 아니다**: 현재 52파일 248KB · 연 환산 2.3MB. `logs/` 전체가 5.05MB이고
+# 그중 원본 로그가 3.0MB다. 지표 JSON을 지워서 얻는 디스크는 없다.
+#
+# 여기 **없는 것은 일부러 뺐다**:
+#   status_snapshot.json      장중 매분 덮어쓰는 현재 상태. 시계열이 아니라 게이지다
+#   model_sweep_*/feature_gate_*/g1_walk_forward_*/regime_ai_training_*   실험 산출물
+#   evidence_*.md             재생성 가능(원본 로그가 있는 한). 단 삭제 대상으로도 두지 않는다
+#
+# ⚠ 넓히고 싶을 때 `!logs/*.json` 으로 적지 마라 — 위 실험 산출물이 통째로 딸려 온다.
+# **살릴 것을 하나씩 적는다**(패턴이 넓으면 안 살릴 것이 걸린다).
+!logs/daily_integrity_*.json
+!logs/vol_scorecard_*.json
+!logs/volume_check_*.json
+!logs/self_eval_*.json
+!logs/verification_scoreboard_*.json
+!logs/feature_health_rolling.json
+!logs/g2_daily_returns.jsonl
+
+# `pass_cycles/`는 **하위 디렉터리라 부모를 한 단계 되살려야** 한다 — 위 `logs/dailycheck/`
+# 와 같은 함정이다(`!logs/pass_cycles/*.json` 만 적으면 조용히 무효).
+# meta 게이트를 넘은 사이클은 2026-08-18 기준 하루 14사이클 중 **1건**이라 재현 기회가
+# 드물다. 그 입력을 백업 없는 자리에 두는 것은 G-0818P-3의 취지를 절반만 지키는 것이다.
+!logs/pass_cycles/
+logs/pass_cycles/*
+!logs/pass_cycles/*.json
 *.parquet
 *.pkl
 *.lgb

@@ -1,0 +1,555 @@
+{
+  "date": "2026-08-14",
+  "symbol": "A05609",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 410,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 0,
+      "longest_gap_minutes": 0,
+      "gaps": [],
+      "tail_gap_minutes": 0
+    }
+  ],
+  "restarts": 0,
+  "starts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "restarts_by_process": {
+    "l1_daily": 0,
+    "g2_paper": 0
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:20:33"
+    ],
+    "g2_paper": [
+      "08:25:30"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.3431,
+      "min": 0.3139,
+      "last": 0.3139,
+      "samples": 41
+    },
+    "15m": {
+      "median": 0.5985,
+      "min": 0.3212,
+      "last": 0.3212,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0073,
+      "min": 0.0073,
+      "last": 0.0073,
+      "samples": 409
+    },
+    "30m": {
+      "median": 0.6131,
+      "min": 0.5985,
+      "last": 0.5985,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0511,
+      "min": 0.0219,
+      "last": 0.0219,
+      "samples": 136
+    },
+    "5m": {
+      "median": 0.3139,
+      "min": 0.0511,
+      "last": 0.0511,
+      "samples": 81
+    }
+  },
+  "log_level_counts": {
+    "INFO": 72,
+    "WARNING": 31,
+    "DEBUG": 708
+  },
+  "tag_counts": {
+    "SessionStart": 6,
+    "CrashForensicsArmed": 6,
+    "LaunchWindowRefused": 4,
+    "FeatureWarmStart": 1,
+    "OptionChainSkipped": 10,
+    "CollectorFirstTick": 1,
+    "ClockSkewMeasured": 1,
+    "FeaturePublish": 708,
+    "InvestorFlowPollRetried": 4,
+    "OptionChainPollRetried": 4,
+    "StatusSnapshotWriteFailed": 2,
+    "ComposerFlushedIncomplete": 1,
+    "ComposerLateBarDropped": 1,
+    "DailyCloseBarHandedOff": 1,
+    "FeatureHealthDegenerate": 4,
+    "FeatureHealthSummary": 2,
+    "TickDeliveryLatency": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "Recomposed": 1,
+    "IntegrityReportGenerated": 1,
+    "IntegrityThresholdBreached": 11,
+    "SessionEnd": 2,
+    "CommandCenterUIPortConfirmed": 1,
+    "RegimeWarmStart": 1,
+    "RegimeWarmStartShort": 1,
+    "RegimeClassified": 14,
+    "DecisionEmitted": 14,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 2,
+  "clock_skew_seconds": 1.264,
+  "delivery_latency": {
+    "p50": 0.5065,
+    "p90": 0.9245,
+    "p99": 1.0264,
+    "max": 1.2124,
+    "samples": 20000.0
+  },
+  "session_git_shas": [
+    "e37d387"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [
+        "px_gap_open"
+      ],
+      "constant": [],
+      "judged": true,
+      "samples": 409
+    },
+    "3m": {
+      "always_nan": [
+        "px_ema_cross_60",
+        "px_gap_open",
+        "px_macd_h_60"
+      ],
+      "constant": [],
+      "judged": true,
+      "samples": 136
+    },
+    "5m": {
+      "always_nan": [
+        "px_accel_60",
+        "px_ema_cross_60",
+        "px_gap_open",
+        "px_hurst_120",
+        "px_macd_h_60",
+        "vl_squeeze_120",
+        "vl_vov_120"
+      ],
+      "constant": [
+        "px_max_ret_60"
+      ],
+      "judged": true,
+      "samples": 81
+    },
+    "10m": {
+      "always_nan": [
+        "px_accel_60",
+        "px_autocorr_60",
+        "px_bb_pos_60",
+        "px_bb_width_60",
+        "px_breakout_60",
+        "px_dd_60",
+        "px_don_pos_60",
+        "px_ema_cross_20",
+        "px_ema_cross_60",
+        "px_ema_dev_60",
+        "px_gap_open",
+        "px_high_dist_60",
+        "px_hurst_120",
+        "px_hurst_60",
+        "px_kurt_r_60",
+        "px_low_dist_60",
+        "px_macd_h_20",
+        "px_macd_h_60",
+        "px_max_ret_60",
+        "px_mom_60",
+        "px_ret_60",
+        "px_rsi_60",
+        "px_runup_60",
+        "px_skew_r_60",
+        "px_stoch_60",
+        "px_trend_r2_60",
+        "px_trend_slope_60",
+        "px_vwap_dev_60",
+        "px_zscore_60",
+        "vl_atr_60",
+        "vl_atr_rel_60",
+        "vl_gk_60",
+        "vl_jump_60",
+        "vl_park_60",
+        "vl_rv_60",
+        "vl_semi_dn_60",
+        "vl_semi_ratio_60",
+        "vl_semi_up_60",
+        "vl_squeeze_120",
+        "vl_squeeze_60",
+        "vl_vov_120",
+        "vl_vov_60",
+        "vl_yz_60"
+      ],
+      "constant": [
+        "px_accel_20",
+        "px_adx_60"
+      ],
+      "judged": true,
+      "samples": 41
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 27
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 14
+    }
+  },
+  "allowed_constant_values": {
+    "ev_dow_fri": 1.0,
+    "ev_dow_mon": 0.0,
+    "ev_dow_thu": 0.0,
+    "ev_dow_tue": 0.0,
+    "ev_dow_wed": 0.0,
+    "ev_dte_fut": 18.0,
+    "ev_dte_opt_m": 18.0,
+    "ev_dte_opt_w": 0.0,
+    "ev_expiry_flag": 0.0,
+    "ev_holiday_adj": 3.0,
+    "ev_rollover_win": 0.0
+  },
+  "volume_check": {
+    "date": "2026-08-14",
+    "symbol": "A05609",
+    "ratio": 1.0,
+    "common_minutes": 410,
+    "archived_volume": 118599,
+    "official_volume": 118599,
+    "missing_minutes": 0,
+    "head_missing_minutes": 0,
+    "middle_missing_minutes": 0,
+    "tail_missing_minutes": 0,
+    "warn_ratio": 0.95,
+    "missing_minutes_limit": 20,
+    "head_missing_minutes_limit": 0,
+    "ok": true
+  },
+  "vol_axis": {
+    "date": "2026-08-14",
+    "symbol": "A05609",
+    "horizons": {
+      "5m": {
+        "samples": 76,
+        "window_days": 20,
+        "baseline_ic": 0.1968010936431989,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_close_remain"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "15m": {
+        "samples": 21,
+        "window_days": 20,
+        "baseline_ic": null,
+        "baseline_used": [],
+        "beats_baseline": [],
+        "measurable": false,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "30m": {
+        "samples": 7,
+        "window_days": 20,
+        "baseline_ic": null,
+        "baseline_used": [],
+        "beats_baseline": [],
+        "measurable": false,
+        "absent_features": [],
+        "undefined_after_control": []
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 540.7GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 29% · 외부 파이썬 0개"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      },
+      {
+        "name": "schedule_drift",
+        "available": true,
+        "ok": true,
+        "detail": "정본 일치 Messiah=08:20, Messiah-G2=08:25 (기동 창 08:15~)"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [
+    "진입점 종료 코드(조회 실패: TimeoutExpired (2/2회 시도))"
+  ],
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 110397,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 434,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 99.8,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:21~15:34 · 카덴스 1분",
+      "window_start_kst": "08:20",
+      "expected_legs": 3,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 83,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 94.5,
+      "expectation_note": "",
+      "first_kst": "08:45",
+      "last_kst": "15:30",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 25.0,
+      "tail_gap_minutes": 5.0,
+      "longest_gap_minutes": 5.0,
+      "gaps": [],
+      "detail": "08:45~15:30 · 카덴스 5분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 82,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:51",
+      "last_kst": "15:32",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 31.0,
+      "tail_gap_minutes": 3.0,
+      "longest_gap_minutes": 9.0,
+      "gaps": [],
+      "detail": "08:51~15:32 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 82,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:53",
+      "last_kst": "15:34",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 33.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 9.0,
+      "gaps": [],
+      "detail": "08:53~15:34 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "ticks",
+      "rows": 410,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:45",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:45~15:34 · 카덴스 1분",
+      "window_start_kst": "08:45",
+      "expected_legs": null,
+      "short_cycles": []
+    }
+  ],
+  "series_findings": [
+    "option_chain/regular: 세션 커버리지 94% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 시작 후 25분간 적재 없음(첫 행 08:45) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 시작 후 31분간 적재 없음(첫 행 08:51) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_thu: 세션 시작 후 33분간 적재 없음(첫 행 08:53) — 그 구간은 영구 소실(소급 경로 없음)"
+  ],
+  "observation_gaps": [],
+  "host_events": [
+    {
+      "event_id": 12,
+      "at_kst": "00:48:15",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "00:48:16",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "00:48:35",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 1074,
+      "at_kst": "01:01:49",
+      "kind": "shutdown",
+      "detail": "RuntimeBroker.exe / 전원 끄기 / 기타(계획되지 않음)"
+    },
+    {
+      "event_id": 6006,
+      "at_kst": "01:02:12",
+      "kind": "shutdown",
+      "detail": ""
+    },
+    {
+      "event_id": 13,
+      "at_kst": "01:02:18",
+      "kind": "shutdown",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "07:15:51",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "07:15:52",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "07:15:59",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [
+    "상위 Horizon 버킷에서 1분봉 2개 유실 — 합성봉이 그만큼 짧게 확정됐다(장 종료 후 `run_recompose.py`로 재합성 필요, 원인은 수집 경로에 있다)",
+    "국면 판정의 100%가 UNKNOWN (임계 50%) — Meta Decision 규칙 ②가 그만큼을 NO_TRADE로 보낸다(Risk·Sizer·OrderGateway가 그 비율만큼 미검증)",
+    "10m 피처 45개가 세션 내내 죽어 있었다(px_accel_60, px_autocorr_60, px_bb_pos_60, px_bb_width_60, px_breakout_60 외) — 모델에 죽은 입력이 들어간다",
+    "1m 피처 1개가 세션 내내 죽어 있었다(px_gap_open) — 모델에 죽은 입력이 들어간다",
+    "3m 피처 3개가 세션 내내 죽어 있었다(px_ema_cross_60, px_gap_open, px_macd_h_60) — 모델에 죽은 입력이 들어간다",
+    "5m 피처 8개가 세션 내내 죽어 있었다(px_accel_60, px_ema_cross_60, px_gap_open, px_hurst_120, px_macd_h_60 외) — 모델에 죽은 입력이 들어간다",
+    "option_chain/regular: 세션 커버리지 94% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 시작 후 25분간 적재 없음(첫 행 08:45) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 시작 후 31분간 적재 없음(첫 행 08:51) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_thu: 세션 시작 후 33분간 적재 없음(첫 행 08:53) — 그 구간은 영구 소실(소급 경로 없음)",
+    "아침 잘림 판정이 축마다 다르다 — 잘렸다: 계열 머리 구멍 33분 / 아니다: 기동 지연 +0.6분 · 거래량 아침 미수집 0분. 어느 축이 옳은지 모르는 상태 자체가 볼 것이다(한 축이 조용해진 날 나머지가 그 사실을 말한다)",
+    "축 모순 — 이상: 계열 머리 구멍 / 아님: 거래량 아침 미수집, 기동 지연 | 경로: 거래량 아침 미수집=logs/volume_check_20260814.json · 계열 머리 구멍=data/bars/A05609 · 기동 지연=logs(SessionStart) | **경로가 다르다 — 이것이 원인 후보다** | 소수파 경로 확인: data/bars/A05609=데이터 있음 | → 다수파(거래량 아침 미수집, 기동 지연) 쪽을 믿는다"
+  ],
+  "series_contract": [],
+  "abnormal_exits": [],
+  "collection_start_lag_minutes": 0.6,
+  "task_exit_codes": {
+    "exits": [],
+    "available": false,
+    "detail": "조회 실패: TimeoutExpired (2/2회 시도)",
+    "launches": []
+  },
+  "irrecoverable_loss_minutes": 33.0,
+  "canonical_consumer_findings": [],
+  "regime_distribution": {
+    "UNKNOWN": 14
+  },
+  "provisional": false,
+  "symbol_mismatch_suspected": false,
+  "symbol_candidates": [],
+  "verdict_surface_gaps": [],
+  "feature_health_rolling": [],
+  "decision_funnel": {
+    "regime": 14
+  }
+}

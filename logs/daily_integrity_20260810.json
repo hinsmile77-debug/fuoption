@@ -1,0 +1,531 @@
+{
+  "date": "2026-08-10",
+  "symbol": "A05608",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 397,
+      "first_bar_kst": "08:58",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 0,
+      "longest_gap_minutes": 0,
+      "gaps": [],
+      "tail_gap_minutes": 0
+    }
+  ],
+  "restarts": 0,
+  "starts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "restarts_by_process": {
+    "l1_daily": 0,
+    "g2_paper": 0
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:58:28"
+    ],
+    "g2_paper": [
+      "08:58:38"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 40
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 396
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 132
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 79
+    }
+  },
+  "log_level_counts": {
+    "INFO": 93,
+    "DEBUG": 689,
+    "WARNING": 5,
+    "ERROR": 2
+  },
+  "tag_counts": {
+    "SessionStart": 5,
+    "CrashForensicsArmed": 5,
+    "LaunchWindowRefused": 3,
+    "FeatureWarmStart": 1,
+    "CollectorFirstTick": 1,
+    "FeaturePublish": 688,
+    "ClockSkewMeasured": 1,
+    "OptionChainPollRetried": 52,
+    "OptionChainSeriesNotListed": 1,
+    "InvestorFlowPollError": 3,
+    "OptionChainPollError": 1,
+    "DailyCloseBarHandedOff": 1,
+    "FeatureHealthSummary": 6,
+    "TickDeliveryLatency": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "Recomposed": 1,
+    "IntegrityReportGenerated": 1,
+    "FixVerificationPassed": 6,
+    "FixVerificationRecurred": 2,
+    "SessionEnd": 2,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 0,
+  "clock_skew_seconds": 0.897,
+  "delivery_latency": {
+    "p50": 0.5262,
+    "p90": 0.9314,
+    "p99": 1.0353,
+    "max": 1.3964,
+    "samples": 20000.0
+  },
+  "session_git_shas": [
+    "ce91b08",
+    "f901de0"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "3m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "5m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "10m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": []
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": []
+    }
+  },
+  "volume_check": {
+    "date": "2026-08-10",
+    "symbol": "A05608",
+    "ratio": 0.9993578562812937,
+    "common_minutes": 397,
+    "archived_volume": 115165,
+    "official_volume": 115239,
+    "missing_minutes": 13,
+    "head_missing_minutes": 13,
+    "middle_missing_minutes": 0,
+    "tail_missing_minutes": 0,
+    "warn_ratio": 0.95,
+    "missing_minutes_limit": 20,
+    "head_missing_minutes_limit": 0,
+    "ok": false
+  },
+  "vol_axis": {
+    "date": "2026-08-10",
+    "symbol": "A05608",
+    "horizons": {
+      "5m": {
+        "samples": 1604,
+        "window_days": 20,
+        "baseline_ic": 0.39584710749343943,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos"
+        ],
+        "measurable": true,
+        "absent_features": []
+      },
+      "15m": {
+        "samples": 530,
+        "window_days": 20,
+        "baseline_ic": 0.3257832346152445,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ],
+        "measurable": true,
+        "absent_features": []
+      },
+      "30m": {
+        "samples": 261,
+        "window_days": 20,
+        "baseline_ic": 0.12895971274491938,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos",
+          "ev_close_remain"
+        ],
+        "measurable": true,
+        "absent_features": []
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 546.5GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 32% · 외부 파이썬 1개(누적 CPU 61초)"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      },
+      {
+        "name": "schedule_drift",
+        "available": true,
+        "ok": true,
+        "detail": "정본 일치 Messiah=08:20, Messiah-G2=08:25 (기동 창 08:15~)"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [],
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 2,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 104499,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 396,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 91.0,
+      "expectation_note": "",
+      "first_kst": "08:59",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 39.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:59~15:34 · 카덴스 1분",
+      "window_start_kst": "08:20",
+      "expected_legs": 3,
+      "short_cycles": [
+        [
+          "10:46",
+          2
+        ],
+        [
+          "15:19",
+          2
+        ],
+        [
+          "15:31",
+          2
+        ]
+      ]
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 80,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "09:00",
+      "last_kst": "15:30",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 40.0,
+      "tail_gap_minutes": 5.0,
+      "longest_gap_minutes": 10.0,
+      "gaps": [],
+      "detail": "09:00~15:30 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": [
+        [
+          "14:30",
+          41
+        ]
+      ]
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 195,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "09:01",
+      "last_kst": "15:32",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 41.0,
+      "tail_gap_minutes": 3.0,
+      "longest_gap_minutes": 4.0,
+      "gaps": [],
+      "detail": "09:01~15:32 · 카덴스 5분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 0,
+      "measured": true,
+      "expected": false,
+      "coverage_pct": 100.0,
+      "expectation_note": "미상장(먼슬리 만기 주(08-13 만기) — KRX 미상장) · 08-14 재개 예정",
+      "first_kst": null,
+      "last_kst": null,
+      "cadence_minutes": null,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 0.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "미상장일이라 0행이 정상 — 미상장(먼슬리 만기 주(08-13 만기) — KRX 미상장) · 08-14 재개 예정",
+      "window_start_kst": "08:20",
+      "expected_legs": null,
+      "short_cycles": []
+    },
+    {
+      "name": "ticks",
+      "rows": 397,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 96.8,
+      "expectation_note": "",
+      "first_kst": "08:58",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 13.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:58~15:34 · 카덴스 1분",
+      "window_start_kst": "08:45",
+      "expected_legs": null,
+      "short_cycles": []
+    }
+  ],
+  "series_findings": [
+    "flow_intraday/K2I: 세션 커버리지 91% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 세션 시작 후 39분간 적재 없음(첫 행 08:59) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 10:46 사이클 2/3다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 15:19 사이클 2/3다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 15:31 사이클 2/3다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 시작 후 40분간 적재 없음(첫 행 09:00) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 14:30 사이클 41/42다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 시작 후 41분간 적재 없음(첫 행 09:01) — 그 구간은 영구 소실(소급 경로 없음)"
+  ],
+  "observation_gaps": [],
+  "host_events": [
+    {
+      "event_id": 1074,
+      "at_kst": "00:17:52",
+      "kind": "shutdown",
+      "detail": "RuntimeBroker.exe / 전원 끄기 / 기타(계획되지 않음)"
+    },
+    {
+      "event_id": 6006,
+      "at_kst": "00:18:15",
+      "kind": "shutdown",
+      "detail": ""
+    },
+    {
+      "event_id": 13,
+      "at_kst": "00:18:21",
+      "kind": "shutdown",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "07:20:44",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "07:20:45",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "07:20:52",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [
+    "공식 분봉의 아침 13분이 아카이브에 없다 — 수집 기동을 의심할 것(같은 사건을 `collection_start_lag_minutes`가 원인 쪽에서 잰다)",
+    "flow_intraday/K2I: 세션 커버리지 91% (< 95%) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 세션 시작 후 39분간 적재 없음(첫 행 08:59) — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 10:46 사이클 2/3다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 15:19 사이클 2/3다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "flow_intraday/K2I: 15:31 사이클 2/3다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 세션 시작 후 40분간 적재 없음(첫 행 09:00) — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/regular: 14:30 사이클 41/42다리 — 그 구간은 영구 소실(소급 경로 없음)",
+    "option_chain/weekly_mon: 세션 시작 후 41분간 적재 없음(첫 행 09:01) — 그 구간은 영구 소실(소급 경로 없음)",
+    "수집 기동이 정시 트리거보다 38분 늦었다 (> 임계 5분) — 그 시간의 옵션체인·수급·체결틱은 영구 소실(소급 경로 없음)",
+    "Messiah-G2 15:35:02 종료 코드 2147942655(=0x800700FF) → Win32 255 — 로그는 `SessionEnd`(정상 종료)를 남겼다. 둘 중 하나는 거짓이고, 그 사실을 아는 축이 이것뿐이다"
+  ],
+  "series_contract": [
+    "option_chain/weekly_thu: 미상장(먼슬리 만기 주(08-13 만기) — KRX 미상장) · 08-14 재개 예정"
+  ],
+  "abnormal_exits": [],
+  "collection_start_lag_minutes": 38.5,
+  "task_exit_codes": {
+    "exits": [
+      {
+        "task": "Messiah",
+        "at_kst": "15:36:12",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "15:35:02",
+        "code": 2147942655,
+        "win32_code": 255
+      },
+      {
+        "task": "Messiah-Postmarket",
+        "at_kst": "15:46:25",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:02",
+        "code": 0,
+        "win32_code": 0
+      }
+    ],
+    "available": true,
+    "detail": "작업 4개 · 기동 7회",
+    "launches": [
+      {
+        "task": "Messiah",
+        "at_kst": "08:20:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "08:25:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah",
+        "at_kst": "08:50:09",
+        "event_id": 110,
+        "reason": "사람이 실행"
+      },
+      {
+        "task": "Messiah",
+        "at_kst": "08:58:03",
+        "event_id": 110,
+        "reason": "사람이 실행"
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "08:58:06",
+        "event_id": 110,
+        "reason": "사람이 실행"
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-Postmarket",
+        "at_kst": "15:45:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      }
+    ]
+  },
+  "irrecoverable_loss_minutes": 41.0,
+  "canonical_consumer_findings": []
+}
