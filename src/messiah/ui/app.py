@@ -460,6 +460,50 @@ def _default_redis_url() -> str:
 
 
 @st.cache_resource(show_spinner=False)
+def _logging_ready() -> bool:
+    """이 프로세스의 구조화 로깅을 **한 번만** 켠다 (2026-08-20 F-B · D-2 마감).
+
+    ## 왜 UI에 로그가 없었나
+
+    `_log_first_render_freshness()`(2026-08-18 G-0818I-4)는 `mlog.log("UISnapshotFreshness", ...)`
+    를 부르고 있었다. 그런데 이 프로세스는 `mlog.setup()`을 **한 번도 부른 적이 없어서**
+    `_logger`에 핸들러가 없었고, 그 줄들은 전부 허공으로 갔다. 계기를 만들어 두고 배선을
+    안 한 것이다 — 2026-08-18부터 사흘간 UI 관련 이상점을 화면 캡처로만 쫓아야 했던 이유다.
+
+    ## 왜 가드가 필요한가
+
+    Streamlit은 **매 상호작용·매 5초 fragment마다 스크립트를 통째로 재실행**한다
+    (`crash_forensics.enable` 옆 주석이 같은 사실을 다룬다). `setup()`은 멱등이 아니다 —
+    `_logger.handlers.clear()`를 돌리고 `SessionStart`를 찍는다. 가드 없이 부르면 그 줄이
+    렌더 수만큼 쌓인다.
+
+    `st.cache_resource`가 그 가드다. 모듈 전역 플래그로는 안 된다 — Streamlit은 스크립트를
+    새 네임스페이스에서 실행하므로 전역이 매번 초기화된다.
+
+    ## 재기동 계수를 오염시키지 않는다 (확인함)
+
+    2026-08-20 장중 계획은 이 변경이 `starts_by_process`를 오염시킬 수 있다며
+    `NESTED_SESSION_ENV` 배선을 선행 조건으로 걸었다. **그 경로는 성립하지 않는다:**
+
+    · `ops/integrity_report.log_paths_for()`는 `l1_daily`·`g2_paper`만 돌려준다 —
+      `analyze_logs()`는 UI 로그를 **아예 읽지 않는다**.
+    · UI 기동 수는 `observation_gaps.parse_ui_starts()`가 세는데, 그것은 Streamlit이 찍는
+      `"Uvicorn server started"` 줄을 본다. `SessionStart`가 아니다.
+
+    그래서 이 프로세스는 `NestedSessionStart`가 아니라 **`SessionStart`가 맞다.** UI는 배치
+    단계가 아니라 독립 장기 프로세스이고, 그 줄이 싣는 `git_sha`·`source_mtime_max`가
+    "화면이 어느 코드로 도는가"(2026-08-05 P0-1이 만든 축)의 유일한 1차 증거다.
+
+    실패해도 화면은 뜬다 — 관측 도구가 화면을 죽이면 본말전도다(R10).
+    """
+    try:
+        mlog.setup("command-center-ui")
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+@st.cache_resource(show_spinner=False)
 def _event_calendar_or_none() -> EventCalendar | None:
     """휴장일 달력 — 못 읽으면 `None`이고, **화면은 그래도 뜬다** (2026-08-11 F-3/F-5).
 
@@ -1316,6 +1360,9 @@ def _render_dashboard_body(
 
 def main() -> None:
     st.set_page_config(page_title="MESSIAH Command Center", layout="wide")
+    # 첫 렌더보다 **먼저** 로깅을 켠다 (2026-08-20 F-B) — `_log_first_render_freshness()`가
+    # 그 뒤에 불리므로, 여기가 아니면 정작 첫 렌더 줄이 또 허공으로 간다.
+    _logging_ready()
 
     st.sidebar.header("데이터 소스")
     # 기본값 LIVE(2026-07-29 사용자 요청 — 모듈 docstring "LIVE/STALE/REPLAY는 항상
