@@ -105,15 +105,70 @@ def judge(
     return bool(reasons), reasons, worst
 
 
-def load(log_dir: Path = DEFAULT_LOG_DIR) -> dict[date, bool | None]:
-    """`logs/daily_integrity_*.json` → {날짜: 불완전일인가}. 축이 없는 옛 리포트는 None.
+def _derive_from_stored(report: Mapping[str, Any], min_coverage_pct: float) -> bool | None:
+    """저장된 리포트의 **입력**으로 불완전일을 계산한다 — 불리언이 없을 때 (2026-08-20 J-3b).
 
-    None은 **판정 불가**다 — False가 아니다(L18). 이 축이 생기기 전(2026-08-19 이전)의
-    날들을 「완전했다」로 세면 오염된 창이 조용히 통과한다. 다만 소비처는 그 None을
-    「제외 대상 아님」으로 다룬다(`usable_days()` 참고) — 옛 날짜를 소급해 전부 버리면
-    30m처럼 창이 좁은 축이 영영 판정 불가가 된다.
+    ## 왜 필요한가 — 오염을 막으려 만든 축이 정작 그 오염을 못 막았다
 
-    `ops/loss_budget.load_daily_losses()`와 같은 파일을 읽지만 필요한 한 필드만 꺼낸다.
+    `incomplete_day` 필드는 2026-08-20부터 쓰인다. 그런데 이 축을 만든 이유인 **2026-08-19**
+    리포트는 그 전에 쓰여 필드가 없다. 그래서 `load()`가 None을 돌려주고, `usable_days()`는
+    None을 「제외 대상 아님」으로 다루므로(그 판단 자체는 옳다) 08-19가 창에 그대로 남았다:
+
+        2026-08-20 실전 산출물
+          feature_health_rolling  days=[08-18, 08-19, 08-20]  excluded_days=[]
+          vol_scorecard           window_days=20              excluded_days=[]
+
+    08-19 장후가 *"이 오염은 되돌릴 수 없다 — 소급해서 「그날은 반쪽이었다」고 말해 줄 필드가
+    없기 때문이다"* 라고 적었을 때, 그 문장은 **불리언 필드**에 관한 것이었다. 판정의 **입력**
+    (`series_coverage`)은 그날 리포트에 처음부터 다 있었다 — 08-19는 5계열 최솟값 61.2%다.
+
+    ## 이것은 과거 판정을 뒤집는 것이 아니다 (R18)
+
+    뒤집는 것은 「그날 그 축이 내린 판정」을 바꾸는 일이다. 여기엔 그런 판정이 **없었다** —
+    축 자체가 없었다. 하는 일은 원래 있던 데이터에 오늘의 정의를 적용해 **롤링 창에 넣을지
+    말지**를 정하는 것뿐이고, 저장된 파일은 한 바이트도 안 건드린다(그날의 채점 기록은
+    나중에 덮지 않는다는 방침 유지).
+
+    ## 못 재는 것과 재서 괜찮은 것을 가른다
+
+    `series_coverage`조차 없는 옛 리포트(2026-08-06 이전)는 여전히 **None**이다 — 계산할
+    입력이 없는 것과 계산해 보니 온전한 것은 다르다(L18). None은 제외되지 않으므로 그
+    시절 날들이 창에서 통째로 사라지지 않는다.
+
+    **장중 사망(`abnormal_exits`의 `mid_session`)은 여기서 안 본다.** 그 필드도 2026-08-20
+    이후에만 채워지고, 그 전 리포트의 `abnormal_exits`는 세션 단위 판정 이전이라 빈 배열이
+    많다 — 없는 것을 근거로 「온전했다」고 말하게 된다. 커버리지 하나로도 08-19는 잡힌다.
+    """
+    coverages = report.get("series_coverage")
+    if not isinstance(coverages, list):
+        return None
+    measured = [
+        float(item["coverage_pct"])
+        for item in coverages
+        if isinstance(item, dict)
+        and item.get("measured")
+        and item.get("expected", True)
+        and isinstance(item.get("coverage_pct"), (int, float))
+    ]
+    if not measured:
+        return None
+    return min(measured) < min_coverage_pct
+
+
+def load(
+    log_dir: Path = DEFAULT_LOG_DIR, *, min_coverage_pct: float = MIN_COVERAGE_PCT
+) -> dict[date, bool | None]:
+    """`logs/daily_integrity_*.json` → {날짜: 불완전일인가}.
+
+    저장된 `incomplete_day` 불리언이 있으면 그것이 정본이다. 없으면 그 리포트의 **입력**
+    (`series_coverage`)으로 계산한다(`_derive_from_stored`) — 축이 생기기 전의 날도
+    롤링 창에서 가려낼 수 있어야 하기 때문이다(2026-08-20 J-3b).
+
+    계산할 입력조차 없으면 None(**판정 불가**)이다 — False가 아니다(L18). 그 시절 날들을
+    「완전했다」로 세면 오염된 창이 조용히 통과하고, 반대로 전부 버리면 30m처럼 창이 좁은
+    축이 영영 판정 불가가 된다. 그래서 None은 제외하지 않는다(`usable_days()` 참고).
+
+    `ops/loss_budget.load_daily_losses()`와 같은 파일을 읽지만 필요한 것만 꺼낸다.
     """
     out: dict[date, bool | None] = {}
     for path in sorted(log_dir.glob("daily_integrity_*.json")):
@@ -123,7 +178,11 @@ def load(log_dir: Path = DEFAULT_LOG_DIR) -> dict[date, bool | None]:
         except (OSError, ValueError, KeyError):
             continue  # 깨진 파일 하나가 나머지 집계를 막지 않는다
         value = report.get("incomplete_day")
-        out[day] = bool(value) if isinstance(value, bool) else None
+        out[day] = (
+            bool(value)
+            if isinstance(value, bool)
+            else _derive_from_stored(report, min_coverage_pct)
+        )
     return out
 
 
@@ -143,7 +202,7 @@ def usable_days(
     **만드는 중**에 이 함수를 부르는 경로(`build_report()`)가 있기 때문이다.
 
     판정 불가(None)는 **제외하지 않는다**(위 `load()` docstring). 제외는 「불완전하다고
-    확인된 날」에만 한다.
+    확인된 날」에만 한다 — 저장된 불리언이든 저장된 커버리지에서 계산한 것이든.
     """
     flags = dict(load(log_dir))
     if known:

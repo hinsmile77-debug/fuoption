@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from messiah.ops import incomplete_days
@@ -224,4 +225,70 @@ def test_only_confirmed_incomplete_days_leave_the_window(tmp_path):
     )
 
     assert usable == [date(2026, 8, 14), date(2026, 8, 18)]
+    assert excluded == [date(2026, 8, 19)]
+
+
+# ---------------------------------------------------------------- J-3b (2026-08-20)
+
+
+def _report(tmp_path, stamp: str, *, coverage: list[float] | None = None, flag=None) -> None:
+    """저장된 무결성 리포트 한 벌 — `incomplete_day` 불리언 유무를 골라 쓴다."""
+    payload: dict = {"date": stamp}
+    if coverage is not None:
+        payload["series_coverage"] = [
+            {"name": f"s{i}", "coverage_pct": pct, "measured": True, "expected": True}
+            for i, pct in enumerate(coverage)
+        ]
+    if flag is not None:
+        payload["incomplete_day"] = flag
+    (tmp_path / f"daily_integrity_{stamp.replace('-', '')}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_a_day_from_before_the_axis_is_still_judged(tmp_path):
+    """**이 절의 핵심.** 축을 만든 이유인 2026-08-19 리포트는 그 축이 생기기 전에 쓰여
+    `incomplete_day` 필드가 없다. 그래서 실전에서 08-19가 롤링 창에 그대로 남았다 —
+    오염을 막으려 만든 축이 정작 그 오염을 못 막았다.
+
+    판정의 **입력**(`series_coverage`)은 그날 리포트에 처음부터 다 있었다(최솟값 61.2%).
+    """
+    _report(tmp_path, "2026-08-19", coverage=[61.2, 63.2, 99.0])  # 불리언 없음
+
+    assert incomplete_days.load(log_dir=tmp_path) == {date(2026, 8, 19): True}
+
+
+def test_a_clean_day_from_before_the_axis_stays_in(tmp_path):
+    """계산해 보니 온전한 날은 창에 남는다 — 옛 날짜를 싸잡아 버리지 않는다."""
+    _report(tmp_path, "2026-08-18", coverage=[99.1, 99.4])
+
+    assert incomplete_days.load(log_dir=tmp_path) == {date(2026, 8, 18): False}
+
+
+def test_the_stored_boolean_wins_over_derivation(tmp_path):
+    """그날 축이 실제로 판정했으면 그것이 정본이다 — 계산이 판정을 덮지 않는다(R18)."""
+    _report(tmp_path, "2026-08-20", coverage=[61.0], flag=False)
+
+    assert incomplete_days.load(log_dir=tmp_path) == {date(2026, 8, 20): False}
+
+
+def test_a_report_without_the_inputs_is_still_unjudgeable(tmp_path):
+    """계산할 입력이 없는 것과 계산해 보니 온전한 것은 다르다(L18).
+    `series_coverage`가 없던 시절(2026-08-06 이전) 리포트는 여전히 판정 불가다."""
+    _report(tmp_path, "2026-07-30")  # 커버리지도 불리언도 없음
+
+    assert incomplete_days.load(log_dir=tmp_path) == {date(2026, 7, 30): None}
+
+
+def test_the_motivating_day_finally_leaves_the_window(tmp_path):
+    """2026-08-20 실전 회귀 — `excluded_days=[]`로 08-19가 3거래일 창에 남아 있었다."""
+    _report(tmp_path, "2026-08-18", coverage=[99.1])
+    _report(tmp_path, "2026-08-19", coverage=[61.2])  # 불리언 없음(옛 리포트)
+    _report(tmp_path, "2026-08-20", coverage=[99.3], flag=False)
+
+    usable, excluded = incomplete_days.usable_days(
+        [date(2026, 8, 18), date(2026, 8, 19), date(2026, 8, 20)], log_dir=tmp_path
+    )
+
+    assert usable == [date(2026, 8, 18), date(2026, 8, 20)]
     assert excluded == [date(2026, 8, 19)]

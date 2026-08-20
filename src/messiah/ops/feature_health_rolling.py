@@ -202,7 +202,13 @@ def judge(
     parsed = [(d, date.fromisoformat(d)) for d in candidates]
     keep, dropped = incomplete_days.usable_days(
         [value for _stamp, value in parsed],
-        log_dir=log_dir or incomplete_days.DEFAULT_LOG_DIR,
+        # **누적 파일이 있는 곳에서 무결성 리포트도 찾는다** (2026-08-20). 모듈 기본값
+        # (`logs/`)으로 접으면, tmp 디렉터리로 누적 파일을 만든 테스트가 **저장소의 진짜
+        # `logs/`를 집어 든다** — 실제로 2026-08-20에 그 일이 났다: J-3b로 옛 리포트도
+        # 판정되기 시작하자 tmp 픽스처를 쓰던 롤 경계 테스트가 진짜 08-14(33분 소실일)를
+        # 제외당해 깨졌다. 운영에서는 `DEFAULT_PATH.parent == logs` 라 동작이 같다.
+        # (`ops/integrity_report`가 `bar_dir`의 부모에서 계열 경로를 파생하는 것과 같은 규율.)
+        log_dir=log_dir or path.parent,
         known=incomplete_known,
     )
     kept = {value.isoformat() for value in keep}
