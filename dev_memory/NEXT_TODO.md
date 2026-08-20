@@ -5961,3 +5961,100 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
       `dominant_day` 문장으로 확인 (08-20 장후)
 - [ ] **J-3b** `feature_health_rolling`의 `excluded_days`에 08-19이 남아 있고 창이 08-18·08-20으로
       구성되는지. 30m이 다시 `judged: false`면 그건 표본 누적 문제지 이 변경 탓이 아니다
+
+## 2026-08-20 장전 점검 — Fix/고도화 ([MW0601])
+
+보고서: `logs/dailycheck/2026-08-20_pre_report.md` · **P0 0건** · P1 3건 · P2 4건
+**전 항목 장후 적용** (08:45 예약 · 09:00 개장 임박 — R11 · 금지계명 3·4). 오늘 코드 변경 없음.
+
+### Fix (장후 적용 — 커밋 순서를 지킬 것)
+
+- [ ] **①(선행) `.gitattributes` 개행 정본화** — CRLF 잡음 76파일이 diff를 5,700줄로 부풀려
+      ②의 리뷰가 불가능하다. 이것부터 넣는다
+- [ ] **F-1 (P1) 어제 구현분 커밋** — F-1~F-6·G-3/G-4 + `configs/incident_causes.yaml`(untracked, `git add` 필수).
+      **F 단위로 쪼갠다** — 8개 동시 데뷔는 08-21에 이분탐색을 막는다.
+      대상: `runtime.py`(seed) · `run_g2_paper_trading.py`(_seed_regime) · `core/logging.py`(RegimeSeeded) ·
+      `loss_ledger.py` · `integrity_report.py` · `ui/app.py`
+- [ ] **F-2 (P1) `code_version.worktree_dirty` + `worktree_dirty_files`** — J-9 마감.
+      `scripts/self_check.py` `git` 항목이 **개수를 말하게** 한다(0 아니면 dev도 `[WARN]`).
+      `git status --porcelain -- src scripts` 로 경로를 좁힌다(`data/`가 크다).
+      **F-1 커밋 뒤에 넣는다** — 순서가 바뀌면 첫날부터 dirty로 울어 기준선을 못 잡는다
+- [ ] **F-3 (P1) 거절된 기동을 재기동으로 세지 않는다** — `ops/session_guard.py:282
+      `prior_sessions_today()`에서 `LaunchWindowRefused`가 ±5초 내에 있는 `SessionStart` 제외.
+      헬퍼 `refused_starts_today()` 분리해 F-4 스코어보드와 판정 공유.
+      **replay 양방향 필수**: 오늘 로그 → `false`, 08-19 로그(진짜 12:29 재기동) → `true`
+### 09:0x 처리 결과 — F-1 · F-3 · F-5 완료 ([MW0601])
+
+- [x] **F-1 완료** — F 단위 6커밋으로 쪼갰다: `6b2fa53`(F-1+F-2a) · `fb0728f`(F-2b) ·
+      `719d5cd`(F-3+G-3) · `4202965`(F-4+G-4) · `f8e0fde`(F-5) · `cb04fd1`(F-6+logs 추적).
+      `configs/incident_causes.yaml` add 완료. 전량 테스트 2115건 통과 ✔
+      **다만 진단을 정정한다**: 원인은 커밋 누락이 아니라 **편집 시각 vs 기동 시각**이다.
+      워킹트리를 직접 임포트하므로(`sys.path.insert(0,"src")`) 08:20 l1은 F-2b를 **실었고**
+      08:25 g2는 F-5를 못 실었다 — 「절반만, 편집 도중 상태로」가 실제 상태다(DECISION_LOG 후속 참고)
+- [x] **F-3 완료** — 커밋 `4eca9af`. 판정을 `session_guard.drop_refused_starts()` 하나로 모으고
+      `integrity_report._drop_refused_starts()`는 그것을 부른다(G-3의 취지를 여기서 선반영).
+      양방향 replay ✔ 08-20 08:20 → 0 · **08-19 12:29 → 1**(진짜 재기동 살아 있음) · 08-19 08:20 → 0.
+      **이 건은 어제 F-2b가 만든 회귀였다** — 부팅 트리거가 매일 발화하므로 매일 재현됐을 것
+- [x] **F-5 완료** — `cb04fd1`에 포함. 다만 패턴을 `*_report.md`에서 **`*.md`(evidence_* 제외)**로
+      넓혔다. 원안이 놓친 파일이 하필 `2026-08-19_incident_0950_deepdive.md` —
+      09:50 사고의 **유일한** 원인 기록이자 지금 `incident_causes.yaml`의 `evidence` 대상이다.
+      `git ls-files logs` = **76** → **J-7 · K-7 마감**
+- [x] **G-3 부분 완료** — 세션 계수 정본을 `session_guard`에 세웠다. 남은 것은
+      `effective_sessions_today()`로 (실기동, 거절) 튜플을 함께 돌려주는 것과 F-4 스코어보드 결선
+- [ ] **F-2 (worktree_dirty) 착수 전 재설계 필요** — dirty는 「커밋과 다르다」만 말하고
+      **「돌고 있는 프로세스가 어느 시점의 파일을 읽었나」**를 말하지 않는다. 오늘 아침이 그 차이다.
+      `SessionStart`에 `src/` 최신 mtime(`source_mtime_max`)을 함께 싣는 축을 더할 것
+- [ ] **K-1 오늘 판정 불가** — F-3은 고쳤지만 **돌고 있는 l1_daily는 08:20 기동본**이라
+      오늘 스냅샷은 계속 `restarted_mid_day: true`다. 08-21 정시 기동부터 판정한다
+
+- [ ] **F-4 (P2) UI stderr 리다이렉션 복구** — `scripts/install_scheduled_tasks.ps1` UI 액션에
+      `2>&1 … ui_YYYYMMDD.err.log`. l1/g2 액션과 같은 형태로 통일. 07-30 이후 회귀 커밋을
+      `git log -S "err.log"`로 특정. **D-3 마감**
+- [ ] **F-5 (P2) `.gitignore` 예외 — `logs/dailycheck/*.md` 추적** — J-7 마감.
+      로그 원본은 추적하지 않는다(일 130~240KB). 점검 보고서·증거 다이제스트만 —
+      08-14 F-12의 "나중 보고서가 앞의 것을 채점한다" 원칙상 소실되면 안 된다
+- [ ] **F-6 (P2) 자가점검 `host`에 `active_hours=08:00~16:00`** — J-8 · D-1 동시 마감.
+      레지스트리 조회 실패는 `[OK ]` 유지 + `조회 실패` 표기(웜스타트와 같은 원칙)
+
+### 고도화
+
+- [ ] **G-1 (이번 주 · 착수 조건 오늘 충족) 커밋 없는 하루를 기동이 막는다** —
+      `self_check.py` `git` 항목을 판정 항목으로 승격. dev는 **이틀 연속 미커밋**이면 `[WARN]`,
+      live/paper는 FAIL·기동 거부(금지계명 10). "이틀 연속" 조건이 오탐을 막는다.
+      **근거: 이 유형이 `50eff6c`(08-19)에 이어 오늘까지 이틀 연속.** 선행: F-2 · F-5
+- [ ] **G-2 (다음 단계) 장후에 `ClosedWithoutCommit`(WARNING) 축 신설** —
+      당일 NEXT_TODO에서 새로 `[x]`가 된 수 > 0 인데 당일 `[MW0601]` 커밋 0이면 경고.
+      `git diff HEAD~1 -- dev_memory/NEXT_TODO.md | grep '^+.*\[x\]'`.
+      dev_memory가 커밋 안 된 날은 **`unresolved`로 보고**(G-4 negative_control 원칙)
+- [ ] **G-3 (이번 주 · F-3과 같은 커밋 가능) 세션 계수 단일 진입점** —
+      `effective_sessions_today(log) -> (실기동, 거절)`. `prior_sessions_today` · F-4 스코어보드 ·
+      `abnormal_exits` · 장후 리포트가 전부 이것 하나를 부른다
+- [ ] **G-4 (이번 주 · F-1 커밋과 같은 날) 불변원칙 2 예외 명문화** —
+      SYSTEM.md에 "구독 성립 이전 · 1회성 · 버스 병행" 3조건부 예외 추가.
+      `RegimeSeeded`에 `delivery: "bus+direct"` 필드. 예외가 함수 주석에만 있으면 다음 사람이
+      되돌리거나 남용한다
+
+### 08-21 장전 관측 — 이번 계획의 판정
+
+- [ ] **K-1** `status_snapshot.json` `restarted_mid_day: false` · `clean: true` ·
+      `start_lag_minutes`가 **숫자**(null 아님). F-3 적용 후
+- [ ] **K-2** `code_version.worktree_dirty` 키 존재 + `false`. F-2 적용 후 → **J-9 마감**
+- [ ] **K-3 ★** `logs/g2_daily_20260821.log` 08:25대 `RegimeSeeded` **1건**.
+      없으면 「국면 시드 없음」 print라도 있어야 한다 — **둘 다 없으면 F-5가 또 안 실린 것** → J-5 재판정
+- [ ] **K-4** 09:00 첫 사이클 `AggregatorNoContribution.regime != UNKNOWN`.
+      **K-3 성립한 경우에만 판정한다** — 못 재는 것을 근거로 선고하지 않는다
+- [ ] **K-5** `logs/ui_20260821.err.log` 존재(내용 비어도 됨) → **D-3 마감**
+- [ ] **K-6** 자가점검 `host` 라인에 `active_hours=` → **J-8 · D-1 마감**
+- [ ] **K-7** `git ls-files logs | wc -l > 0` → **J-7 마감**
+
+### 오늘 장후 — 재판정 / 보류
+
+- [ ] **J-10** `daily_integrity_20260820.json` `delivery_latency.p90` 4거래일째.
+      **1,000ms 초과면 G-2(완성봉 유예 연동) 재착수 조건 충족.** 오늘 아침 경고값 925ms(유예의 1.85배)
+- [ ] **J-5b 보류** — F-5 미반영이므로 `regime_unseeded_cycles`가 세션 수만큼 나오는 것이
+      **예상된 결과**다. 설계 채점으로 읽지 않는다
+- [ ] **J-12 보류** — 1-3의 계수 오류(F-3 전)로 오탐 예상. 거절 1 + 실기동 1을 사람이 직접 확인
+- [ ] **C-1 (즉시 가능)** 로컬 PC `Get-Item scripts\run_g2_paper_trading.py | select LastWriteTime` —
+      08:25:30 이전/이후. 1-1의 인과 확정. **이전이었다면 더 심각하다**(무출력 경로)
+- [ ] **C-4 (즉시 가능)** 브라우저로 `http://localhost:8511` 1회 개방 후 `UISnapshotFreshness`
+      출현 여부 → **D-2 판정**. 단 F-4 전이라 예외가 나도 안 보인다
