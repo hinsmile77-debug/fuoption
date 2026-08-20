@@ -34,6 +34,7 @@ from datetime import date
 from typing import Sequence
 
 from messiah.core.messages import BarClosed
+from messiah.core.timeutil import KST
 
 Bars = Sequence[BarClosed]
 
@@ -675,3 +676,97 @@ STATEFUL_FEATURES: list[tuple[str, "callable[[Bars, SessionState], float | None]
     ("px_range_pos_d", px_range_pos_d),
     ("px_round_dist", px_round_dist),
 ]
+
+
+# ---------------------------------------------------------------- 세션 경계 (2026-08-20 F-G)
+#
+# ## 야간 갭이 10분봉 한 칸으로 들어가고 있었다
+#
+# 2026-08-20에 `px_max_ret_60`이 10m에서 세션 내내(41봉) 한 값에 고정됐고, 등록부가
+# `no-degenerate-features` **3번째 재발**로 판정했다. 원인은 수정이 안 든 것이 아니었다:
+#
+#     +0.032462  2026-08-19 15:30 KST -> 2026-08-20 08:40 KST   ← 17시간 간격, 창의 argmax
+#     +0.019337  2026-08-14 15:30 KST -> 2026-08-17 08:40 KST   ← 주말 갭 (3일)
+#     +0.017546  2026-08-20 09:00     -> 2026-08-20 09:10       ← 오늘 장중 최대
+#
+# 창 60은 **60분이 아니라 60봉**이다. 10m에서 60봉 = 600분 ≈ 1.46 거래일이고, 한 세션은
+# 410분 ≈ 41봉이라 **창이 세션보다 길다**. 그래서 argmax가 세션 중에 창을 벗어날 수 없고,
+# 그 argmax가 하필 전일 종가 → 당일 시가를 잇는 세션 경계 봉이다. 야간 갭 +3.25%는 그날
+# 장중 최대(+1.75%)의 1.85배 — 어떤 장중 봉도 이걸 못 넘는다.
+#
+# `px_max_ret_60`만의 문제가 아니다. **인접 종가 차분을 쓰는 모든 피처**가 롤링 창이 세션
+# 경계를 넘는 순간 17시간짜리 관측치 하나를 10분봉으로 취급한다. 평균·표준편차 계열은
+# 이상치가 희석돼 값이 계속 변하므로 계기에 안 걸리고, **max/min 계열만 고정(pin)돼 눈에
+# 보인다.** 즉 `px_max_ret_60`은 병이 아니라 유일한 증상이다.
+#
+# ## 값은 아직 안 바꾼다
+#
+# 라이브 번들이 이 오염된 값 위에서 학습됐다. 정의를 바꾸면 학습분포와 추론분포가 어긋나므로
+# **번들 재학습 없이 전환하지 않는다.** 아래 두 함수는 (1) 전환 시 쓸 정본과 (2) 「그 상수가
+# 야간 갭 때문인가」를 숫자로 답하는 계기다. 지금 계산되는 피처 값은 한 톨도 안 바뀐다.
+
+
+def _trading_day(bar: BarClosed) -> date:
+    """봉이 속한 **거래일** — 반드시 KST로 변환한 뒤 날짜를 뽑는다.
+
+    `bar_open_kst`는 이름과 달리 UTC로 저장돼 오는 경로가 있다(Parquet 재생). UTC 날짜로
+    가르면 08:40 KST 봉이 **전날**로 떨어져 09:00 봉과의 사이를 세션 경계로 오인한다 —
+    실제 경계(전일 15:30 → 당일 08:40)는 놓치면서 없는 경계를 만드는, 정확히 반대로 틀리는
+    실수다.
+    """
+    return bar.bar_open_kst.astimezone(KST).date()
+
+
+def session_boundary_indices(bars: Bars) -> list[int]:
+    """인접쌍 `i`(= `bars[i]` → `bars[i+1]`) 중 **거래일이 바뀌는** 것들의 인덱스."""
+    if len(bars) < 2:
+        return []
+    days = [_trading_day(bar) for bar in bars]
+    return [i for i in range(len(days) - 1) if days[i] != days[i + 1]]
+
+
+def same_session_returns(bars: Bars) -> list[float]:
+    """세션 경계를 **넘지 않는** 단순 인접 수익률.
+
+    반환 길이는 `len(bars) - 1`이 **아닐 수 있다** — 경계 쌍 수만큼 짧다. 호출측이 길이를
+    가정하면 안 된다(그 가정이 이 버그를 만든 형태다).
+
+    경계 쌍을 **제외**하지 갭 조정으로 이어 붙이지 않는다. 야간 정보를 살리려는 선택이
+    갭 조정인데, 그 정보는 이미 `px_gap_open`이 전용 피처로 들고 있다 — 같은 정보를 두
+    경로로 넣으면 다중공선성이 생긴다(장후 리포트 F-G 권고와 동일).
+    """
+    boundaries = set(session_boundary_indices(bars))
+    closes = _closes(bars)
+    return [
+        b / a - 1
+        for i, (a, b) in enumerate(zip(closes, closes[1:]))
+        if a != 0 and i not in boundaries
+    ]
+
+
+def session_boundary_inflation(bars: Bars, window: int) -> dict[str, float | int] | None:
+    """`px_max_ret(bars, window)`의 최댓값이 **야간 갭 때문인가**를 숫자로 답한다.
+
+    반환: `with_boundary`(현재 값) · `same_session`(경계 제외 값) · `ratio` · `boundary_pairs`.
+    창이 안 차거나 잴 것이 없으면 `None` — 0으로 적으면 "오염 없음"이 되어 거짓이다(L18).
+
+    이 값이 있어야 등록부의 `no-degenerate-features` 재발이 **익명의 3번째 실패**가 아니라
+    「원인이 규명된 알려진 기전」으로 읽힌다. 판정은 바꾸지 않는다 — 피처가 실제로 퇴화한
+    것은 사실이고, 고치는 것은 값 전환(재학습 동반)이다.
+    """
+    if len(bars) < window + 1:
+        return None
+    tail = bars[-(window + 1) :]
+    closes = _closes(tail)
+    every = [b / a - 1 for a, b in zip(closes, closes[1:]) if a != 0]
+    same = same_session_returns(tail)
+    if not every or not same:
+        return None
+    with_boundary = max(every)
+    same_session = max(same)
+    return {
+        "with_boundary": with_boundary,
+        "same_session": same_session,
+        "ratio": (with_boundary / same_session) if same_session > 0 else float("inf"),
+        "boundary_pairs": len(session_boundary_indices(tail)),
+    }

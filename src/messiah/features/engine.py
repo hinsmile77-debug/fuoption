@@ -535,7 +535,46 @@ class FeatureEngine:
                 # (`FeatureHealth.allowed_constant_values` 주석).
                 allowed_constant_values=health.allowed_constant_values,
             )
+            # **그 상수가 야간 갭 때문인가** (2026-08-20 F-G). 종전엔 퇴화 판정이 나와도
+            # 원인이 익명이라 등록부가 「수정이 듣지 않았다 · 3회 재발」로만 말했다.
+            # 이 줄이 붙으면 같은 재발이 「원인이 규명된 알려진 기전」으로 읽힌다 —
+            # 판정 자체는 안 바꾼다(피처가 실제로 퇴화한 것은 사실이다).
+            if health.constant:
+                self._log_session_boundary_inflation(health)
         return healths
+
+    def _log_session_boundary_inflation(self, health: FeatureHealth) -> None:
+        """퇴화한 Horizon에서 세션 경계 오염을 계량해 남긴다 (2026-08-20 F-G).
+
+        실패해도 장 마감 절차를 막지 않는다 — 관측 한 줄이 하루의 종료를 멈추면 본말전도다.
+        """
+        try:
+            horizon = Horizon(health.horizon)
+        except ValueError:
+            return
+        bars = list(self._history.get(horizon, ()))
+        # 표준 창 중 **가장 긴 것**으로 잰다 — 창이 세션(약 41봉)보다 길어야 경계가 창 안에
+        # 갇히고, 그때만 이 기전이 성립한다.
+        window = max(px_core.W_STD)
+        try:
+            inflation = px_core.session_boundary_inflation(bars, window)
+        except Exception:  # noqa: BLE001
+            return
+        if inflation is None or not inflation.get("boundary_pairs"):
+            return
+        mlog.log(
+            "SessionBoundaryInflation",
+            f"{health.horizon} 창 {window}봉 안에 세션 경계 "
+            f"{inflation['boundary_pairs']}쌍 — 최대 단봉수익률이 "
+            f"{inflation['with_boundary']:+.6f}인데 경계를 빼면 "
+            f"{inflation['same_session']:+.6f}이다({inflation['ratio']:.2f}배). "
+            "야간 갭이 봉 한 칸으로 들어가 있다",
+            symbol=self._symbol,
+            horizon=health.horizon,
+            window_bars=window,
+            constant_features=health.constant,
+            **{key: value for key, value in inflation.items()},
+        )
 
     def last_nan_ratios(self) -> dict[str, float]:
         return {horizon.value: ratio for horizon, ratio in self._last_nan_ratio.items()}
