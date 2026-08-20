@@ -48,7 +48,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import yaml
 
@@ -79,6 +79,19 @@ class VerificationStatus:
     # 08-17 휴장으로 08-18 기준 남은 거래일이 1일뿐인데 `consecutive_days: 3`인 항목이
     # 셋 있었다. 처방이 다르다: 고치는 게 아니라 **기한을 다시 잡는 것**이다.
     UNREACHABLE = "기한 불가"
+    # **계측은 성립했는데 값이 기준을 넘었다** (2026-08-19 F-4). `RECURRED`와 가르는 이유:
+    # 2026-08-19 장후에 ERROR 4건이 났고 **네 건 다 계측이 정확히 작동한 결과**였다.
+    # `truncation-is-visible`은 그날 잘림을 정확히 보였고(11건·5계열), `leg-completeness-
+    # measured`는 12:30 사이클 41/42다리를 정확히 세었으며, `ui-restart-observability`는
+    # 180.2분 공백을 정확히 쟀다. 세 계기 모두 설계대로 돌았고 그 대가로 「수정이 듣지
+    # 않았다」를 받았다 — 고칠 것이 없는 곳으로 사람을 보내는 신호다.
+    #
+    # 값이 나쁘다는 사실 자체는 **안 숨긴다.** 그것을 말하는 자리가 이 상태이고, 그날
+    # 진짜 사건은 `abnormal_exits`(F-1)가 잡는다.
+    MEASURED_BAD = "계측 성립 · 값 위반"
+    # **계기가 자기가 못 보는 사고가 난 날에 통과 도장을 찍었다** (2026-08-19 G-4).
+    # negative control이 사건을 가리키는데 이 지표가 0이면 통과가 아니라 눈이 먼 것이다.
+    INSTRUMENT_BLIND = "계기 실명"
     # 과거에 위반했지만 **그 뒤로는 기준을 지키고 있다** (2026-08-18 F-0818P-1).
     # 종전엔 이 상태가 `RECURRED`(ERROR)와 구분되지 않아 회복 중인 항목이 매일 ERROR를
     # 냈다 — 2026-08-18 장후에 ERROR 11건 중 9건이 그 상태였다(늑대소년의 정체).
@@ -257,6 +270,26 @@ def _degenerate_feature_count(report: dict[str, Any]) -> float | None:
             for entry in judged
         )
     )
+
+
+def _refused_starts_leaked(report: dict[str, Any]) -> float | None:
+    """기동 창 거절이 기동 수에 새어 들어간 건수 — 0이면 가드가 먹었다 (2026-08-19 F-4).
+
+    셋을 대조한다: 로그에 찍힌 `SessionStart` 태그 수 · `LaunchWindowRefused` 수 ·
+    리포트가 실제로 센 프로세스별 기동 수(`starts_by_process`, 거절분이 이미 빠진 값).
+    가드가 설계대로면 `태그 − 거절 − 실계수 == 0`이다.
+
+    `starts_by_process`가 없는 옛 리포트는 None(판정 불가)이다 — 0이 아니다(L18).
+    """
+    counted = report.get("starts_by_process")
+    tags = report.get("tag_counts")
+    if not isinstance(counted, dict) or not isinstance(tags, dict):
+        return None
+    raw = float(tags.get("SessionStart", 0))
+    refused = float(tags.get("LaunchWindowRefused", 0))
+    effective = float(sum(int(v) for v in counted.values()))
+    # 구조화 태그 없던 시절의 거절은 태그 수에 안 잡혀 음수가 된다 — 0으로 접는다.
+    return max(0.0, raw - refused - effective)
 
 
 # 등록부에서 쓸 수 있는 지표 — **무결성 리포트에 실제로 있는 필드만** 연다. 임의 표현식을
@@ -464,6 +497,31 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # **승격이 조용히 안 먹은 것**이다 — 이 프로젝트가 반복한 실패 형태(결선했다고 믿는데
     # 안 붙어 있음)를 이 자리에서 잡는다. 채점을 안 돌린 날은 None(판정 불가).
     "absent_watchlist_features": _absent_watchlist_features,
+    # **기동 창 거절이 기동으로 새어 들어갔는가** (2026-08-19 F-4). 0이면 가드가 설계대로
+    # 걸러낸 것이다.
+    #
+    # 왜 새로 파나: `launch-window-refusal-not-counted`가 `observation_gap_minutes_max`를
+    # `ui-restart-observability`와 **공유**하고 있었다. 공백이 한 번 생기면 등록부는 항상
+    # **재발 2건**으로 셌고, 2026-08-19의 재발 4건 중 2건이 그 중복이었다. 한 지표를 둘이
+    # 나눠 쓰면 사고 하나가 계기 수만큼 부풀어 보인다 — 이제 `load_registry()`가 그 상태를
+    # 거부한다.
+    #
+    # 산식: 로그의 `SessionStart` 태그 수 − 거절 수 − 리포트가 실제로 센 기동 수. 가드가
+    # 걸러내면 셋이 정확히 상쇄돼 0이다. 구조화 태그 없이 쓰인 옛 거절(`_legacy_refused_
+    # starts`)은 태그 수에 안 잡혀 음수를 만들 수 있으므로 0으로 접는다.
+    "refused_starts_counted_as_restart": _refused_starts_leaked,
+    # **불완전일인가** (2026-08-19 F-3). 1.0(반쪽짜리 하루) / 0.0(온전한 하루) / None(축이
+    # 없던 옛 리포트). G-4의 negative control로 쓰인다 — 커버리지가 61%인 날에 이 값이
+    # 0이면 판정기가 눈이 먼 것이다.
+    "incomplete_day": lambda r: (
+        float(bool(r["incomplete_day"])) if isinstance(r.get("incomplete_day"), bool) else None
+    ),
+    # **장중에 죽어 있던 시간**(분) — `abnormal_exits`의 negative control (2026-08-19 F-1/G-4).
+    "mid_session_gap_minutes": lambda r: (
+        float(r["mid_session_gap_minutes"])
+        if isinstance(r.get("mid_session_gap_minutes"), (int, float))
+        else None
+    ),
     # 국면 판정 중 UNKNOWN의 비율 (2026-08-12 F-2). **분포인가 상수인가**를 묻는다.
     #
     # 이 지표가 없던 2026-08-12에 국면은 하루 종일 100% UNKNOWN이었고, 그날 Meta Decision
@@ -502,6 +560,32 @@ class PendingVerification:
     registered: date
     metric: str
     consecutive_days: int
+    # **이 항목이 묻는 것이 계측인가 결과인가** (2026-08-19 F-4).
+    #
+    #   outcome     (기본) 지표값이 기준 안에 있어야 한다. 벗어나면 `재발`.
+    #   instrument  그 지표가 **산출되기만 하면** 충족이다. 값이 기준을 넘은 것은 이 수정의
+    #               실패가 아니라 그날의 사실이므로 `계측 성립 · 값 위반`으로 따로 낸다.
+    #
+    # 2026-08-19에 재발 4건이 전부 `instrument` 성격의 항목이었다 — 네 계기가 그날 사고를
+    # 정확히 재고 「수정이 듣지 않았다」를 받았다. 취지문("~를 재는가", "~가 보이는가")과
+    # 채점 방식("그 값이 좋은가")이 어긋나 있었다.
+    #
+    # **미지정은 `outcome`이다** — 기존 항목의 판정을 소급해 바꾸지 않는다(R18). 축을
+    # 명시한 항목만 새 규율로 옮긴다(점진 이행).
+    axis: str = "outcome"
+    # **이 지표가 반드시 반응해야 하는 사건** (2026-08-19 G-4). (지표 이름, 그 지표가
+    # 이보다 크면 사건이 있었다고 보는 값).
+    #
+    # 왜 필요한가: 2026-08-19에 `no-silent-process-death`가 **자기가 못 보는 사고가 일어난
+    # 날에** 「7거래일 연속 충족」을 선고했다. 계기의 출력을 그 계기의 합격 기준으로 쓰면,
+    # **계기가 눈이 멀수록 성적이 좋아진다.** 그날 `observation_gaps`는 2건이었고
+    # `abnormal_exits`는 0이었다 — 그 두 값을 나란히 놓기만 했으면 즉시 적발됐을 사안이다.
+    #
+    # `references/phases.md` §D의 「건수 0은 두 가지다 — 진짜 없었거나, 계측이 없거나」를
+    # 사람이 매번 기억하지 않아도 되게 만드는 자리다.
+    control_metric: str | None = None
+    control_min: float = 0.0
+    control_summary: str = ""
     deadline: date | None = None
     # **채점 시작점을 뒤로 미는 날짜** (2026-08-10 B-3). `registered`를 고쳐 쓰지 않는
     # 이유는 그 값이 **수정이 들어간 날**이라는 사실 기록이기 때문이다 — 그걸 덮으면
@@ -584,6 +668,12 @@ class VerificationVerdict:
     # "직전 측정"이다(L18: 못 잰 날을 값으로 세지 않는다).
     last_value: float | None = None
     prev_value: float | None = None
+    # 계측은 성립했는데 값이 기준을 넘은 날들 (2026-08-19 F-4) — `instrument` 축 전용.
+    measured_bad: tuple[date, ...] = ()
+    # 이 항목이 묻는 것이 계측인가 결과인가 (2026-08-19 F-4) — 등록부 `axis`를 그대로 싣는다.
+    axis: str = "outcome"
+    # negative control이 가리킨 사건 — (날짜, 값) (2026-08-19 G-4).
+    control: tuple[date, float] | None = None
 
     @property
     def needs_attention(self) -> bool:
@@ -600,7 +690,14 @@ class VerificationVerdict:
             VerificationStatus.PREMISE_BROKEN,
             # 기한 불가도 사람 몫이다 — 다만 처방이 "고쳐라"가 아니라 "기한을 다시 잡아라"다.
             VerificationStatus.UNREACHABLE,
+            # **계기가 눈이 멀었다는 판정은 재발보다 무겁다** (2026-08-19 G-4). 재발은
+            # "고쳤는데 되돌아갔다"이고 이쪽은 "애초에 볼 수 없었다"다 — 후자는 그동안
+            # 쌓인 통과 이력 전체를 무효로 만든다.
+            VerificationStatus.INSTRUMENT_BLIND,
         )
+        # **`MEASURED_BAD`는 여기 없다** (2026-08-19 F-4). 계측이 제대로 돌아 나쁜 값을
+        # 보고한 것은 그 수정의 실패가 아니다. 매일 사람 앞에 ERROR로 올리면 정작 진짜
+        # 재발이 그 더미에 묻힌다 — 이 모듈이 막으려던 실패 그 자체다(`RECOVERING`과 같은 판단).
 
 
 class RegistryError(ValueError):
@@ -629,6 +726,25 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
             )
         if entry.get("max") is None and entry.get("min") is None:
             raise RegistryError(f"{entry.get('id', '?')}: max/min 중 최소 하나는 있어야 한다")
+        axis = str(entry.get("axis", "outcome"))
+        if axis not in ("outcome", "instrument"):
+            raise RegistryError(
+                f"{entry.get('id', '?')}: 알 수 없는 축 '{axis}' — outcome | instrument"
+            )
+        # negative control (2026-08-19 G-4) — 결과·전제와 **같은 엄격도**로 검증한다.
+        control = entry.get("negative_control") or {}
+        control_metric = control.get("metric")
+        if control:
+            if control_metric not in METRIC_EXTRACTORS:
+                raise RegistryError(
+                    f"{entry.get('id', '?')}: 알 수 없는 대조 지표 '{control_metric}' — "
+                    f"사용 가능: {sorted(METRIC_EXTRACTORS)}"
+                )
+            if control_metric == metric:
+                raise RegistryError(
+                    f"{entry.get('id', '?')}: 대조 지표가 자기 자신이다 — "
+                    f"계기가 자기를 채점하는 것을 막으려는 자리인데 그 자체가 된다"
+                )
         premise = entry.get("premise") or {}
         premise_metric = premise.get("metric")
         if premise:
@@ -658,9 +774,39 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
                 premise_max=None if premise.get("max") is None else float(premise["max"]),
                 premise_min=None if premise.get("min") is None else float(premise["min"]),
                 premise_summary=str(premise.get("summary", "")),
+                axis=axis,
+                control_metric=control_metric,
+                control_min=float(control.get("min", 0.0)),
+                control_summary=str(control.get("summary", "")),
             )
         )
+    _reject_shared_metrics(out)
     return out
+
+
+def _reject_shared_metrics(items: Sequence[PendingVerification]) -> None:
+    """한 지표를 둘 이상이 나눠 쓰면 거부한다 (2026-08-19 F-4).
+
+    2026-08-19에 `ui-restart-observability`와 `launch-window-refusal-not-counted`가 둘 다
+    `observation_gap_minutes_max`를 쓰고 있었다. 그래서 관측 공백이 **한 번** 생기면 등록부는
+    항상 **재발 2건**으로 셌다 — 그날 재발 4건 중 2건이 그 중복이었다. 사고 하나가 계기
+    개수만큼 부풀어 보이면 「오늘 위반 N건」이 사고 규모를 뜻하지 않게 된다.
+
+    조용히 넘기지 않고 거부하는 이유는 이 모듈의 다른 실패 조건과 같다: 등록부 자체가
+    잘못된 채로 도는 것이 「검증하고 있다는 착각」의 근원이다.
+
+    **전제 지표(`premise_metric`)는 공유해도 된다** — 그쪽은 판정이 아니라 배경이고,
+    실제로 `delivery_latency_p99_seconds`를 둘이 나눠 쓰고 있다.
+    """
+    seen: dict[str, str] = {}
+    for item in items:
+        owner = seen.get(item.metric)
+        if owner is not None:
+            raise RegistryError(
+                f"지표 '{item.metric}'을 '{owner}'와 '{item.id}'가 함께 쓴다 — 사고 한 번이 "
+                f"위반 두 건으로 세어진다(2026-08-19 F-4). 둘 중 하나에 고유 지표를 줄 것"
+            )
+        seen[item.metric] = item.id
 
 
 def _as_date(value: Any) -> date:
@@ -774,6 +920,8 @@ def evaluate(
         clean_streak = 0
         violations: list[date] = []
         unjudged: list[date] = []
+        # 계측은 됐는데 값이 기준을 넘은 날 (2026-08-19 F-4) — `instrument` 축 전용.
+        measured_bad: list[date] = []
         # **뒤에서부터 몇 날을 연속으로 못 쟀나** — 계측 고장(`STALLED`) 판정의 근거다.
         # 옛 코드는 "누적 판정 불가 수 + 통과 0"으로 봤는데, 끝까지 순회하면 그 조합이
         # 성립하지 않는다(옛날에 한 번 통과했으면 오늘 계측이 죽어도 안 걸린다).
@@ -787,12 +935,27 @@ def evaluate(
             value = extractor(reports[day])
             if value is None:
                 unjudged.append(day)  # 못 잰 날 — 통과로도 위반으로도 안 센다(L18)
-                trailing_unmeasured += 1
+                # **불완전일 때문에 못 잰 날은 계측 고장이 아니다** (2026-08-19 F-3).
+                #
+                # F-3이 반쪽짜리 하루를 롤링 창에서 빼면서 `judged: false`가 늘어난다.
+                # 그 자체는 정직해지는 것이지만, 그 날들을 `trailing_unmeasured`에 세면
+                # 사고가 난 주에 등록부가 「최근 N거래일 연속 판정 불가 — 계측이 고장 났을
+                # 수 있다」를 연쇄로 낸다. 계측은 멀쩡하다 — 잴 하루가 온전하지 않았을 뿐이고,
+                # 그건 이미 `incomplete_day`가 말한다. 여기서 또 세면 같은 사건이 두 번
+                # 보고되고, 그중 하나는 틀린 진단이다.
+                if reports[day].get("incomplete_day") is not True:
+                    trailing_unmeasured += 1
                 continue
             trailing_unmeasured = 0
             measured.append(value)
             if item.satisfied_by(value):
                 clean_streak += 1
+            elif item.axis == "instrument":
+                # **계측은 성립했다** (2026-08-19 F-4). 이 항목이 묻는 것은 "그 지표가
+                # 산출되는가"이고 값은 그날의 사실이다 — 통과로 세되 값이 나빴다는 사실을
+                # 따로 남긴다(아래 `measured_bad`).
+                clean_streak += 1
+                measured_bad.append(day)
             else:
                 violations.append(day)
                 clean_streak = 0
@@ -815,9 +978,29 @@ def evaluate(
                 report_days=sorted(reports),
                 last_value=measured[-1] if measured else None,
                 prev_value=measured[-2] if len(measured) >= 2 else None,
+                measured_bad=measured_bad,
+                control=_latest_control(item, reports),
             )
         )
     return verdicts
+
+
+def _latest_control(
+    item: PendingVerification, reports: dict[date, dict[str, Any]]
+) -> tuple[date, float] | None:
+    """negative control 지표의 **가장 최근 측정** — (날짜, 값) (2026-08-19 G-4).
+
+    `_latest_premise()`와 같은 형태다. 못 잰 날은 건너뛴다 — 대조 지표가 없는 날을 0으로
+    읽으면 「사건이 없었다」가 되어 이 축이 아무것도 못 잡는다(L18).
+    """
+    if item.control_metric is None:
+        return None
+    extractor = METRIC_EXTRACTORS[item.control_metric]
+    for day in sorted(reports, reverse=True):
+        value = extractor(reports[day])
+        if value is not None:
+            return day, value
+    return None
 
 
 def _scorable_days_until(
@@ -884,14 +1067,18 @@ def _verdict_for(
     report_days: list[date] | None = None,
     last_value: float | None = None,
     prev_value: float | None = None,
+    measured_bad: list[date] | None = None,
+    control: tuple[date, float] | None = None,
 ) -> VerificationVerdict:
     """판정 하나 — **오늘 위반이 맨 앞이다** (2026-08-18 F-0818P-1).
 
     판정 순서 자체가 규율이다:
 
+        ⓪ 계기 실명          대조 사건이 있는데 이 지표가 0 — 그동안의 통과가 무효다
         ① 오늘 위반          재발 — 오늘 나는 유일한 ERROR
         ② 뒤 N일 연속 못 잼   계측 고장 — "진행 중"이 아니라 정체다
         ③ 전제 붕괴          결과는 깨끗한데 딛고 선 것이 무너졌다
+        ③.5 오늘 값 위반      계측 성립 · 값 위반 — 계기는 멀쩡하다(WARNING)
         ④ 연속 통과 ≥ N      검증 완료 — 위반 이력이 있어도 **회복으로 졸업**한다
         ⑤ 기한 경과          기한 초과
         ⑥ 위반 이력 있음     회복 중 — WARNING이지 ERROR가 아니다
@@ -899,6 +1086,14 @@ def _verdict_for(
 
     ②를 ④보다 먼저 보는 이유: 옛날에 N일 연속 통과했더라도 **최근 N일을 못 재고 있으면**
     그건 통과가 아니라 모르는 것이다. 2026-08-04에 크래시 집계가 정확히 그 자리였다.
+
+    ⓪이 맨 위인 이유 (2026-08-19 G-4): 나머지 판정은 전부 **이 계기가 볼 수 있다**를 전제로
+    한다. 그 전제가 깨지면 아래 어떤 판정도 뜻이 없다 — 2026-08-19에 `no-silent-process-
+    death`가 「7거래일 연속 충족」을 선고했는데, 그 7일 동안 이 축이 볼 수 있는 사고는
+    실제로 한 종류뿐이었다.
+
+    ③.5가 ④ 앞인 이유 (2026-08-19 F-4): 나쁜 값을 그대로 둔 채 「검증 완료」를 찍으면
+    그 사실이 산출물에서 사라진다. 계기의 성적(④)과 그날의 사실(③.5)은 다른 문장이다.
     """
     first_violation = violations[0] if violations else None
     last_violation = violations[-1] if violations else None
@@ -921,7 +1116,32 @@ def _verdict_for(
             violation_count=len(violations),
             last_value=last_value,
             prev_value=prev_value,
+            measured_bad=tuple(measured_bad or ()),
+            control=control,
+            axis=item.axis,
         )
+
+    # ⓪ **계기가 자기 자신을 채점하고 있지 않은가** (2026-08-19 G-4).
+    #
+    # 대조 지표가 「사건이 있었다」고 말하는데 이 지표가 0이면, 통과는 계기가 좋아서가
+    # 아니라 계기가 **못 봐서**다. 2026-08-19가 그 형태였다:
+    #
+    #     observation_gaps  2건(158.9분 · 180.2분)   ← 사건은 있었다
+    #     abnormal_exits    0건                      ← 그런데 이 축은 조용했다
+    #     판정              7거래일 연속 기준 충족    ← 그리고 통과 도장을 찍었다
+    #
+    # 대조 지표를 **못 잰 날은 판정하지 않는다**(`_latest_control`이 None) — 모르는 것을
+    # 근거로 실명을 선고하면 새 오탐원이 된다.
+    if control is not None and last_value is not None:
+        control_day, control_value = control
+        if control_value > item.control_min and last_value <= 0:
+            return _verdict(
+                VerificationStatus.INSTRUMENT_BLIND,
+                f"{control_day.isoformat()} {item.control_metric}={control_value:g}"
+                f"(> {item.control_min:g})인데 {item.metric}={last_value:g} — "
+                f"사건이 있었는데 이 축이 0을 냈다. 통과가 아니라 **못 본 것**이다"
+                + (f" · {item.control_summary}" if item.control_summary else ""),
+            )
 
     # ① **재발은 "마지막으로 잰 날에 위반 중"이다** (2026-08-18 F-0818P-1).
     #
@@ -972,6 +1192,18 @@ def _verdict_for(
             f"결과는 아직 깨끗하지만 전제가 무너졌다 — {measured_on.isoformat()} 측정 "
             f"{item.premise_metric}={value:g} (요구: {item.premise_text()})"
             + (f" · {item.premise_summary}" if item.premise_summary else ""),
+        )
+
+    # ③.5 **계측은 성립했고 값이 나빴다** (2026-08-19 F-4). `instrument` 축 전용이다 —
+    # `outcome` 축은 같은 상황을 ①에서 이미 재발로 잡았다.
+    if measured_bad and today in set(measured_bad):
+        return _verdict(
+            VerificationStatus.MEASURED_BAD,
+            f"계측은 성립했다 — 오늘({today.isoformat()}) {item.metric}"
+            + (f"={last_value:g}" if last_value is not None else "")
+            + f"가 기준({item.criterion_text()})을 벗어났다. "
+            f"이 항목이 묻는 것은 **재는가**이고 그 답은 예다 — 값이 나쁜 것은 "
+            f"오늘의 사실이지 이 수정의 실패가 아니다 (연속 {clean_streak}일)",
         )
 
     # ④ **위반 이력이 있어도 졸업한다** (2026-08-18 F-0818P-1). 이것이 `since:` 수동 리셋을
@@ -1079,10 +1311,19 @@ def scoreboard(verdicts: list[VerificationVerdict], *, today: date) -> dict[str,
             "violation_count": v.violation_count,
             "value": v.last_value,
             "prev_value": v.prev_value,
+            # 계측은 됐는데 값이 나빴던 날들 (2026-08-19 F-4) — 비어 있으면 그런 날이 없었다.
+            "measured_bad": [d.isoformat() for d in v.measured_bad],
+            "axis": v.axis,
         }
 
     buckets: dict[str, list[dict[str, Any]]] = {
         "today_violating": [],
+        # **계측 성립 · 값 위반** (2026-08-19 F-4). `today_violating`에서 갈라낸다 —
+        # 2026-08-19에 이 네 건이 재발로 세어져 「오늘 위반 4」가 됐고, 그 넷은 전부
+        # 09:50 사망 **한 사건**을 네 각도에서 정확히 본 결과였다.
+        "measured_bad": [],
+        # **계기가 눈이 멀었다** (2026-08-19 G-4). 가장 무거운 자리라 맨 앞 다음이다.
+        "instrument_blind": [],
         "recovering": [],
         "clean": [],
         "unjudgeable": [],
@@ -1090,7 +1331,11 @@ def scoreboard(verdicts: list[VerificationVerdict], *, today: date) -> dict[str,
         "pending": [],
     }
     for verdict in verdicts:
-        if verdict.violated_today or verdict.status == VerificationStatus.RECURRED:
+        if verdict.status == VerificationStatus.INSTRUMENT_BLIND:
+            buckets["instrument_blind"].append(entry(verdict))
+        elif verdict.status == VerificationStatus.MEASURED_BAD:
+            buckets["measured_bad"].append(entry(verdict))
+        elif verdict.violated_today or verdict.status == VerificationStatus.RECURRED:
             buckets["today_violating"].append(entry(verdict))
         elif verdict.status == VerificationStatus.RECOVERING:
             buckets["recovering"].append(entry(verdict))
@@ -1123,6 +1368,7 @@ def scoreboard_line(board: dict[str, Any]) -> str:
     counts = board["counts"]
     line = (
         f"등록부 {board['total']}건 — 오늘 위반 {counts['today_violating']} · "
+        f"계측 성립·값 위반 {counts['measured_bad']} · 계기 실명 {counts['instrument_blind']} · "
         f"회복 중 {counts['recovering']} · 검증 완료 {counts['clean']} · "
         f"판정 불가 {counts['unjudgeable']} · 기한 {counts['overdue']} · "
         f"대기 {counts['pending']}"
