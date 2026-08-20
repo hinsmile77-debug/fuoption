@@ -30,6 +30,18 @@ Validator의 관문은 두 종류다(그 모듈 docstring):
 정상 흐름은 `--promote shadow`(기본)다: 등록 → shadow → 20거래일 동안 챔피언과 겨룸
 (`models/shadow_manager.evaluate_promotion`) → 사람이 `promote_to_live()`.
 
+### 입력 계약이 바뀐 교체 — 성적 문제가 아니다 (2026-08-20 F-G 2단계)
+
+위 규율에는 사각지대가 하나 있다. **피처 정의가 바뀌면 챔피언은 성적과 무관하게 무효**다 —
+그 모델이 학습한 입력 분포가 더 이상 생산되지 않기 때문이다. 그 상태로 shadow 20거래일을
+기다리면 그동안 매 추론이 **학습-서빙 왜곡**이고, 그건 어느 쪽 끝점보다도 나쁘다.
+
+    python scripts/build_bundles.py --horizons 30m --promote live --operator MW0601 \
+        --supersede-reason "세션 경계 인접쌍 제외(F-G) — 학습 입력 정의 변경"
+
+`--supersede-reason` 없이는 종전대로 거부한다. 구 챔피언은 `retired`로 **보존**된다
+(Ver 1.6 §9.2 — 롤백 가능).
+
 그런데 **지금은 챔피언이 없다.** 챔피언 없는 shadow는 겨룰 상대가 없고
 (`evaluate_promotion`은 `champion_returns`를 요구한다), shadow에만 넣으면 `get_live()`가
 계속 `None`이라 `intel.futures`는 여전히 안 흐른다. 그래서 부트스트랩 경로를 명시적으로
@@ -105,6 +117,14 @@ def _parse_args() -> argparse.Namespace:
         help="live는 그 Horizon에 챔피언이 없을 때만(부트스트랩) — 모듈 docstring 참고",
     )
     p.add_argument("--operator", default=None, help="--promote live에 필수(감사 추적)")
+    p.add_argument(
+        "--supersede-reason",
+        default=None,
+        help=(
+            "챔피언이 있어도 교체한다 — **입력 정의가 바뀐 경우 전용** (2026-08-20 F-G). "
+            "성적을 근거로 한 교체에는 쓰지 않는다(그건 shadow 20거래일의 몫)."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="관문만 보고 등록하지 않는다")
     # 학습 예산 — 기본은 `train_formal_expert()`의 프로덕션 값에 가깝다.
     p.add_argument("--n-search-trials", type=int, default=20)
@@ -271,17 +291,57 @@ def _promote(registry: ModelRegistry, bundle_id: str, horizon: Horizon, args) ->
 
     # --promote live: 부트스트랩 전용 (모듈 docstring "첫 번들의 예외")
     champion = registry.get_live(horizon)
-    if champion is not None:
+    if champion is not None and not args.supersede_reason:
         raise SystemExit(
             f"거부 — {horizon.value}에 이미 챔피언이 있다({champion.bundle_id}). "
             "챔피언 교체는 shadow에서 20거래일 겨룬 뒤 성적으로 하는 일이다"
-            "(models/shadow_manager.evaluate_promotion). --promote shadow로 다시 실행할 것."
+            "(models/shadow_manager.evaluate_promotion). --promote shadow로 다시 실행할 것.\n"
+            "다만 **입력 정의가 바뀐 경우는 성적 문제가 아니다** — "
+            "--supersede-reason 를 참고할 것."
         )
-    registry.promote_to_shadow(bundle_id, "부트스트랩 — live 승격 직전 경유")
+    if champion is None:
+        registry.promote_to_shadow(bundle_id, "부트스트랩 — live 승격 직전 경유")
+        registry.promote_to_live(
+            bundle_id,
+            operator=args.operator,
+            reason="부트스트랩: 이 Horizon에 챔피언이 없어 첫 번들을 현역으로 세운다",
+        )
+        return BundleStatus.LIVE.value
+
+    # **입력 계약이 바뀐 교체** (2026-08-20 F-G 2단계).
+    #
+    # 위 가드는 「챔피언 교체는 성적으로 하는 일」을 지키려고 있다. 옳은 규율이고 그대로 둔다.
+    # 그런데 그 규율에는 사각지대가 하나 있다: **피처 정의가 바뀌면 챔피언은 성적과 무관하게
+    # 무효**다. 그 모델이 학습한 입력 분포가 더 이상 생산되지 않기 때문이다.
+    #
+    # 그 상태로 shadow 20거래일을 기다리면 그동안 **매 추론이 학습-서빙 왜곡**이다 —
+    # 옛 챔피언에게 새 정의의 값을 먹인다. 어느 쪽 끝점보다도 나쁘다.
+    #
+    # 그래서 좁게 연다: 사유를 문장으로 적어야 하고(`--supersede-reason`), 승인자가 있어야
+    # 하며(`--operator`), 강등은 `registry.promote_to_live()`가 감사 추적과 함께 남긴다
+    # (Ver 1.6 §9.2 — 레코드·파일 모두 보존해 롤백 가능).
+    # **승인자 없이는 못 간다.** `main()`이 CLI 진입에서 같은 검사를 하지만 여기서 한 번 더
+    # 본다 — 이 함수는 테스트·스크립트에서도 직접 불리고, 그때 `operator=None`이 통과하면
+    # 감사 추적에 `승인: None`이 남는다. 남는 것이 없느니만 못한 기록이다.
+    if not args.operator:
+        raise SystemExit(
+            "거부 — 챔피언 교체에는 --operator가 필요하다(감사 추적). "
+            "사유만으로는 누가 승인했는지 남지 않는다."
+        )
+    registry.promote_to_shadow(bundle_id, "입력 계약 변경에 따른 교체 — live 승격 직전 경유")
     registry.promote_to_live(
         bundle_id,
         operator=args.operator,
-        reason="부트스트랩: 이 Horizon에 챔피언이 없어 첫 번들을 현역으로 세운다",
+        reason=(
+            f"입력 계약 변경: {args.supersede_reason}"
+            f" (구 챔피언 {champion.bundle_id} 자동 강등)"
+        ),
+    )
+    print(
+        f"  ⚠ 챔피언 교체 — {champion.bundle_id} → {bundle_id}\n"
+        f"    사유: {args.supersede_reason}\n"
+        f"    승인: {args.operator} · 구 챔피언은 retired로 보존(롤백 가능)",
+        flush=True,
     )
     return BundleStatus.LIVE.value
 
@@ -290,6 +350,9 @@ async def main() -> int:
     args = _parse_args()
     if args.promote == "live" and not args.operator:
         print("--promote live에는 --operator가 필요하다(감사 추적)", file=sys.stderr)
+        return 2
+    if args.supersede_reason and args.promote != "live":
+        print("--supersede-reason은 --promote live 에서만 뜻이 있다", file=sys.stderr)
         return 2
     session_guard.refuse_if_regular_session("번들 생산", force=args.force_intraday)
 

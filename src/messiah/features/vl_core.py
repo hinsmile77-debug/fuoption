@@ -48,6 +48,7 @@ import statistics
 from typing import Sequence
 
 from messiah.core.messages import BarClosed
+from messiah.features import px_core
 from messiah.features.px_core import atr as _px_atr
 from messiah.features.px_core import px_bb_width as _px_bb_width
 
@@ -66,14 +67,13 @@ _INNER_SUBWINDOW = 5  # vl_vov/vl_squeeze 하위윈도우 (모듈 docstring 참�
 
 
 def _windowed_log_rets(bars: Bars, window: int) -> list[float] | None:
-    """최근 `window`개 로그수익률 — 워밍업 부족·전부 비양수 종가로 로그 불능이면 None."""
-    if window < 1 or len(bars) < window + 1:
-        return None
-    closes = [float(b.c_ticks) for b in bars[-(window + 1) :]]
-    log_rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-    if len(log_rets) < window:
-        return None
-    return log_rets
+    """최근 `window`개 **장중** 로그수익률 — 워밍업 부족·로그 불능이면 None.
+
+    2026-08-20 F-G — 세션 경계 쌍을 세지 않는다. 이 헬퍼가 `vl_rv`·`vl_semi_*`·`vl_jump`·
+    `vl_vov` 등 변동성 계열 전부의 입구이고, 야간 갭 하나가 그 전부를 위로 밀어 올린다.
+    실현변동성이 실제보다 크면 포지션 사이징이 그만큼 작아진다 — 조용히 손해 보는 쪽이다.
+    """
+    return px_core.same_session_log_returns(bars, window)
 
 
 # ---------------------------------------------------------------- W-std 계열
@@ -246,8 +246,16 @@ def vl_vov(bars: Bars, window: int) -> float | None:
         return None
     rv_series: list[float] = []
     for end in range(len(bars) - window, len(bars)):
-        sub = bars[end - inner : end + 1]
-        rv = vl_rv(sub, inner)
+        # **앞부분을 잘라서 넘기지 않는다** (2026-08-20 F-G 2단계).
+        #
+        # 종전엔 `bars[end - inner : end + 1]`로 딱 `inner + 1`봉만 넘겼다. 세션 경계를
+        # 인식하게 된 뒤로는 그 조각 안에 경계가 하나만 있어도 인접쌍이 `inner - 1`개로
+        # 줄어 `vl_rv`가 `None`을 내고, 그러면 `vl_vov` 전체가 `None`이 된다.
+        # 30분봉 기준 하루 13봉이라 **거의 모든 조각이 경계를 문다.**
+        #
+        # 접두 전체를 넘기면 `vl_rv`가 끝에서부터 경계를 건너뛰며 `inner`개를 채운다 —
+        # 걷는 비용은 `inner + 경계 수`라 잘라서 넘기던 때와 사실상 같다.
+        rv = vl_rv(bars[: end + 1], inner)
         if rv is None:
             return None
         rv_series.append(rv)
@@ -293,9 +301,9 @@ def vl_vol_ratio(
     if len(bars) < slow_window + 1:
         return None
 
-    closes = [float(b.c_ticks) for b in bars[-(slow_window + 1) :]]
-    log_rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-    if len(log_rets) < slow_window:
+    # 세션 경계 쌍 제외 (2026-08-20 F-G) — 위 `_windowed_log_rets`와 같은 규율.
+    log_rets = px_core.same_session_log_returns(bars, slow_window)
+    if log_rets is None:
         return None
 
     rv_slow = statistics.pstdev(log_rets)

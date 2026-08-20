@@ -95,8 +95,11 @@ def _ema_series(values: Sequence[float], period: int) -> list[float]:
     return out
 
 
-def _log_returns(closes: Sequence[float]) -> list[float]:
-    return [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
+# `_log_returns(closes)`는 2026-08-20 F-G 2단계에서 **제거했다.**
+#
+# 종가 배열만 받는 시그니처라 두 봉이 10분 떨어졌는지 17시간 떨어졌는지 알 방법이 없었고,
+# 그것이 정확히 야간 갭 오염의 형태였다. 대체는 `same_session_log_returns(bars, count)` —
+# **봉을 받는다.** 종가만 받는 헬퍼를 다시 만들면 같은 결함이 조용히 돌아온다.
 
 
 def _pearson(xs: Sequence[float], ys: Sequence[float]) -> float | None:
@@ -191,11 +194,15 @@ def px_accel(bars: Bars, window: int) -> float | None:
 
 
 def px_max_ret(bars: Bars, window: int) -> float | None:
-    """최대 단봉 수익 — max(단순 수익률) in W."""
-    if len(bars) < window + 1:
+    """최대 단봉 수익 — max(단순 수익률) in W **장중 봉** (2026-08-20 F-G).
+
+    세션 경계 쌍을 세지 않는다. 종전엔 야간 갭(+3.25%)이 그날 장중 최대(+1.75%)의 1.85배라
+    argmax를 매일 고정시켰고, 등록부가 그것을 「퇴화한 피처」로 3회 재발 판정했다.
+    """
+    pairs = same_session_pairs(bars, window)
+    if pairs is None:
         return None
-    closes = _closes(bars[-(window + 1) :])
-    rets = [b / a - 1 for a, b in zip(closes, closes[1:]) if a != 0]
+    rets = [b / a - 1 for a, b in pairs if a != 0]
     return max(rets) if rets else None
 
 
@@ -268,11 +275,9 @@ def px_hurst(bars: Bars, window: int) -> float | None:
     <20개 미만이거나 분산이 0이면 중립값 0.5."""
     if len(bars) < window:
         return None
-    closes = _closes(bars[-window:])
-    if len(closes) < 20:
-        return 0.5
-    log_rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-    if len(log_rets) < 19 or statistics.pstdev(log_rets) == 0:
+    # 세션 경계 쌍 제외 (2026-08-20 F-G) — 야간 갭은 R/S 통계의 range를 통째로 지배한다.
+    log_rets = same_session_log_returns(bars, window - 1)
+    if log_rets is None or len(log_rets) < 19 or statistics.pstdev(log_rets) == 0:
         return 0.5
 
     chunk_sizes = sorted({s for s in (8, 16, 32, len(log_rets) // 2) if 4 <= s <= len(log_rets)})
@@ -307,26 +312,30 @@ def px_autocorr(bars: Bars, window: int) -> float | None:
     """수익률 자기상관 — corr(ret_t, ret_{t-1}) over W."""
     if len(bars) < window + 2:
         return None
-    closes = _closes(bars[-(window + 1) :])
-    rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-    if len(rets) < 3:
+    # 세션 경계 쌍 제외 (2026-08-20 F-G) — 야간 갭 하나가 자기상관 부호를 뒤집을 수 있다.
+    rets = same_session_log_returns(bars, window)
+    if rets is None or len(rets) < 3:
         return None
     return _pearson(rets[:-1], rets[1:])
 
 
 def px_skew_r(bars: Bars, window: int) -> float | None:
-    """수익률 왜도 — rolling skew."""
-    if len(bars) < window + 1:
+    """수익률 왜도 — rolling skew **장중 봉** (2026-08-20 F-G).
+
+    모멘트 계열은 이상치가 희석돼 값이 계속 변하므로 계기에 안 걸린다 — 그래서 오염이
+    `px_max_ret`처럼 눈에 보이지 않았을 뿐, 야간 갭은 왜도·첨도를 가장 크게 흔드는 항이다.
+    """
+    rets = same_session_log_returns(bars, window)
+    if rets is None:
         return None
-    rets = _log_returns(_closes(bars[-(window + 1) :]))
     return _skew(rets)
 
 
 def px_kurt_r(bars: Bars, window: int) -> float | None:
-    """수익률 첨도 — rolling kurtosis(초과 첨도)."""
-    if len(bars) < window + 1:
+    """수익률 첨도 — rolling kurtosis(초과 첨도) **장중 봉** (2026-08-20 F-G)."""
+    rets = same_session_log_returns(bars, window)
+    if rets is None:
         return None
-    rets = _log_returns(_closes(bars[-(window + 1) :]))
     return _kurtosis_excess(rets)
 
 
@@ -337,8 +346,11 @@ def px_rsi(bars: Bars, window: int) -> float | None:
     """RSI(W) — 단순평균 기반(Wilder 지수평활 아님, 모듈 docstring 참고)."""
     if len(bars) < window + 1:
         return None
-    closes = _closes(bars[-(window + 1) :])
-    deltas = [b - a for a, b in zip(closes, closes[1:])]
+    # 세션 경계 쌍 제외 (2026-08-20 F-G) — 야간 갭이 gain/loss 한쪽에 통째로 실린다.
+    pairs = same_session_pairs(bars, window)
+    if pairs is None:
+        return None
+    deltas = [b - a for a, b in pairs]
     gains = [d for d in deltas if d > 0]
     losses = [-d for d in deltas if d < 0]
     avg_gain = statistics.fmean(gains) if gains else 0.0
@@ -723,6 +735,54 @@ def session_boundary_indices(bars: Bars) -> list[int]:
         return []
     days = [_trading_day(bar) for bar in bars]
     return [i for i in range(len(days) - 1) if days[i] != days[i + 1]]
+
+
+def same_session_pairs(bars: Bars, count: int) -> list[tuple[float, float]] | None:
+    """뒤에서부터 **세션 경계를 넘지 않는** 인접 종가쌍을 `count`개 (2026-08-20 F-G 2단계).
+
+    반환은 시간 오름차순. 버퍼를 다 걸어도 `count`개를 못 채우면 `None`(워밍업 부족)이다.
+
+    ## 왜 「제외」가 아니라 「더 걷기」인가
+
+    경계 쌍을 그냥 빼면 반환 길이가 `count`에 못 미쳐 호출측의 `len(...) < window` 가드에
+    걸린다. 10m의 `*_60`은 창(60봉)이 한 세션(약 41봉)보다 길어 **매일** 그렇게 되므로,
+    그 조치는 야간 갭 오염을 NaN으로 바꿀 뿐이다 — 더 나쁘다.
+
+    그래서 필요한 만큼 더 걷는다. 의미는 「600분 전까지(밤을 건너뛰며)」가 아니라
+    **「장중 60봉의 인접 수익률」**이 되고, 그 값이 애초에 이 피처들이 재려던 것이다.
+
+    ## 무엇이 안 바뀌나
+
+    `px_ret`·`px_mom`·`px_accel`은 **인접쌍이 아니라 두 점 사이의 구간 수익률**이다
+    (`bars[-1-W]` vs `bars[-1]`). 그 구간이 밤을 넘으면 야간 이동이 값에 들어가는데,
+    그것은 오염이 아니라 **그 피처가 재는 것 자체**다. 야간 갭을 따로 보고 싶으면
+    `px_gap_open`이 전용으로 들고 있다. 여기서 손대지 않는다.
+    """
+    if count < 1 or len(bars) < 2:
+        return None
+    days = [_trading_day(bar) for bar in bars]
+    closes = _closes(bars)
+    pairs: list[tuple[float, float]] = []
+    for index in range(len(bars) - 1, 0, -1):
+        if days[index - 1] != days[index]:
+            continue  # 세션 경계 — 17시간을 한 칸으로 접은 합성 관측치다
+        pairs.append((closes[index - 1], closes[index]))
+        if len(pairs) == count:
+            break
+    if len(pairs) < count:
+        return None
+    pairs.reverse()
+    return pairs
+
+
+def same_session_log_returns(bars: Bars, count: int) -> list[float] | None:
+    """`same_session_pairs`의 로그수익률판 — 비양수 종가가 섞이면 `None`."""
+    pairs = same_session_pairs(bars, count)
+    if pairs is None:
+        return None
+    if any(a <= 0 or b <= 0 for a, b in pairs):
+        return None
+    return [math.log(b / a) for a, b in pairs]
 
 
 def same_session_returns(bars: Bars) -> list[float]:

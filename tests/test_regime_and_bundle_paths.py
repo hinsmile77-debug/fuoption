@@ -304,9 +304,17 @@ async def test_build_one_produces_a_loadable_bundle(tmp_path):
 
 
 class _Args:
-    def __init__(self, promote: str, operator: str | None = None):
+    def __init__(
+        self,
+        promote: str,
+        operator: str | None = None,
+        supersede_reason: str | None = None,
+    ):
         self.promote = promote
         self.operator = operator
+        # 2026-08-20 F-G 2단계 — 「입력 정의가 바뀐 교체」 전용 통로. 기본은 None이라
+        # 아래 기존 테스트들의 의미(성적 없는 교체는 거부)가 그대로 유지된다.
+        self.supersede_reason = supersede_reason
 
 
 def _register(registry: ModelRegistry, bundle_id: str, tmp_path: Path) -> None:
@@ -347,6 +355,55 @@ def test_a_second_bundle_may_not_seize_the_crown(tmp_path):
         _promote(registry, "challenger", Horizon.M30, _Args("live", operator="MW0601"))
 
     assert registry.get_live(Horizon.M30).bundle_id == "champion"
+    registry.close()
+
+
+def test_a_changed_input_contract_may_replace_the_champion(tmp_path):
+    """**성적 문제가 아닌 교체가 하나 있다** (2026-08-20 F-G 2단계).
+
+    위 가드는 「챔피언 교체는 성적으로 하는 일」을 지킨다. 옳은 규율이지만 사각지대가 있다:
+    **피처 정의가 바뀌면 챔피언은 성적과 무관하게 무효**다. 그 모델이 학습한 입력 분포가
+    더 이상 생산되지 않기 때문이다.
+
+    그 상태로 shadow 20거래일을 기다리면 그동안 **매 추론이 학습-서빙 왜곡**이다 —
+    옛 챔피언에게 새 정의의 값을 먹인다. 어느 쪽 끝점보다도 나쁘다.
+
+    그래서 좁게 연다: 사유를 문장으로 적어야만 통과하고, 구 챔피언은 `retired`로 **보존**된다
+    (Ver 1.6 §9.2 — 롤백 가능).
+    """
+    registry = ModelRegistry(tmp_path / "registry.db")
+    _register(registry, "champion", tmp_path)
+    _promote(registry, "champion", Horizon.M30, _Args("live", operator="MW0601"))
+    _register(registry, "retrained", tmp_path)
+
+    status = _promote(
+        registry,
+        "retrained",
+        Horizon.M30,
+        _Args("live", operator="MW0601", supersede_reason="세션 경계 인접쌍 제외 — 입력 정의 변경"),
+    )
+
+    assert status == BundleStatus.LIVE.value
+    assert registry.get_live(Horizon.M30).bundle_id == "retrained"
+    # **구 챔피언을 지우지 않는다** — 롤백 경로가 살아 있어야 한다.
+    assert registry._status_of("champion")[0] == BundleStatus.RETIRED
+    registry.close()
+
+
+def test_supersede_still_requires_an_operator(tmp_path):
+    """사유만으로는 안 된다 — 승인자가 감사 추적에 남아야 한다."""
+    registry = ModelRegistry(tmp_path / "registry.db")
+    _register(registry, "champion", tmp_path)
+    _promote(registry, "champion", Horizon.M30, _Args("live", operator="MW0601"))
+    _register(registry, "retrained", tmp_path)
+
+    with pytest.raises((SystemExit, ValueError, TypeError)):
+        _promote(
+            registry,
+            "retrained",
+            Horizon.M30,
+            _Args("live", operator=None, supersede_reason="정의 변경"),
+        )
     registry.close()
 
 

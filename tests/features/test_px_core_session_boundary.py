@@ -24,12 +24,19 @@ R16은 *"Feature 계산은 known-value 회귀 테스트 필수"* 다. **세션 �
 버퍼에 대한 known-value 케이스가 하나도 없었고**, 그 결손이 이 사고의 직접 원인이다.
 여기 값들은 `data/bars/A05609/10m/*.parquet` 4일치 153봉에서 실측한 것이다.
 
-## 값은 아직 안 바뀐다
+## 값을 바꿨다 — 재학습과 같은 커밋으로 (2026-08-20 F-G 2단계)
 
-라이브 번들 `real-20260811-1604-30m`이 오염된 값 위에서 학습됐다. 정의를 바꾸면 학습분포와
-추론분포가 어긋나므로 **번들 재학습 없이 전환하지 않는다**. 그래서 아래 첫 테스트는 현재
-동작(경계 포함)을 **의도적으로** 고정한다 — 누가 모르고 값을 바꾸면 여기서 걸리고,
-바꾸려면 재학습이 함께 와야 한다는 사실이 이 파일에 적혀 있다.
+라이브 번들 `real-20260811-1604-30m`이 오염된 값 위에서 학습돼 있었다. 정의만 바꾸면
+학습분포와 추론분포가 어긋나므로 **전환과 재학습을 한 커밋에** 넣었다.
+
+전환 방식은 「경계 쌍 제외」가 아니라 **「경계를 넘지 않는 인접쌍을 필요한 수만큼 더 걷기」**다.
+그냥 빼면 반환 길이가 창에 못 미쳐 `len(...) < window` 가드에 걸리는데, 10m의 `*_60`은 창
+(60봉)이 세션(약 41봉)보다 길어 **매일** 그렇게 된다 — 오염을 NaN으로 바꿀 뿐이라 더 나쁘다.
+
+실측 효과(`data/bars/A05609/10m/` 4일치 153봉, 창이 찬 구간의 distinct value):
+
+    전환 전  0.008827 · 0.019337(주말 갭) · 0.032462(야간 갭)   ← 3개 중 2개가 인공물
+    전환 후  0.008743 · 0.008827 · 0.017546                     ← 전부 실제 장중 값
 """
 
 from __future__ import annotations
@@ -153,18 +160,73 @@ def test_same_session_returns_is_shorter_than_the_pair_count() -> None:
     assert len(px_core.same_session_returns(bars)) == len(bars) - 1 - 1
 
 
-# ------------------------------------------------ 현재 동작 고정 (전환 방지턱)
+# ------------------------------------------------ 전환 후 계약
 
 
-def test_px_max_ret_still_includes_the_gap_today() -> None:
-    """**의도적으로 현재(오염된) 동작을 고정한다.**
+def test_px_max_ret_excludes_the_overnight_gap() -> None:
+    """**전환의 본체.** 야간 갭이 더 이상 argmax를 차지하지 않는다.
 
-    라이브 번들이 이 값 위에서 학습됐다. 모르고 바꾸면 학습분포와 추론분포가 어긋난다.
-    바꾸려면 이 테스트를 함께 고쳐야 하고, 그때 이 docstring이 재학습이 필요하다는 사실을
-    읽게 한다 — 값 전환은 재학습과 **같은 커밋**이어야 한다.
+    2026-08-20 실측에서 이 값은 0.032462(야간 갭)였고, 이제 0.017546(그날 장중 최대)이다.
     """
     bars = _two_day_bars()
-    value = px_core.px_max_ret(bars, window=len(bars) - 1)
-    assert value == pytest.approx(
-        OVERNIGHT_GAP, rel=1e-3
-    ), "값이 바뀌었다면 세션 경계 전환이 들어온 것이다 — 모델 번들 재학습이 함께 왔는가?"
+    value = px_core.px_max_ret(bars, window=len(bars) - 2)
+    assert value == pytest.approx(INTRADAY_MAX, rel=1e-3)
+    assert value < OVERNIGHT_GAP
+
+
+def test_sample_count_is_preserved_across_the_boundary() -> None:
+    """**경계 쌍을 빼되 표본 수는 유지한다.**
+
+    그냥 빼면 반환 길이가 창에 못 미쳐 호출측 가드에 걸리고, 10m의 `*_60`은 창이 세션보다
+    길어 **매일** 그렇게 된다 — 오염을 NaN으로 바꿀 뿐이라 더 나쁘다.
+    """
+    bars = _two_day_bars()
+    count = len(bars) - 2  # 경계 1곳이 있으므로 인접쌍 총수보다 하나 적게 요구
+    pairs = px_core.same_session_pairs(bars, count)
+    assert pairs is not None
+    assert len(pairs) == count
+    days = {b.bar_open_kst.astimezone(KST).date() for b in bars}
+    assert len(days) == 2, "이 픽스처는 이틀을 걸친다 — 전제 확인"
+
+
+def test_pairs_never_cross_a_boundary() -> None:
+    """걷어 온 쌍 중 어느 하나도 거래일을 넘지 않는다."""
+    bars = _two_day_bars()
+    boundary = px_core.session_boundary_indices(bars)[0]
+    crossing = (
+        float(bars[boundary].c_ticks),
+        float(bars[boundary + 1].c_ticks),
+    )
+    pairs = px_core.same_session_pairs(bars, len(bars) - 2)
+    assert pairs is not None
+    assert crossing not in pairs
+
+
+def test_warmup_shortage_is_none_not_a_short_list() -> None:
+    """모자라면 짧은 목록이 아니라 `None`이다 — 호출측이 길이를 가정하지 않아도 되게."""
+    day = datetime(2026, 8, 20, 9, 0, tzinfo=KST)
+    bars = [_bar(day + timedelta(minutes=10 * i), 52_000 + i) for i in range(5)]
+    assert px_core.same_session_pairs(bars, 4) is not None
+    assert px_core.same_session_pairs(bars, 5) is None
+
+
+def test_span_features_are_deliberately_untouched() -> None:
+    """`px_ret`·`px_mom`은 인접쌍이 아니라 **두 점 사이의 구간 수익률**이다.
+
+    그 구간이 밤을 넘으면 야간 이동이 값에 들어가는데, 그것은 오염이 아니라 **그 피처가 재는
+    것 자체**다. 야간 갭을 따로 보고 싶으면 `px_gap_open`이 전용으로 들고 있고, 같은 정보를
+    두 경로로 넣으면 다중공선성이 생긴다. 여기 손대면 이 테스트가 그 판단을 상기시킨다.
+    """
+    bars = _two_day_bars()
+    span = px_core.px_ret(bars, window=len(bars) - 1)
+    assert span is not None
+    assert span > 0.02, "이틀을 걸친 구간 수익률은 야간 갭을 포함해야 한다"
+
+
+def test_log_returns_helper_is_gone() -> None:
+    """종가만 받는 헬퍼를 다시 만들면 같은 결함이 조용히 돌아온다.
+
+    `_log_returns(closes)`는 두 봉이 10분 떨어졌는지 17시간 떨어졌는지 알 방법이 없었고,
+    그것이 정확히 야간 갭 오염의 형태였다.
+    """
+    assert not hasattr(px_core, "_log_returns")
