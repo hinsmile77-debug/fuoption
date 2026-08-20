@@ -240,6 +240,9 @@ TAG_LEVELS: dict[str, int] = {
     "RegimeClassified": logging.INFO,
     # 국면 이력 버퍼를 과거 완성봉으로 사전 충전 (2026-08-12 F-1) — `FeatureWarmStart`와 대칭.
     "RegimeWarmStart": logging.INFO,
+    # 웜스타트 버퍼로 기동 직후 국면을 **한 번 발행**했다 (2026-08-19 F-5). 이 줄이 없는
+    # 날은 세션 첫 사이클이 `UNKNOWN`으로 나갔다는 뜻이다 — 그 자체가 관측 대상이다.
+    "RegimeSeeded": logging.INFO,
     # 충전했는데도 `classify()` 하한(window+2)에 못 닿는다 — 그날 국면은 UNKNOWN으로
     # 시작하고, 아카이브가 얕다는 뜻이다. 조용히 콜드스타트로 넘어가지 않는다(금지계명 12).
     "RegimeWarmStartShort": logging.WARNING,

@@ -243,3 +243,59 @@ async def test_run_forever_subscribes_to_driving_horizon_topic():
     await bus.publish("bar.30m.TEST", fit_bars[0])
     assert len(published) == 1
     assert published[0].regime in Regime
+
+
+# ------------------------------------------------ 첫 사이클 국면 시드 (2026-08-19 F-5)
+
+
+@pytest.mark.asyncio
+async def test_seed_publishes_the_warm_started_regime():
+    """**세션 첫 사이클이 국면 없이 나가지 않게 한다** (2026-08-19 F-5).
+
+    `warm_start()`는 버퍼만 채우고 발행하지 않으므로, 국면 소비자는 구동 Horizon의 첫
+    완성봉이 올 때까지 `UNKNOWN`을 들고 있었다. 2026-08-19 종일 실측: 세션 첫 사이클
+    2건 중 2건이 `agg=UNKNOWN`이었고 이후 7건은 전부 일치했다 — 값은 이미 버퍼에 있었고
+    전달만 없었다.
+    """
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3, 4))
+
+    bus = InProcessBus()
+    published = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["intel.regime"], collector)
+
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, bus)
+    runtime.warm_start(fit_bars)
+
+    state = await runtime.seed()
+
+    assert state is not None
+    assert state.regime is not Regime.UNKNOWN
+    assert [msg.regime for msg in published] == [state.regime]
+
+
+@pytest.mark.asyncio
+async def test_seed_stays_silent_when_the_buffer_is_short():
+    """하한 미달이면 `classify()`가 UNKNOWN을 낸다. 그걸 발행하면 **아무것도 안 한 것과
+    같은 값을 시끄럽게 넣는 것**이라, 그날 국면이 진짜 UNKNOWN인지 시드가 빈 것인지
+    구분이 사라진다(금지계명 12)."""
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3, 4))
+
+    bus = InProcessBus()
+    published = []
+
+    async def collector(msg):
+        published.append(msg)
+
+    await bus.subscribe(["intel.regime"], collector)
+
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, bus)
+    runtime.warm_start(_bars(3))  # 하한(window+2)에 한참 못 미친다
+
+    assert await runtime.seed() is None
+    assert published == []

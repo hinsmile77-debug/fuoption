@@ -160,6 +160,7 @@ class Aggregator:
         views: Mapping[Horizon, ExpertView],
         regime_state: RegimeState,
         blocked: Mapping[str, list[str]],
+        regime_received: bool = True,
     ) -> None:
         """기여 의견 0의 **사유를 갈래별로** 남긴다 (2026-08-14 F-5).
 
@@ -184,6 +185,10 @@ class Aggregator:
         승격 여부는 20거래일 분포를 본 뒤에 정한다.
         """
         reasons = {name: sorted(items) for name, items in blocked.items() if items}
+        # **국면 UNKNOWN의 정체를 가른다** (2026-08-19 F-5). 종전엔 「아직 안 받았다」와
+        # 「UNKNOWN으로 판정됐다」가 같은 값으로 나가, 2026-08-19에 세션 첫 사이클 2건이
+        # 어긋난 사실을 사람이 직전 `RegimeClassified`와 하나씩 대조해서야 알았다.
+        regime_source = "received" if regime_received else "not_yet_received"
         mlog.log(
             "AggregatorNoContribution",
             f"기여 의견 0 — 이 사이클의 FuturesView는 n=0으로 나간다"
@@ -192,6 +197,9 @@ class Aggregator:
             + ")",
             symbol=symbol,
             regime=regime_state.regime.value,
+            regime_source=regime_source,
+            # 기동 후 국면이 아직 안 온 상태에서 도는 사이클 — 세션당 최대 1건이어야 한다.
+            first_cycle_after_start=not regime_received,
             views_received=len(views),
             horizons_received=sorted(h.value for h in views),
             **{name: sorted(items) for name, items in blocked.items()},
@@ -204,6 +212,7 @@ class Aggregator:
         regime_state: RegimeState,
         *,
         as_of: datetime,
+        regime_received: bool = True,
     ) -> FuturesView:
         """
         입력: `views`는 Horizon별 최신 `ExpertView`(meta_passed가 이미 실제 판정값). `as_of`는
@@ -249,7 +258,9 @@ class Aggregator:
         total_weight = sum(w.weight for w in active)
 
         if total_weight <= 0:
-            self._log_no_contribution(symbol, views, regime_state, blocked)
+            self._log_no_contribution(
+                symbol, views, regime_state, blocked, regime_received=regime_received
+            )
             return FuturesView(
                 symbol=symbol,
                 ts_utc=as_of,

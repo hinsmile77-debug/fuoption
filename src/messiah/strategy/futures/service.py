@@ -76,6 +76,8 @@ class FuturesAIService:
         self._aggregator = aggregator or Aggregator()
         self._bus = bus
         self._latest_regime: RegimeState = _UNSEEN_REGIME.model_copy(update={"symbol": symbol})
+        # **아직 한 번도 안 받았다**와 **UNKNOWN으로 판정됐다**를 가른다 (2026-08-19 F-5).
+        self._regime_received = False
         self._latest_views: dict[Horizon, ExpertView] = {}
         # 마지막으로 meta 판정에 쓰인 meta_features (2026-08-18 G-0818P-3). `MetaGateEvaluated`
         # 가 확률을 남기게 됐지만(F-0818I-1) **그 확률을 만든 입력**은 여전히 계산 직후
@@ -95,9 +97,21 @@ class FuturesAIService:
         """
         return {h.value: dict(f) for h, f in self._latest_meta_features.items()}
 
+    @property
+    def regime_received(self) -> bool:
+        """국면을 **한 번이라도 받았나** (2026-08-19 F-5).
+
+        `_latest_regime.regime == UNKNOWN`으로는 이 질문에 답할 수 없다 — 진짜 UNKNOWN으로
+        판정된 국면과 아직 아무것도 안 온 상태가 같은 값이기 때문이다(조용한 폴백, 금지계명 12).
+        2026-08-19에 세션 첫 사이클 2건이 `agg=UNKNOWN`으로 나갔는데, 로그만 봐서는 그 둘을
+        구분할 수 없었다 — 사람이 직전 `RegimeClassified`와 하나씩 대조해서야 알았다.
+        """
+        return self._regime_received
+
     async def handle_regime(self, msg: BusMessage) -> None:
         if isinstance(msg, RegimeState) and msg.symbol == self._symbol:
             self._latest_regime = msg
+            self._regime_received = True
 
     async def handle_feature(self, msg: BusMessage) -> None:
         if not isinstance(msg, FeatureVector) or msg.symbol != self._symbol:
@@ -147,7 +161,11 @@ class FuturesAIService:
         # 이 파이프라인 전체가 같은 시각 도메인을 써야 한다.
         as_of = trigger.valid_until or trigger.ts_utc
         aggregate = self._aggregator.compute(
-            self._symbol, self._latest_views, self._latest_regime, as_of=as_of
+            self._symbol,
+            self._latest_views,
+            self._latest_regime,
+            as_of=as_of,
+            regime_received=self._regime_received,
         )
         await self._bus.publish(TOPIC_FUTURES, aggregate)
 

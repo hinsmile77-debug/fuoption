@@ -348,6 +348,59 @@ def _load_regime_runtime(symbol: str, bus: MessageBus, today: date) -> RegimeRun
     return runtime
 
 
+async def _seed_regime(runtime: RegimeRuntime, consumer: FuturesAIService, symbol: str) -> None:
+    """웜스타트 버퍼로 국면을 **한 번 발행**한다 — 세션 첫 사이클용 (2026-08-19 F-5).
+
+    `warm_start()`는 버퍼만 채우므로 국면 소비자는 첫 30m 완성봉이 올 때까지 `UNKNOWN`을
+    들고 있다. 2026-08-19 실측: 세션 첫 사이클 2건 중 2건이 `agg=UNKNOWN`이었고 나머지
+    7건은 전부 일치했다 — 값은 이미 버퍼에 있었는데 전달만 안 됐다.
+
+    ## 왜 버스 발행만으로는 안 되나
+
+    `TOPIC_REGIME`은 pub/sub이다(Streams가 아니다 — `core/bus.py`의 토픽 분류). 즉 **구독이
+    서지 않은 시점의 발행은 사라진다.** 이 시드는 `_run_regular_session()`의 `gather()`가
+    돌기 전에 나가야 값이 첫 사이클에 닿는데, 그 시점엔 `futures_service.run_forever()`가
+    아직 구독을 안 걸었다.
+
+    그래서 **둘 다 한다**: 버스에 발행하고(다른 구독자와 관측용), 소비자에게 직접도 건넨다.
+    같은 프로세스에 배선된 두 객체라 직접 전달이 가능하고, 그쪽이 경합이 없다. 지연으로
+    구독을 기다리는 방식은 「몇 초면 충분한가」라는 답 없는 질문을 남긴다.
+
+    실패해도 기동은 계속한다 — 국면은 부가 입력이지 이 프로세스의 전제조건이 아니다
+    (`_warm_start_regime()`과 같은 원칙). 다만 조용히 넘어가지 않는다(금지계명 12).
+    """
+    try:
+        state = await runtime.seed()
+    except Exception as exc:  # noqa: BLE001 — 시드 실패가 그날 운영을 막으면 안 됨
+        mlog.log(
+            "RegimeWarmStartFailed",
+            f"국면 시드 실패 — 첫 사이클은 UNKNOWN으로 나간다: {exc}",
+            symbol=symbol,
+        )
+        return
+    if state is None:
+        # 하한 미달이거나 판정 자체가 UNKNOWN이다. **발행하지 않은 사실을 남긴다** —
+        # 시드가 빈 것과 그날 국면이 진짜 UNKNOWN인 것은 다르다(`RegimeRuntime.seed()`).
+        print(
+            "국면 시드 없음 — 첫 사이클은 UNKNOWN으로 나간다"
+            f"(충전 {runtime.history_capacity}봉 용량 · 하한 {runtime.min_bars_for_classify}봉)",
+            flush=True,
+        )
+        return
+    mlog.log(
+        "RegimeSeeded",
+        f"기동 직후 국면 시드 {state.regime.value} (확신도 {state.confidence:.2f}) — "
+        f"세션 첫 사이클이 UNKNOWN으로 나가지 않는다",
+        symbol=symbol,
+        horizon=Horizon.M30.value,
+        regime=state.regime.value,
+        confidence=round(float(state.confidence), 4),
+    )
+    # 구독이 서기 전이라 버스 발행만으로는 안 닿는다(위 docstring) — 직접도 건넨다.
+    await consumer.handle_regime(state)
+    print(f"국면 시드: {state.regime.value} (확신도 {state.confidence:.2f})", flush=True)
+
+
 def _load_shadow_manager(registry: ModelRegistry, symbol: str, bus: MessageBus) -> ShadowManager:
     manager = ShadowManager(symbol, bus)
     for record in registry.list_by_status(BundleStatus.SHADOW):
@@ -575,6 +628,11 @@ async def main(cfg: InstanceConfig) -> None:
     futures_service = _load_futures_service(registry, symbol, bus, cfg.feature_set)
     shadow_manager = _load_shadow_manager(registry, symbol, bus)
     regime_runtime = _load_regime_runtime(symbol, bus, today)
+    # **세션 첫 사이클이 국면 없이 나가지 않게** 한다 (2026-08-19 F-5). 웜스타트는 버퍼만
+    # 채우므로 소비자는 첫 30m 완성봉까지 `UNKNOWN`을 들고 있었다 — 2026-08-19 실측으로
+    # 세션 첫 사이클 2/2가 그 상태였다. 값은 이미 버퍼에 있었고 전달만 없었다.
+    if regime_runtime is not None:
+        await _seed_regime(regime_runtime, futures_service, symbol)
 
     broker = SimBroker(cash=cfg.capital.total)
     await broker.connect()

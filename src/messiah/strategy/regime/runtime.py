@@ -39,7 +39,7 @@ from typing import Sequence
 
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_BAR, TOPIC_REGIME, BusLike
-from messiah.core.messages import BarClosed, Horizon
+from messiah.core.messages import BarClosed, Horizon, Regime
 from messiah.strategy.regime.service import RegimeAI
 
 _DEFAULT_HISTORY_LIMIT = 200  # HMM 관측 윈도우(기본 20)보다 넉넉히 큰 롤링 버퍼
@@ -109,6 +109,47 @@ class RegimeRuntime:
         self._history.clear()
         self._history.extend(accepted)  # deque(maxlen)이 알아서 오래된 것부터 버린다
         return len(self._history)
+
+    async def seed(self) -> object | None:
+        """웜스타트 버퍼로 **한 번 판정하고 발행한다** — 세션 첫 사이클을 위해 (2026-08-19 F-5).
+
+        ## 왜 필요한가 — 매 세션의 첫 판단이 국면 없이 내려갔다
+
+        `warm_start()`는 버퍼만 채우고 **발행하지 않는다**(설계대로). 그래서 국면 소비자
+        (`strategy/futures/service.py`의 `_latest_regime`)는 기동 직후 `_UNSEEN_REGIME`
+        (=`UNKNOWN`)을 들고 있다가, 구동 Horizon의 **첫 완성봉**이 올 때에야 실제 값을 받는다.
+        30m 구동이면 그 사이가 최대 30분이다.
+
+        2026-08-19 종일 실측이 그 구조를 그대로 보여줬다(`AggregatorNoContribution` 9건 전량 대조):
+
+            09:00:02  agg=UNKNOWN  ← 직전 RANGE      (08:25:34 기동 후 첫 사이클) ✗
+            12:31:01  agg=UNKNOWN  ← 직전 HIGH_VOL   (12:30:14 재기동 후 첫 사이클) ✗
+            나머지 7건 전부 일치 ✓
+
+        **첫 사이클 2건 중 2건 어긋남 · 이후 7건 중 0건.** Δt가 {12ms, 633ms}로 양극단에
+        퍼져 있어 경합 가설은 기각됐다(장중 점검 C-1이 세운 판정 기준). 경합이 아니라
+        **캐시가 아직 안 채워진 것**이었고, 그 값은 이미 버퍼에 있었다.
+
+        `UNKNOWN`은 집계기에서 가중치표 폴백 + Meta 임계 +0.10을 뜻한다 — 즉 매 세션의
+        **첫 판단이 가장 보수적인 국면 가정으로** 나간다. 정상일이면 09:00 한 건이지만
+        그 한 건이 매일 개장 첫 판단이다.
+
+        ## 하한 미달이면 발행하지 않는다
+
+        `classify()`는 봉이 모자라면 `UNKNOWN`을 돌려준다. 그걸 발행하면 **아무것도 안 한
+        것과 같은 값을 시끄럽게 넣는 것**이라, 그날 국면이 진짜로 UNKNOWN인 것인지 시드가
+        빈 것인지 구분이 사라진다. 그래서 판정이 UNKNOWN이면 발행도 로깅도 없이 None을
+        돌려주고, 호출측이 그 사실을 남긴다(금지계명 12 — 조용한 폴백 금지).
+
+        반환: 발행한 `RegimeState`, 또는 발행하지 않았으면 None.
+        """
+        if len(self._history) < self.min_bars_for_classify:
+            return None
+        state = self._regime_ai.classify(self._bars())
+        if state.regime == Regime.UNKNOWN:
+            return None
+        await self._bus.publish(TOPIC_REGIME, state)
+        return state
 
     def classify_now(self):
         """현재 버퍼로 **판정만** 한다 — 발행도, 로깅도, 버퍼 변경도 없다.
