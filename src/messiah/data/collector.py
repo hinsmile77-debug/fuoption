@@ -597,14 +597,28 @@ class TickCollector:
                 measured=False,
             )
             return
+        # **절단을 문장에 드러낸다** (2026-08-20 F-H). 종전 문구는 "표본 20000건"이라
+        # 적었고, 그것이 「20,000건 봤다」로 읽혔다. 실제로는 「20,000건까지만 기억한다」였다.
+        truncated = bool(stats.get("truncated"))
+        observed = int(stats.get("observed_total", stats["samples"]))
+        scope = (
+            f"표본 {int(stats['samples'])}건 — ⚠ 관측 {observed:,}건 중 **끝 토막만** "
+            f"(링버퍼 상한 {int(stats.get('capacity', 0)):,})"
+            if truncated
+            else f"표본 {int(stats['samples'])}건(전량)"
+        )
         mlog.log(
             "TickDeliveryLatency",
             f"회선 수신 지연 상한 — p50 {stats['p50']:.3f}s · p90 {stats['p90']:.3f}s · "
             f"p99 {stats['p99']:.3f}s · 최대 {stats['max']:.3f}s "
-            f"(표본 {int(stats['samples'])}건, frac(t)만큼 과대평가된 상한)",
+            f"({scope}, frac(t)만큼 과대평가된 상한)",
             symbol=self._symbol,
             measured=True,
-            **{key: round(value, 4) for key, value in stats.items()},
+            by_hour=self._clock_skew.delivery_latency_by_hour(),
+            **{
+                key: (round(value, 4) if isinstance(value, (int, float)) else value)
+                for key, value in stats.items()
+            },
         )
 
     async def _archive_and_publish_bar(self, bar: BarClosed) -> None:

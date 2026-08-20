@@ -969,9 +969,17 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             if record.get("measured"):
                 delivery_latency = {
                     key: float(record[key])
-                    for key in ("p50", "p90", "p99", "max", "samples")
+                    for key in ("p50", "p90", "p99", "max", "samples", "capacity", "observed_total")
                     if isinstance(record.get(key), (int, float))
                 }
+                # **이 숫자가 하루인가 끝 토막인가** (2026-08-20 F-H). 소비처가 그걸 알아야
+                # "1,000ms 미만" 같은 판정을 믿을지 정할 수 있다 — `fix_verification._latency`가
+                # 이 플래그를 보고 판정 불가를 낸다.
+                if record.get("truncated") is not None:
+                    delivery_latency["truncated"] = bool(record["truncated"])
+                hours = record.get("by_hour")
+                if isinstance(hours, dict):
+                    delivery_latency["by_hour"] = hours
         elif tag in (
             "FeatureHealthSummary",
             "FeatureHealthDegenerate",
@@ -1161,13 +1169,17 @@ def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
     않는다** — 그것이 2026-08-14 F-4가 남긴 교훈이다(유도 경로를 만들어 두고 6일간 0회 사용).
     """
     trends: dict[str, Any] = {}
-    offset = logs.get("publish_offset")
-    if isinstance(offset, Mapping):
-        by_hour = offset.get("by_hour")
+    # 두 축을 **같은 눈금**으로 나란히 놓는다 (2026-08-20 F-H) — 「회선이 나빠졌다」와
+    # 「내부 처리가 밀렸다」는 그래야 갈린다. 자료구조가 같으므로 헬퍼도 하나다.
+    for name in ("publish_offset", "delivery_latency"):
+        source = logs.get(name)
+        if not isinstance(source, Mapping):
+            continue
+        by_hour = source.get("by_hour")
         if isinstance(by_hour, Mapping):
             trend = hourly_trend(by_hour, key="p50")
             if trend is not None:
-                trends["publish_offset"] = trend
+                trends[name] = trend
     return trends
 
 

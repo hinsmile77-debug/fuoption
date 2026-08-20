@@ -107,20 +107,50 @@ class ClockSkewTracker:
     def __init__(self, *, window: int = _WINDOW, latency_capacity: int = _LATENCY_CAPACITY) -> None:
         self._samples: deque[float] = deque(maxlen=window)
         self._latencies: deque[float] = deque(maxlen=latency_capacity)
+        self._latency_capacity = latency_capacity
+        # **관측한 총 건수** — `len(self._latencies)`와 다르다 (2026-08-20 F-H).
+        # 링버퍼가 넘치면 후자는 상한에 붙박이고, 그러면 "20,000건 봤다"와 "20,000건까지만
+        # 기억한다"가 같은 숫자가 된다. 2026-08-20에 정확히 그 일이 있었다 — 그날
+        # `TickArchiveSummary`는 137,977행을 보고했는데 지연 표본은 20000.0이었고,
+        # 아무도 절단을 의심하지 않았다. docstring이 "세션 전체"라 적혀 있었기 때문이다.
+        self._latency_observed = 0
+        # **시간대 버킷** (2026-08-20 F-H · C-6). 전량 보관 대신 시(hour)별로만 모은다.
+        # 원자료가 링버퍼에 덮이면 「오프셋 악화가 회선인가 내부 적체인가」를 사후에
+        # 손으로도 못 푼다 — 2026-08-20 C-6이 그래서 판정 불가로 남았다.
+        # 하루 7~8시간 × 실수 몇만 개면 메모리는 무시할 수준이고, 이 축이 있으면
+        # 링버퍼 용량을 올릴 필요 자체가 없다(문제는 용량이 아니라 침묵이었다).
+        self._latency_by_hour: dict[int, list[float]] = {}
 
     def observe(self, ts_exchange: datetime, received: datetime) -> None:
         """
         입력: 둘 다 tz-aware여야 한다(SYSTEM.md R3) — naive면 ValueError.
         계산: 두 시각의 차이를 초로 표본에 넣는다. 프레임당 한 번만 부르는 것이 맞다
              (같은 프레임의 N건은 같은 순간에 도착한 것이라 표본이 아니라 중복이다).
-             같은 자리에서 수신 지연 상한(`ŝ − 표본`)도 세션 전체 목록에 쌓는다 —
-             기준 ŝ는 **그 시점의** 창 최댓값이라 하루 중 시계 점프에 분포가 안 밀린다.
+             같은 자리에서 수신 지연 상한(`ŝ − 표본`)도 쌓는다 — 기준 ŝ는 **그 시점의**
+             창 최댓값이라 하루 중 시계 점프에 분포가 안 밀린다.
+
+        ## 「세션 전체」가 아니다 (2026-08-20 F-H — 이 docstring이 틀렸었다)
+
+        종전 이 자리는 *"세션 전체 목록에 쌓는다"* 라고 적혀 있었다. 실제로는
+        `deque(maxlen=20000)`이라 **끝에서 20,000개**만 남는다. 2026-08-20에 그 대가가
+        나왔다 — 그날 지연 p90 921ms로 *"1,000ms 미만이니 유예 상향 조건 미충족"* 을
+        판정했는데, 그 921ms는 하루가 아니라 **세션 끝 토막**의 값이었다(같은 세션
+        `TickArchiveSummary`는 137,977행). 절단이 일어났다는 사실을 로그도 리포트도
+        말하지 않았다.
+
+        그래서 총 관측 건수를 따로 세고(`_latency_observed`), 시간대별 분포를 따로
+        모은다(`_latency_by_hour`) — 후자가 있으면 링버퍼에 덮여도 하루의 모양이 남는다.
         """
         ensure_aware(ts_exchange)
         ensure_aware(received)
         delta = (ts_exchange - received).total_seconds()
         self._samples.append(delta)
-        self._latencies.append(max(self._samples) - delta)
+        latency = max(self._samples) - delta
+        self._latencies.append(latency)
+        self._latency_observed += 1
+        # 시간대는 **거래소 시각** 기준이다 — 로컬 시계는 지금 재고 있는 대상이라
+        # 그것으로 버킷을 나누면 재려는 것으로 자를 눈금을 만드는 셈이 된다.
+        self._latency_by_hour.setdefault(ts_exchange.hour, []).append(latency)
 
     @property
     def samples(self) -> int:
@@ -146,13 +176,36 @@ class ClockSkewTracker:
         if len(self._latencies) < MIN_SAMPLES:
             return None
         ordered = sorted(self._latencies)
+        truncated = self._latency_observed > len(self._latencies)
         return {
             "p50": _quantile(ordered, 0.50),
             "p90": _quantile(ordered, 0.90),
             "p99": _quantile(ordered, 0.99),
             "max": ordered[-1],
             "samples": float(len(ordered)),
+            # **이 숫자가 하루인가 끝 토막인가** (2026-08-20 F-H). 소비처가 그것을
+            # 알아야 "1,000ms 미만" 같은 판정을 믿을지 정할 수 있다.
+            "truncated": truncated,
+            "capacity": float(self._latency_capacity),
+            "observed_total": float(self._latency_observed),
         }
+
+    def delivery_latency_by_hour(self) -> dict[str, dict[str, float]]:
+        """시간대별 지연 분포 (2026-08-20 F-H · C-6). 링버퍼에 덮여도 하루의 모양이 남는다.
+
+        `features/engine.log_publish_offsets()`의 `by_hour`와 **같은 자료구조**다 —
+        `ops/integrity_report.hourly_trend()`가 둘 다 같은 헬퍼로 읽는다. 「회선이 나빠졌다」와
+        「내부 처리가 밀렸다」는 두 축을 같은 눈금으로 나란히 놓아야 갈린다.
+        """
+        out: dict[str, dict[str, float]] = {}
+        for hour, values in sorted(self._latency_by_hour.items()):
+            ordered = sorted(values)
+            out[f"{hour:02d}"] = {
+                "p50": _quantile(ordered, 0.50),
+                "p90": _quantile(ordered, 0.90),
+                "samples": float(len(ordered)),
+            }
+        return out
 
     @property
     def exceeds_threshold(self) -> bool:

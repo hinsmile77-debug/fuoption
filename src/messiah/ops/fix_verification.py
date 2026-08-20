@@ -106,9 +106,25 @@ def _bar_1m(report: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _latency(report: dict[str, Any], key: str) -> float | None:
-    """회선 수신 지연 분위수 — 못 잰 날은 None(판정 불가)이지 0이 아니다(L18)."""
+    """회선 수신 지연 분위수 — 못 잰 날은 None(판정 불가)이지 0이 아니다(L18).
+
+    ## 절단된 날은 판정하지 않는다 (2026-08-20 F-H)
+
+    지연 표본은 링버퍼(`ops/clock_skew`, 상한 20,000)에 쌓인다. 프레임이 그보다 많은 날은
+    **세션 끝 토막**만 남는데, 종전엔 그 사실이 어디에도 안 나와 하루 값처럼 읽혔다.
+    2026-08-20이 그랬다 — 관측 137,977건 중 20,000건의 p90(921ms)으로 *"1,000ms 미만이니
+    유예 상향 조건 미충족"* 을 판정했다.
+
+    등록부는 이 값을 **전제 지표**로 쓴다(모듈 docstring "전제를 채점한다"). 전제가 하루의
+    일부만 본 값이면 그 채점은 근거가 없다 — 통과로도 위반으로도 세지 않고 판정 불가를 낸다.
+
+    `truncated` 키가 없는 과거 리포트는 종전 의미를 보존한다(기본 False) — 소급해서
+    과거 판정을 뒤집지 않는다.
+    """
     latency = report.get("delivery_latency")
     if not isinstance(latency, dict):
+        return None
+    if latency.get("truncated") is True:
         return None
     value = latency.get(key)
     return float(value) if isinstance(value, (int, float)) else None
