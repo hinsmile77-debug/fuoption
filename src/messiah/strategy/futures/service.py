@@ -34,6 +34,7 @@ intel.regime은 별도로 구독해(`strategy/regime/runtime.py`가 발행) 최�
 
 from __future__ import annotations
 
+import hashlib
 from typing import Mapping
 
 import numpy as np
@@ -151,6 +152,20 @@ class FuturesAIService:
             threshold=meta.threshold,
             passed=passed,
             model_version=view.model_version,
+            # **입력의 지문** (2026-08-20 F-F). 2026-08-20 장중에 이 확률이 3사이클 연속
+            # 비트 단위로 같았다(08-19는 9사이클이 전부 달랐다). 확률만 남고 입력이 안 남아
+            # 「같은 입력이라 같은 확률」과 「계기가 얼어붙었다」를 가를 수 없었다.
+            #
+            # 원값 전량은 안 싣는다 — 하루 8~14줄이 수십 필드로 부풀면 로그 자체가 부담이다.
+            # 지문이 같으면 입력이 같은 것이고, 그것이 이 질문에 답하는 데 필요한 전부다.
+            meta_features_digest=_features_digest(meta_features),
+            # 어느 봉의 판단인가 — 지문이 같아도 봉이 다르면 「같은 입력이 반복됐다」이고,
+            # 봉까지 같으면 같은 사이클을 두 번 센 것이다. 둘은 다른 문제다.
+            feature_as_of=(
+                None
+                if feature_vector.valid_until is None
+                else feature_vector.valid_until.isoformat()
+            ),
         )
         return view.model_copy(update={"meta_passed": passed})
 
@@ -185,3 +200,18 @@ class FuturesAIService:
             await self.handle_feature(msg)
         elif isinstance(msg, RegimeState):
             await self.handle_regime(msg)
+
+
+def _features_digest(features: Mapping[str, float]) -> str:
+    """meta 입력의 지문 — 정렬 키 기준 `sha1[:8]` (2026-08-20 F-F).
+
+    정렬하는 이유: dict 순서가 바뀌어도 같은 입력이면 같은 지문이어야 한다. 순서가 지문을
+    흔들면 「입력이 바뀌었다」가 매번 참이 되어 축이 무의미해진다.
+
+    부동소수는 `repr`로 굳힌다 — 반올림하면 미세하게 다른 입력이 같은 지문을 받는다.
+    이 축이 답하려는 질문이 정확히 "비트 단위로 같은가"이므로 반올림하면 안 된다.
+
+    암호학적 용도가 아니다(충돌 저항이 필요 없다) — 하루 14줄을 서로 구별하는 것이 전부다.
+    """
+    payload = "|".join(f"{key}={value!r}" for key, value in sorted(features.items()))
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]

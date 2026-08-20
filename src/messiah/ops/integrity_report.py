@@ -777,6 +777,41 @@ INTRADAY_DRIFT_RATIO = 3.0
 _PARTIAL_HOUR_SAMPLE_RATIO = 0.5
 
 
+# ---------------------------------------------------------------- 값 정지 (2026-08-20 G-E)
+
+# 하루 표본의 이 비율 이상이 **연속 같은 값**이면 계기 고장 후보로 본다.
+#
+# 0.3은 자의적이다 — 그래서 `INFO` 기록으로만 시작한다(R18). 오탐 여지가 실질적이라는 것도
+# 이유다: 트리 모델의 같은 잎, 정상적으로 0.0인 `nan_ratio` 등이 정당하게 반복된다.
+# 판정으로 승격하는 것은 F-F의 입력 지문이 쌓여 「같은 입력이라 같은 값」을 걸러낼 수 있게 된 뒤다.
+VALUE_FROZEN_RUN_RATIO = 0.3
+
+
+def constant_run_length(values: Sequence[Any]) -> int:
+    """가장 긴 **연속 동일값** 구간의 길이 (2026-08-20 G-E).
+
+    ## 왜 이 축인가
+
+    이 저장소는 「0건」의 두 얼굴(2026-08-19 G-4 negative control)과 「고쳤는데 새 경로가 한 번도
+    안 쓰였다」(2026-08-20 G-A 폴백 사용률)를 이미 축으로 세웠다. **「값이 안 변한다」는 그
+    세 번째 얼굴이고, 지금까지 축이 없었다.**
+
+    계기가 죽었는데 그럴듯한 값을 계속 내보내는 실패는 **침묵보다 나쁘다** — 침묵은 보이지만
+    얼어붙은 값은 정상으로 보인다. 2026-08-20 장중 meta 확률 3연속 비트 동일이 그 사례다.
+
+    비교는 `==`가 아니라 `repr`로 한다 — 부동소수 `0.7000000000000001`과 `0.7`은 다른 값이고,
+    이 축이 묻는 것이 정확히 "비트 단위로 같은가"다.
+    """
+    best = current = 0
+    previous: str | None = None
+    for value in values:
+        marker = repr(value)
+        current = current + 1 if marker == previous else 1
+        previous = marker
+        best = max(best, current)
+    return best
+
+
 def hourly_trend(by_hour: Mapping[str, Any], *, key: str = "p50") -> dict[str, Any] | None:
     """시간대별 통계에서 **일중 추세**를 뽑는다 (2026-08-20 G-D).
 
@@ -892,6 +927,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     meta_gate_probs: list[float] = []
     meta_gate_passes = 0
     meta_gate_threshold: float | None = None
+    meta_gate_digests: list[str] = []
 
     # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
     # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
@@ -997,6 +1033,10 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 threshold = record.get("threshold")
                 if isinstance(threshold, (int, float)):
                     meta_gate_threshold = float(threshold)
+                # 입력 지문 (2026-08-20 F-F) — 확률이 얼어붙었을 때 원인을 가르는 유일한 축.
+                digest = record.get("meta_features_digest")
+                if isinstance(digest, str) and digest:
+                    meta_gate_digests.append(digest)
         elif tag == "RegimeClassified":
             # 국면 **분포** (2026-08-12 F-2). 건수가 아니라 내역을 센다 — 2026-08-12엔
             # `DecisionEmitted: 14`만 남아 "14건 나왔다"는 알았지만 **그 14건이 전부 같은
@@ -1082,6 +1122,20 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                     4,
                 ),
                 "max": round(max(meta_gate_probs), 4),
+                # **값이 안 변한 최장 구간** (2026-08-20 G-E). 판정이 아니라 기록이다 —
+                # 트리 모델의 같은 잎이 정당하게 반복될 수 있어 오탐 여지가 실질적이다.
+                # F-F의 입력 지문이 쌓이면 「같은 입력이라 같은 값」을 걸러낼 수 있고,
+                # 그때 판정으로 승격한다(R18).
+                "frozen_run": constant_run_length(meta_gate_probs),
+                "frozen_suspected": bool(
+                    constant_run_length(meta_gate_probs)
+                    >= max(2, VALUE_FROZEN_RUN_RATIO * len(meta_gate_probs))
+                ),
+                # 그 구간의 입력이 같았는가 — 지문이 같으면 계기 고장이 아니다.
+                # 지문 자체가 없는 날(계측 이전)은 `None`이지 `False`가 아니다(L18).
+                "input_frozen_run": (
+                    constant_run_length(meta_gate_digests) if meta_gate_digests else None
+                ),
             }
             if meta_gate_probs
             else None
