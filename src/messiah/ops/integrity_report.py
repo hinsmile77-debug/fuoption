@@ -218,6 +218,19 @@ class IntegrityReport:
     # 동시에 등록부의 **전제 지표**다: 겹②·겹④가 "1분봉이 경계 뒤 얼마 안에 도착한다"를
     # 전제하는데, 그 전제가 며칠 뒤 조용히 깨지는 것을 잡을 자리가 여기다.
     delivery_latency: dict[str, float] | None
+    # **완성봉 확정 → 피처 발행까지의 지연**, 시간대 축 포함 (2026-08-20 F-E).
+    #
+    # 위 `delivery_latency`가 회선 쪽 끝(틱이 얼마나 늦게 오는가)을 잰다면 이쪽은 내부 처리
+    # 쪽 끝(그 틱을 받아 피처를 내보내기까지)이다. 둘이 있어야 오프셋이 나빠진 날 처방이
+    # 갈린다 — 회선이면 유예 상향, 내부면 프로파일링.
+    #
+    # `by_hour`가 들어 있고 `intraday_trend`가 그것을 요약한다(G-D). 2026-08-20 실측:
+    # 1m p50이 09시 74.8ms → 14시 884.8ms(11.8배)였는데 종일 p90 1,083ms 하나로는 그 사실이
+    # 보이지 않았다.
+    publish_offset: dict[str, Any] | None
+    # 일별 단일 통계에 붙는 **일중 추세** (2026-08-20 G-D). 판정이 아니라 표시다 —
+    # 임계 승격은 20거래일 분포를 본 뒤(R18).
+    intraday_trend: dict[str, Any]
     # 그날 프로세스가 실제로 돌던 커밋. 지금 HEAD와 다르면 그 수집분은 **그 시점 코드의
     # 산물**이라는 사실이 사후 조사에 필요하다 — 2026-08-04가 정확히 그 경우였다(WS 프레임
     # 절반 유실 수정이 12:22에 들어갔는데 수집 프로세스는 08:35에 뜬 옛 코드로 하루를 돌았다).
@@ -750,6 +763,104 @@ def _drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[
     return session_guard.drop_refused_starts(starts, refused)
 
 
+# ---------------------------------------------------------------- 일중 추세 (2026-08-20 G-D)
+
+# 「첫 시간대 대비 마지막 시간대가 몇 배」를 넘으면 일중 악화로 보는가.
+#
+# 3.0은 **자의적이다.** 그래서 초기엔 기록만 한다(R18 — 게이트·임계 신설은 섀도 계측 20거래일
+# 후 승격). 2026-08-20 실측 `publish_offset` 1m ratio ≈ 11.8이 첫 표본이다.
+INTRADAY_DRIFT_RATIO = 3.0
+
+# 표본 수가 시간대 중앙값의 이 비율에 못 미치면 **부분 시간대**로 보고 양 끝 계산에서 뺀다.
+# 0.5인 이유: 개장 전 웜업(08시)과 마감 잔여(15시)는 실제로 한 시간의 1/4~1/3 분량이고,
+# 정상 시간대는 서로 비슷하다 — 2026-08-20 1m 실측 08시 15건 · 15시 24건 vs 정상 59~60건.
+_PARTIAL_HOUR_SAMPLE_RATIO = 0.5
+
+
+def hourly_trend(by_hour: Mapping[str, Any], *, key: str = "p50") -> dict[str, Any] | None:
+    """시간대별 통계에서 **일중 추세**를 뽑는다 (2026-08-20 G-D).
+
+    반환: `{first_hour, last_hour, first, last, ratio, slope, hours, dropped, drift}`
+    또는 `None`(표본 부족).
+
+    ## 왜 필요한가
+
+    2026-08-20 `publish_offset` 종일 p90은 1,083ms 하나였다. 그 숫자로는 「종일 나빴다」와
+    「시간이 갈수록 나빠졌다」가 구분되지 않는데 **처방이 정반대다**(회선이면 유예 상향,
+    내부 적체면 프로파일링). 시간대로 갈라 보니 1m p50이 09시 74.8ms → 14시 884.8ms였다.
+
+    ## 부분 시간대를 뺀다
+
+    첫 버킷과 마지막 버킷은 **한 시간이 통째로 들어 있지 않다** — 08시는 개장 전 웜업 구간이고
+    15시는 마감(15:35)까지의 잔여다. 그대로 양 끝으로 쓰면 2026-08-20 1m이 `08시 280ms →
+    15시 789ms = 2.8배`가 되는데, 실제로 볼 값은 `09시 74.8ms → 14시 884.8ms = 11.8배`다.
+    **부분 버킷이 진폭을 절반 이하로 눌렀다.**
+
+    그래서 표본 수가 **중앙값의 절반에 못 미치는 버킷은 뺀다**. 뺀 것은 `dropped`에 남긴다 —
+    조용히 버리면 그 자체가 다음 사람이 못 보는 사실이 된다.
+
+    시간대가 **둘 미만이면 `None`** 이다. 재기동으로 잘린 날에 비율을 지어내면 그것이 곧
+    오탐이다 — 못 재는 것과 0을 안 합친다(L18).
+
+    `slope`(시간당 변화량)를 함께 낸다. 비율은 첫 값이 작으면 폭발하고(1m 09시가 74.8ms다)
+    양 끝 두 점만 본다 — 기울기는 전 구간을 보므로 둘이 어긋나면 그 자체가 볼 것이다.
+
+    `drift`는 **판정이 아니라 표시**다. 임계 3.0은 자의적이므로 승격은 20거래일 분포를 본 뒤에
+    한다(R18).
+    """
+    if not by_hour:
+        return None
+    points: list[tuple[str, float, float]] = []
+    for hour, stats in sorted(by_hour.items()):
+        if not isinstance(stats, Mapping):
+            continue
+        value = stats.get(key)
+        samples = stats.get("samples")
+        if isinstance(value, (int, float)):
+            points.append((str(hour), float(value), float(samples or 0)))
+    if len(points) < 2:
+        return None
+
+    counts = sorted(count for _h, _v, count in points)
+    mid = len(counts) // 2
+    median_count = counts[mid] if len(counts) % 2 else (counts[mid - 1] + counts[mid]) / 2
+    floor = median_count * _PARTIAL_HOUR_SAMPLE_RATIO
+    full = [(h, v) for h, v, count in points if count >= floor]
+    dropped = [h for h, _v, count in points if count < floor]
+    if len(full) < 2:  # 전부 부분 버킷이면 원본으로 되돌린다 — 판정을 포기하진 않는다
+        full = [(h, v) for h, v, _count in points]
+        dropped = []
+
+    first_hour, first = full[0]
+    last_hour, last = full[-1]
+    ratio = None if first <= 0 else round(last / first, 2)
+    return {
+        "first_hour": first_hour,
+        "last_hour": last_hour,
+        "first": round(first, 1),
+        "last": round(last, 1),
+        "ratio": ratio,
+        "slope": _slope([(int(h), v) for h, v in full]),
+        "hours": len(full),
+        "dropped": dropped,
+        "drift": bool(ratio is not None and ratio >= INTRADAY_DRIFT_RATIO),
+    }
+
+
+def _slope(points: Sequence[tuple[int, float]]) -> float | None:
+    """시간당 변화량(최소자승). 양 끝 두 점만 보는 `ratio`가 못 보는 것을 본다."""
+    if len(points) < 2:
+        return None
+    n = float(len(points))
+    mean_x = sum(x for x, _y in points) / n
+    mean_y = sum(y for _x, y in points) / n
+    denominator = sum((x - mean_x) ** 2 for x, _y in points)
+    if denominator == 0:
+        return None
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in points)
+    return round(numerator / denominator, 1)
+
+
 def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     level_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
@@ -766,6 +877,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     session_git_shas: list[str] = []
     clock_skews: list[float] = []
     delivery_latency: dict[str, float] | None = None
+    publish_offset: dict[str, Any] | None = None
     degenerate: dict[str, dict[str, list[str]]] = {}
     allowed_constants: dict[str, float] = {}
     nan_by_horizon: dict[str, list[float]] = {}
@@ -892,6 +1004,20 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             value = record.get("regime")
             if isinstance(value, str) and value:
                 regime_counts[value] = regime_counts.get(value, 0) + 1
+        elif tag == "FeaturePublishOffset":
+            # 완성봉 확정 → 발행 지연 (2026-08-20 F-E). `TickDeliveryLatency`가 회선 쪽
+            # 끝을 잰다면 이쪽은 내부 처리 쪽 끝이다 — 둘이 있어야 오프셋이 나빠진 날
+            # 원인을 가른다. `measured=False`인 날은 담지 않는다(L18 — 못 잰 것과 0을
+            # 안 합친다. 아래 `unmeasured` 블록이 그 사실을 따로 적는다).
+            if record.get("measured"):
+                publish_offset = {
+                    key: float(record[key])
+                    for key in ("p50", "p90", "p99", "max", "samples")
+                    if isinstance(record.get(key), (int, float))
+                }
+                hours = record.get("by_hour")
+                if isinstance(hours, dict):
+                    publish_offset["by_hour"] = hours
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -933,6 +1059,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         # 상태가 판정 기준이다(그 시간대의 봉은 이미 그 스큐로 만들어졌다).
         "clock_skew_seconds": (max(clock_skews, key=abs) if clock_skews else None),
         "delivery_latency": delivery_latency,
+        "publish_offset": publish_offset,
         "degenerate_features": degenerate,
         "allowed_constant_values": allowed_constants,
         "nan_ratio_by_horizon": nan_summary,
@@ -963,6 +1090,25 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- 탐지·복구 소유권 (고도화 4)
+
+
+def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
+    """일중 추세를 재는 축들을 한자리에 모은다 (2026-08-20 G-D).
+
+    지금 소비처는 `publish_offset` 하나다 — `by_hour`를 실제로 싣는 유일한 축이기 때문이다.
+    `delivery_latency`·`nan_ratio`도 같은 대접을 받아야 하지만, 그러려면 각자 시간대 버킷을
+    먼저 남겨야 한다(F-E가 발행 오프셋에 대해 한 일). **소비처가 없는 축을 미리 만들지
+    않는다** — 그것이 2026-08-14 F-4가 남긴 교훈이다(유도 경로를 만들어 두고 6일간 0회 사용).
+    """
+    trends: dict[str, Any] = {}
+    offset = logs.get("publish_offset")
+    if isinstance(offset, Mapping):
+        by_hour = offset.get("by_hour")
+        if isinstance(by_hour, Mapping):
+            trend = hourly_trend(by_hour, key="p50")
+            if trend is not None:
+                trends["publish_offset"] = trend
+    return trends
 
 
 def analyze_data_flow_ownership(tag_counts: Mapping[str, int]) -> list[str]:
@@ -1954,6 +2100,13 @@ def build_report(
             "회선 수신 지연 분포(TickDeliveryLatency 로그 없음 — 1분봉 시각 확정 승격 근거)",
             "absent",
         )
+    # 2026-08-20 F-E. 이 계측 **이전** 로그에는 태그 자체가 없다 — 그 날들을 0으로 적으면
+    # "지연이 없었다"가 되어 거짓 통과다(L18). 없는 것은 없다고 적는다.
+    if logs["publish_offset"] is None:
+        note_unmeasured(
+            "발행 오프셋 분포(FeaturePublishOffset 로그 없음 — 계측 이전이거나 발행 0건)",
+            "absent",
+        )
     if volume_check is None:
         note_unmeasured("공식 분봉 대비 거래량 대조(verify_archive_volume.py 미실행)", "absent")
     if not (vol_axis.get("horizons") if vol_axis else None):
@@ -2234,6 +2387,8 @@ def build_report(
         late_bar_drops=late_bar_drops,
         clock_skew_seconds=clock_skew,
         delivery_latency=logs["delivery_latency"],
+        publish_offset=logs["publish_offset"],
+        intraday_trend=_intraday_trends(logs),
         session_git_shas=logs["session_git_shas"],
         degenerate_features=degenerate_features,
         allowed_constant_values=allowed_constants,
@@ -2523,6 +2678,22 @@ def format_summary(report: IntegrityReport) -> str:
             f"p90 {latency.get('p90', 0):.3f}s · p99 {latency.get('p99', 0):.3f}s · "
             f"최대 {latency.get('max', 0):.3f}s (표본 {int(latency.get('samples', 0)):,}건)"
         )
+    if report.publish_offset is not None:
+        offset = report.publish_offset
+        lines.append(
+            f"  발행 오프셋(완성봉 확정→발행): p50 {offset.get('p50', 0):.0f}ms · "
+            f"p90 {offset.get('p90', 0):.0f}ms · p99 {offset.get('p99', 0):.0f}ms · "
+            f"최대 {offset.get('max', 0):.0f}ms (표본 {int(offset.get('samples', 0)):,}건)"
+        )
+        # **일중 추세를 같은 자리에** 붙인다 (G-D) — 종일 통계만 보면 「종일 나쁨」과
+        # 「갈수록 나빠짐」이 같은 숫자가 된다. 두 해석은 처방이 정반대다.
+        trend = (report.intraday_trend or {}).get("publish_offset")
+        if trend and trend.get("ratio") is not None:
+            mark = "⚠ " if trend.get("drift") else ""
+            lines.append(
+                f"    {mark}일중 추세: {trend['first_hour']}시 {trend['first']:.0f}ms → "
+                f"{trend['last_hour']}시 {trend['last']:.0f}ms ({trend['ratio']}배)"
+            )
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
 

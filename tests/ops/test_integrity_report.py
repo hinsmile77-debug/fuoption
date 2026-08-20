@@ -1146,6 +1146,22 @@ def test_measured_axes_drop_out_of_unmeasured(tmp_path: Path):
                 "always_nan": [],
                 "constant": [],
             },
+            # 2026-08-20 F-E — 발행 오프셋 축. 이 테스트의 취지가 "전 축이 측정된 날은
+            # unmeasured가 빈다"이므로 새 축이 생기면 픽스처도 함께 자라야 한다.
+            {
+                "level": "INFO",
+                "tag": "FeaturePublishOffset",
+                "measured": True,
+                "p50": 520.0,
+                "p90": 1300.0,
+                "p99": 2100.0,
+                "max": 4200.0,
+                "samples": 409,
+                "by_hour": {
+                    "09": {"p50": 74.8, "p90": 348.4, "samples": 59},
+                    "14": {"p50": 884.8, "p90": 1750.9, "samples": 60},
+                },
+            },
         ],
     )
     (tmp_path / "volume_check_20260729.json").write_text(

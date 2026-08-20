@@ -48,7 +48,7 @@ from messiah.core.messages import (
     HealthLevel,
     Horizon,
 )
-from messiah.core.timeutil import KST
+from messiah.core.timeutil import KST, now_kst
 from messiah.features import px_core
 from messiah.features import spec as feature_spec
 
@@ -343,6 +343,7 @@ class FeatureEngine:
         horizons: Sequence[Horizon] | None = None,
         sidecars: Mapping[str, object] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = now_kst,
     ) -> None:
         """
         입력: `feature_set`은 `features/spec.py`가 아는 이름이어야 한다 — 미등록 이름은 기저
@@ -387,8 +388,13 @@ class FeatureEngine:
             else min(self._horizons, key=lambda h: HORIZON_SECONDS[h], default=Horizon.M1)
         )
         self._monotonic = monotonic
+        self._now = now
         self._last_publish_at: float | None = None
         self._last_nan_ratio: dict[Horizon, float] = {}
+        # **완성봉 확정에서 발행까지 몇 ms 걸렸나** (2026-08-20 F-E). `(시각, 오프셋ms)` 쌍을
+        # 세션 내내 모아 장 마감에 한 줄로 낸다 — 하루 700건 남짓이라 메모리는 무시할 수준이고,
+        # 사이클마다 집계하면 그 자체가 예산을 먹는다.
+        self._publish_offsets: list[tuple[datetime, float]] = []
         # 피처별 세션 누적 통계 (2026-08-05, 고도화 3) — `_FeatureStat` 주석 참고.
         self._feature_stats: dict[Horizon, dict[str, _FeatureStat]] = {
             h: {} for h in self._horizons
@@ -819,6 +825,17 @@ class FeatureEngine:
             return
         self._last_publish_at = self._monotonic()
         self._last_nan_ratio[vector.horizon] = vector.nan_ratio
+        # **봉 확정 시각을 함께 싣는다** (2026-08-20 F-E).
+        #
+        # 종전엔 로그의 `ts`(발행 wall clock)만 남았고, 오프셋을 알려면 사람이 `ts`의
+        # 초 단위를 Horizon 격자로 나눠 역산해야 했다. 그 프록시는 **되감기 모호성**이 있다 —
+        # 봉 확정은 거래소 시각으로 판정하는데 `ts`는 로컬 시계라, 시계 스큐가 +0.156초인 날
+        # 「경계보다 0.15초 이르게 발행」이 「59.85초 늦게 발행」과 초 단위에서 구분되지 않는다.
+        # 2026-08-20 replay가 실제로 그 함정에 빠졌다가 `ClockSkewMeasured`와 대조해서야 갈랐다.
+        #
+        # 확정 시각을 그대로 실으면 그 모호성이 **구조적으로** 사라진다. 값은 이미 손에 있다
+        # (`vector.valid_until` = `bar_open_kst + Horizon길이`) — 새 입력이 필요 없다.
+        offset_ms = self._record_publish_offset(vector)
         mlog.log(
             "FeaturePublish",
             "FeatureVector 발행",
@@ -826,8 +843,93 @@ class FeatureEngine:
             horizon=vector.horizon.value,
             feature_set=vector.feature_set,
             nan_ratio=vector.nan_ratio,
+            bar_confirm_kst=(
+                None if vector.valid_until is None else vector.valid_until.isoformat()
+            ),
+            publish_offset_ms=offset_ms,
         )
+
+    def _record_publish_offset(self, vector: FeatureVector) -> float | None:
+        """봉 확정 → 발행까지의 지연(ms). `valid_until`이 없으면 `None`(0이 아니다 — L18)."""
+        if vector.valid_until is None:
+            return None
+        moment = self._now()
+        try:
+            offset_ms = (moment - vector.valid_until).total_seconds() * 1000.0
+        except TypeError:  # naive/aware 혼재 — 못 재는 것이지 0이 아니다
+            return None
+        offset_ms = round(offset_ms, 1)
+        self._publish_offsets.append((moment, offset_ms))
+        return offset_ms
+
+    def log_publish_offsets(self) -> dict[str, float] | None:
+        """세션 전체 발행 오프셋 분포를 **시간대 축과 함께** 한 줄로 남긴다 (2026-08-20 F-E).
+
+        장 마감 절차에서 부른다 — `collector.log_delivery_latency()` 바로 다음 자리다.
+        둘은 같은 예산의 양쪽 끝을 잰다: 저쪽은 **회선이 틱을 얼마나 늦게 주는가**,
+        이쪽은 **그 틱을 받아 피처를 내보내기까지 얼마나 걸리는가**. 종전엔 후자를 재는 축이
+        아예 없어서, 오프셋이 나빠진 날 원인이 회선인지 내부 적체인지 판단할 수 없었다.
+
+        `by_hour`가 G-D의 1차 소비처다 — 하루 한 숫자로는 「종일 나쁨」과 「갈수록 나빠짐」이
+        같은 값으로 접힌다. 못 잰 날은 `measured=False`로 남긴다(L18).
+        """
+        if not self._publish_offsets:
+            mlog.log(
+                "FeaturePublishOffset",
+                "발행 오프셋 표본 없음 — 그 세션에 완성봉 발행이 없었다는 뜻",
+                symbol=self._symbol,
+                samples=0,
+                measured=False,
+            )
+            return None
+        values = sorted(offset for _moment, offset in self._publish_offsets)
+        stats = _percentiles(values)
+        by_hour: dict[str, dict[str, float]] = {}
+        buckets: dict[int, list[float]] = {}
+        for moment, offset in self._publish_offsets:
+            buckets.setdefault(moment.hour, []).append(offset)
+        for hour, offsets in sorted(buckets.items()):
+            hour_stats = _percentiles(sorted(offsets))
+            by_hour[f"{hour:02d}"] = {
+                "p50": hour_stats["p50"],
+                "p90": hour_stats["p90"],
+                "samples": hour_stats["samples"],
+            }
+        mlog.log(
+            "FeaturePublishOffset",
+            f"완성봉 확정 → 발행 지연 — p50 {stats['p50']:.0f}ms · p90 {stats['p90']:.0f}ms · "
+            f"p99 {stats['p99']:.0f}ms · 최대 {stats['max']:.0f}ms "
+            f"(표본 {int(stats['samples'])}건)",
+            symbol=self._symbol,
+            measured=True,
+            by_hour=by_hour,
+            **stats,
+        )
+        return stats
 
     async def run_forever(self) -> None:
         patterns = [f"{TOPIC_BAR}.{h.value}.{self._symbol}" for h in self._horizons]
         await self._bus.subscribe(patterns, self.handle_bar)
+
+
+def _percentiles(sorted_values: list[float]) -> dict[str, float]:
+    """정렬된 표본의 p50/p90/p99/max/samples (2026-08-20 F-E).
+
+    `statistics.quantiles`를 안 쓴다 — 표본이 1건인 시간대가 실제로 있고(15시대는 마감까지
+    한두 봉뿐이다) 그쪽은 예외를 던진다. 여기서는 **표본이 적어도 값을 낸다**: 적은 표본으로
+    잰 값이라는 사실은 `samples`가 말한다(못 잰 것과 적게 잰 것을 안 합친다).
+    """
+
+    def _at(fraction: float) -> float:
+        if not sorted_values:
+            return 0.0
+        index = min(len(sorted_values) - 1, max(0, int(round(fraction * len(sorted_values))) - 1))
+        return sorted_values[index]
+
+    return {
+        "p50": round(_at(0.5), 1),
+        "p90": round(_at(0.9), 1),
+        "p99": round(_at(0.99), 1),
+        "max": round(sorted_values[-1], 1) if sorted_values else 0.0,
+        "samples": float(len(sorted_values)),
+    }
