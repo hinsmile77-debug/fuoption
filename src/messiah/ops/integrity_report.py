@@ -882,10 +882,39 @@ def hourly_trend(by_hour: Mapping[str, Any], *, key: str = "p50") -> dict[str, A
         "last": round(last, 1),
         "ratio": ratio,
         "slope": _slope([(int(h), v) for h, v in full]),
+        # **계단은 기울기로 안 잡힌다** (2026-08-20 장후 F-E 승격분).
+        #
+        # 그날 발행 오프셋은 선형 악화가 아니라 11시 계단 + 고원이었다. 09→15시 회귀직선은
+        # 그 계단을 완만한 상승으로 뭉갠다 — 기울기만 보면 「종일 조금씩 나빠졌다」로 읽히고,
+        # 그건 처방이 다른 이야기다(점진 악화면 자원, 계단이면 그 시각에 무슨 일이 있었나).
+        "step_detected": _step_hour(full),
         "hours": len(full),
         "dropped": dropped,
         "drift": bool(ratio is not None and ratio >= INTRADAY_DRIFT_RATIO),
     }
+
+
+def _step_hour(points: Sequence[tuple[str, float]]) -> str | None:
+    """앞뒤 구간 p50 비율이 임계를 넘는 **경계 시각** — 없으면 `None` (2026-08-20 F-E).
+
+    각 경계에서 「그 앞 전부의 중앙값」과 「그 뒤 전부의 중앙값」을 비교한다. 인접 두 점만
+    보면 잡음 한 점이 계단으로 잡히고, 회귀직선만 보면 진짜 계단이 완만한 상승으로 뭉개진다.
+
+    여러 경계가 임계를 넘으면 **비율이 가장 큰 것**을 낸다 — 사람이 하나만 본다면 그것이다.
+    """
+    if len(points) < 3:
+        return None
+    best: tuple[float, str] | None = None
+    for index in range(1, len(points)):
+        before = [value for _hour, value in points[:index]]
+        after = [value for _hour, value in points[index:]]
+        head, tail = median(before), median(after)
+        if head <= 0:
+            continue
+        ratio = tail / head
+        if ratio >= INTRADAY_DRIFT_RATIO and (best is None or ratio > best[0]):
+            best = (ratio, points[index][0])
+    return None if best is None else best[1]
 
 
 def _slope(points: Sequence[tuple[int, float]]) -> float | None:
@@ -3029,6 +3058,20 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
     print("=== 수정 유효성 검증 ===", flush=True)
     for line in fv.format_verdicts(verdicts):
         print(line, flush=True)
+    # **`fix_committed`를 아직 안 적은 항목** (2026-08-20 G-H). 막지는 않되 매일 센다 —
+    # 조용히 두면 영원히 안 채워지고, 그러면 「기전 미상」 축이 하루짜리 장식이 된다.
+    try:
+        undeclared = fv.undeclared_fix_state(fv.load_registry())
+    except Exception:  # noqa: BLE001 — 장후 절차를 막지 않는다
+        undeclared = []
+    if undeclared:
+        print(
+            f"  ℹ 등록부 {len(undeclared)}개 항목이 `fix_committed` 미기입 — "
+            "「고쳤는데 안 듣는다」와 「아직 안 고쳤다」를 가르려면 채워야 한다: "
+            + ", ".join(undeclared[:5])
+            + (" …" if len(undeclared) > 5 else ""),
+            flush=True,
+        )
 
     tags = {
         fv.VerificationStatus.VERIFIED: "FixVerificationPassed",
@@ -3038,6 +3081,8 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
         fv.VerificationStatus.PREMISE_BROKEN: "FixVerificationPremiseBroken",
         fv.VerificationStatus.RECOVERING: "FixVerificationRecovering",
         fv.VerificationStatus.UNREACHABLE: "FixVerificationDeadlineUnreachable",
+        # 2026-08-20 G-H — 「고친 적이 없으므로 재발이 아니다」. WARNING이다.
+        fv.VerificationStatus.UNDIAGNOSED: "FixVerificationUndiagnosed",
     }
     for verdict in verdicts:
         tag = tags.get(verdict.status)

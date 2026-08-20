@@ -284,6 +284,11 @@ TAG_LEVELS: dict[str, int] = {
     # 세 번 놓쳤다. 통과는 INFO로 조용히, 기한 초과는 WARNING으로 회의 안건에.
     "FixVerificationPassed": logging.INFO,
     "FixVerificationRecurred": logging.ERROR,
+    # **고친 적이 없으므로 재발이 아니다** (2026-08-20 G-H). `no-degenerate-features`가
+    # 2026-08-13 최초 위반 후 엿새 동안 3회 "수정이 듣지 않았다"를 냈는데, 애초에 수정이
+    # 없었다 — dev_memory가 "조사 먼저(W-11)"로 적어 뒀고 등록부는 그것을 몰랐다.
+    # WARNING인 이유: 처방이 "원인을 다시 봐라"가 아니라 "아직 착수를 안 했다"다.
+    "FixVerificationUndiagnosed": logging.WARNING,
     "FixVerificationOverdue": logging.WARNING,
     # 연속 판정 불가 — 수정이 안 든 게 아니라 **계측이 고장 났다**는 뜻이라 재발과 같은 급.
     "FixVerificationStalled": logging.ERROR,

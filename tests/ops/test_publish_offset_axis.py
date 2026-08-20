@@ -208,3 +208,58 @@ def test_summary_carries_by_hour(monkeypatch) -> None:
     trend = hourly_trend(published["by_hour"])
     assert trend is not None
     assert trend["ratio"] is not None and trend["ratio"] > INTRADAY_DRIFT_RATIO
+
+
+# --------------------------------------- 계단 감지 (2026-08-20 장후 F-E 승격분)
+#
+# 그날 발행 오프셋은 **선형 악화가 아니라 11시 계단 + 고원**이었다. 09→15시 회귀직선은
+# 그 계단을 완만한 상승으로 뭉갠다 — 기울기만 보면 「종일 조금씩 나빠졌다」로 읽히고,
+# 그건 처방이 다른 이야기다(점진 악화면 자원, 계단이면 **그 시각에 무슨 일이 있었나**).
+
+
+def test_step_is_detected_where_the_level_jumps() -> None:
+    trend = hourly_trend(
+        _hours(
+            {
+                "09": (74.8, 60),
+                "10": (140.4, 60),
+                "11": (334.8, 60),
+                "12": (664.1, 60),
+                "13": (652.6, 60),
+                "14": (884.8, 60),
+            }
+        )
+    )
+    assert trend is not None
+    assert trend["step_detected"] is not None, "계단이 있는데 못 잡으면 기울기와 다를 게 없다"
+
+
+def test_a_flat_day_has_no_step() -> None:
+    trend = hourly_trend(
+        _hours({"09": (600.0, 60), "10": (610.0, 60), "11": (598.0, 60), "12": (605.0, 60)})
+    )
+    assert trend is not None
+    assert trend["step_detected"] is None
+
+
+def test_a_single_noisy_hour_is_not_a_step() -> None:
+    """인접 두 점만 보면 잡음 한 점이 계단이 된다 — 앞뒤 **구간 중앙값**을 본다."""
+    trend = hourly_trend(
+        _hours(
+            {
+                "09": (600.0, 60),
+                "10": (605.0, 60),
+                "11": (2400.0, 60),  # 한 시간만 튐
+                "12": (598.0, 60),
+                "13": (602.0, 60),
+            }
+        )
+    )
+    assert trend is not None
+    assert trend["step_detected"] is None
+
+
+def test_too_few_hours_is_not_judged() -> None:
+    trend = hourly_trend(_hours({"09": (100.0, 60), "10": (500.0, 60)}))
+    assert trend is not None
+    assert trend["step_detected"] is None, "두 점으로는 계단과 추세를 못 가른다"

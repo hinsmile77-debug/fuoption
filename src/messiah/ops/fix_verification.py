@@ -79,6 +79,16 @@ class VerificationStatus:
     # 08-17 휴장으로 08-18 기준 남은 거래일이 1일뿐인데 `consecutive_days: 3`인 항목이
     # 셋 있었다. 처방이 다르다: 고치는 게 아니라 **기한을 다시 잡는 것**이다.
     UNREACHABLE = "기한 불가"
+    # **고친 적이 없으므로 재발이 아니다** (2026-08-20 G-H).
+    #
+    # `no-degenerate-features`는 2026-08-13 최초 위반 후 엿새 동안 3회 재발하는 내내
+    # *"수정이 듣지 않았다"* 라는 같은 문장을 냈다. 그런데 애초에 수정이 없었다 —
+    # `DECISION_LOG.md`가 *"창 길이인지 버그인지 미확정 · 조사 먼저(W-11)"* 로 적어 뒀고,
+    # 등록부는 그 사실을 모른 채 매일 ERROR를 냈다.
+    #
+    # **"고친 게 안 듣는다"와 "아직 안 고쳤다"는 대응이 완전히 다르다** — 전자는 원인
+    # 재조사이고 후자는 그냥 착수다. 같은 ERROR로 묶으면 ERROR 한 건의 의미가 닳는다.
+    UNDIAGNOSED = "기전 미상"
     # **계측은 성립했는데 값이 기준을 넘었다** (2026-08-19 F-4). `RECURRED`와 가르는 이유:
     # 2026-08-19 장후에 ERROR 4건이 났고 **네 건 다 계측이 정확히 작동한 결과**였다.
     # `truncation-is-visible`은 그날 잘림을 정확히 보였고(11건·5계열), `leg-completeness-
@@ -619,6 +629,29 @@ class PendingVerification:
     max_value: float | None = None
     min_value: float | None = None
     # 이 수정이 성립하려면 참이어야 하는 조건. 지표 이름은 `metric`과 같은 등록부를 쓴다.
+    # **이 항목에 대응하는 수정이 실제로 커밋됐는가** (2026-08-20 G-H).
+    #
+    # 값은 커밋 sha 문자열이고, 사람이 착수할 때 채운다.
+    fix_committed: str | None = None
+    # **키를 적었는가** — 값이 비었는가와 다르다.
+    #
+    # 등록부의 기존 20여 항목은 이 필드를 모른다. 「값이 비면 미착수」로 정하면 그 전부가
+    # 하루아침에 WARNING으로 내려앉아 경보가 통째로 둔해진다 — 장후 리포트 G-H가 정확히
+    # 그 위험을 지적했다. 그래서 **키를 명시적으로 적은 항목만** 이 판정에 들어온다:
+    #
+    #     fix_committed: abc1234   → 고쳤다. 위반은 `재발`(ERROR)
+    #     fix_committed:           → 아직 안 고쳤다. 위반은 `기전 미상`(WARNING)
+    #     (키 없음)                → 종전 그대로(`재발`). 소급해서 의미를 바꾸지 않는다
+    #
+    # 키 없는 항목은 `undeclared_fix_state()`가 열거하고, 장후 절차가 그 수를 한 줄 남긴다 —
+    # 조용히 두면 영원히 안 채워지고, 그러면 이 축이 오늘 하루만 쓰인 장식이 된다.
+    fix_state_declared: bool = False
+
+    @property
+    def fix_is_pending(self) -> bool:
+        """「고친 적이 없다」가 **명시적으로 선언된** 항목인가 (2026-08-20 G-H)."""
+        return self.fix_state_declared and not self.fix_committed
+
     premise_metric: str | None = None
     premise_max: float | None = None
     premise_min: float | None = None
@@ -710,6 +743,9 @@ class VerificationVerdict:
             # "고쳤는데 되돌아갔다"이고 이쪽은 "애초에 볼 수 없었다"다 — 후자는 그동안
             # 쌓인 통과 이력 전체를 무효로 만든다.
             VerificationStatus.INSTRUMENT_BLIND,
+            # 기전 미상도 사람 몫이다 — 다만 처방이 "원인을 다시 봐라"가 아니라
+            # **"아직 착수를 안 했다"** 이므로 로그 레벨은 WARNING이다(2026-08-20 G-H).
+            VerificationStatus.UNDIAGNOSED,
         )
         # **`MEASURED_BAD`는 여기 없다** (2026-08-19 F-4). 계측이 제대로 돌아 나쁜 값을
         # 보고한 것은 그 수정의 실패가 아니다. 매일 사람 앞에 ERROR로 올리면 정작 진짜
@@ -784,6 +820,13 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
                 consecutive_days=int(entry.get("consecutive_days", 1)),
                 deadline=_as_date(entry["deadline"]) if entry.get("deadline") else None,
                 since=_as_date(entry["since"]) if entry.get("since") else None,
+                # 2026-08-20 G-H — 비어 있으면 위반이 `재발`이 아니라 `기전 미상`이다.
+                fix_committed=(
+                    (str(entry["fix_committed"]).strip() or None)
+                    if entry.get("fix_committed")
+                    else None
+                ),
+                fix_state_declared="fix_committed" in entry,
                 max_value=None if entry.get("max") is None else float(entry["max"]),
                 min_value=None if entry.get("min") is None else float(entry["min"]),
                 premise_metric=premise_metric,
@@ -798,6 +841,16 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
         )
     _reject_shared_metrics(out)
     return out
+
+
+def undeclared_fix_state(items: Sequence[PendingVerification]) -> list[str]:
+    """`fix_committed` 키를 아직 안 적은 항목의 id (2026-08-20 G-H).
+
+    막지 않는다 — 등록부 20여 항목을 한꺼번에 강제하면 그 자체가 큰 변경이고, 급하게 채운
+    값은 틀린 값이다. 대신 그 수를 매일 한 줄 남겨 사람이 하나씩 채우게 한다.
+    조용히 두면 이 축은 오늘 하루만 쓰인 장식이 된다.
+    """
+    return [item.id for item in items if not item.fix_state_declared]
 
 
 def _reject_shared_metrics(items: Sequence[PendingVerification]) -> None:
@@ -1165,6 +1218,21 @@ def _verdict_for(
     # 이제는 **연속 통과가 0**일 때만 — 즉 개선 증거가 아직 하나도 없을 때만 — 재발이다.
     # 문구는 최초가 아니라 **가장 최근 위반**을 가리킨다: 08-18에 `daily-axes-measured`가
     # 그날 새로 위반했는데 문장은 사흘 묵은 08-13을 말해 새 위반이 그 뒤에 숨었다.
+    # ①-a **고친 적이 없으면 재발이 아니다** (2026-08-20 G-H).
+    #
+    # `fix_committed`가 비어 있다는 것은 "이 항목에 대응하는 수정이 아직 커밋되지 않았다"는
+    # 뜻이다. 그 상태의 위반은 **예상된 결과**이지 수정의 실패가 아니다.
+    # 재발(ERROR)과 갈라야 ERROR 한 건의 의미가 살아난다.
+    if last_violation is not None and clean_streak == 0 and item.fix_is_pending:
+        history = ""
+        if len(violations) > 1 and first_violation is not None:
+            history = f" (최초 위반 {first_violation.isoformat()} 이후 {len(violations)}회)"
+        return _verdict(
+            VerificationStatus.UNDIAGNOSED,
+            f"기준 위반{history} — 그러나 이 항목에 대응하는 수정이 아직 커밋되지 않았다"
+            f"(`fix_committed` 미기입). 재발이 아니라 **미착수**다 {note}",
+        )
+
     if last_violation is not None and clean_streak == 0:
         history = ""
         if len(violations) > 1 and first_violation is not None:
@@ -1280,6 +1348,7 @@ def format_verdicts(verdicts: list[VerificationVerdict]) -> list[str]:
     marks = {
         VerificationStatus.VERIFIED: "✅",
         VerificationStatus.PENDING: "⏳",
+        VerificationStatus.UNDIAGNOSED: "🔎",
         VerificationStatus.RECURRED: "❌",
         VerificationStatus.STALLED: "🚫",
         VerificationStatus.OVERDUE: "⚠",
