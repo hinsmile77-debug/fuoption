@@ -15,6 +15,27 @@
 그 결과값이며, PASS가 곧 우위의 증거는 아니다(표본이 8개월·창 1~2개뿐). live 승격은 여전히
 사람이 `ModelRegistry.promote_to_live()`를 불러야 일어난다.
 
+## 못 재는 관문은 찍지 않는다 (2026-08-23)
+
+`SimBroker`의 손익 단위는 **틱**이다 — 원으로 바꾸려면 계약 승수(원/지수포인트)가
+필요한데 그 값이 이 저장소 어디에도 없다(`broker/simulator/adapter.py` 모듈 docstring).
+그래서 관문 셋이 갈린다:
+
+- **`cost_adjusted_sharpe`** — 잰다. 척도 불변이라 틱으로 충분하다.
+- **`negative_window_ratio`** — 잰다. 부호만 본다.
+- **`max_drawdown`** — **못 잰다.** `ValidatorConfig.max_drawdown_limit = 0.3`은 *자본
+  대비 비율*이고, 틱을 비율로 바꾸려면 승수가 있어야 한다. 승수를 정본에 넣기 전까지
+  이 관문은 미측정이며, 여기서 PASS/FAIL을 찍지 않는다.
+
+2026-08-23 이전에는 손익이 아예 없어서 전 구간 수익률이 정확히 0.0이었고, 그 0을
+관문에 넣으면 `max_drawdown`(0.0 < 0.3)과 `negative_window_ratio`(0.0 < 0.4)가 **둘 다
+PASS**로 나왔다 — 아무것도 안 잰 계기가 초록 도장 두 개를 찍는 형태이고, 2026-08-21
+F-14가 매니페스트에서 없앤 것과 같은 계열이다.
+
+거래 건수도 함께 보고한다. 실전은 2026-08-21까지 17거래일 연속 주문 0건이었다 —
+백테스트도 0건이면 모델의 성질이고, 백테스트만 활발하면 train/serve 불일치다.
+처방이 정반대라 이 갈래를 먼저 본다.
+
 사용:
     python scripts/run_g1_walk_forward.py --train-days 180 --test-days 30   # 프로덕션 기본값
     python scripts/run_g1_walk_forward.py --train-days 120 --test-days 20   # 창을 더 얻고 싶을 때
@@ -38,7 +59,7 @@ from messiah.backtest.harness import (  # noqa: E402
     aggregate_to_horizon,
     equity_curve_from_windows,
     run_walk_forward_backtest,
-    window_returns_from_windows,
+    window_pnl_ticks,
 )
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.data import backfill  # noqa: E402
@@ -199,32 +220,94 @@ async def main() -> int:
         print(
             f"  train {r.train_start}~{r.train_end} ({r.n_train_bars}봉) → "
             f"test {r.test_start}~{r.test_end} ({r.n_test_bars}봉)  "
-            f"수익률 {r.return_pct:+.4%}"
+            f"주문 {r.n_orders} · 체결 {r.n_fills} · TTL만료 {r.n_expired}  "
+            + (
+                "손익 미측정"
+                if r.total_pnl_ticks is None
+                else f"손익 {r.total_pnl_ticks:+.1f}틱"
+                f"(실현 {r.realized_pnl_ticks:+.1f} · 평가 {r.unrealized_pnl_ticks:+.1f})"
+            )
         )
 
-    window_returns = window_returns_from_windows(results)
-    equity = equity_curve_from_windows(results, args.cash)
+    # **거래를 하긴 하는가** — 손익을 못 재도 답할 수 있는 질문이고, 지금 가장 급한 질문이다.
+    total_orders = sum(r.n_orders for r in results)
+    total_fills = sum(r.n_fills for r in results)
+    traded_windows = sum(1 for r in results if r.traded)
+    print(
+        f"\n거래 활동: 주문 {total_orders}건 · 체결 {total_fills}건 · "
+        f"거래가 일어난 창 {traded_windows}/{len(results)}"
+    )
+    if total_orders == 0:
+        print(
+            "  → 백테스트도 주문 0건이다. 실전 17거래일 연속 0건(2026-08-21)과 같은 결과이므로\n"
+            "    **배선이 아니라 모델의 성질**이다 — 재학습이나 접근 변경의 문제다."
+        )
+    elif total_fills == 0:
+        print(
+            "  → 주문은 나가는데 체결이 0건이다. 지정가가 안 붙는 것이므로\n"
+            "    **가격 배치(sizer/limit) 문제**이지 판단 계층의 문제가 아니다."
+        )
+    else:
+        print(
+            "  → 백테스트는 거래한다. 실전만 0건이라면 **train/serve 불일치**이고,\n"
+            "    재학습이 아니라 배선 조사가 처방이다."
+        )
+
+    # **틱 손익을 표본으로 쓴다** (2026-08-23). `return_pct`는 `SimBroker`가 원 자본을
+    # 안 건드리므로 여전히 0.0 고정이다 — 그 값으로 채점하면 안 된다.
+    pnl_ticks = window_pnl_ticks(results)
     # 창별 수익률을 표본으로 연율화한다 — 창 하나가 test_days 만큼의 기간이므로
     # 1년에 그 창이 몇 번 들어가는지가 periods_per_year다.
     periods_per_year = _TRADING_DAYS_PER_YEAR / max(1, args.test_days)
+    pnl_measured = all(r.pnl_measured for r in results) and pnl_ticks is not None
+    samples = pnl_ticks if pnl_ticks is not None else [0.0] * len(results)
     gates = Validator().validate_performance(
-        daily_returns=window_returns,
+        daily_returns=samples,
         periods_per_year=periods_per_year,
-        equity_curve=equity,
-        window_returns=window_returns,
+        # 자본 곡선은 **틱 누적**이다. `max_drawdown`이 이걸 비율로 읽으면 분모가 자본이
+        # 아니라 틱이라 뜻이 없다 — 그래서 아래에서 그 관문만 미측정으로 뺀다.
+        equity_curve=equity_curve_from_windows(results, args.cash),
+        window_returns=samples,
     )
 
-    print("\nG1 관문 (Ver 1.2 §8.3):")
-    for gate in gates:
-        mark = "PASS" if gate.passed else "FAIL"
-        print(f"  [{mark}] {gate.name}: {gate.value:.4f} (임계 {gate.threshold})")
-    passed = all(g.passed for g in gates)
-    print(f"\nG1 종합: {'PASS' if passed else 'FAIL'}")
-    print(
-        "주의: 이 결과는 '관문이 실제 데이터로 계산됐다'는 사실이지 우위의 증거가 아니다 — "
-        f"표본은 창 {len(results)}개뿐이고, `negative_window_ratio`는 창이 3개 이상일 때부터 "
-        "의미를 갖는다."
-    )
+    #: 자본 대비 **비율**을 요구해서 틱 단위로는 채점할 수 없는 관문.
+    _NEEDS_CAPITAL = {"max_drawdown"}
+
+    # **손익을 못 재면 관문을 찍지 않는다** (2026-08-23, 모듈 docstring 참고).
+    #
+    # 전 구간 수익률이 0.0이면 `max_drawdown`·`negative_window_ratio`가 둘 다 PASS로
+    # 나온다. 그 두 초록은 성과가 아니라 계기의 부재이고, 그대로 번들 매니페스트에
+    # 들어가면 F-14가 막으려던 「미측정이 통과로 보이는」 상태를 다시 만든다.
+    if not pnl_measured:
+        print("\nG1 관문 (Ver 1.2 §8.3): **전부 미측정**")
+        print(
+            "  손익을 못 잰 창이 있다. 그 상태로 관문을 찍으면 max_drawdown과\n"
+            "  negative_window_ratio가 둘 다 통과로 나오는데, 그것은 성과가 아니라\n"
+            "  **계기의 부재**다. 그래서 아무 도장도 찍지 않는다."
+        )
+        for gate in gates:
+            print(f"  [미측정] {gate.name}")
+        passed = False
+    else:
+        print("\nG1 관문 (Ver 1.2 §8.3) — 손익 단위: 틱")
+        scored = []
+        for gate in gates:
+            if gate.name in _NEEDS_CAPITAL:
+                print(
+                    f"  [미측정] {gate.name}: 자본 대비 비율이 필요한데 손익 단위가 틱이다 "
+                    "(계약 승수 미정)"
+                )
+                continue
+            scored.append(gate)
+            mark = "PASS" if gate.passed else "FAIL"
+            print(f"  [{mark}] {gate.name}: {gate.value:.4f} (임계 {gate.threshold})")
+        passed = bool(scored) and all(g.passed for g in scored)
+        print(f"\nG1 종합(측정된 것만): {'PASS' if passed else 'FAIL'}")
+        print(
+            "주의: 이 결과는 '관문이 실제 데이터로 계산됐다'는 사실이지 우위의 증거가 아니다 — "
+            f"표본은 창 {len(results)}개뿐이고, `negative_window_ratio`는 창이 3개 이상일 때부터 "
+            "의미를 갖는다. `max_drawdown`은 아직 미측정이라 **G1 전체 통과가 아니다.**"
+        )
 
     if args.out:
         payload = {
@@ -248,13 +331,37 @@ async def main() -> int:
                     "test_start": r.test_start.isoformat(),
                     "test_end": r.test_end.isoformat(),
                     "return_pct": r.return_pct,
+                    "n_orders": r.n_orders,
+                    "n_fills": r.n_fills,
+                    "n_expired": r.n_expired,
+                    "pnl_measured": r.pnl_measured,
+                    "pnl_unit": r.pnl_unit,
+                    "realized_pnl_ticks": r.realized_pnl_ticks,
+                    "unrealized_pnl_ticks": r.unrealized_pnl_ticks,
+                    "total_pnl_ticks": r.total_pnl_ticks,
                 }
                 for r in results
             ],
+            # 손익을 못 잰 실행에서는 `value`가 0.0으로 고정이므로 `passed`를 담지 않는다 —
+            # 담으면 그 JSON을 읽는 다음 소비자가 초록 두 개를 성과로 읽는다.
+            "pnl_measured": pnl_measured,
             "gates": [
-                {"name": g.name, "passed": g.passed, "value": g.value, "threshold": g.threshold}
+                {
+                    "name": g.name,
+                    "measured": pnl_measured and g.name not in _NEEDS_CAPITAL,
+                    "passed": (g.passed if pnl_measured and g.name not in _NEEDS_CAPITAL else None),
+                    "value": (g.value if pnl_measured and g.name not in _NEEDS_CAPITAL else None),
+                    "threshold": g.threshold,
+                }
                 for g in gates
             ],
+            "trade_activity": {
+                "orders": sum(r.n_orders for r in results),
+                "fills": sum(r.n_fills for r in results),
+                "expired": sum(r.n_expired for r in results),
+                "windows_traded": sum(1 for r in results if r.traded),
+                "windows": len(results),
+            },
             "passed": passed,
         }
         Path(args.out).write_text(

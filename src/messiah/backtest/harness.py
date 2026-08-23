@@ -81,12 +81,47 @@ class WindowResult:
     end_equity: Decimal
     n_train_bars: int
     n_test_bars: int
+    # **거래가 몇 번 일어났는가** (2026-08-23).
+    #
+    # 자본 곡선만 보면 「거래하고 본전」과 「한 번도 거래 안 함」이 같은 값(0.0%)이다.
+    # 2026-08-21까지 실전 17거래일 연속 주문 0건이 정확히 그 모양으로 숨어 있었고,
+    # 백테스트도 같은 눈으로 보면 같은 것을 못 본다. 세 숫자를 가른다:
+    #   n_orders   접수된 주문 — 0이면 판단 계층이 아무것도 안 내보냈다
+    #   n_fills    실제 체결 — 주문은 있는데 0이면 지정가가 안 붙은 것이다
+    #   n_expired  TTL 만료 — 위 둘 사이의 차이를 설명한다
+    n_orders: int = 0
+    n_fills: int = 0
+    n_expired: int = 0
+    # 이 창의 손익이 **실제로 계산된 것인가** (`SimBroker.computes_pnl`).
+    # `False`면 아래 손익 필드는 전부 의미가 없고, 그 값으로 성과 관문을 채점하면
+    # `max_drawdown`·`negative_window_ratio`가 둘 다 통과로 나온다 — 아무것도 안 잰
+    # 계기가 초록 도장을 찍는 것이다(2026-08-23 실측).
+    pnl_measured: bool = False
+    # 손익의 **단위** — `SimBroker`는 `"ticks"`다. 원이 아니다: 계약 승수(원/지수포인트)가
+    # 이 저장소에 없어서 환산할 수 없다(`broker/simulator/adapter.py` 모듈 docstring).
+    pnl_unit: str | None = None
+    # 이 창에서 **닫은 만큼**의 손익(틱).
+    realized_pnl_ticks: float = 0.0
+    # 창이 끝날 때 열려 있던 포지션의 평가손익(틱). 못 재면 None(0이 아니다 — L18).
+    unrealized_pnl_ticks: float | None = None
+
+    @property
+    def total_pnl_ticks(self) -> float | None:
+        """실현 + 평가. 평가를 못 재면 None — 창 끝에 포지션이 열린 채 끝났는데 그것을
+        0으로 세면 그 창의 성과가 조용히 왜곡된다."""
+        if self.unrealized_pnl_ticks is None:
+            return None
+        return self.realized_pnl_ticks + self.unrealized_pnl_ticks
 
     @property
     def return_pct(self) -> float:
         if self.start_equity <= 0:
             return 0.0
         return float((self.end_equity - self.start_equity) / self.start_equity)
+
+    @property
+    def traded(self) -> bool:
+        return self.n_fills > 0
 
 
 def aggregate_to_horizon(m1_bars: Sequence[BarClosed], horizon: Horizon) -> list[BarClosed]:
@@ -287,6 +322,13 @@ async def run_walk_forward_backtest(
             start_equity = (await broker.account()).total_equity
             await _feed_m1_bars(test_m1_bars, composer, broker, bus, replay_clock)
             end_equity = (await broker.account()).total_equity
+            n_orders = broker.n_accepted_orders
+            n_fills = broker.n_fills
+            n_expired = broker.n_expired_orders
+            pnl_measured = bool(getattr(broker, "computes_pnl", False))
+            pnl_unit = getattr(broker, "pnl_unit", None)
+            realized_ticks = float(getattr(broker, "realized_pnl_ticks", 0.0))
+            unrealized = broker.unrealized_pnl_ticks()
 
         results.append(
             WindowResult(
@@ -298,10 +340,32 @@ async def run_walk_forward_backtest(
                 end_equity=end_equity,
                 n_train_bars=len(train_bars),
                 n_test_bars=len(test_m1_bars),
+                n_orders=n_orders,
+                n_fills=n_fills,
+                n_expired=n_expired,
+                pnl_measured=pnl_measured,
+                pnl_unit=pnl_unit,
+                realized_pnl_ticks=realized_ticks,
+                unrealized_pnl_ticks=unrealized,
             )
         )
 
     return results
+
+
+def window_pnl_ticks(results: Sequence[WindowResult]) -> list[float] | None:
+    """창별 손익(틱) — 하나라도 평가손익을 못 재면 **None**이다 (2026-08-23).
+
+    "그 창만 빼고 계산"하지 않는다: 포지션을 들고 끝난 창을 빼면 남는 표본이 **닫고
+    끝난 창들만**이 되어 생존 편향이 생긴다. 못 재면 그 사실을 위로 올린다(L18).
+    """
+    out: list[float] = []
+    for result in results:
+        total = result.total_pnl_ticks
+        if total is None:
+            return None
+        out.append(total)
+    return out
 
 
 def equity_curve_from_windows(results: Sequence[WindowResult], starting_cash: int) -> list[float]:

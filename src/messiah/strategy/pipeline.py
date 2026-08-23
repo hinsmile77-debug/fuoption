@@ -181,6 +181,66 @@ from messiah.strategy.decision.meta_decision import MetaDecisionEngine
 _BAR_HISTORY_LIMIT = 200
 
 
+def _directional_edge(view: FuturesView, side: Side) -> float:
+    """방향 기대우위 — **3-클래스 확률에 맞춘 산식** (2026-08-23).
+
+    ## 종전 산식이 왜 구조적으로 0이었나
+
+        edge = max(0.0, min(1.0, 2.0 * intent.confidence - 1.0))
+
+    `2p − 1`은 **이항 승부**의 배당 공식이다: 이기면 +1단위, 지면 −1단위일 때의 기대값.
+    그런데 `confidence`는 3-클래스(UP/FLAT/DOWN) 모델의 **방향 클래스 확률 하나**다
+    (`strategy/decision/meta_decision.py` — `confidence = agg_p_up if LONG else agg_p_down`).
+    그 값을 이항 공식에 넣으면 **FLAT 확률 전체가 불리한 쪽으로 계산된다.**
+
+    삼중장벽 레이블에서 FLAT은 큰 몫을 차지한다 — `models/labeling.py`의 실측 표가
+    30m에서 76.3%라고 적어 놓았다. 그러니 `p > 0.5`는 구조적으로 도달하기 어렵고,
+    `max(0.0, ...)` 클램프가 그 미달을 전부 정확히 0으로 눕혔다.
+
+    ## 실측 (2026-08-21 15:30, 유일하게 리스크 엔진까지 간 사이클)
+
+        agg_p_down 0.4873 · agg_p_up 0.1473 · p_flat 0.3654 · ATR 48.93틱 · 비용 1.62틱
+
+        종전:  2×0.4873 − 1 = −0.0255 → clamp → edge 0.0 → net ER −1.62틱 → 거절
+        지금:  0.4873 − 0.1473 = 0.3400        → edge 0.34 → net ER +15.0틱
+
+    라이브 전 이력에서 리스크 엔진까지 도달한 사이클은 2건(08-18 · 08-21)뿐이고 **둘 다
+    `Net ER -1.62틱`으로 소수점까지 같은 사유에 걸렸다.** `edge`가 0이면 `net_er`이
+    `−비용`으로 붕괴해 비용만 살아남기 때문이다 — 신호가 0에 곱해진 지문이다.
+
+    ## 지금 산식
+
+        edge = p_favorable − p_adverse
+
+    삼중장벽의 세 결과에 각각의 지불을 곱한 것이다: 유리한 배리어 터치는 +폭, 불리한
+    배리어 터치는 −폭, 시간 배리어(FLAT)는 진입가 근처 청산이라 **0에 가깝다**
+    (`labeling._resolve_barrier()`가 시간 만료 시 `last.c_ticks`로 청산한다).
+    FLAT을 0으로 두는 것은 근사이고, 실제로는 약간의 표류와 왕복 비용이 있다 — 비용은
+    아래 `net_expected_return_ticks`에서 따로 차감하므로 이중 계산은 아니다.
+
+    ## 아직 안 고친 것 두 개 (둘 다 edge를 **키우는** 방향이라 보수적으로 남긴다)
+
+    ㉠ **배리어 폭.** 배리어를 치면 실제 지불은 `width_atr_mult × ATR`이고 30m은
+      **2.0배**다(`labeling._WIDTH_ATR_MULT`). 호출부는 `edge × atr_ticks`로 1.0배를
+      쓴다. 고치면 30m 기대값이 두 배가 된다 — 위험 성향을 바꾸는 변경이라 사람이
+      결정할 일이다.
+    ㉡ **ATR 축.** 호출부의 `atr_ticks`는 **1분봉** ATR인데(`handle_bar()`가 M1만 담는다)
+      레이블 기하의 ATR은 그 Horizon의 봉으로 잰다. 축이 다르다.
+
+    둘 다 지금은 기대값을 **과소평가**하는 방향이라 안전 쪽으로 틀렸다. `2p − 1`은
+    그렇지 않았다 — 그것은 신호를 통째로 지웠다.
+
+    반환은 `[-1, 1]`. **음수를 0으로 누르지 않는다** — 종전 클램프가 "약간 불리"와
+    "크게 불리"를 같은 `−비용`으로 접었고, 그래서 두 날의 거절 사유가 소수점까지
+    같았다. 얼마나 나빴는지는 남아야 한다(L18).
+    """
+    if side == Side.LONG:
+        favorable, adverse = view.agg_p_up, view.agg_p_down
+    else:
+        favorable, adverse = view.agg_p_down, view.agg_p_up
+    return max(-1.0, min(1.0, favorable - adverse))
+
+
 class TradingPipeline:
     def __init__(
         self,
@@ -352,7 +412,7 @@ class TradingPipeline:
             return
 
         cost = self._cost_model.estimate_round_trip_from_bars(bars, qty=1)
-        edge = max(0.0, min(1.0, 2.0 * intent.confidence - 1.0))
+        edge = _directional_edge(view, intent.side)
         net_expected_return_ticks = edge * atr_ticks - cost.total_ticks
         net_er_detail = {
             "edge": edge,
@@ -360,6 +420,10 @@ class TradingPipeline:
             "cost_ticks": cost.total_ticks,
             "net_expected_return_ticks": net_expected_return_ticks,
             "confidence": intent.confidence,
+            # **산식의 두 항을 그대로 남긴다** (2026-08-23). `edge` 하나만 남기면
+            # "0이 나왔다"와 "왜 0인가"를 가를 수 없다 — 그게 17거래일을 눈멀게 했다.
+            "p_favorable": view.agg_p_up if intent.side == Side.LONG else view.agg_p_down,
+            "p_adverse": view.agg_p_down if intent.side == Side.LONG else view.agg_p_up,
             "atr_window": self._atr_window,
             "bars_used": len(bars),
         }
