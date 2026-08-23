@@ -301,9 +301,19 @@ def truncate(s, n):
 
 
 def run_git(root: Path, args, timeout=25):
+    """[MW0601 483차 후속3 / P1-1·P1-2] 읽기 전용 git 호출.
+
+    P1-1 `--no-optional-locks`: `git status` 는 읽기처럼 보이지만 **인덱스를 다시 쓴다**
+      (stat 캐시 갱신) — 즉 `.git/index.lock` 을 잡는다. 이 옵션이면 인덱스를 아예
+      건드리지 않아, 수집기가 스테일 락의 원인 후보에서 **영구 제외**된다.
+
+    P1-2 타임아웃: `subprocess.run` 은 `TimeoutExpired` 시 자식을 죽여준다(futures 쪽
+      수집기는 `Popen.communicate` 라 고아가 남는 결함이 있었고 483차에 고쳤다).
+      여기서는 **사유를 반환 문자열에 남기는 것**만 보강한다 — 계측 4원칙 ④.
+    """
     try:
         p = subprocess.run(
-            ["git", *args],
+            ["git", "--no-optional-locks", *args],
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -316,8 +326,47 @@ def run_git(root: Path, args, timeout=25):
             if p.returncode == 0
             else f"(git 실패 rc={p.returncode}) {p.stderr.strip()[:300]}"
         )
+    except subprocess.TimeoutExpired:
+        return f"(git 타임아웃 {timeout}s — subprocess.run 이 자식을 종료함) git {' '.join(args)}"
     except Exception as e:  # noqa: BLE001
         return f"(git 실행 불가) {e}"
+
+
+def git_index_lock(root: Path) -> dict:
+    """[MW0601 483차 후속3 / P0-1·P2-1] `.git/index.lock` 스테일 판정.
+
+    ⚠ **판정 로직을 여기 두지 않는다.** 정본은 `scripts/git_lock_guard.py` 하나이며
+    futures 저장소에도 같은 파일이 있다. 같은 판정을 두 곳에 적으면 한쪽만 고쳐져
+    조용히 갈라진다 — 2026-08-21 사고가 정확히 **두 저장소에서 동시에** 났다.
+    정본을 못 찾으면 **미측정**으로 반환한다(계측 4원칙 ②).
+
+    왜 필요한가: 스테일 락에서 `git status` 는 **rc=0 · stderr 무출력**이고
+    `git add`/`commit` 만 죽는다. 이 저장소는 2026-08-21 09:08:53 에 생긴 0바이트 락으로
+    **2일간 커밋이 봉쇄**됐는데 어떤 계측에도 안 걸렸다.
+    """
+    guard = root / "scripts" / "git_lock_guard.py"
+    miss = {
+        "present": None,
+        "size": None,
+        "age_sec": None,
+        "stale": False,
+        "git_procs": None,
+        "note": "",
+    }
+    if not guard.exists():
+        miss["note"] = "scripts/git_lock_guard.py 없음 — 인덱스락 **미측정**"
+        return miss
+    try:
+        if str(guard.parent) not in sys.path:
+            sys.path.insert(0, str(guard.parent))
+        import git_lock_guard as _glg
+
+        info = _glg.inspect(str(root))
+        info["note"] = ""
+        return info
+    except Exception as e:  # noqa: BLE001
+        miss["note"] = f"git_lock_guard 호출 실패 — **미측정**: {e}"
+        return miss
 
 
 def read_text(path: Path, limit=None) -> str:
@@ -664,7 +713,29 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     real_files = len([ln for ln in real_diff.splitlines() if ln.strip()])
     noise = raw_files - real_files
 
-    A(f"- HEAD `{head}` · 브랜치 `{branch}` · 작업트리 미커밋 {len(dirty)}건(untracked 포함)")
+    # [MW0601 483차 후속3 / P0-1] 인덱스락 3상태 — None(미측정) / False(없음) / True(있음).
+    # 미측정을 "없음"으로 적으면 계측 4원칙 ② 위반이고, 하필 이 지표는 무증상 결함의
+    # 유일한 창구다.
+    lk = git_index_lock(root)
+    if lk["present"] is None:
+        lock_txt = f" · 인덱스락 **미측정**({lk.get('note') or '사유 미기록'})"
+    elif not lk["present"]:
+        lock_txt = " · 인덱스락 없음"
+    else:
+        _age_h = (lk["age_sec"] or 0) / 3600.0
+        _proc = (
+            f"git 프로세스 {lk['git_procs']}개"
+            if lk["git_procs"] is not None
+            else "git 프로세스 **미측정**"
+        )
+        _tail = " → **커밋 불가 상태**" if lk["stale"] else " (판정 보류 — 3중 조건 미충족)"
+        lock_txt = (
+            f" · 🔴 **인덱스락 잔존** {lk['size']}바이트 · {_age_h:.1f}시간 · " f"{_proc}{_tail}"
+        )
+    A(
+        f"- HEAD `{head}` · 브랜치 `{branch}` · 작업트리 미커밋 {len(dirty)}건(untracked 포함)"
+        + lock_txt
+    )
     A(
         f"- `src/`+`scripts/` 실제 변경 **{real_files}파일**"
         + (f" · 개행 잡음 {noise}파일(CRLF — 부채 아님)" if noise else " · 개행 잡음 없음")
@@ -682,7 +753,15 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("")
     A(f"**당일({D}) 커밋**")
     A("```")
-    A(todays if todays.strip() else "(당일 커밋 없음)")
+    if todays.strip():
+        A(todays)
+    else:
+        # [MW0601 483차 후속3 / P0-2] "안 했다"와 "못 했다"를 가른다 — 계측 4원칙 ②.
+        A(
+            "(당일 커밋 없음 — ⚠ 인덱스락 잔존으로 **커밋 불가 상태였음**. 미조치가 아니다)"
+            if lk["stale"]
+            else "(당일 커밋 없음 — 커밋 가능 상태였음)"
+        )
     A("```")
     A("")
     A("**직전 커밋 10건**")
@@ -953,6 +1032,25 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("## 9. 자동 적신호 (기계가 먼저 잡은 것 — 분석의 출발점이지 결론이 아니다)")
     A("")
     flags: list[str] = []
+    # [MW0601 483차 후속3 / P0-1] 스테일 인덱스락 — 무증상이라 여기서만 드러난다
+    if lk["present"] is None:
+        flags.append(
+            f"인덱스락 **미측정** — {lk.get('note') or '사유 미기록'}. `git status` 는 스테일 락에서도"
+            " rc=0 이라 이 칸이 비면 커밋 불가 상태를 볼 창구가 없다"
+        )
+    elif lk["stale"]:
+        flags.append(
+            f"`.git/index.lock` **스테일 잔존** (0바이트 · {(lk['age_sec'] or 0) / 3600.0:.1f}시간 ·"
+            " git 프로세스 0개) — 이 저장소는 **커밋 불가** 상태다. `git status` 는 rc=0 으로 조용히"
+            " 통과하므로 다른 어떤 계측에도 안 걸린다. `python scripts/git_lock_guard.py --check`"
+            " 로 3중 조건 확인 후 `--reclaim`"
+        )
+    elif lk["present"]:
+        flags.append(
+            f"`.git/index.lock` 존재 ({lk['size']}바이트 · {(lk['age_sec'] or 0) / 60.0:.1f}분 ·"
+            f" git 프로세스 {lk['git_procs'] if lk['git_procs'] is not None else '미측정'}) —"
+            " 실행 중인 git 일 수 있으니 **지우지 말 것**. 몇 분 뒤에도 남아 있으면 재판정"
+        )
     snap = root / "logs" / "status_snapshot.json"
     if snap.exists():
         try:
