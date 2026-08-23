@@ -192,6 +192,14 @@ async def main() -> int:
         regime_ai = RegimeAI.fit(regime_bars)
         print(f"  상태 수 {regime_ai.n_states} · 명명 {regime_ai.labels}")
 
+    # **어떤 가정으로 도는지 먼저 찍는다.** `--regime off`로 돌려 놓고 결과만 읽으면
+    # 「주문 0건」이 모델의 성질처럼 보인다(2026-08-24에 실제로 그렇게 읽을 뻔했다).
+    if args.regime == "off":
+        print(
+            "\n⚠ --regime off — 국면이 항상 UNKNOWN이다. MetaDecisionEngine 게이트 ②가\n"
+            "  UNKNOWN을 100% 차단하므로 **이 실행은 주문 0건이 보장된다.** 배관 확인용이며\n"
+            "  「모델이 거래하는가」를 물으려면 --regime on 으로 돌릴 것."
+        )
     print("\n백테스트 시작 (창마다 재학습 — 수 분 걸린다)")
     results = await run_walk_forward_backtest(
         bars,
@@ -237,10 +245,28 @@ async def main() -> int:
         f"\n거래 활동: 주문 {total_orders}건 · 체결 {total_fills}건 · "
         f"거래가 일어난 창 {traded_windows}/{len(results)}"
     )
-    if total_orders == 0:
+    if total_orders == 0 and args.regime == "off":
+        # **이 설정으로는 그 질문에 답할 수 없다** (2026-08-24).
+        #
+        # `--regime off`는 국면을 항상 `UNKNOWN`으로 두는데, `MetaDecisionEngine`의
+        # `_EVENT_LIKE_REGIMES = {EVENT, UNKNOWN}`이 그것을 게이트 ②에서 100% 차단한다.
+        # 그래서 주문 0건은 **구조적으로 보장된 결과**이고 모델에 대해 아무것도 말하지 않는다.
+        #
+        # 2026-08-24에 이 자리에 "배선이 아니라 모델의 성질이다"라는 단정이 있었다.
+        # 계기가 자기 전제를 확인하지 않고 결론을 냈던 것이다 — 그 결론이 맞을 수도
+        # 있었지만, 이 설정에서는 **알 수 없다**가 정답이다.
         print(
-            "  → 백테스트도 주문 0건이다. 실전 17거래일 연속 0건(2026-08-21)과 같은 결과이므로\n"
-            "    **배선이 아니라 모델의 성질**이다 — 재학습이나 접근 변경의 문제다."
+            "  → 주문 0건이지만 **이 실행으로는 아무것도 판정할 수 없다.**\n"
+            "    `--regime off`는 국면을 항상 UNKNOWN으로 두고, MetaDecisionEngine의\n"
+            "    게이트 ②(_EVENT_LIKE_REGIMES = {EVENT, UNKNOWN})가 그것을 100% 차단한다.\n"
+            "    주문 0건은 이 설정이 보장하는 결과이지 모델의 성질이 아니다.\n"
+            "    **`--regime on`으로 다시 돌릴 것.**"
+        )
+    elif total_orders == 0:
+        print(
+            "  → 백테스트도 주문 0건이다(국면 결선 상태에서). 실전 17거래일 연속 0건\n"
+            "    (2026-08-21)과 같은 결과이므로 **배선이 아니라 모델의 성질**로 읽는다 —\n"
+            "    재학습이나 접근 변경의 문제다."
         )
     elif total_fills == 0:
         print(
@@ -273,6 +299,18 @@ async def main() -> int:
     #: 자본 대비 **비율**을 요구해서 틱 단위로는 채점할 수 없는 관문.
     _NEEDS_CAPITAL = {"max_drawdown"}
 
+    # **거래가 0건이면 성과 관문은 전부 미측정이다** (2026-08-24).
+    #
+    # 손익 표본이 전부 0.0이면 `negative_window_ratio`가 0.0으로 **PASS**가 된다 —
+    # 손실 창이 없어서가 아니라 **창 자체가 없어서**다. Sharpe도 마찬가지로 0.0/0.0이다.
+    # 1차 실행에서 `max_drawdown`만 단위 문제로 빠지고 이쪽은 초록으로 찍혔다.
+    #
+    # 성과는 거래의 결과다. 거래가 없으면 잴 성과도 없고, 그 사실을 초록으로 표시하는
+    # 것이 이 저장소가 반복해서 다친 형태다(마흐디 L18 · 2026-08-21 F-14).
+    traded_at_all = any(r.traded for r in results)
+    if not traded_at_all:
+        pnl_measured = False
+
     # **손익을 못 재면 관문을 찍지 않는다** (2026-08-23, 모듈 docstring 참고).
     #
     # 전 구간 수익률이 0.0이면 `max_drawdown`·`negative_window_ratio`가 둘 다 PASS로
@@ -280,11 +318,18 @@ async def main() -> int:
     # 들어가면 F-14가 막으려던 「미측정이 통과로 보이는」 상태를 다시 만든다.
     if not pnl_measured:
         print("\nG1 관문 (Ver 1.2 §8.3): **전부 미측정**")
-        print(
-            "  손익을 못 잰 창이 있다. 그 상태로 관문을 찍으면 max_drawdown과\n"
-            "  negative_window_ratio가 둘 다 통과로 나오는데, 그것은 성과가 아니라\n"
-            "  **계기의 부재**다. 그래서 아무 도장도 찍지 않는다."
-        )
+        if not traded_at_all:
+            print(
+                "  체결이 한 건도 없다. 손익 표본이 전부 0.0이면 negative_window_ratio가\n"
+                "  0.0으로 PASS가 되는데, 그건 손실 창이 없어서가 아니라 **창 자체가**\n"
+                "  **없어서**다. 성과는 거래의 결과이고, 거래가 없으면 잴 성과도 없다."
+            )
+        else:
+            print(
+                "  손익을 못 잰 창이 있다. 그 상태로 관문을 찍으면 max_drawdown과\n"
+                "  negative_window_ratio가 둘 다 통과로 나오는데, 그것은 성과가 아니라\n"
+                "  **계기의 부재**다. 그래서 아무 도장도 찍지 않는다."
+            )
         for gate in gates:
             print(f"  [미측정] {gate.name}")
         passed = False
@@ -355,6 +400,10 @@ async def main() -> int:
                 }
                 for g in gates
             ],
+            # 어떤 가정으로 돈 실행인가 — 이게 없으면 나중에 이 JSON을 읽는 사람이
+            # 주문 0건을 모델의 성질로 읽는다.
+            "regime_wiring": args.regime,
+            "orders_structurally_blocked": args.regime == "off",
             "trade_activity": {
                 "orders": sum(r.n_orders for r in results),
                 "fills": sum(r.n_fills for r in results),
