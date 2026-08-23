@@ -99,6 +99,13 @@ _WS_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
 #
 # 이 값을 **고정 임계로 쓰는 것은 2026-07-31에 틀린 것으로 판명됐다** — 아래 `_StallWatchdog`
 # "적응 임계" 절 참고. 이제 하한으로만 쓰고, 실제 임계는 최근 관측된 한산함에서 파생된다.
+#: 시계 어긋남을 장중에 다시 재는 주기 (2026-08-21 F-13).
+#:
+#: 정규장 405분 ÷ 30분 ≈ 14줄/일. 실측된 이동 속도(3시간 30분에 531ms)를 시계열로 잇기에
+#: 충분하고, 아무도 안 보게 될 양은 아니다. 하루 한 줄이던 종전 값이 "스큐는 하루 한
+#: 상수"라는 틀린 전제 위에 서 있었다.
+_CLOCK_SKEW_REPORT_INTERVAL = timedelta(minutes=30)
+
 _TICK_STALL_TIMEOUT_SECONDS = 120.0
 _TICK_STALL_CHECK_INTERVAL_SECONDS = 30.0
 
@@ -351,7 +358,10 @@ class TickCollector:
         # 만들어도 **이건 유지한다**. 시계는 연결과 무관한 이 PC의 성질이고, 재연결마다
         # 표본을 버리면 스큐를 다시 30표본 모을 때까지 판정 불가가 된다.
         self._clock_skew = ClockSkewTracker()
-        self._clock_skew_reported = False
+        # 2026-08-21 F-13 — 세션당 1회에서 **장중 30분 주기**로 바꿨다. 마지막으로 남긴
+        # 시각과 값을 들고 있어야 주기 판정과 `delta_seconds`가 가능하다.
+        self._clock_skew_last_report_at: datetime | None = None
+        self._clock_skew_last_value: float | None = None
         self._watchdog = _StallWatchdog(
             timeout_seconds=stall_timeout_seconds,
             check_interval_seconds=stall_check_interval_seconds,
@@ -527,26 +537,55 @@ class TickCollector:
             )
 
     def _observe_clock_skew(self, tick: Tick) -> None:
-        """거래소 시각 대비 로컬 시계 어긋남을 표본에 넣고, 세션당 **한 번** 결과를 남긴다.
+        """거래소 시각 대비 로컬 시계 어긋남을 표본에 넣고, **장중 30분 주기**로 남긴다.
 
-        왜 한 번인가: 이 값은 초 단위로 서서히 움직이는 이 PC의 성질이지 매 프레임의 사건이
-        아니다. 매번 로그하면 `FeaturePublish`처럼 하루 수만 줄이 되어 아무도 안 본다 —
-        `nan_ratio=0.0165`가 8거래일 내내 같은 값으로 찍히고도 아무도 안 물어봤던 것과 같은
-        실패 형태다(2026-08-04). 대신 **임계를 넘으면 WARNING**으로 갈라 남긴다.
+        종전엔 세션당 한 줄이었다. 그 판단의 근거는 "이 값은 서서히 움직이는 이 PC의
+        성질이지 매 프레임의 사건이 아니다"였고, 매 프레임 로그가 `FeaturePublish`처럼
+        하루 수만 줄이 되는 것을 막으려던 것이다. 그 절충 자체는 옳았다.
 
-        하루 중 시계가 점프하면(Windows Time 동기) 롤링 창이 따라가지만 로그는 이미 나갔다.
-        그건 의도한 절충이다 — 그 경우를 잡는 것은 다음 거래일 리포트의 몫이고, 이 로그의
-        목적은 "오늘 이 PC의 시계가 어땠나"를 한 줄로 남기는 것이다.
+        **틀린 것은 "하루 한 상수"라는 전제였다** (2026-08-21 1-10). 실측에서 스큐가
+        3시간 30분 동안 531ms 움직였다. 아침 08:45에 잰 한 값을 종일 쓰면, 그 값으로
+        보정한 모든 것(발행 오프셋 · 완성봉 경계 유예)이 오후로 갈수록 틀어진다. 그리고
+        종전 주석은 그 경우를 "다음 거래일 리포트의 몫"으로 미뤘는데, 리포트가 읽을 값이
+        하루 한 개뿐이라 **리포트도 그것을 볼 수 없었다.**
+
+        30분 주기는 정규장 405분에 약 14줄이다 — 아무도 안 보게 될 양이 아니고, 실측된
+        이동 속도(3.5시간에 531ms)를 시계열로 잇기에 충분하다. `delta_seconds`가 직전
+        측정 대비 변화라서, 한 줄만 봐도 "움직이고 있는가"를 알 수 있다.
+
+        표본이 아직 모자라 못 재는 시각에는 **직전값을 유지하고 `measured=False`로**
+        남긴다. 조용히 건너뛰지 않는다(금지계명 12).
         """
         self._clock_skew.observe(tick.ts_exchange, now_kst())
-        if self._clock_skew_reported or self._clock_skew.seconds is None:
+        now = now_kst()
+        last_at = self._clock_skew_last_report_at
+        if last_at is not None and now - last_at < _CLOCK_SKEW_REPORT_INTERVAL:
             return
-        self._clock_skew_reported = True
         skew = self._clock_skew.seconds
+        if skew is None:
+            if last_at is None:
+                return  # 세션 시작 직후 — 아직 한 번도 못 쟀다. 주기의 기준점도 없다.
+            self._clock_skew_last_report_at = now
+            mlog.log(
+                "ClockSkewMeasured",
+                "거래소 시각 − 로컬 시계 = 측정 불가(표본 부족) — 직전값 유지",
+                symbol=self._symbol,
+                skew_seconds=self._clock_skew_last_value,
+                delta_seconds=None,
+                samples=self._clock_skew.samples,
+                measured=False,
+            )
+            return
+
+        previous = self._clock_skew_last_value
+        delta = None if previous is None else round(skew - previous, 3)
+        self._clock_skew_last_report_at = now
+        self._clock_skew_last_value = skew
         exceeded = self._clock_skew.exceeds_threshold
         mlog.log(
             "ClockSkewExceeded" if exceeded else "ClockSkewMeasured",
             f"거래소 시각 − 로컬 시계 = {skew:+.2f}초"
+            + ("" if delta is None else f" (직전 대비 {delta:+.3f}초)")
             + (
                 f" — 임계 {clock_skew.WARN_THRESHOLD_SECONDS:.1f}초 초과, "
                 "완성봉 유예 500ms가 무의미해진다(w32time 동기 확인 필요)"
@@ -555,7 +594,9 @@ class TickCollector:
             ),
             symbol=self._symbol,
             skew_seconds=round(skew, 3),
+            delta_seconds=delta,
             samples=self._clock_skew.samples,
+            measured=True,
         )
 
     def clock_skew_seconds(self) -> float | None:

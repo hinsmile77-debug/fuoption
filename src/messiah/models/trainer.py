@@ -60,6 +60,7 @@ from messiah.strategy.futures.meta_labeler import (
     META_FEATURE_NAMES,
     MetaLabeler,
     OutOfFoldRecord,
+    ThresholdSelection,
     build_meta_training_data,
     select_threshold,
 )
@@ -265,6 +266,9 @@ class ExpertTrainingResult:
     # "임계값 과적합"과 "모델에 우위 없음"을 구분하기 때문이다 — 두 증상이 똑같이 무거래다.
     threshold_selection_probabilities: list[float] = field(default_factory=list)
     threshold_insample_probabilities: list[float] = field(default_factory=list)
+    # 임계값이 **어디서 왔는가** (2026-08-21 F-6). `None`은 옛 경로로 만들어진 결과라
+    # 출처를 모른다는 뜻이다 — "최적화였다"고 가정하지 않는다(L18).
+    threshold_selection: ThresholdSelection | None = None
 
 
 async def train_formal_expert(
@@ -385,10 +389,10 @@ async def train_formal_expert(
         n_splits=meta_threshold_splits,
         fitted=meta_labeler,
     )
-    threshold = select_threshold(
+    threshold_selection = select_threshold(
         selection_probs, list(meta_returns), min_support_fraction=meta_min_support_fraction
     )
-    meta_labeler = meta_labeler.with_threshold(threshold)
+    meta_labeler = meta_labeler.with_threshold(threshold_selection.value)
     inference_probs = [
         meta_labeler.predict_pass_probability(dict(zip(META_FEATURE_NAMES, row))) for row in meta_x
     ]
@@ -401,6 +405,7 @@ async def train_formal_expert(
         n_meta_signals=len(meta_y),
         threshold_selection_probabilities=selection_probs,
         threshold_insample_probabilities=inference_probs,
+        threshold_selection=threshold_selection,
     )
 
 

@@ -271,11 +271,39 @@ async def test_seed_publishes_the_warm_started_regime():
     runtime = RegimeRuntime(_SYMBOL, regime_ai, bus)
     runtime.warm_start(fit_bars)
 
-    state = await runtime.seed()
+    seeded = await runtime.seed()
 
-    assert state is not None
+    assert seeded is not None
+    state, bus_ok = seeded
     assert state.regime is not Regime.UNKNOWN
     assert [msg.regime for msg in published] == [state.regime]
+    # 2026-08-21 F-3 — 호출측이 `RegimeSeeded.delivery`를 채우려면 경로를 알아야 한다.
+    assert bus_ok is True
+    assert runtime.last_seed_publish_error is None
+
+
+@pytest.mark.asyncio
+async def test_seed_reports_a_dead_bus_instead_of_swallowing_it():
+    """**버스 발행 실패가 시드를 막지는 않는다** — 같은 프로세스 소비자에게는 직접 전달이
+    살아 있다. 다만 조용히 넘어가지도 않는다(금지계명 12): 실패 사실이 반환값을 타고
+    나가 `delivery="direct-only"`로 기록된다 (2026-08-21 F-3)."""
+    fit_bars = _bars(100)
+    regime_ai = RegimeAI.fit(fit_bars, n_states_candidates=(2, 3, 4))
+
+    class _DeadBus:
+        async def publish(self, topic, message):
+            raise ConnectionError("redis down")
+
+    runtime = RegimeRuntime(_SYMBOL, regime_ai, _DeadBus())
+    runtime.warm_start(fit_bars)
+
+    seeded = await runtime.seed()
+
+    assert seeded is not None
+    state, bus_ok = seeded
+    assert state.regime is not Regime.UNKNOWN  # 판정 자체는 살아 있다
+    assert bus_ok is False
+    assert "redis down" in (runtime.last_seed_publish_error or "")
 
 
 @pytest.mark.asyncio

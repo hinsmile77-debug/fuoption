@@ -17,6 +17,7 @@ from messiah.core.messages import BarClosed, Health, HealthLevel, Horizon
 from messiah.data.archiver import ParquetArchiver
 from messiah.ui import app as app_module
 from messiah.ui.app import (
+    _ABSENCE_OBSERVE_SECONDS,
     _NOTICE_RENDERER,
     _absence_reason,
     _available_dates,
@@ -338,12 +339,18 @@ class _FakeSource:
     어떤 사유를 말하나"라, 배지를 입력으로 받는 편이 검증 의도에 맞는다.
     """
 
-    def __init__(self, mode=DataSourceMode.LIVE, snapshots=None) -> None:
+    def __init__(self, mode=DataSourceMode.LIVE, snapshots=None, listening=None) -> None:
         self.mode = mode
         self._snapshots = dict(snapshots or {})
+        # 얼마나 오래 듣고 있었나 (2026-08-21 F-11). 기본은 관측 창을 넘긴 상태 —
+        # 「미배선」 갈래를 보는 기존 테스트들의 의미를 그대로 유지한다.
+        self._listening = _ABSENCE_OBSERVE_SECONDS + 60.0 if listening is None else listening
 
     def snapshot(self, key: str) -> TopicSnapshot:
         return self._snapshots.get(key) or TopicSnapshot(None, FreshnessBadge.NO_DATA, None)
+
+    def listening_seconds(self):
+        return self._listening
 
 
 def _health_snapshot(level=HealthLevel.OK, *, badge=FreshnessBadge.LIVE, age=3.0, git_sha=""):
@@ -354,10 +361,14 @@ def _health_snapshot(level=HealthLevel.OK, *, badge=FreshnessBadge.LIVE, age=3.0
 _G2 = health_cache_key("g2.pipeline")
 
 
-def test_unwired_publisher_is_not_reported_as_an_outage():
-    """`intel.futures`가 안 오는 건 사고가 아니라 구조다 — live 번들이 0개라 발행 자체가 없다.
+def test_unwired_publisher_is_not_reported_as_a_publisher_outage():
+    """발행자가 살아 있는데 값이 안 오는 것을 **발행자 사고로 보고하지 않는다**.
 
     끊김과 같은 회색 NO_DATA로 보이면 Redis 단절과 "원래 그런 것"이 구분되지 않는다(L18).
+
+    문구는 2026-08-21 F-11로 「미배선」 단정에서 **「미배선 또는 끊김」**으로 바뀌었다 —
+    heartbeat만으로는 둘을 가를 수 없기 때문이다. 종전의 「미배선」 단정이 열흘째 거짓인
+    채로 화면에 떠 있었던 것이 이상점 1-12였다. **말할 수 있는 것만 말한다.**
     """
     source = _FakeSource(snapshots={_G2: _health_snapshot()})
 
@@ -365,14 +376,48 @@ def test_unwired_publisher_is_not_reported_as_an_outage():
 
     assert reason is not None
     assert "미배선" in reason
-    assert "끊김" not in reason
+    # 발행자 사고를 주장하지 않는다 — 그 갈래는 heartbeat가 죽었을 때만 나온다.
+    assert "heartbeat" not in reason and "응답 없음" not in reason
 
 
 def test_waiting_is_distinguished_from_unwired():
-    source = _FakeSource(snapshots={_G2: _health_snapshot()})
+    """**주기가 아직 안 돈 것과 배선이 없는 것은 다르다** (2026-08-21 F-11 · 1-12).
 
-    assert "대기" in (_absence_reason(source, "DecisionIntent") or "")
-    assert "미배선" in (_absence_reason(source, "OptionsView") or "")
+    2026-08-21 13:03에 창을 열었을 때 화면은 「미배선」이라고 말했고, 27분 뒤 값이
+    정상으로 들어왔다 — 배선은 처음부터 멀쩡했고 주기가 안 돌았을 뿐이었다. 그 문장은
+    번들이 승격된 2026-08-11 이후로 **열흘째 거짓**이었다.
+    """
+    # 창을 연 지 10분 — 30분 주기 토픽은 아직 한 바퀴도 안 돌았다.
+    fresh = _FakeSource(snapshots={_G2: _health_snapshot()}, listening=600.0)
+    reason = _absence_reason(fresh, "FuturesView") or ""
+    assert "대기" in reason
+    assert "미배선" not in reason
+    assert "10분" in reason, "판정 근거를 화면에 함께 적는다"
+
+    # 관측 창(30분 × 2)을 넘기고도 안 오면 그때는 주기 문제가 아니다.
+    waited = _FakeSource(snapshots={_G2: _health_snapshot()}, listening=3_700.0)
+    assert "미배선" in (_absence_reason(waited, "FuturesView") or "")
+    assert "미배선" in (_absence_reason(waited, "OptionsView") or "")
+
+
+def test_unmeasurable_listening_time_refuses_to_judge():
+    """못 재면 판정하지 않는다 — 모르는 것을 「미배선」이라 부르지 않는다(L18)."""
+    source = _FakeSource(snapshots={_G2: _health_snapshot()}, listening=None)
+    source._listening = None
+
+    reason = _absence_reason(source, "FuturesView") or ""
+    assert "대기" in reason
+    assert "판정 불가" in reason
+
+
+def test_a_dead_publisher_still_wins_over_the_waiting_branch():
+    """**진짜 사고를 「대기」로 덮으면 이 변경이 원래 결함보다 나쁘다** (F-11 회귀 위험 ㉠)."""
+    source = _FakeSource(
+        snapshots={_G2: _health_snapshot(badge=FreshnessBadge.STALE, age=95.0)},
+        listening=60.0,  # 방금 창을 열었지만 발행자는 죽어 있다
+    )
+
+    assert "끊김" in (_absence_reason(source, "FuturesView") or "")
 
 
 def test_dead_publisher_turns_the_same_topic_into_an_outage():

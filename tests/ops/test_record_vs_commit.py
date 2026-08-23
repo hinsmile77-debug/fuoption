@@ -64,8 +64,15 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _close_one(root: Path) -> None:
+    """**구현 종결** 한 건을 닫는다 — F-/G- 항목이라야 반입 대조의 대상이다 (F-16)."""
     todo = root / "dev_memory" / "NEXT_TODO.md"
-    todo.write_text("- [x] 어제 닫은 것\n- [x] 오늘 닫은 것\n", encoding="utf-8")
+    todo.write_text("- [x] 어제 닫은 것\n- [x] **F-9** 오늘 구현한 것\n", encoding="utf-8")
+
+
+def _close_one_observation(root: Path) -> None:
+    """**관측 종결** 한 건 — 커밋할 코드가 애초에 없는 항목이다."""
+    todo = root / "dev_memory" / "NEXT_TODO.md"
+    todo.write_text("- [x] 어제 닫은 것\n- [x] **B-7** 오늘 확인한 값\n", encoding="utf-8")
 
 
 def test_clean_day_is_ok(repo: Path) -> None:
@@ -138,3 +145,48 @@ def test_summary_speaks_even_on_a_clean_day(repo: Path) -> None:
     assert any("기록↔반입" in line for line in rvc.summarize(ok))
     unresolved = rvc.RecordVsCommit(None, None, "unresolved", "git 없음")
     assert "판정 불가" in rvc.summarize(unresolved)[0]
+
+
+# ------------------------------------------ F-16 · 관측 종결을 구현 종결로 세지 않는다
+
+
+def test_a_day_that_only_closed_observations_is_not_a_breach(repo: Path) -> None:
+    """**측정 도구가 자기를 돌리는 세션의 산물을 결함으로 셌다** (2026-08-21 F-16 · 1-15).
+
+    2026-08-21에 점검 세션이 관측 항목 스물몇 건을 닫았다 — 「오늘 1m 오프셋이 얼마였나」
+    같은, 커밋할 코드가 애초에 없는 항목들이다. 이 축은 그것을 「완료 N건인데 미커밋」으로
+    읽어 적신호를 냈다. 매일 우는 축은 정작 진짜 사고가 난 날에도 안 읽힌다.
+    """
+    _close_one_observation(repo)
+    result = rvc.assess(
+        date(2026, 8, 19), repo_root=repo, today=date(2026, 8, 19), dirty_source_files=14
+    )
+    assert result.verdict == "observation_only"
+    assert result.breached is False
+    assert result.n_closed == 1
+    assert result.n_implementation == 0
+    # 분류 근거를 남긴다 — 오분류가 났을 때 사람이 확인할 재료가 이 문장뿐이다.
+    assert "관측 종결" in result.detail
+
+
+def test_an_implementation_closure_still_breaches(repo: Path) -> None:
+    """**원래 잡으려던 것을 놓치면 안 된다** (F-16 회귀 위험 ㉠) — F-/G- 항목이 섞여
+    있으면 관측이 아무리 많아도 반입 대조는 그대로 작동한다."""
+    todo = repo / "dev_memory" / "NEXT_TODO.md"
+    todo.write_text(
+        "- [x] 어제 닫은 것\n- [x] **B-7** 관측\n- [x] **F-14** 승격 관문\n",
+        encoding="utf-8",
+    )
+    result = rvc.assess(
+        date(2026, 8, 19), repo_root=repo, today=date(2026, 8, 19), dirty_source_files=14
+    )
+    assert result.verdict == "closed_with_uncommitted_source"
+    assert result.n_closed == 2
+    assert result.n_implementation == 1
+
+
+def test_classification_reads_the_item_prefix() -> None:
+    assert rvc.classify_closed("- [x] **F-14** 승격 관문") == "implementation"
+    assert rvc.classify_closed("  - [X] **G-4** 고도화") == "implementation"
+    assert rvc.classify_closed("- [x] **B-10** UI 로그 JSON 유효행") == "observation"
+    assert rvc.classify_closed("- [x] **확인 필요 (나)** 축 혼합 확정") == "observation"

@@ -496,11 +496,12 @@ async def test_flush_final_bar_returns_none_when_there_is_nothing_to_flush(tmp_p
     assert await collector.flush_final_bar() is None
 
 
-async def test_clock_skew_is_measured_and_logged_once_per_session(tmp_path: Path, monkeypatch):
+async def test_clock_skew_is_not_logged_every_frame(tmp_path: Path, monkeypatch):
     """2026-08-04엔 거래소 시각이 로컬보다 9.72초 앞서 있었는데 로그에 흔적이 없었다.
 
-    세션당 **한 줄**인 것이 요구사항이다 — 매 프레임 남기면 `FeaturePublish`처럼 하루
-    수만 줄이 되어 아무도 안 본다(`data/collector.py` `_observe_clock_skew` docstring).
+    **매 프레임 남기면 안 된다** — `FeaturePublish`처럼 하루 수만 줄이 되어 아무도 안
+    본다. 주기는 30분이므로(2026-08-21 F-13) 프레임 60개가 순식간에 흐르는 이 테스트에서
+    나오는 줄은 첫 한 줄뿐이다.
     """
     logged: list[tuple[str, dict]] = []
     monkeypatch.setattr(
@@ -514,9 +515,41 @@ async def test_clock_skew_is_measured_and_logged_once_per_session(tmp_path: Path
         await collector.run_once()
 
     skew_logs = [f for tag, f in logged if tag in ("ClockSkewMeasured", "ClockSkewExceeded")]
-    assert len(skew_logs) == 1, "세션당 한 줄이어야 한다"
+    assert len(skew_logs) == 1, "30분 주기이므로 이 짧은 세션에선 한 줄"
     assert skew_logs[0]["samples"] >= 30
+    assert skew_logs[0]["measured"] is True
+    assert skew_logs[0]["delta_seconds"] is None, "첫 줄은 직전값이 없다"
     assert collector.clock_skew_seconds() is not None
+
+
+async def test_clock_skew_is_remeasured_every_thirty_minutes(tmp_path: Path, monkeypatch):
+    """**하루 한 상수가 아니다** (2026-08-21 F-13 · 1-10).
+
+    실측에서 스큐가 3시간 30분에 531ms 움직였다. 아침 한 값을 종일 쓰면 그 값으로 보정한
+    모든 것이 오후로 갈수록 틀어지고, 리포트가 읽을 값이 하루 한 개뿐이라 **리포트도
+    그것을 볼 수 없었다.** 두 번째 줄과 `delta_seconds`가 그 사각을 없앤다.
+    """
+    from datetime import timedelta as _td
+
+    logged: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "messiah.data.collector.mlog.log", lambda tag, msg, **f: logged.append((tag, f))
+    )
+
+    base = now_kst()
+    ticks = iter(range(10_000))
+    # 프레임마다 벽시계를 1분씩 밀어 30분 경계를 실제로 넘긴다.
+    monkeypatch.setattr("messiah.data.collector.now_kst", lambda: base + _td(minutes=next(ticks)))
+    frames = [_SUBSCRIBE_ACK] + [_REAL_TICK_1, _REAL_TICK_2] * 30
+    collector, _ = _collector(tmp_path, frames)
+
+    with pytest.raises(ConnectionError):
+        await collector.run_once()
+
+    skew_logs = [f for tag, f in logged if tag in ("ClockSkewMeasured", "ClockSkewExceeded")]
+    assert len(skew_logs) >= 2, "30분 경계를 넘으면 다시 잰다"
+    assert all("delta_seconds" in f for f in skew_logs)
+    assert skew_logs[1]["delta_seconds"] is not None, "두 번째 줄부터는 직전 대비 변화가 있다"
 
 
 async def test_clock_skew_is_none_before_enough_samples(tmp_path: Path):

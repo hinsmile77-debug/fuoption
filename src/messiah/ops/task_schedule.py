@@ -114,6 +114,18 @@ def collection_tasks(path: Path | str = DEFAULT_SCHEDULE_PATH) -> list[Scheduled
     return [task for task in tasks if task.collection]
 
 
+def all_tasks(path: Path | str = DEFAULT_SCHEDULE_PATH) -> list[ScheduledTask]:
+    """정본의 **전체** 작업 — 등록 대조가 보는 목록 (2026-08-21 F-5).
+
+    `collection_tasks()`를 지우지 않는다: 기동 창 파생(`launch_window_start`)은 수집 계열만
+    봐야 맞다. 두 질문이 다르다 — "언제부터 기동을 허용하나"는 수집만의 문제고, "등록된
+    시각이 정본과 같은가"는 네 작업 전부의 문제다. 종전엔 후자가 전자의 목록을 빌려 써서
+    Messiah-Shutdown(15:40) · Messiah-Postmarket(15:45) 둘을 **아무도 안 보고 있었다.**
+    """
+    tasks, _ = load_schedule(path)
+    return list(tasks)
+
+
 def earliest_collection_trigger(path: Path | str = DEFAULT_SCHEDULE_PATH) -> time:
     """수집 작업 중 가장 이른 정시 트리거 — 기동 창이 반드시 포함해야 하는 시각."""
     tasks = collection_tasks(path)

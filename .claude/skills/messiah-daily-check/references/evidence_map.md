@@ -9,7 +9,7 @@
 | `logs/l1_daily_{d}.log` | L1 메인 (수집·합성·피처·판단) | 하루의 거의 전부. 세션 경계, 자가점검, 완성봉, Feature 발행, 오류 | 130~240KB |
 | `logs/g2_daily_{d}.log` | G2 페이퍼 트레이딩 | 모의 판단·주문 경로 | 2~8KB |
 | `logs/ui_{d}.log` | Command Center (Streamlit/Uvicorn) | UI 기동·포트·접속 | 0.4~19KB |
-| `logs/ui_{d}.err.log` | UI stderr | **존재하면 그 자체가 신호** | 보통 0 |
+| ~~`logs/ui_{d}.err.log`~~ | **존재하지 않는다** — UI는 stderr를 stdout에 병합해 `ui_{d}.log` 하나로 받는다(`ui_launcher.py`: `stderr=subprocess.STDOUT`). 이 파일을 매일 찾던 것이 2026-08-21 이상점 1-6이었다 | 찾지 말 것 | — |
 | `logs/postmarket_{d}.log` | 장후 5단계 배치 | 조각통합→재합성→검증→스코어카드→무결성. **크기가 작으면 중단** | 12~14KB 정상 |
 | `logs/shutdown_watchdog.log` | 종료 감시 (롤링) | 종료 시퀀스, 강제 종료 | 누적 |
 

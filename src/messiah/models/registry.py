@@ -35,10 +35,12 @@ Ver 1.6 §9.1 원안(`experts/e1.lgb`..)과 달리, 이미 존재하는 `Horizon
 from __future__ import annotations
 
 import json
+import logging
+import math
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import yaml
 
@@ -48,6 +50,10 @@ from messiah.models.trainer import ExpertTrainingResult
 from messiah.models.validator import ValidationReport
 from messiah.strategy.futures.expert import HorizonExpert
 from messiah.strategy.futures.meta_labeler import MetaLabeler
+
+#: R18 — live 승격 전 섀도 병행 관측이 필요한 거래일수. 지금은 **계측 기준**일 뿐
+#: 강제 차단선이 아니다(F-14 ④ — 차단은 별도 결정).
+SHADOW_TRADING_DAYS_REQUIRED = 20
 
 _VALID_TRANSITIONS: dict[BundleStatus, frozenset[BundleStatus]] = {
     BundleStatus.CANDIDATE: frozenset({BundleStatus.SHADOW, BundleStatus.RETIRED}),
@@ -62,15 +68,85 @@ class RegistryError(Exception):
 
 
 @dataclass(frozen=True)
+class ManifestGate:
+    """매니페스트에 적히는 관문 한 줄 — 통과·미달·미측정 셋을 **전부** 적는다 (F-14).
+
+    종전 `gates_passed: dict[name, value]`는 **통과분만** 담았다. 그래서 미달과 미측정이
+    매니페스트에서 통째로 사라졌고, "관문 넷 통과"처럼 읽혔다(실제로는 일곱 중 넷이고
+    셋은 아무도 안 쟀다). 없는 것과 통과한 것을 같은 모양으로 두지 않는다(마흐디 L18).
+    """
+
+    name: str
+    passed: bool
+    measured: bool = True
+    value: float | None = None
+    threshold: float | None = None
+
+    def to_yaml_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "passed": bool(self.passed),
+            "measured": bool(self.measured),
+            "value": self.value,
+            "threshold": self.threshold,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: Mapping) -> ManifestGate:
+        return cls(
+            name=str(data["name"]),
+            passed=bool(data["passed"]),
+            measured=bool(data.get("measured", True)),
+            value=_opt_float(data.get("value")),
+            threshold=_opt_float(data.get("threshold")),
+        )
+
+
+def _opt_float(x: object) -> float | None:
+    if x is None:
+        return None
+    try:
+        value = float(x)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) or math.isinf(value) else value
+
+
+@dataclass(frozen=True)
 class BundleManifest:
+    """번들 매니페스트 — **상태의 정본이 아니다** (2026-08-21 F-14).
+
+    `initial_status`는 패킹 시점의 상태를 남기는 기록일 뿐이고, 그 번들이 **지금**
+    candidate인지 live인지는 `data/models/registry.db`의 `bundles.status`가 정본이다.
+    종전엔 필드 이름이 `status`라 두 곳이 같은 질문에 다른 답을 낼 수 있었다 — 실제로
+    2026-08-21 장후 점검에서 매니페스트는 `candidate`, Registry는 `live`인 번들이
+    나왔다. 이름을 바꿔 **매니페스트가 현재 상태를 주장할 수 없게** 했다
+    (불변원칙 2 "스키마는 단일 정의"의 자료 판본).
+    """
+
     bundle_id: str
     horizon: Horizon
     trained_range: tuple[str, str]
     run_id: str
     feature_set: str
     validation_report: str
-    gates_passed: dict[str, float]
-    status: BundleStatus = BundleStatus.CANDIDATE
+    gates: tuple[ManifestGate, ...]
+    initial_status: BundleStatus = BundleStatus.CANDIDATE
+    #: 옛 스키마(`gates_passed` dict)에서 읽어 온 매니페스트인가. 옛 번들은 미달·미측정
+    #: 관문이 기록에 남아 있지 않으므로 승격 관문이 판정할 재료 자체가 없다 —
+    #: 거부가 아니라 **유예(grandfather)** 하되 그 사실을 반드시 소리 내어 남긴다.
+    legacy_gates: bool = False
+
+    @property
+    def gates_passed(self) -> dict[str, float | None]:
+        """통과 관문만 추린 읽기 전용 뷰 — 옛 `gates_passed` 필드의 자리를 대신한다.
+        **판정에 쓰지 말 것**(통과분만 보이므로 미달·미측정이 안 보인다). 사람이 읽는
+        요약과 옛 호출부 호환용이다."""
+        return {gate.name: gate.value for gate in self.gates if gate.passed}
+
+    def blocking_gates(self) -> tuple[ManifestGate, ...]:
+        """승격을 막는 관문 — 미달과 미측정을 **함께** 돌려준다."""
+        return tuple(gate for gate in self.gates if not gate.passed)
 
     def to_yaml_dict(self) -> dict:
         return {
@@ -80,12 +156,29 @@ class BundleManifest:
             "run_id": self.run_id,
             "feature_set": self.feature_set,
             "validation_report": self.validation_report,
-            "gates_passed": self.gates_passed,
-            "status": self.status.value,
+            "gates": [gate.to_yaml_dict() for gate in self.gates],
+            "initial_status": self.initial_status.value,
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> BundleManifest:
+        """신·구 스키마를 모두 읽는다 (F-14 회귀 위험 ㉡ 마이그레이션).
+
+        옛 스키마: `gates_passed: {name: value}` + `status:`.
+        새 스키마: `gates: [{name, passed, measured, value, threshold}]` + `initial_status:`.
+        """
+        raw_gates = data.get("gates")
+        legacy = raw_gates is None
+        if legacy:
+            # 옛 매니페스트는 통과분만 담았다 — 담긴 것은 전부 통과·측정된 관문이다.
+            # 담기지 **않은** 관문이 무엇이었는지는 매니페스트만으로 알 수 없다.
+            gates = tuple(
+                ManifestGate(name=str(name), passed=True, measured=True, value=_opt_float(value))
+                for name, value in dict(data.get("gates_passed") or {}).items()
+            )
+        else:
+            gates = tuple(ManifestGate.from_yaml_dict(item) for item in raw_gates)
+        status_value = data.get("initial_status", data.get("status"))
         return cls(
             bundle_id=data["bundle_id"],
             horizon=Horizon(data["horizon"]),
@@ -93,8 +186,9 @@ class BundleManifest:
             run_id=data["run_id"],
             feature_set=data["feature_set"],
             validation_report=data["validation_report"],
-            gates_passed=dict(data["gates_passed"]),
-            status=BundleStatus(data["status"]),
+            gates=gates,
+            initial_status=BundleStatus(status_value),
+            legacy_gates=legacy,
         )
 
 
@@ -147,15 +241,42 @@ def pack_bundle(
         ),
         encoding="utf-8",
     )
+    # **임계값의 출처를 함께 적는다** (2026-08-21 F-6).
+    #
+    # 종전엔 숫자 하나뿐이었다. 그래서 `meta_labeler_threshold: 0.0`이 "학습이 0을
+    # 최적이라 판단했다"인지 "지지도 하한을 채우는 후보가 없어 격자 첫 칸으로 떨어졌다"
+    # 인지 저장 상태만 보고는 알 수 없었다 — 그리고 임계 0은 메타 게이트가 통째로
+    # 무력이라는 뜻이다(`p >= 0`은 언제나 참).
+    selection = training_result.threshold_selection
+    thresholds: dict[str, object] = {
+        "meta_labeler_threshold": training_result.meta_labeler.threshold
+    }
+    if selection is not None:
+        thresholds.update(
+            {
+                "meta_labeler_threshold_source": selection.source,
+                "meta_labeler_threshold_support": selection.support,
+                "meta_labeler_threshold_total": selection.total,
+                "meta_labeler_threshold_min_support": selection.min_support,
+            }
+        )
     (bundle_dir / "thresholds.yaml").write_text(
-        yaml.safe_dump(
-            {"meta_labeler_threshold": training_result.meta_labeler.threshold},
-            allow_unicode=True,
-        ),
+        yaml.safe_dump(thresholds, allow_unicode=True),
         encoding="utf-8",
     )
 
-    gates_passed = {gate.name: gate.value for gate in validation_report.gates if gate.passed}
+    # **통과분만 추리지 않는다** (F-14). 미달·미측정도 그대로 싣는다 — 매니페스트가
+    # "관문 넷 통과"라고 읽히던 것이 2026-08-21 P0의 절반이었다.
+    gates = tuple(
+        ManifestGate(
+            name=gate.name,
+            passed=bool(gate.passed),
+            measured=bool(gate.measured),
+            value=_opt_float(gate.value),
+            threshold=_opt_float(gate.threshold),
+        )
+        for gate in validation_report.gates
+    )
     manifest = BundleManifest(
         bundle_id=bundle_id,
         horizon=horizon,
@@ -163,22 +284,51 @@ def pack_bundle(
         run_id=run_id,
         feature_set=feature_set,
         validation_report="validation_report.json",
-        gates_passed=gates_passed,
-        status=BundleStatus.CANDIDATE,
+        gates=gates,
+        initial_status=BundleStatus.CANDIDATE,
     )
     (bundle_dir / "manifest.yaml").write_text(
         yaml.safe_dump(manifest.to_yaml_dict(), allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+    # `gate.to_dict()`가 `NaN`/`inf`를 `null`로 눕힌다 — jq·브라우저가 거부하지 않는
+    # **엄밀한 JSON**이어야 한다(F-14 검증 ㉢). `allow_nan=False`가 그 보증이다:
+    # 어딘가에서 NaN이 새어 들어오면 조용히 나가지 않고 여기서 죽는다.
     (bundle_dir / "validation_report.json").write_text(
         json.dumps(
-            [gate.__dict__ for gate in validation_report.gates],
+            [gate.to_dict() for gate in validation_report.gates],
             ensure_ascii=False,
             indent=2,
+            allow_nan=False,
         ),
         encoding="utf-8",
     )
     return manifest
+
+
+#: 옛 번들 두 개에는 출처 키가 없다 — "최적화였다"고 가정하지 않는다(L18).
+THRESHOLD_SOURCE_UNKNOWN = "unknown"
+
+
+def load_threshold_selection(bundle_dir: Path) -> dict[str, object]:
+    """번들의 `thresholds.yaml`을 읽어 임계값과 **출처**를 돌려준다 (2026-08-21 F-6).
+
+    출처 키가 없는 옛 번들은 `source="unknown"`이다 — `absent`가 아니다. 키가 없다는
+    사실 자체가 "그 시절엔 아무도 안 적었다"는 정보이고, 그것은 폴백과도 최적화와도
+    다른 세 번째 상태다.
+    """
+    path = Path(bundle_dir) / "thresholds.yaml"
+    if not path.exists():
+        return {"threshold": None, "source": THRESHOLD_SOURCE_UNKNOWN, "measured": False}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return {
+        "threshold": _opt_float(data.get("meta_labeler_threshold")),
+        "source": str(data.get("meta_labeler_threshold_source", THRESHOLD_SOURCE_UNKNOWN)),
+        "support": data.get("meta_labeler_threshold_support"),
+        "total": data.get("meta_labeler_threshold_total"),
+        "min_support": data.get("meta_labeler_threshold_min_support"),
+        "measured": "meta_labeler_threshold_source" in data,
+    }
 
 
 def load_manifest(bundle_dir: Path) -> BundleManifest:
@@ -245,8 +395,13 @@ class ModelRegistry:
 
     def register(self, manifest: BundleManifest, bundle_dir: Path) -> None:
         """신규 candidate 등록 — Validator 통과 산출물만 넘길 것(호출자 책임, Ver 1.6
-        §7.1 [6]). 이 메서드 자체는 `validation_report.passed`를 재확인하지 않는다 —
-        `manifest.gates_passed`가 이미 `pack_bundle()`에서 통과 관문만 추려 담았다."""
+        §7.1 [6]). 이 메서드 자체는 관문을 판정하지 않는다 — candidate는 "아직 아무것도
+        주장하지 않는 상태"이기 때문이다. **관문 판정은 `promote_to_live()`가 한다**
+        (2026-08-21 F-14).
+
+        종전 주석은 "`manifest.gates_passed`가 이미 통과 관문만 추려 담았으니 안전하다"고
+        적혀 있었다. 그 문장이 정확히 결함이었다 — 통과분만 담기 때문에 미달·미측정이
+        기록에서 사라졌고, 그래서 매니페스트만 보면 언제나 전원 통과였다."""
         existing = self._conn.execute(
             "SELECT 1 FROM bundles WHERE bundle_id = ?", (manifest.bundle_id,)
         ).fetchone()
@@ -276,11 +431,30 @@ class ModelRegistry:
     def promote_to_shadow(self, bundle_id: str, reason: str = "") -> None:
         self._transition(bundle_id, BundleStatus.SHADOW, reason)
 
-    def promote_to_live(self, bundle_id: str, *, operator: str, reason: str = "") -> None:
+    def promote_to_live(
+        self,
+        bundle_id: str,
+        *,
+        operator: str,
+        reason: str = "",
+        shadow_trading_days: int | None = None,
+    ) -> None:
         """사람 승인 전제(Ver 1.1 §6-4) — `operator`로 승인자를 남긴다(감사 추적). 같은
         Horizon의 기존 `live`는 자동 `retired`(Ver 1.6 §9.2 "승격 시 이전 live는 자동
-        retired, 롤백 가능하게 보존" — 레코드·파일 모두 지우지 않는다)."""
+        retired, 롤백 가능하게 보존" — 레코드·파일 모두 지우지 않는다).
+
+        **관문을 여기서 다시 본다** (2026-08-21 F-14). 종전엔 이 메서드가 관문을 전혀
+        묻지 않았고, `manifest.gates_passed`가 "통과분만 담았으니 안전하다"는 주석에
+        기대고 있었다 — 그 주석이 틀렸다. 통과분만 담기 때문에 **미달·미측정이 사라져서**
+        매니페스트만 보면 언제나 전원 통과였다. 지금은 미달과 미측정 둘 다 승격을 막는다.
+
+        `shadow_trading_days`는 R18의 20거래일 섀도 요건을 **계측**하기 위한 것이다.
+        20 미만이면 `BundlePromotedWithoutShadow`(WARNING)를 내되 **막지는 않는다** —
+        강제 차단은 별도 결정이 필요하고, 이번 범위는 계측과 경보까지다.
+        """
         _, horizon = self._status_of(bundle_id)
+        self._enforce_promotion_gates(bundle_id, operator=operator)
+        self._record_shadow_requirement(bundle_id, shadow_trading_days)
         previous_live = self.get_live(horizon)
         self._transition(bundle_id, BundleStatus.LIVE, f"승인자={operator}; {reason}".strip("; "))
         if previous_live is not None and previous_live.bundle_id != bundle_id:
@@ -301,6 +475,79 @@ class ModelRegistry:
                 BundleStatus.LIVE,
                 BundleStatus.RETIRED,
                 f"{bundle_id}로 대체",
+            )
+
+    def _enforce_promotion_gates(self, bundle_id: str, *, operator: str) -> None:
+        """live 승격 직전 매니페스트의 관문을 다시 읽어 미달·미측정을 막는다 (F-14).
+
+        옛 스키마 번들(`gates_passed` dict만 있는 것)은 **판정할 재료가 없다** — 미달·
+        미측정이 애초에 기록되지 않았기 때문이다. 그래서 거부가 아니라 유예하되,
+        유예했다는 사실을 WARNING으로 남기고 자가점검이 매 기동 그것을 읽는다
+        (`scripts/self_check.py check_bundle`). 조용한 통과는 만들지 않는다(금지계명 12).
+        """
+        record = self.get(bundle_id)
+        if record is None:
+            raise RegistryError(f"미등록 bundle_id: {bundle_id}")
+        try:
+            manifest = load_manifest(record.bundle_dir)
+        except (OSError, KeyError, ValueError) as exc:
+            raise RegistryError(
+                f"{bundle_id}: 매니페스트를 읽을 수 없어 승격 관문을 판정할 수 없다 — {exc!r}"
+            ) from exc
+
+        if manifest.legacy_gates:
+            mlog.log(
+                "BundlePromotedWithLegacyGates",
+                f"{bundle_id}: 옛 매니페스트 스키마 — 미달·미측정 기록이 없어 승격 관문을 "
+                "유예(grandfather)했다. 재학습·재패킹 전까지 이 번들의 관문은 미판정이다",
+                bundle_id=bundle_id,
+                operator=operator,
+                level=logging.WARNING,
+            )
+            return
+
+        blocking = manifest.blocking_gates()
+        if blocking:
+            unmeasured = [g.name for g in blocking if not g.measured]
+            failed = [g.name for g in blocking if g.measured]
+            mlog.log(
+                "BundlePromotionRejected",
+                f"{bundle_id}: 승격 거부 — 미달 {failed or '없음'} · 미측정 {unmeasured or '없음'}",
+                bundle_id=bundle_id,
+                operator=operator,
+                failed_gates=failed,
+                unmeasured_gates=unmeasured,
+                level=logging.ERROR,
+            )
+            raise RegistryError(
+                f"{bundle_id}: live 승격 거부 — 미달 관문 {failed or '없음'} · "
+                f"미측정 관문 {unmeasured or '없음'}. "
+                "미측정은 통과가 아니다(2026-08-21 F-14)"
+            )
+
+    def _record_shadow_requirement(self, bundle_id: str, shadow_trading_days: int | None) -> None:
+        """R18 섀도 20거래일 요건 — 계측과 경보까지만 (F-14 ④)."""
+        if shadow_trading_days is None:
+            mlog.log(
+                "BundlePromotedWithoutShadow",
+                f"{bundle_id}: 섀도 거래일수 미측정 — R18(20거래일)을 채웠는지 알 수 없다",
+                bundle_id=bundle_id,
+                shadow_trading_days=None,
+                required=SHADOW_TRADING_DAYS_REQUIRED,
+                measured=False,
+                level=logging.WARNING,
+            )
+            return
+        if shadow_trading_days < SHADOW_TRADING_DAYS_REQUIRED:
+            mlog.log(
+                "BundlePromotedWithoutShadow",
+                f"{bundle_id}: 섀도 {shadow_trading_days}거래일 — "
+                f"R18 요건 {SHADOW_TRADING_DAYS_REQUIRED}거래일 미달",
+                bundle_id=bundle_id,
+                shadow_trading_days=shadow_trading_days,
+                required=SHADOW_TRADING_DAYS_REQUIRED,
+                measured=True,
+                level=logging.WARNING,
             )
 
     def retire(self, bundle_id: str, reason: str) -> None:

@@ -218,3 +218,51 @@ def test_validate_all_assembles_seven_gates_and_aggregates_pass(tmp_path: Path):
 
     assert len(report.gates) == 7
     assert report.passed is True
+
+
+# --------------------------------------- F-6 · 메타 임계 승격 관문
+
+
+def test_meta_threshold_gate_rejects_a_disabled_gate():
+    """**임계 0으로 열린 게이트가 승격을 통과하면 안 된다** (2026-08-21 F-6 ④ · 1-8).
+
+    2026-08-21 실측에서 현역 번들의 메타 임계가 `0.0`이었다 — `p >= 0`은 언제나 참이라
+    차단 계층 하나가 통째로 없는 상태였고, 승격 관문 어디에도 그것을 묻는 항목이 없어서
+    아무도 몰랐다.
+    """
+    from messiah.strategy.futures.meta_labeler import ThresholdSelection
+
+    disabled = ThresholdSelection(value=0.0, source="fallback", support=3, total=41, min_support=2)
+    gate = Validator().validate_meta_threshold(disabled)
+    assert gate.passed is False
+    assert gate.measured is True  # 재 봤더니 미달이다 — 미측정이 아니다
+    assert "fallback" in gate.detail
+
+
+def test_meta_threshold_gate_rejects_a_fallback_even_inside_the_range():
+    """값이 우연히 범위 안이어도 **폴백이면 근거가 없다** — 지지도 하한을 채우는 후보가
+    하나도 없어 격자 첫 칸으로 떨어진 것이기 때문이다."""
+    from messiah.strategy.futures.meta_labeler import ThresholdSelection
+
+    gate = Validator().validate_meta_threshold(
+        ThresholdSelection(value=0.35, source="fallback", support=1, total=41, min_support=2)
+    )
+    assert gate.passed is False
+
+
+def test_meta_threshold_gate_passes_an_optimized_threshold():
+    from messiah.strategy.futures.meta_labeler import ThresholdSelection
+
+    gate = Validator().validate_meta_threshold(
+        ThresholdSelection(value=0.55, source="optimized", support=18, total=41, min_support=2)
+    )
+    assert gate.passed is True
+
+
+def test_meta_threshold_gate_is_unmeasured_for_older_bundles():
+    """출처 키가 없는 번들은 **미측정**이다. 미측정은 `passed=False`이므로 F-14의 승격
+    관문이 그대로 막는다 — 「안 쟀으니 통과」가 구조적으로 불가능하다."""
+    gate = Validator().validate_meta_threshold(None)
+    assert gate.measured is False
+    assert gate.passed is False
+    assert gate.value is None

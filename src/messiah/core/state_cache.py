@@ -46,10 +46,39 @@ class StateCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._entries: dict[str, CacheEntry] = {}
+        # **언제부터 듣고 있었나** (2026-08-21 F-11). 「아직 한 번도 안 왔다」는 사실만으로는
+        # 「미배선」인지 「아직 주기가 안 돌았다」인지 가를 수 없다 — 가르는 것은 **경과
+        # 시간**이다. 창을 연 지 3분 만에 「미배선」이라고 말하는 화면은 거짓말을 한다.
+        self._created_at = now_utc()
 
-    def update(self, key: str, message: BusMessage) -> None:
+    @property
+    def created_at(self) -> datetime:
+        """이 캐시가 만들어진 시각 — 세션(창)이 듣기 시작한 시점이다."""
+        return self._created_at
+
+    def listening_seconds(self, *, now: datetime | None = None) -> float:
+        """듣기 시작한 뒤 흐른 시간(초) — 부재 사유 판정의 유일한 관측 근거다."""
+        return ((now or now_utc()) - self._created_at).total_seconds()
+
+    def ever_seen(self, key: str) -> bool:
+        """이 세션에서 그 토픽을 **한 번이라도** 받은 적이 있는가 (2026-08-21 F-11).
+
+        엔트리는 지우지 않으므로 "받은 적 있음"은 영구히 참이다 — 그래서 이 값이 거짓이면
+        「이 창이 열린 뒤로 한 번도 안 왔다」가 정확한 사실이다.
+        """
         with self._lock:
-            self._entries[key] = CacheEntry(message=message, updated_at=now_utc())
+            return key in self._entries
+
+    def update(self, key: str, message: BusMessage, *, received_at: datetime | None = None) -> None:
+        """캐시를 갱신한다. `received_at`을 주면 **그 시각을 나이의 기준으로 삼는다.**
+
+        구독 전 이력을 1회 소급 적재할 때 필요하다 (2026-08-21 F-9). 소급분에 지금
+        시각을 찍으면 어제 판단이 화면에서 「0초 전」으로 보인다 — 값을 채우려다
+        **화면이 거짓말을 하게 만드는 것**이라 원래 결함보다 나쁘다. 호출측이 메시지의
+        원래 발행 시각을 넘기면 신선도 배지가 정직하게 회색·앰버로 뜬다.
+        """
+        with self._lock:
+            self._entries[key] = CacheEntry(message=message, updated_at=received_at or now_utc())
 
     def get(self, key: str) -> BusMessage | None:
         with self._lock:

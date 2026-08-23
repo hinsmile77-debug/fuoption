@@ -42,7 +42,7 @@ from messiah.data.bar_composer import MultiHorizonBarComposer  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
 from messiah.features.engine import FeatureEngine  # noqa: E402
 from messiah.models.labeling import BARRIER_PARAMS  # noqa: E402
-from messiah.models.registry import ModelRegistry, pack_bundle  # noqa: E402
+from messiah.models.registry import ModelRegistry, RegistryError, pack_bundle  # noqa: E402
 from messiah.models.release import pack_release, verify_release  # noqa: E402
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import (  # noqa: E402
@@ -168,9 +168,19 @@ async def main(args: argparse.Namespace) -> None:
 
     print("\n[2/6] A는 shadow→live로 승격(챔피언), B는 shadow까지만(도전자)")
     registry.promote_to_shadow(manifest_a.bundle_id, "스모크: 챔피언 후보 방어전 개시")
-    registry.promote_to_live(
-        manifest_a.bundle_id, operator="smoke-script", reason="스모크 최초 승격"
-    )
+    # 2026-08-21 F-14 이후 `promote_to_live()`는 매니페스트의 관문을 다시 본다 —
+    # 미달과 **미측정** 둘 다 막는다. 합성 데이터가 어느 관문에 걸리면 여기서 죽는데,
+    # 그때 필요한 정보는 "무엇에 걸렸나"이지 스택 트레이스가 아니다.
+    try:
+        registry.promote_to_live(
+            manifest_a.bundle_id, operator="smoke-script", reason="스모크 최초 승격"
+        )
+    except RegistryError as exc:
+        raise SystemExit(
+            f"[2/6] 승격 거부 — {exc}\n"
+            "  이 스모크의 합성 성과 시계열이 관문을 못 넘었다는 뜻이다. "
+            "관문이 일하고 있다는 증거이기도 하다(2026-08-21 F-14)."
+        ) from exc
     registry.promote_to_shadow(manifest_b.bundle_id, "스모크: 도전자 방어전 개시")
     live = registry.get_live(_HORIZON)
     shadows = registry.list_by_status(BundleStatus.SHADOW)

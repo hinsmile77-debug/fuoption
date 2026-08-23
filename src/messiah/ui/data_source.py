@@ -181,6 +181,14 @@ class DataSource(Protocol):
 
     def snapshot(self, key: str) -> TopicSnapshot: ...
 
+    def listening_seconds(self) -> float | None:
+        """이 화면이 **얼마나 오래 듣고 있었나**(초) — 못 재면 None (2026-08-21 F-11).
+
+        「아직 한 번도 안 왔다」는 사실만으로는 「미배선」인지 「주기가 아직 안 돌았다」인지
+        가를 수 없다. 가르는 것은 경과 시간이고, 그 값은 여기서만 나온다.
+        """
+        ...
+
 
 class LiveDataSource:
     mode = DataSourceMode.LIVE
@@ -204,6 +212,9 @@ class LiveDataSource:
         badge = compute_badge(self.mode, age, stale_after_seconds=threshold)
         return TopicSnapshot(message=message, badge=badge, age_seconds=age, cadence_seconds=cadence)
 
+    def listening_seconds(self) -> float | None:
+        return self._cache.listening_seconds()
+
 
 class ReplayDataSource:
     """고정 스냅샷(백테스트/시뮬레이터 결과, Parquet에서 미리 읽어둔 값 등) — 실시간 버스가
@@ -222,3 +233,7 @@ class ReplayDataSource:
         message = self._snapshots.get(key)
         badge = FreshnessBadge.NO_DATA if message is None else FreshnessBadge.REPLAY
         return TopicSnapshot(message=message, badge=badge, age_seconds=None)
+
+    def listening_seconds(self) -> float | None:
+        """재생에는 「듣고 있던 시간」이라는 것이 없다 — 판정하지 않는다(F-11 ㉢)."""
+        return None

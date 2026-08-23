@@ -30,7 +30,7 @@
 
 ### A-4. 국면 특유의 함정
 - [ ] 08:15~09:00 사이 10분 이상 로그 공백 — 무엇으로 채워졌어야 하나
-- [ ] UI(Command Center) 기동 확인, `logs/ui_*.err.log` 비어 있는가
+- [ ] UI(Command Center) 기동 확인. `logs/ui_YYYYMMDD.log`에 (a) 역추적(Traceback)·`Logging error`·`UnicodeEncodeError` 문자열이 0건인가 (b) 구조화 JSON 행이 2행 이상인가(`SessionStart` + `UISnapshotFreshness`). **표준오류는 표준출력에 합쳐지므로 별도 `.err.log`는 존재하지 않는다**(`core/ui_launcher.py`: `stderr=subprocess.STDOUT`) — 2026-08-21 F-4 정정
 - [ ] 웜업이 끝났는가 — 끝나지 않은 웜업이 회색(UNKNOWN)으로 표시되며 조용히 지나가는 사례가 과거에 있었다
 
 ---

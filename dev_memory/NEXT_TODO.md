@@ -6430,3 +6430,694 @@ Reconciler)는 2026-08-16 레이블 기하 재측정이 정한 순서다. **오�
       네 날이 이제 제외 대상이다. 오늘 산출물(`window_days=20 excluded=[]`)은 그 전 값이다.
       **소급 재산출은 R18 검토 필요** — 저장된 IC를 바꾸는 일이라 J-3b(창 구성)와 성격이 다르다.
       08-21 정상 산출부터 적용하고 과거분은 그대로 두는 쪽이 기본안
+
+---
+
+## 2026-08-21 장전 점검 — 도출 항목 ([MW0601])
+
+리포트: `logs/dailycheck/2026-08-21_report.md` · 증거: `logs/dailycheck/evidence_20260821_pre.md`
+**코드 변경 없음**(R11 / 금지계명 3·4). 아래 F/G는 전부 **장후 적용**이다.
+
+### 완료 처리 (오늘 충족 확인)
+
+- [x] **K-2′** `status_snapshot.json` · `code_version.worktree_dirty_files: 0` · `worktree_dirty: false`
+      키 존재 확인 → **J-9 마감**
+- [x] **K-6′** 자가점검 `host` 줄에 `active_hours=08:00~16:00` 출현 → **J-8 · D-1 마감**
+- [x] **M-3** `SessionStart.source_mtime_max` 출현. 세 프로세스 전부 `2026-08-20T13:44:20.391969+00:00`
+      (KST 08-20 22:44). 기동 08:20:31 / 08:25:27 / 08:20:40 전부 그 뒤 — **기동 뒤 소스 변경 없음**
+- [x] **M-5** 기동 창 이전 거절 2건(07:22:50 l1 · 07:23:08 g2) 후 `Docker Desktop 자동 기동` 줄 **0건**,
+      08:20/08:25 정시 트리거로 실제 기동됨(거절→정시 기동 연결 확인)
+- [x] **어제 장전 1-1 해소** 소스 실변경 미커밋 0파일 · g2 sha=HEAD=`559fb1c` ·
+      08:25:28 `RegimeSeeded HIGH_VOL(0.9911)` 출현
+- [x] **어제 장전 1-3 해소** `irrecoverable_loss.restarted_mid_day: false` · `clean: true` ·
+      `start_lag_minutes: 0.5`
+
+### 미충족 · 정정
+
+- [ ] **M-4 미충족** — `logs/ui_20260821.log`에 `UISnapshotFreshness` **0행**.
+      `UnicodeEncodeError: 'cp949' codec can't encode character '—'`로 레코드가 통째로 버려졌다.
+      F-1로 처리 후 재관측
+- [ ] **M-8 판정 불가** — `FeaturePublish`가 싣는 필드에 피처 값이 없고(`symbol` `horizon`
+      `feature_set` `nan_ratio` `bar_confirm_kst` `publish_offset_ms`), 육안 경로인 UI 기록은 M-4로 유실.
+      **판정 기준 자체를 바꿔야 한다** → G-3(dev에서도 live 번들 식별자 1줄)로 대체
+- [ ] **↩️ 어제 장전 1-4 정정** — `logs/ui_*.err.log` 부재는 **결함이 아니다**.
+      `core/ui_launcher.py:265` `stderr=subprocess.STDOUT`이라 설계상 존재할 수 없다 → F-4
+
+### Fix (장후 적용 · 커밋 4개)
+
+- [ ] **F-1 (P1) UI 자식 인코딩 고정 + 로그 레코드 보존 + 「한 번만」 가드 이동**
+      ① `core/ui_launcher.py` `launch_command_center()` — `popen(...)`에
+      `env={**os.environ, "PYTHONIOENCODING":"utf-8", "PYTHONUTF8":"1"}`. 둘 다 넣는다(streamlit이
+      스트림을 다시 감싸면 전자가 무력화될 수 있다). ② `core/logging.py:486` — 핸들러 생성 전
+      `target.reconfigure(encoding="utf-8", errors="backslashreplace")`를 `getattr` 가드와 함께.
+      **`errors="backslashreplace"`가 핵심** — 레코드를 버리는 대신 그 글자만 흠집으로 남긴다(금지계명 12).
+      ③ `ui/app.py:1310~1311` — `snapshot_freshness_logged` 소모를 **기록 성공 후**로.
+      회귀 위험: `PYTHONUTF8=1`은 자식의 파일 입출력 기본 인코딩까지 바꾼다 →
+      착수 전 `grep -rn "open(" src/messiah/ui/`로 인코딩 미지정 `open()` 전수 확인.
+      커밋 ①
+- [ ] **F-2 (P1) 발행 오프셋 시간축 통일 + 유예 초과 승격 로깅** (이상점 1-2·1-3 통합)
+      ① `features/engine.py` `_record_publish_offset()` — `bar_composer`와 **같은 패턴**으로
+      `clock_skew_seconds` 콜러블 주입, `exchange_now = self._now() + timedelta(seconds=skew or 0.0)`.
+      호출측(`scripts/run_l1_daily.py`)에서 `TickCollector.clock_skew_seconds`를 넘기되
+      **`bar_composer`에 넘기는 것과 같은 객체**여야 두 계기가 같은 축이 된다.
+      ② `_publish()` — `offset_ms > 임계`면 `FeaturePublishOffsetExceeded`(WARNING). 태그를 가른다(R6).
+      ③ `core/logging.py` 태그 등록. ④ `ops/integrity_report.py` — `skew_applied` 통계 저장.
+      **임계는 `_BOUNDARY_GRACE_SECONDS`에서 파생**(500을 새로 쓰지 않는다). 커밋 ②
+- [ ] **F-2 결정 필요 (사용자)** — 섀도 임계를 `유예 × 4`(2,000ms)로 20거래일 두는 데 동의하는가.
+      권고 = 동의. 유예값으로 바로 켜면 오늘 표본 기준 75%가 걸려 주간 경보 집계를 덮는다
+- [ ] **F-3 (P1) `RegimeSeeded.delivery` 기입** — SYSTEM.md 불변원칙 2 예외 조건 ③ 후단 미구현.
+      ① `strategy/regime/runtime.py` `seed()` 반환을 `tuple[state, bus_ok]`로(호출처 전수 확인:
+      `grep -rn "\.seed()" src/ scripts/ tests/`). ② `scripts/run_g2_paper_trading.py` `_seed_regime()` —
+      `delivery="bus+direct" | "direct-only"`, 후자면 `RegimeSeedBusFailed`(WARNING) 병행.
+      **로그를 `consumer.handle_regime()` 뒤로 옮긴다** — 지금은 직접 전달이 실패해도 `RegimeSeeded`가 찍힌다.
+      ③ `core/logging.py` 태그 등록. ④ `ops/integrity_report.py:2737` 근처 — `delivery`를 리포트에.
+      커밋 ③
+- [ ] **F-4 (P2) 점검 체크리스트의 잘못된 기대 정정** — `phases.md` A-4를
+      "`ui_YYYYMMDD.log`에 Traceback·`Logging error` 0건 · JSON 2행 이상"으로.
+      `evidence_map.md` 동반 정정. `collect_evidence.py` §9에 UI 인코딩 자동 적신호 추가.
+      **그렇게 바꿨다면 오늘 M-4 실패를 기계가 잡았다.** 커밋 ④
+- [ ] **F-5 (P2) 스케줄 실측 대조를 정본 4종 전부로** — `ops/host_health.py:523`
+      `collection_tasks()` → 전체. 수집 계열은 기존 판정 유지, 비수집(Shutdown 15:40 ·
+      Postmarket 15:45)은 **finding만**(기동 창 비교는 건너뛴다). `ops/task_schedule.py`에 `all_tasks()`
+      추가하되 `collection_tasks()`는 기동 창 파생에 계속 쓰이므로 **지우지 않는다**. 커밋 ④
+
+### 고도화
+
+- [ ] **G-1 (이번 주) 로그 레코드 유실을 센다** — `core/logging.py`에 `Handler.handleError()` 재정의.
+      프로세스 로컬 카운터를 올리고 `SessionEnd.log_records_dropped: n`으로 싣는다.
+      0이 아니면 `daily_integrity`의 `observation_gaps`에. **`handleError()` 안에서 다시 로깅하면
+      무한 재귀다 — 카운터 증가만 한다.** 선행: F-1(안 하면 카운터가 오늘처럼 올라가기만 한다)
+- [ ] **G-2 (W-12) 두 시계를 섞는 뺄셈을 타입으로 막는다** — `core/timeutil.py`에
+      `ExchangeInstant` / `LocalInstant` 얇은 래퍼. 뺄셈은 같은 타입끼리만, 축 변환은
+      `to_exchange(skew)` / `to_local(skew)` 명시 호출로만. 스큐가 `None`이면 변환도 `None`(L18).
+      **완성봉 규율 3경로 한정으로 시작**: `bar_composer._defer_until_boundary_passed` ·
+      `features/engine._record_publish_offset` · `data/collector._observe_clock_skew`.
+      R3이 시간대 혼동에 한 일을 시계 혼동에 한다
+- [ ] **G-3 (이번 주) 자가점검에 `[SKIP]` 등급 추가** — dev 생략을 `[OK ]`로 칠하지 않는다.
+      요약 줄에 생략 건수 **강제**: `self-check: PASS — 기동 허용 (3항목 미측정: bundle·registry·secrets)`.
+      **dev에서도 레지스트리 live 식별자 1줄은 찍는다**(해시 검증 생략해도 비용 0):
+      `[SKIP] bundle   dev — 해시 검증 생략 · live=real-20260820-2053-30m (30m)`.
+      `collect_evidence.py`의 비-OK 행 집계를 함께 고친다 — 안 고치면 `[SKIP]`이 매일 이상점으로 뜬다.
+      **오늘 M-8 판정 불가를 직접 만든 항목이다**
+
+### 08-21 장중 관측 (A 시리즈)
+
+- [ ] **A-1** 09:00 이후 첫 `MetaGateEvaluated` / `DecisionEmitted`에 번들 식별자가 실리는가.
+      실리면 `real-20260820-2053-30m`인가 → **M-8 대체 판정**
+- [ ] **A-2** 장중 `publish_offset_ms` 음수가 **1분봉에만** 몰리는가. 몰리면 `MinuteBarAggregator`의
+      1분봉 확정 경로가 로컬 시계를 쓰는 것이고, **1-2와는 별개의 확정 결함**이다
+      (오늘 음수 5건 전부 `horizon: "1m"`이 그 방향의 방증)
+- [ ] **A-3** 5m·10m·15m·30m **각 Horizon의 그날 첫 발행**에도 초 단위 정체가 붙는가
+      (08:48:05 5,473.8ms / 5,528.8ms의 초기화 비용 가설). 첫 발행에만 붙으면 확정,
+      무작위면 GC·디스크·경합을 봐야 한다
+- [ ] **A-4** `logs/ui_20260821.log` JSON 행 수 · `UnicodeEncodeError` 건수 — 유실 규모 실측
+- [ ] **A-5** `code_version.stale`이 계속 `false`인가 (장중 배포·재기동 없음 — 금지계명 3·4)
+- [ ] **A-6** `AggregatorNoContribution` 건수·사유. 어제 14건. 오늘 첫 사이클이 `UNKNOWN`이 아닌가
+      (`RegimeSeeded` 실효 검증)
+- [ ] **A-7** `late_bar_drops` · `delivery_latency` 진행값 — 어제 p90 921.4ms 대비 방향
+
+### 08-24 관측 예정 (F/G 적용분 채점)
+
+- [ ] **Q-1** `logs/ui_20260824.log` JSON 행 ≥ 2 (`SessionStart` + `UISnapshotFreshness`) ·
+      `UnicodeEncodeError` 0건 → **F-1 · M-4 동시 마감**
+- [ ] **Q-2** `FeaturePublish.publish_offset_ms` **음수 0건** · `skew_applied_ms` 필드 출현 → F-2 마감
+- [ ] **Q-3** `RegimeSeeded.delivery == "bus+direct"` → F-3 마감
+- [ ] **Q-4** 자가점검 `host` 줄에 4종 전부(`Messiah-Shutdown=15:40`·`Messiah-Postmarket=15:45`) → F-5 마감
+- [ ] **Q-5** 증거 다이제스트 §9 자동 적신호에 UI 인코딩 항목이 뜨는가(08-21 로그 재수집으로 선행 확인) → F-4 마감
+
+### 주의 — 축 정의 전환 고지
+
+- [ ] **08-21 `publish_offset` 표본은 보정 전 축이다.** F-2 적용 후 표본과 직접 비교하면 −798ms 계단이
+      생기고 그것이 **P-4′(계단 감지)의 오탐**이 된다. `ops/integrity_report.py`의 `skew_applied` 통계로
+      두 축을 구분한다. 스큐는 날마다 다르므로 이 필드 없이는 날짜 간 비교가 성립하지 않는다
+- [ ] **N-4 규율 적용** — F-2 검증에 **저장 상태 전용 검증**을 포함한다. 저장된
+      `daily_integrity_20260821.json`을 읽어 보정 전 축임이 표시되는지. 리플레이("지금 계산하면")가 아니라
+      저장 상태("읽으면")를 묻는다 — 2026-08-20 J-3b가 정확히 그 사각에서 실패했다
+
+## 2026-08-21 장중 점검 — 도출 항목 ([MW0601])
+
+관측 구간 09:00~12:37. 코드 변경 0(금지계명 3·4). 리포트 `logs/dailycheck/2026-08-21_report.md` 제2부.
+
+### 완료 처리 (오늘 충족 확인)
+
+- [x] **M-8 마감 (대체 판정)** — `FeaturePublish`에 피처 값이 없어 원안은 판정 불가였으나,
+      `MetaGateEvaluated` 8건 전부 `"model_version": "real-20260820-2053-30m"`.
+      **어제 승격 번들이 실렸다** → 장전 「확인 필요 (가)」 해소.
+- [x] **A-1 충족** — 위와 동일.
+- [x] **A-2 충족(몰린다)** — `publish_offset_ms` 음수 **178건 전부 `horizon: "1m"`**,
+      3m/5m/10m/15m/30m 합계 169건 중 음수 **0건**. 장전이 정한 기준대로 **별개의 확정 결함** →
+      리포트 이상점 1-9.
+- [x] **A-3 반증** — 각 Horizon 그날 첫 발행: 5m 574.4ms · 10m 620.4ms · 15m 591.6ms ·
+      30m 800.4ms(그날 3m+ 중앙값 567~596ms 대역). **초기화 비용 가설 반증** →
+      루프 전역 정지로 재정의, 이상점 1-11.
+- [x] **A-4 실측 완료** — `logs/ui_20260821.log` 총 48행 중 구조화 JSON **1행**
+      (08:20:40 `SessionStart`), `UnicodeEncodeError` **1건**, 08:20:40 이후 **4h17m 무기록**.
+      「한 번만」 가드 진단 확인. 1-1 지속.
+- [x] **A-5 충족** — 12:37:18 `code_version.stale: false` · `worktree_dirty_files: 0` ·
+      세 프로세스 `git_sha` 전부 `559fb1c`. 장중 배포·재기동 없음.
+
+### 정정 (전제가 틀렸던 항목)
+
+- [ ] **↩️ A-6 전제 정정** — `AggregatorNoContribution` 어제 14건 → 오늘 **0건**이나
+      **「`RegimeSeeded` 실효 검증」이 아니다.** 어제 14건은 **전부 `blocked_by_meta=['30m']`**
+      이었고, 오늘 0건이 된 것은 **메타 게이트 임계가 0.0이 되어 아무것도 막지 않기 때문**이다.
+      개선이 아니라 게이트가 열린 결과. → 아래 F-6.
+      **교훈: 관측 항목에 기대하는 원인을 적어 두면 다른 원인이 같은 결과를 냈을 때 안 보인다.**
+- [ ] **↩️ 「축 정의 전환 고지」에 한 줄 추가** — 고지는 08-21 표본이 "보정 전 축"이라고만
+      적었으나 **그 축이 하루 안에서도 이동한다**(3h30m에 531.4ms · 약 145ms/시간).
+      P-4′(계단 감지) 오탐 범위가 고지된 것보다 넓다 — 날짜 간 계단뿐 아니라 **하루 안 기울기**도 본다.
+- [ ] **↩️ 장전 F-2 정정 → F-7로 대체** — 스큐 상수(+798ms) 전제가 깨졌다. 아래 F-7 참조.
+
+### 부분 판정 (장후로 이월 — 판정 불가이지 결함 아님)
+
+- [ ] **A-7 잔여분** — `AggregatorLateTickDropped` 12:37까지 **0건**(실손실 없음).
+      `delivery_latency` p90/p99/최대는 세션 종료 시 `TickDeliveryLatency`로 산출 → **장후**.
+
+### Fix (장후 적용 · 커밋 ②′⑤⑥)
+
+- [ ] **F-6 (P1) 메타 임계의 출처를 기록하고, 열린 게이트를 경보·관문으로 막는다** —
+      대응 이상점 1-8. **적용 시점: 장후(15:35 이후).**
+      ① `strategy/futures/meta_labeler.py:179 select_threshold()` 반환을
+      `ThresholdSelection(value, source, support, total, min_support)`로.
+      `best_threshold is not None` → `"optimized"`, 그 외 → `"fallback"`.
+      **반환 타입 변경이라 누락 호출부가 컴파일에서 드러난다**(조용한 회귀 방지).
+      ② `models/registry.py:150~152` — `thresholds.yaml`에 `meta_labeler_threshold_source` ·
+      `_support` · `_total` 병기. 읽기 쪽 기본값 `"unknown"`(옛 번들 2개는 필드 없음. `absent` 아님).
+      ③ `strategy/futures/service.py:146` — `MetaGateEvaluated`에 `threshold_source` 추가 ·
+      `threshold <= 0.0`이면 **호출부 `level=` 인자로 WARNING 승격** + msg "게이트 무력".
+      **`core/logging.py:111`의 태그별 고정 레벨 표는 건드리지 않는다** — 고치면 정상
+      사이클까지 WARNING이 된다.
+      ④ 승격 검증에 `meta_threshold_sane` 관문 신설 —
+      `passed = (0.0 < threshold < 1.0) and (source == "optimized")`.
+      **성과 3종 NaN·`passed:false`는 건드리지 않는다**(`_deferred_performance_gates()` ·
+      DECISION_LOG:4155의 기존 결정).
+- [ ] **F-6 결정 필요 (사용자)** — 임계 0.0 번들을 어떻게 할지. ㉠ 구 번들 복귀(피처 정의
+      불일치가 남는다) ㉡ 임계만 손으로 되돌린다 ㉢ 재학습. **권고 ㉢**, 단 아래 확인 (라) 선행.
+- [ ] **F-7 (P1) 발행 오프셋을 발행 시점의 롤링 스큐로 보정하고 스큐를 주기적으로 남긴다** —
+      대응 이상점 1-2·1-9·1-10. **장전 F-2의 정정판. 적용 시점: 장후(배치 완주 뒤 · 재기동 필요).**
+      ① `features/engine.py:891 _record_publish_offset()` —
+      `moment_exchange = self._now() + timedelta(seconds=skew)`,
+      `skew is None`이면 `return None`(0으로 때우지 않는다 — L18).
+      **`skew_applied_ms` 필드명은 Q-2가 이미 판정 기준으로 쓰는 이름 그대로 쓴다.**
+      Engine이 수집기 트래커를 직접 참조하면 계층 역행(불변원칙 1) —
+      **수집기가 버스로 발행**하고(불변원칙 2) Engine이 마지막 값을 든다. 버스가 비면 `None`.
+      ② `data/collector.py:529~544 _observe_clock_skew()` — `_clock_skew_reported` 단일
+      플래그를 **30분 경과 또는 직전 대비 0.3초 이상 차이** 시 재로깅으로.
+      **태그는 `ClockSkewMeasured` 유지**(새 태그를 만들면 `collect_evidence.py` 항상-인용
+      목록과 `integrity_report.py` 파서를 둘 다 고쳐야 한다). 필드 추가 `previous_seconds` ·
+      `delta_seconds` · `minutes_since_previous`. **0.3초가 오늘 표본 하나에서 유도한 값임을
+      주석에 명기한다**(임계를 실측 없이 정하지 않는다는 규율).
+      ③ `data/normalizer.py:321 MinuteBarAggregator` — `BarClosed`에
+      `close_trigger: "tick" | "timer"`. 오늘 178/233건이 틱 구동이라는 것은 **오프셋 부호에서
+      추론**한 것이고, 자가점검은 `bar_close  1분봉 확정: timer`라고 표시한다 — 표시와 실제가 어긋난다.
+      ④ 유예 초과 승격 로깅(장전 F-2와 동일 · 임계 2,000ms = 유예 4배).
+- [ ] **F-7 결정 필요 (사용자 · 장전 F-2 결정에 추가)** — 보정값을 「아침에 한 번 잰 값」이
+      아니라 「그 순간의 롤링 값」으로 바꾸는 데 동의하는가. **권고: 바꾼다.**
+      아침 값을 그대로 쓰면 정오 기준 약 **500ms 과대보정**이 남는다.
+- [ ] **F-8 (P2) 발행 루프 정체를 세고 호스트 자원 시계열을 붙인다** — 대응 이상점 1-11
+      (1-3 지속분 포함). **적용 시점: 장후.**
+      ① `features/engine.py` — 같은 순간(±100ms) 2개 이상 Horizon이 함께 임계를 넘으면
+      개별 WARNING 대신 `PublishLoopStalled` 한 줄
+      (`stall_ms` · `horizons` · `bar_confirm_kst`). 오늘 14군집 중 **5군집**이 이 형태.
+      ② `core/logging.py`에 `"PublishLoopStalled": logging.WARNING` 등록.
+      ③ `ops/host_health.py`에 **5분 주기 `HostSample`**(DEBUG) —
+      `cpu_percent` · `disk_queue` · `available_mb` · `python_processes`. 정규장 405분 → 81줄.
+      지금은 08:20:08 자가점검이 `cpu=사용률 3%`를 **한 번** 잴 뿐이라 정체 시각의 상태를
+      사후에 못 본다.
+      ④ `ops/integrity_report.py` — `daily_integrity`에 `publish_stalls`(건수·최대 ms·시각 목록).
+
+### 고도화
+
+- [ ] **G-4 (이번 주) 승격을 「성적」이 아니라 「게이트가 살아 있는가」로도 잠근다** —
+      승격 검증에 **효과 축** 추가. 검증 구간 신호에 번들을 물려 `blocked_ratio`
+      (차단/전체)를 계산해 `validation_report.json`에 싣고 **`0.0`이면 `passed: false`**.
+      **out-of-fold 예측만 쓴다**(학습 구간과 겹치면 낙관적으로 나온다).
+      값 검사(F-6)는 0.0은 잡지만 **0.001은 못 잡는다** — 효과를 보면 둘 다 잡힌다.
+      비용: `inference_latency_ms` 2.37ms(임계 10.0ms)라 신호 수천 건이어도 수 초.
+      **선행: F-6.** 오늘 1-8이 어제 저녁에 걸렸어야 할 자리다.
+- [ ] **G-5 (F-7과 동시 · 커밋 ②′) 시계 축을 「하루 한 상수」에서 「시계열」로** —
+      `daily_integrity`에 `clock_skew_by_hour`(시간별 롤링 스큐 중앙값 · 표본 수).
+      **신규 자료구조 없음** — 2026-08-20 F-H·C-6에서 만든 `ops/clock_skew.py` 시간대 버킷을
+      그대로 재사용. 수집은 F-7의 주기 로깅이 한다.
+      **P-4′가 「축 전환 계단」과 「회선 악화 계단」을 가르게 된다** — 「축 정의 전환 고지」가
+      걱정하는 오탐이 정확히 이 자리.
+- [ ] **G-6 (다음 단계 · F-8 이후) 프로세스 경계를 넘는 정지를 한 축에서 본다** —
+      `logs/status_snapshot.json`에 `last_stall`
+      (`kst` · `max_ms` · `processes` · `horizons`). 수집은 F-8의 `PublishLoopStalled`가 하고
+      **스냅샷은 읽기만 한다**(불변원칙 1). 현재 스냅샷 1.6KB라 여유 있음.
+      오늘 12:30:01 정지를 **기계가 하나도 못 봤다** — 로그 공백 판정(10분 격자)에도,
+      레벨 집계(전부 DEBUG)에도, 자동 적신호 §9에도 안 걸린다.
+
+### 확인 필요 (장후 판정)
+
+- [ ] **(라) 메타 임계 0.0이 학습 결과인가 표본 부족 폴백인가** — `select_threshold()`는
+      두 경로 모두 `float` 하나만 돌려주고 출처를 버린다. 어제 학습은 세션 경계 인식으로
+      피처 정의를 바꾼 직후(`f15aa58`)라 레이블 가능 표본이 줄었을 개연성이 있으나 **가설이다.**
+      **판정 방법**: 어제 학습 산출(`real-20260820-2053`)에서 `select_threshold()` 입력 표본 수와
+      후보별 지지도를 본다. `표본 수 × 0.05`보다 모든 후보의 선택 건수가 작으면 **폴백 확정.**
+      학습 로그가 없으면 같은 데이터로 학습 진입점을 재실행해야 안다.
+- [ ] **(마) 1-11의 초 단위 정체가 호스트 차원인가 프로세스 내부인가** — 두 프로세스 동시
+      정지는 **1군집**(12:30:01)뿐이다(단 `g2_daily`는 30분 주기라 겹칠 기회가 8번뿐 —
+      8번 중 1번 겹쳤다). 나머지 13군집은 `l1_daily` 단독.
+      **판정 방법**: 장후에 Windows 이벤트 로그·성능 카운터에서 12:30:01 전후. F-8의
+      `HostSample`이 붙으면 내일부터는 로그만으로 판정된다.
+
+### 08-21 장후 관측 (B 시리즈)
+
+- [ ] **B-1** 오늘 `MetaGateEvaluated` 전량 — `threshold: 0.0`이 종일 유지됐는가 · 최종 통과율
+- [ ] **B-2** `self_eval_20260821.json` · `daily_integrity_20260821.json` — 메타 통과율 급변
+      (0/14 → n/n)이 **어느 지표에도 안 잡히면 그 자체가 관측 공백**
+- [ ] **B-3** 어제 학습에서 `select_threshold()` 입력 표본 수·후보별 지지도 → (라) 판정
+- [ ] **B-4** `TickDeliveryLatency` p90/p99/최대 — 어제 921.4 / 1,025.1 / 1,143.4ms 대비 방향
+- [ ] **B-5** `FeaturePublishOffset` 세션 요약 `by_hour` — 1m·3m+ 갈라짐이 **저장 상태에서도**
+      보이는가 (N-4 규율 · 1-10 재확인)
+- [ ] **B-6** 오후장 정체 군집 수 (오전 14건 대비) · 프로세스 경계를 넘는 군집이 더 나오는가
+- [ ] **B-7** `daily_integrity_20260821.json` `late_bar_drops: 0` · `incomplete_day: false`
+- [ ] **B-8** 15:40 종료 · 15:45 장후 배치 트리거 실행 시각이 `configs/scheduled_tasks.json`
+      정본과 일치하는가 — **실측 대조가 없는 2종이다**(1-7)
+- [ ] **B-9** `SessionEnd` 3프로세스 전부 출현 (R13 · 금지계명 14)
+- [ ] **B-10** `logs/ui_20260821.log` 최종 JSON 행 수가 **1행에서 늘지 않았는가** —
+      「한 번만」 가드 확정 (1-1 · A-4)
+
+### 08-24 관측 예정 (F-6~F-8 적용분 채점 · 기존 Q 시리즈에 추가)
+
+- [ ] **Q-6** `MetaGateEvaluated`에 `threshold_source` 필드 출현 · 임계 0.0이면 WARNING → F-6 마감
+- [ ] **Q-7′** `thresholds.yaml`을 **읽어서**(리플레이 아님 · N-4) `_source` 키 부재 시
+      `"unknown"`으로 뜨는가 → F-6 저장상태 검증
+- [ ] **Q-8** `ClockSkewMeasured` 하루 **2건 이상** · `delta_seconds` 필드 출현 → F-7 마감
+      (`skew_applied_ms` 음수 0건은 기존 **Q-2**가 이미 담당)
+- [ ] **Q-9** `BarClosed.close_trigger` 분포가 자가점검 `bar_close` 표시와 일치하는가 → F-7 마감
+- [ ] **Q-10** `PublishLoopStalled` 건수 = 손으로 센 군집 수 · `HostSample` 81줄 내외 ·
+      `daily_integrity.publish_stalls` 출현 → F-8 마감
+
+---
+
+## 2026-08-21 장중 재점검 (13:03) — UI 복구 도출 항목 ([MW0601])
+
+리포트: `logs/dailycheck/2026-08-21_report.md` 제2부-B · 결정: DECISION_LOG
+`[MW0601] 화면이 죽은 게 아니라 보는 사람이 없었다`
+**코드 변경 없음**(R11 / 금지계명 3·4). 아래 F-9는 **장후 적용**이다.
+
+### 완료 처리
+
+- [x] **장전 「사용자 조치 1」 (UI를 브라우저로 한 번 열어 달라)** — 12:58 열었다.
+      `Established` 1건 확인. 08:20:40~12:56 **4시간 36분 UI 관측 공백**은 그대로 기록에 남긴다
+
+### 정정
+
+- [ ] **↩️ B-10 기대값 정정** — 「`logs/ui_20260821.log` 최종 JSON 행 수가 1행에서 늘지
+      않는가」는 틀린 기대다. `snapshot_freshness_logged` 「한 번만」 가드가 **프로세스별이
+      아니라 세션별**임이 오늘 실측됐다(같은 PID 11280에서 08:20:40 · 12:58 두 번 시도).
+      올바른 기대는 **「JSON 행은 안 늘고 `Logging error` 블록만 는다」**.
+      **F-1 ③의 전제를 이 사실에 맞춰 다시 읽을 것**
+- [ ] **↩️ 「메시아 중단중」 전제 정정** — 중단된 적 없다. 세 프로세스 무중단
+      (l1 08:20:02 · g2 08:25:01 · UI 08:20:34 기동, 13:03 생존).
+      `verdict.ok: true` · `code_version.stale: false` · `observation_gap_count: 0`
+
+### Fix (장후 적용 · 커밋 ⑤ — F-1~F-5와 별도)
+
+- [ ] **F-9 (P2) 창을 새로 열면 직전 판단부터 보여준다 — 스트림 1회 소급 적재**
+      `src/messiah/ui/app.py:378` `_poll_streams_forever()`가 `last_ids`를
+      `bus.stream_last_id(topic)`(=「지금부터」)로 고정해, **낮에 창을 열면 다음 30분 정각까지
+      판단 칸이 빈 채로 남는다** — 직전 값이 `decision.intent` 스트림에 멀쩡히 있는데도
+      (오늘 13:03 기준 86건 적재). 오늘 「UI가 안 보인다」의 배경일 가능성이 높다.
+      ① `last_ids` 확정 **전에** 토픽별 `XREVRANGE <topic> + - COUNT 1`을 1회 읽어
+      `cache.update()`에 먹인다(`decision.intent` · `exec.fill`).
+      ② `last_ids`는 **읽어온 마지막 ID로** 고정 — `stream_last_id()`를 그대로 두면
+      소급분과 신규분 사이에 창이 다시 생긴다.
+      **회귀 위험**: ㉠ 2026-08-05 3차 P0-2(`$` 두 번 쓰기) 재발 금지 — 소급 읽기와 이후
+      전진은 **같은 ID 축**이어야 한다 ㉡ 소급분이 화면에서 「방금 온 값」으로 보이면 더 나쁘다 —
+      `age_seconds`가 **원래 발행 시각** 기준인지 확인(`_FRESHNESS_LIMITS`, app.py:151~157).
+      오래된 값이면 배지가 회색·붉은색이어야 맞다 ㉢ `XREVRANGE` 역순을 **시간 오름차순으로
+      되돌려** 먹인다.
+      **검증**: ㉠ 순수 로직 pytest — 가짜 스트림에 3건 심고 구독을 나중에 시작해 마지막 1건이
+      캐시에 들어오는가 ㉡ **N-4 규율(저장 상태 전용 검증)** — 실제 스트림이 있는 상태에서 UI를
+      새로 띄워 **첫 렌더에** `DecisionIntent NO_DATA`가 아닌지 `logs/ui_*.log` 한 줄로 확인.
+      **선행: F-1** (없으면 그 한 줄이 오늘처럼 통째로 버려진다)
+- [ ] **F-10 → 1-1에 통합** (새 번호 아님) — 12:58 새 세션 렌더 기록도 동일하게
+      `UnicodeEncodeError: 'cp949' … '—'`로 유실. 버려진 내용:
+      `첫 스냅샷(LIVE) — FuturesView NO_DATA · DecisionIntent NO_DATA · RegimeState NO_DATA ·
+      CircuitBreakerStatus NO_DATA · 차트 2026-08-21(당일 0일)`. **F-1의 근거가 하나 늘었다**
+
+### 고도화
+
+- [ ] **G-7 (이번 주) 상태판이 「사람이 보고 있는가」를 말하게 한다**
+      `logs/status_snapshot.json`의 `command_center_ui: "UP"`은 **서버가 떴다**만 말한다.
+      오늘 그것이 UP인 동안 **4시간 36분 아무도 화면을 안 보고 있었다.**
+      `ops/status_board.py` — `command_center_ui`를 문자열에서 객체로:
+      `{"state": "UP", "sessions": n, "last_render_kst": "..."}`.
+      **`sessions`를 어떻게 세는가가 이 항목의 실제 난점이다** — 포트 소유 PID의
+      ESTABLISHED 수를 세려면 psutil(`pyproject.toml`에 없다)이나 netstat 파싱이 필요하고,
+      `ui_launcher.identify_port_holder()` docstring이 이미 **같은 이유로 그 길을 포기했다.**
+      그러므로 **UI 자신이 세게 한다** — `ui/app.py`가 렌더할 때마다 Redis에 하트비트를 찍고
+      (`sys.health` 컴포넌트 `command-center-ui`, 기존 배선 재사용) 상태판은 그 age만 본다.
+      새 의존성 0개. 선행: **F-1**(하트비트 로그가 인코딩으로 죽으면 같은 함정이다)
+- [ ] **G-8 (W-12) 「관측 공백」 정의에 UI를 넣는다**
+      `daily_integrity`의 `observation_gaps`는 오늘 **0건**으로 나왔다. 그런데 화면 기록은
+      08:20:40 이후 12:56까지 없었다. **수집 로그 공백만 세고 화면 공백은 안 센다.**
+      G-7의 `last_render_kst`가 생기면 `ops/integrity_report.py`에
+      `ui_render_gap_minutes`를 추가한다. 임계는 **장중 30분**(판단 주기와 같은 격자).
+      선행: G-7
+
+### 관측 예정
+
+- [ ] **U-1 (2026-08-21 13:32)** — 13:30 정각 사이클 뒤 UI의 판단·국면·선물 세 칸이
+      실제로 채워지는가. **안 채워지면 원인이 F-9(늦게 연 창)가 아니라 별개의 배선 문제다.**
+      확인 경로: `decision.intent` 스트림에 13:30 항목 적재 + `intel.regime`·`intel.futures`
+      pub/sub 실수신(50초 창으로는 30분 주기를 못 잡으므로 **13:29:50~13:30:20** 창으로 볼 것)
+- [ ] **U-2 (2026-08-24 장전)** — `Established` 연결 수를 장전 체크리스트 A-4에 넣을지 결정.
+      넣으면 `references/phases.md` · `collect_evidence.py` §9 동반 수정. 선행: G-7
+
+### 2026-08-21 13:33 — U-1 결과 반영 추가분 ([MW0601])
+
+- [x] **U-1 종결 · 통과** — 13:29:45~13:30:30 실측: `intel.regime` 1 · `intel.futures` 1 ·
+      `bar.5m.A05609` 1 · `sys.health` 16 · `sys.circuit_breaker` 3 · `intel.options` **0**.
+      `decision.intent` 스트림 `1787284800791-0` → `1787286600999-0`(13:30:00.996 ·
+      `NO_TRADE` · `real-20260820-2053-30m` · `④ |S|=0.095 < 0.2`).
+      **화면 배선 문제 아님이 확정** — F-9(늦게 연 창)의 근거가 확정됐다
+
+- [ ] **1-12 (신규 P1) 화면이 「비어 있는 이유」를 틀리게 말한다**
+      `src/messiah/ui/app.py:720~727` `_ABSENCE_REASON`이 `FuturesView`를
+      「Registry에 live 번들이 0개」, `RegimeState`를 「학습된 RegimeAI 인스턴스가 아직 없음」
+      이라고 단정한다. **둘 다 오늘 실측으로 거짓**이다 — `RegimeState`는 `_wire_regime`
+      결선(2026-08-11 ④-c) 이후 **10일째**, `FuturesView`는 번들 승격(`f15aa58`, 2026-08-20)
+      이후 **어제부터** 낡았다. `OptionsView`만 여전히 참(`intel.options` 0건).
+      원인: `_absence_reason()`(735~757행)의 갈래 ③(`g2.pipeline` heartbeat)을 통과하면
+      ④ 고정 문자열로 떨어진다. 오늘 heartbeat는 `OK · age 5.7초`라 통과한다.
+      **707~719행 주석이 요구한 ③「대기」 갈래가 이 두 키에서는 도달 불가능한 코드다.**
+      위반: **R10** · **금지계명 12**(조용한 폴백) · **L18**. 2026-08-14 F-3(만기 월물
+      `A05608` 화면이 건강한 수집기를 지목한 사고)과 같은 계열
+
+- [ ] **F-11 (P1) 「미배선」을 선언이 아니라 관측으로 판정한다 — 커밋 ⑥ (F-9와 분리)**
+      ① `_ABSENCE_REASON` 값을 「미배선」 단정 → **「대기」 기본값**으로. 주기 문구는
+      `_FRESHNESS_LIMITS`(app.py:151~157)의 `cadence`에서 **파생**(숫자 새로 쓰지 않는다 —
+      F-2가 `_BOUNDARY_GRACE_SECONDS`에 세운 규율과 동일).
+      ② `StateCache`에 `ever_seen` 플래그. ㉠ 받은 적 있음 → 「대기」 ㉡ 받은 적 없고
+      **발행 주기 2배 경과** → 「미배선 또는 끊김」 ㉢ 그 전 → 「대기」. 판정 근거 병기.
+      ③ `OptionsView`는 ㉡ 갈래로 자연히 「미배선」이 나와야 한다 — **고정 문자열을 지우는
+      것이 목적이 아니라 도달 경로를 관측에 묶는 것이 목적이다.**
+      **회귀 위험**: ㉠ 갈래 ③(heartbeat) **손대지 않는다** — 진짜 끊김을 「대기」로 덮으면
+      원래 결함보다 나쁘다 ㉡ `ever_seen`은 **세션별**이라 창을 새로 열면 리셋된다 →
+      **㉡의 「주기 2배」 시간 조건이 이 설계의 핵심** ㉢ REPLAY는 지금처럼 `None` 유지.
+      **검증**: ㉠ pytest 3조합 (heartbeat OK·ever_seen False·10분 → 「대기」 /
+      동·70분 → 「미배선 또는 끊김」 / heartbeat STALE → 「끊김」)
+      ㉡ **N-4 규율** — 낮에 UI를 새로 띄워 첫 렌더 캡션이 「미배선」이 **아닌지**.
+      **F-9와의 관계**: 둘 다 필요하다. F-9는 「빈 칸을 채운다」, F-11은 「왜 빈지 바로
+      말한다」. F-9만 하면 소급 적재 실패일에 거짓 사유가 다시 뜨고, F-11만 하면 30분을
+      여전히 기다린다
+
+- [ ] **G-9 (W-12) 정적 선언 표가 코드보다 낡는 것을 기계가 잡는다**
+      1-12는 오타가 아니라 **구조적 표류**다 — 승격·결선 어느 쪽도 `_ABSENCE_REASON`을
+      갱신하지 않으므로 코드가 나아갈 때마다 표가 조용히 낡는다. 다음 승격 때 또 한 칸이
+      낡는다. 같은 형태의 표를 전수 조사하고(`grep -rn "미배선\|아직 없음\|결선되지 않음" src/`)
+      **「실측으로 반증 가능한 선언」에 만료를 붙인다** — 예: 표 항목에 `asserted_on` 날짜를
+      달고, `ops/integrity_report.py`가 그 토픽을 그날 한 번이라도 수신했으면
+      `StaleAssertion` finding을 낸다. 선행: F-11
+
+## 2026-08-21 장후 종합 ([MW0601])
+
+### 완료 처리
+
+- [x] **1-6** `ui_*.err.log` 부재의 성격 정정 — 장전에서 완결. 조치 불요
+- [x] **1-7 해소** 스케줄 정본 4종 실측 대조 — `daily_integrity.task_exit_codes.launches`에
+      **4종 전부** 이미 기록돼 있었다: Messiah 08:20:00 · Messiah-G2 08:25:00 ·
+      Messiah-Shutdown 15:40:00 · Messiah-Postmarket 15:45:00 (전부 `event_id: 107 · "정시 트리거"`).
+      종료 코드도 3종 `code: 0`. **F-5는 계기 신설이 아니라 이 필드를 자가점검이 읽는 것으로 축소**
+- [x] **B-1** `MetaGateEvaluated` 14건 전량 `threshold: 0.0` · `passed: true` · 통과율 **14/14**
+- [x] **B-2** `daily_integrity.meta_gate` 존재(evaluations 14 · passes 14 · p90 0.3786 · max 0.4269 ·
+      frozen_run 2 · input_frozen_run 1). **계측 성립, 판정(경보) 없음** — `breaches: []`.
+      `self_eval`에는 메타 필드 전무
+- [x] **B-3 → 대체 판정** 학습 산출물에 표본 수·후보별 지지도 미저장. 소스 구조 + 두 번들 동일값으로 (라) 판정
+- [x] **B-4** 회선 지연 p90 921.4→**930.1ms**(+0.9%) · p99 1,025.1→1,030.9 · 최대 1,143.4→**2,366.4**(+107%).
+      `by_hour` p90 08~15시 0.917~0.938s 평평 · `intraday_trend.delivery_latency.drift: false`.
+      **최대만 단발 이상치.** 표본이 링버퍼 끝 20,000건(관측 75,803)이라 확정 불가
+- [x] **B-5** `FeaturePublishOffset` `by_hour` p50: 08:557 · 09:**−290** · 10:**−32** · 11:+307 ·
+      12:+566 · 13:+568 · 14:+590 · 15:+581. **N-4(저장 상태) 규율 충족 — 1m 단조 이동 확정**
+- [x] **B-6 → 척도 정정** 절대 1,000ms: 오전 10/오후 21군집(53건·31군집).
+      중앙값+500ms: 오전 **68**/오후 **18**군집(140건·86군집). **결론 역전**
+- [x] **B-7** `late_bar_drops: 0` · `incomplete_day: false` · `incomplete_reason: []` · `provisional: false`
+- [x] **B-8** 15:40:00 · 15:45:00 정시 트리거 실측 확인. watchdog 15:40:01.15 시작
+- [x] **B-9** `SessionEnd` l1 ✅ g2 ✅ postmarket ✅ / **ui ✗ — 설계상 강제 종료(오탐, 1-16)**
+- [x] **B-10** UI 로그 JSON 유효행 **1행** 유지 · `Logging error` 블록 2개. **정정된 기대값대로 통과**
+- [x] **확인 필요 (나)** 축 혼합 확정 **+ 정정** — 1m 계열 한정
+- [x] **확인 필요 (다)** 첫 발행 가설 반증 유효 **+ 부분 부활** — 30분 경계 겹침 비용은 실재
+- [x] **확인 필요 (라) 판정** 메타 임계 0.0은 **폴백이 압도적으로 유력** —
+      `meta_labeler.py:210·215~216` `fallback_threshold`는 "가장 많은 신호를 남기는 후보" =
+      구조적으로 항상 `grid[0] = 0.0`. 두 번들(`1744`·`2053`) 모두 0.0.
+      **best와 fallback이 같은 값·같은 모양으로 저장돼 구분 불가**
+
+### 정정 (기존 항목의 내용 변경 — 새 번호 부여하지 않는다)
+
+- [ ] **↩️ F-2 · F-7 폐기 → F-12로 대체.** 보정 범위가 **1m 계열 한정**으로 좁혀졌다.
+      전체 보정을 그대로 적용하면 오늘 이동폭 29ms인 3m을 800ms로 벌린다 —
+      **fix가 원래 결함보다 나빠진다**
+- [ ] **↩️ F-8 순서 이동** — F-12 **이후**로. 절대 임계는 기준선 이동을 흡수해 오전/오후
+      결론을 뒤집는다(오늘 실증: 10 vs 68군집). 보정 전에 세면 카운터가 첫날부터 못 쓴다
+- [ ] **↩️ F-5 축소** — 계기 신설 불요. `task_exit_codes.launches`를 자가점검이 읽는 것으로 충분
+- [ ] **↩️ 인용 규율** — 1-9 "76.4%" → **29.1%(206/708 · 전량 1m)** ·
+      1-10 "531ms" → **848ms** · 1-11 군집 수는 **척도(절대/보정) 명시 없이 인용 금지**
+
+### Fix (장후 신규 · 커밋 ⑦~⑫)
+
+- [ ] **F-14 (P0 · 커밋 ⑦) 승격 관문이 「미측정」을 통과로 바꾸지 못하게 하고 상태 정본을 하나로 정한다**
+      ① 승격 판정을 `all(r["passed"] for r in report)`로. 미측정은 `passed: false`로 취급.
+      대상: `grep -rn "gates_passed\|def promote\|status.*live" src/messiah/models/ src/messiah/strategy/`
+      ② `manifest.yaml` `gates_passed: dict`(통과분만) → `gates: [{name, passed, measured, value, threshold}]`.
+      통과·실패·미측정 셋을 전부 표현. `NaN` → `value: null` + `measured: false`(1-17 동시 해결)
+      ③ **상태 정본 = `data/models/registry.db` `bundles.status`.** `manifest.status`는 제거 또는
+      `initial_status`로 개명 — 오늘 `manifest: candidate` vs `db: live` 불일치
+      ④ R18 섀도: `shadow_trading_days` 기록 + 20 미만이면 `BundlePromotedWithoutShadow`(WARNING).
+      **이번엔 계측·경보까지만** — 강제 차단은 별도 결정
+      ⑤ dev 모드 `bundle` 자가점검을 「생략」 → 「미측정 명시」(G-3·G-11 연계)
+      **회귀 위험**: ㉠ 적용 시 현재 live 번들이 자격 미달 → 판단 정지 가능. **기존 번들 유예
+      (grandfather)하되 유예 사실을 매 기동 자가점검에 찍는다** ㉡ 스키마 변경으로 기존 번들 2개
+      로드 불가 → 마이그레이션 함수(구 dict → 신 list) 필요 ㉢ dev에선 `bundle` 줄이 「생략」이라
+      효과가 안 보인다 → ⑤가 선행
+      **검증**: pytest(미측정 1건 → 승격 거부 · gates 3상태 기록) · 기존 번들 2개 마이그레이션 로드 ·
+      엄격 JSON 파서 파싱 성공 · `db.status` ↔ `manifest` 불일치 0. **기한 2026-08-24 장후**
+- [ ] **F-13 (P1 · 커밋 ⑧) 시계 어긋남을 장중 주기적으로 재고 남긴다 — 장중 F-7에서 분리**
+      `ClockSkewMeasured` 기동 1회 → **장중 30분 주기**, `delta_seconds`(직전 대비 변화) 추가.
+      측정 실패 시 **직전값 유지 + `measured: false`** — 조용히 넘어가지 않는다(금지계명 12).
+      **F-12의 선행** — 없으면 롤링 참조가 항상 08:45 값을 돌려준다.
+      **검증**: 하루 **2건 이상** · `delta_seconds` 출현(오늘 1건이 기준선). **기한 2026-08-24 장후**
+- [ ] **F-12 (P1 · 커밋 ⑨) 발행 오프셋 보정을 1m 계열에만 걸고 스큐를 발행 시점 롤링값으로 쓴다**
+      ① `grep -rn "publish_offset_ms" src/`로 산출 지점 확정. **1m 경로에만**
+      `offset = local_publish_ts - (exchange_bar_close + skew_at_publish)`
+      ② `skew_at_publish`는 `ClockSkewMeasured` 최근값 롤링 참조 (상수 캐시 금지)
+      ③ `axis` 키 병기 — `"exchange_vs_local"`(1m) / `"local_only"`(3m+).
+      **어느 축으로 잰 값인지 로그가 스스로 말하게 한다.** 스키마는 `core/messages.py`부터(불변원칙 2)
+      **회귀 위험**: ㉠ **3m~30m에 보정이 흘러가면 안 된다** — 단위 테스트로 못 박는다
+      ㉡ F-13 선행 필수 ㉢ `axis` 추가는 스키마 변경
+      **검증**: pytest 2조합(1m skew+800 발행T+300 → +1100 / 3m 동일입력 → +300 보정없음) ·
+      **N-4**: 다음 거래일 1m `by_hour` 이동폭 **100ms 이내**(기준선 848ms) ·
+      3m 이동폭 오늘 29ms 대비 악화 없음 · `axis` 키 출현. **기한 2026-08-24 장후**
+- [ ] **F-15 (P1 · 커밋 ⑩) 완성봉 유예를 상수 선언에서 매일 채점되는 축으로 바꾼다**
+      ① `ops/integrity_report.py`에 `publish_grace` 축 — Horizon별 오프셋 중앙값·p90을
+      유예 상수와 대조. 지금은 기록만 하고 대조하지 않는다
+      ② 유예 상수 단일 출처 — 자가점검 `bar_close`가 인용하는 값과 채점에 쓰는 값이 **같은 상수**
+      (F-2가 `_BOUNDARY_GRACE_SECONDS`에 세운 규율: **숫자를 새로 쓰지 않는다**)
+      ③ 유예 4배 초과 시 `PublishGraceExceeded`(WARNING) — **임계는 F-12 적용 후 보정된 오프셋 기준**
+      **회귀 위험**: ㉠ 지금 적용하면 3m~30m 전 계열이 매일 breach → 경보가 닳는다(1-15 형태).
+      **1단계는 `measured` 값만 남기고 `breaches` 승격은 F-12 실측 뒤** ㉡ **유예 500ms 자체가
+      재검토 대상** — 합성 직렬 비용 중앙값 ~690ms. 상수 변경은 코드가 아니라 사람이 결정
+      **검증**: `publish_grace` 축 출현 · Horizon 6개 `measured: true` ·
+      오늘 값(3m 586.0 / 5m 595.7 / 10m 630.6 / 15m 720.0 / 30m 775.0ms) 재현. **기한 2026-08-25 장후**
+- [ ] **F-16 (P2 · 커밋 ⑫) 오탐 두 건을 끈다**
+      ① `record_vs_commit`의 `closed_items`를 **구현 종결(F-/G-)** 과 **관측 종결(A-/B-/K-/M-/Q-/U-)** 로
+      분류. 관측만인 날 `verdict: "observation_only"` — 결함으로 세지 않는다.
+      분류 근거를 `detail`에 반드시 남긴다(오분류 시 원래 잡으려던 것을 못 잡는다)
+      ② `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` §9 —
+      watchdog 관리 대상을 **`shutdown_watchdog.log`의 그날 실제 match 기록에서 파생**해
+      (정적 목록 금지 — 1-12 형태 회피) `SessionEnd` 부재를 적신호에서 제외하고
+      `"watchdog 강제 종료(설계) — 15:40:01 PID 10732"`로 사유 명시
+      ③ `daily_integrity_report`와 증거 수집기의 종료 판정을 **한 함수로 통합** —
+      지금 두 곳이 같은 사실에 다른 답을 낸다(`abnormal_exits: []` vs 적신호 3번)
+      **검증**: 오늘 데이터 재실행 시 `verdict == "observation_only"` · 적신호 3번 소멸/사유 전환.
+      **기한 2026-08-24 장후**
+
+### 고도화 (당일 관측 근거)
+
+- [ ] **G-10 (W-12) 계기가 자기가 재려는 오염의 영향권 안에 있는지를 기계가 묻게 한다**
+      **근거**: 오늘 같은 형태가 두 번(1-11 척도 오염 · 1-15 자기 채점) + `b0e1ddd`(08-20) ·
+      `60b6d95` · 1-12까지 **다섯 번째 사례**.
+      임계를 쓰는 축마다 `baseline: "absolute" | "rolling_hourly"` 명시를 강제하고,
+      `absolute`를 고른 축은 도입 후 **첫 5거래일 두 척도 병기**해 결론이 갈리면
+      `ScaleContaminated`(WARNING). **선행 F-12**
+- [ ] **G-11 (W-12) 「미측정」에 하나의 표현형을 준다**
+      **근거**: 오늘 미측정이 **네 모양**으로 나타났고 둘이 결함이 됐다 —
+      `NaN`(1-17) · 누락(1-13) · `judged: false`+`min_samples`(**정답**, `FeatureHealthNotJudged`
+      *"0건이 아니라 '모른다'이다"*) · `dev — 생략`(자가점검 3줄).
+      `core/messages.py`에 `Measurement`(`value: float|None`, `measured: bool`, `reason: str`)
+      단일 정의하고 `NaN`·누락·「생략」 셋을 금지. **F-14 · G-3과 묶으면 한 번에 끝난다**
+- [ ] **G-12 (W-24~26) 차단 계층의 「살아 있음」을 매일 채점한다**
+      **근거**: 오늘 메타 게이트 14/14 통과(임계 0.0)를 `daily_integrity`가 **기록만 하고
+      판정하지 않았다**(`meta_gate` 필드 있음 · `breaches: []` · WARNING 0). 반면 나머지 둘은
+      일했다 — `decision_funnel: {pass: 1, score: 13}` + `RiskReject` 1건.
+      **세 계층 중 하나가 죽어도 결과는 정상으로 보인다.**
+      `decision_funnel`을 4계층(`meta`/`score`/`risk`/`killswitch`)으로 확장하고 계층별
+      **차단율**을 일별 기록. N거래일 연속 0%면 `GateInactive`(WARNING).
+      `meta_gate.frozen_run: 2` · `input_frozen_run: 1`이 이미 절반을 세고 있다.
+      **장중 G-4의 일별 관측판** — G-4가 승격 시점 관문이면 G-12는 매일의 관문
+
+### 08-24 관측 예정 (C 시리즈 · 기존 Q 시리즈에 추가)
+
+- [ ] **C-1** `ClockSkewMeasured` 하루 2건 이상 · `delta_seconds` → F-13 마감 (기존 Q-8 승계)
+- [ ] **C-2** `FeaturePublishOffset` **1m** `by_hour` 이동폭 100ms 이내 (기준선 848ms) → F-12 마감
+- [ ] **C-3** 같은 요약 **3m** `by_hour` 이동폭 — 오늘 29ms 대비 악화 없음 (F-12 회귀 감시)
+- [ ] **C-4** `FeaturePublish`에 `axis` 키 (1m=`exchange_vs_local` / 3m+=`local_only`) → F-12 마감
+- [ ] **C-5** `manifest.yaml` `gates` 3상태 표현 · `validation_report.json` 엄격 파싱 성공 → F-14·1-17 마감
+- [ ] **C-6** `registry.db.status` ↔ `manifest` 불일치 0 · 정본 단일 → F-14 마감
+- [ ] **C-7** `daily_integrity`에 `publish_grace` 축 · Horizon 6개 `measured: true` → F-15 (08-25)
+- [ ] **C-8** `record_vs_commit.verdict` — 점검만 한 날 `observation_only` → F-16 마감
+- [ ] **C-9** 증거 수집기 §9에서 `ui` SessionEnd 항목 소멸 또는 사유 명시 → F-16 마감
+- [ ] **C-10** `MetaGateEvaluated.threshold_source` 출현 · 0.0이면 WARNING → F-6 마감
+- [ ] **C-11** `RegimeWarmStart.bars_by_source` A05608 비중 · 롤 갭 보정 유무 → **(바) 판정**
+- [ ] **C-12** `irrecoverable_loss` 총계 ↔ 내역 ↔ `status_snapshot` 세 숫자 산식 → **(사) 판정**
+- [ ] **C-13** `TickDeliveryLatency.observed_total` ↔ `TickArchiveSummary.rows` 모집단 정의 → **(아) 판정**
+- [ ] **C-14** `PublishLoopStalled` — **F-12 이후에만 유효.** 보정 기준선 사용 여부 확인
+- [ ] **C-15** `archiver-restart-restore` 검증 기한 재조정 완료 여부 (채점 가능일 5일 확보)
+
+### 확인 필요 (미판정 — 결함으로 세지 않는다)
+
+- [ ] **(바) 국면 웜스타트 200봉 중 144봉이 만기 지난 이전 월물** — 08:25:28 `RegimeWarmStart`
+      `bars_by_source: {"A05609": 56, "A05608": 144}`. 근월물은 A05609(다음 롤 2026-09-11).
+      09:00 시드 `HIGH_VOL` 0.9911로 정상 대역이었다. 2026-08-14 F-3(만기 월물 A05608이 화면에서
+      건강한 수집기를 지목한 사고)과 같은 코드 계열인지.
+      **판정 기준**: `RegimeRuntime` 웜스타트 경로에 롤 갭(가격 수준 차) 보정이 있는가.
+      없으면 국면 판정 입력에 계단이 들어간다
+- [ ] **(사) 소급 불가 손실 총계·내역·상태판 세 숫자가 다르다** —
+      `irrecoverable_loss_minutes: 0.5` vs `breakdown: {start_lag 0.5, series_head_gap 5.0,
+      mid_session_gap 0.0}` vs `status_snapshot: clean: true "손실 없음"(0분)`.
+      `series_coverage`의 `option_chain/regular` `head_gap_minutes: 5.0`은 폴링 주기 5분과 같아
+      첫 폴링 전 공백일 수 있다. **판정 기준**: 총계 산식이 `start_lag + mid_session_gap`인지 소스 확인
+- [ ] **(아) 지연 관측 총수와 틱 적재 행수가 다르다** — `observed_total: 75,803`(capacity 20,000 ·
+      `truncated: true`) vs `TickArchiveSummary.rows: 136,123` = 55.7%.
+      **판정 기준**: 두 카운터의 모집단 정의가 코드에서 같은지. 다르면 리포트에 병기, 같아야 하면 누수 조사
+- [ ] **(마) 정체가 호스트 차원인가 프로세스 내부인가** — 🔄 **미해결.** F-8 미적용으로 계기 부재
+      (`PublishLoopStalled`·`HostSample` 없음). `host_health`는 하루 1회 스냅샷이라 초 단위 군집과
+      대조 불가. **F-12가 선행** — 척도를 고치기 전에 세면 첫날부터 못 쓴다
+
+## 2026-08-23 Fix 구현 세션 ([MW0601])
+
+> 2026-08-21 리포트가 남긴 Fix 열세 건(F-1 · F-3 · F-4 · F-5 · F-6 · F-8 · F-9 · F-11 ·
+> F-12 · F-13 · F-14 · F-15 · F-16)을 **전부 구현했다.** F-2 · F-7 · F-10은 리포트가
+> 폐기·흡수한 대로 손대지 않았다. 오늘은 일요일이라 R11·금지 15계명 3·4의 장중 코드 변경
+> 금지가 걸리지 않는다.
+
+### 완료 처리 (구현 종결 — 채점은 2026-08-24 C 시리즈)
+
+- [x] **F-14 (P0)** 승격 관문 · 상태 정본 · `NaN` 소거 — `ModelRegistry.promote_to_live()`가
+      매니페스트를 다시 읽어 **미달과 미측정 둘 다** 막는다. `manifest.gates_passed: dict` →
+      `gates: [{name, passed, measured, value, threshold}]`, `status` → `initial_status`
+      (현재 상태의 정본은 `registry.db`). `GateResult.measured` 신설 · `to_dict()`가
+      `NaN`을 `null`로 눕히고 `json.dumps(allow_nan=False)`로 못 박았다.
+      **유예는 없었다** — `scripts/migrate_bundle_manifests.py`로 기존 번들 4개를
+      각자의 `validation_report.json`에서 **실제 판정으로** 복원했다(재료가 있는데 "판정할
+      재료가 없다"고 적는 것은 거짓말이다). 현역 `real-20260820-2053-30m`의 미통과 3건
+      (`sharpe`·`max_drawdown`·`negative_window_ratio`)이 이제 매 기동 자가점검 `bundle`
+      줄에 뜬다. dev 모드도 「생략」이 아니라 「미측정 명시」다(⑤)
+- [x] **F-13 (P1)** 시계 어긋남 **장중 30분 주기** 측정 — `_CLOCK_SKEW_REPORT_INTERVAL`.
+      `delta_seconds`(직전 대비) 추가. 표본 부족이면 직전값 유지 + `measured: false`.
+      리포트에 `clock_skew_range_seconds`(하루 이동폭) 축 신설 — 종전엔 표본이 하루
+      1개뿐이라 이 값이 **구조적으로** None이었다(그래서 리포트가 1-10을 못 봤다)
+- [x] **F-12 (P1)** 발행 오프셋 **1m 전용** 롤링 스큐 보정 + `publish_offset_axis` 키.
+      `FeatureEngine(clock_skew_seconds=...)`로 합성기와 **같은 콜러블**을 본다.
+      **부호는 `raw + skew`다** — 리포트 본문 산식(`- (T_e + skew)`)은 그 자신의 검증
+      예시(+300ms → +1,100ms)와 어긋났고, 실측 대조(1m 중앙값 −3.5ms + 스큐 798ms ≈
+      795ms로 3m 586ms·5m 596ms 대역)도 더하기를 지지한다. 3m+ 무보정을 pytest로 못 박음.
+      세션 요약에 `by_horizon`(축 · p50/p90 · 음수 건수 · `day_drift_ms`) 신설
+- [x] **F-15 (P1)** 완성봉 유예 채점 축 `publish_grace` — Horizon별 중앙값을 유예 상수와
+      대조. **`verdict: "recorded_only"` — `breaches`에 안 넣는다**(R18 · 회귀 위험 ㉠).
+      유예 상수는 세 곳이 `_BOUNDARY_GRACE_SECONDS` 하나를 읽는다(②). 4배 초과에
+      `PublishGraceExceeded`(WARNING) ③
+- [x] **F-8 (P2)** 발행 루프 정체 — 같은 봉 확정 순간(±100ms)에 2개 이상 Horizon이 함께
+      임계를 넘으면 `PublishLoopStalled` 한 줄로 묶는다. **F-12 이후에 넣었다**(임계 오염 방지)
+- [x] **F-6 (P1)** 메타 임계 출처 — `select_threshold()` 반환을 `float` → `ThresholdSelection`
+      (`value`/`source`/`support`/`total`/`min_support`). `thresholds.yaml`에 출처 4키 기록,
+      옛 번들은 `"unknown"`(`fallback`도 `optimized`도 아닌 세 번째 상태).
+      `MetaGateEvaluated`에 `threshold_source` + **임계 0이면 그 한 줄만 WARNING 승격**.
+      승격 관문 `meta_threshold_sane` 신설(`0 < 임계 < 1` **그리고** 출처 `optimized`)
+- [x] **F-1 (P1)** UI 인코딩 두 겹 — ① `ui_launcher`가 자식에 `PYTHONIOENCODING=utf-8` ·
+      `PYTHONUTF8=1` 전달(착수 전 `src/messiah/` 텍스트 `open()` 전수 확인, 미지정 0건)
+      ② 로그 핸들러 `reconfigure(errors="backslashreplace")` — 표현 불가 글자 하나로
+      레코드를 통째로 버리지 않는다 ③ 「한 번만」 가드를 **성공 뒤로** 이동
+- [x] **F-3 (P1)** `RegimeSeeded.delivery` — `RegimeRuntime.seed()`가 `(state, bus_ok)`를
+      돌려주고, 버스 실패 시 `RegimeSeedBusFailed`(WARNING). **직접 전달을 로그보다 먼저**
+      한다(종전엔 로그가 먼저라 전달 실패해도 「시드했다」가 남았다).
+      리포트에 `regime_seed_delivery` 축 — 필드 없는 옛 로그는 `unknown`
+- [x] **F-4 (P2)** 점검 기대 정정 — `phases.md` A-4 · `evidence_map.md`에서 존재하지 않는
+      `ui_*.err.log` 제거. 수집기 §9에 **로깅 인코딩 실패 자동 적신호** 신설:
+      08-21 로그 재실행에서 `ui: 로깅 인코딩 실패 4건`을 기계가 스스로 잡았다
+- [x] **F-5 (P2, 축소)** 스케줄 대조 4종 — `task_schedule.all_tasks()` 신설,
+      `check_schedule_drift()`가 네 작업 전부를 본다. 비수집 계열에는 **기동 창을 대지
+      않는다**(Shutdown 15:40 · Postmarket 15:45는 창 밖이지만 정상).
+      실측: `정본 일치 Messiah=08:20, Messiah-G2=08:25, Messiah-Postmarket=15:45,
+      Messiah-Shutdown=15:40`
+- [x] **F-9 (P2)** 스트림 1회 소급 적재 — `MessageBus.stream_tail()` 신설. 소급분과 전진이
+      **같은 ID 축**을 쓴다(`$` 재등장 없음). **원래 발행 시각으로 캐시에 넣는다** —
+      `StateCache.update(received_at=...)`. 값은 보이고 나이는 정직하다
+- [x] **F-11 (P1)** 「미배선」을 관측으로 판정 — `StateCache.created_at`/`listening_seconds()`.
+      관측 창(30m × 2) 안이면 「대기 — 듣기 시작 후 N분」, 넘기면 「미배선 또는 끊김」.
+      **①「끊김」 갈래는 손대지 않았다**(진짜 사고를 대기로 덮으면 원래 결함보다 나쁘다)
+- [x] **F-16 (P2)** 오탐 2건 — ① `record_vs_commit.classify_closed()`로 구현(F-/G-)과
+      관측 종결을 가르고 관측만인 날 `verdict: "observation_only"` ② 신설
+      `ops/shutdown_watchdog.py`가 **그날 실제 match 기록에서** 강제 종료 대상을 파생
+      (정적 목록 금지) ③ 종료 판정을 `session_end_verdict()` 한 함수로 통합.
+      08-21 재실행 실측: 적신호가 `ui: SessionEnd 없음 — watchdog 강제 종료(설계) —
+      15:40:01 PID 11280 ... (결함 아님)`으로 전환됐다
+
+### 계획과 다른 점 (반드시 읽을 것)
+
+- **F-12 부호** — 리포트 본문은 `offset = local_publish_ts - (exchange_bar_close +
+  skew)`라고 적었지만 그대로 구현하면 오전 −495ms가 −1,293ms로 **더 나빠진다.**
+  같은 절의 검증 예시(1m · skew +800 · 발행 T+300 → **+1,100**)가 `raw + skew`를
+  가리키고 실측 대조도 그쪽이라, 검증 예시를 따랐다
+- **F-14 유예(grandfather) 미사용** — 리포트는 옛 번들을 유예하라고 했지만, 관문 일곱
+  개의 실제 결과가 같은 디렉터리의 `validation_report.json`에 **그대로 남아 있었다.**
+  재료가 있으므로 유예 대신 마이그레이션으로 실제 판정을 복원했다. 유예 경로
+  (`BundlePromotedWithLegacyGates`)는 코드에 남아 있다 — 재료가 없는 번들용
+- **F-14 부작용(확인 필요)** — 이제 `--promote live`가 **미측정 성과 관문 3종 때문에
+  새 번들을 거부한다.** 그것이 F-14의 취지이지만, 부트스트랩 통로가 막힌다는 뜻이기도
+  하다. 우회 플래그는 **일부러 안 만들었다**(만들면 방금 막은 구멍을 다시 연다).
+  사용자 조치 3번(㉡ 성과 3종 측정)이 그 통로를 여는 정규 경로다
+- **F-5 「`task_exit_codes.launches` 4종 표시」** — 자가점검에 넣지 않았다. ㉠ 자가점검은
+  08:20에 도는데 그 시점엔 Shutdown·Postmarket이 아직 안 떴고 ㉡ `Get-WinEvent` 조회를
+  매 기동에 붙이는 비용이 크며 ㉢ `task_exit_codes.summarize()`가 **이미** 장후 리포트에
+  기동 이력 4종을 전부 싣고 있다. 1-7의 실질(대조 범위 4종)은 `check_schedule_drift`
+  확장으로 달성됐다
+- **`mlog.log(level=...)` 예외 통로 신설** — F-6 ③이 요구한 「호출부 레벨 승격」을 위해
+  `_LEVEL_ESCALATABLE` 화이트리스트를 만들었다. **명시된 태그만, 올리는 방향으로만.**
+  내리는 것은 `ValueError`다(조용해지는 방향의 예외는 금지계명 12가 막는 그것)
+
+### 구현 중 스스로 잡은 것 (전체 스위트가 드러냈다)
+
+- [x] **유예 경보가 학습·리플레이 경로에서 봉마다 터졌다** — `models/trainer.
+      build_feature_vectors()`가 같은 `FeatureEngine`으로 과거 봉을 흘리는데, 그때
+      `now()`는 벽시계고 `valid_until`은 몇 달 전이라 오프셋이 **수십억 ms**가 된다.
+      첫 구현이 `발행 유예 초과 — 5m 2377834874ms`를 봉마다 찍었다.
+      → `_PUBLISH_OFFSET_LIVE_CEILING_MS`(1시간) 신설. **값은 안 버린다** —
+      `_publish_offsets`에 그대로 쌓여 세션 요약에 실리고, 경보 축에서만 뺀다.
+      회귀 테스트 2건(상한 초과는 조용 · 5.5초 실측 정체는 그대로 운다)
+- [x] **F-8의 「묶는다」가 실제로는 안 묶였다** — 첫 구현은 발행마다 즉시 남겨서
+      3-Horizon 군집이 **세 줄**이 됐다(목적이 사라진다). → 순간이 바뀌거나 세션이
+      끝날 때 flush하는 방식으로 바꿨다. 대가: 그날 마지막 한 건은 세션 요약 시점에
+      남는다(`bar_confirm_kst`가 실제 시각을 말하므로 사후 분석에는 영향 없음)
+- [x] **F-6이 관문을 일곱 → 여덟로 늘렸다** — `meta_threshold_sane`.
+      `test_build_one_produces_a_loadable_bundle`의 기대값 정정
+
+### 미해결 — 이 세션 범위 밖
+
+- [ ] **이 PC의 시스템 시계가 +5.616초 어긋나 있다** — 자가점검 `[FAIL] clock` (임계 5초).
+      **지금 상태면 2026-08-24 아침 L1·G2가 기동을 거부한다.** `w32time`은 Running.
+      `w32tm /resync` 필요 — 사람이 해야 하는 조치다
+- [ ] **Docker 데몬 무응답** — `host` 자가점검 경고. 이 때문에
+      `tests/ops/test_integrity_report.py` 4건이 환경 사유로 실패한다(코드 결함 아님)
+
+### 등록부 유지보수
+
+- [ ] **`archiver-restart-restore` 검증 기한 재조정** — 기한 2026-08-20까지 채점 가능일이
+      3일뿐이었다(필요 5일). **못 고친 게 아니라 잴 날이 없었다.** 사용자 조치 5번
+- [ ] **등록부 22개 항목 `fix_committed` 기입** — 「고쳤는데 안 듣는다」와 「아직 안 고쳤다」를
+      가르려면 채워야 한다. 장후 배치가 오늘도 같은 안내를 냈다
+      (ui-crash-isolation · ui-restart-observability · crash-forensics-armed ·
+      tick-collection-live · clock-sync-restored 외)

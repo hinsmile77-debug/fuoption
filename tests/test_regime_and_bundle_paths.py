@@ -179,6 +179,10 @@ def _gate(name: str, passed: bool) -> GateResult:
     return GateResult(name=name, passed=passed, value=0.1, threshold=0.5)
 
 
+def _unmeasured_gate(name: str) -> GateResult:
+    return GateResult(name=name, passed=False, value=None, threshold=None, measured=False)
+
+
 def test_performance_gates_are_recorded_as_unmeasured_not_omitted():
     """**빼면 "넷을 다 통과했다"처럼 읽힌다.** 실제로는 일곱 중 넷이고 셋은 아무도 안 쟀다 —
     없는 것과 통과한 것을 같은 모양으로 두지 않는다(마흐디 L18)."""
@@ -187,6 +191,10 @@ def test_performance_gates_are_recorded_as_unmeasured_not_omitted():
     assert {g.name for g in gates} == {"sharpe", "max_drawdown", "negative_window_ratio"}
     assert all(not g.passed for g in gates)
     assert all("미측정" in g.detail for g in gates)
+    # 2026-08-21 F-14 — 미측정은 `measured=False` + `value=None`이다. `NaN`이 아니다:
+    # `NaN`은 `validation_report.json`을 엄밀한 JSON이 아니게 만든다.
+    assert all(g.measured is False for g in gates)
+    assert all(g.value is None and g.threshold is None for g in gates)
 
 
 def test_model_gates_ignore_the_deferred_performance_gates():
@@ -285,8 +293,10 @@ async def test_build_one_produces_a_loadable_bundle(tmp_path):
     assert built is not None, "합성 데이터로도 한 바퀴는 돌아야 한다"
     bundle_id, report, bundle_dir, trained_range = built
 
-    # 관문 일곱이 전부 기록된다 — 성과 셋은 "미측정"으로.
-    assert len(report.gates) == 7
+    # 관문 **여덟**이 전부 기록된다 — 성과 셋은 "미측정"으로 (2026-08-21 F-6이
+    # `meta_threshold_sane`을 더해 일곱 → 여덟이 됐다).
+    assert len(report.gates) == 8
+    assert "meta_threshold_sane" in {gate.name for gate in report.gates}
     # 아티팩트가 실제로 다시 읽힌다(매니페스트만 그럴듯한 번들은 롤백 때 드러난다).
     from messiah.models.registry import load_expert, load_manifest, load_meta_labeler
 
@@ -296,8 +306,15 @@ async def test_build_one_produces_a_loadable_bundle(tmp_path):
     assert manifest.trained_range == trained_range
     assert load_expert(bundle_dir) is not None
     assert load_meta_labeler(bundle_dir) is not None
-    # 통과한 관문만 매니페스트에 담긴다 — 미측정 성과 관문이 통과로 실리면 안 된다.
+    # **미측정도 매니페스트에 남는다** — 다만 통과로는 실리지 않는다 (2026-08-21 F-14).
+    # 종전엔 통과분만 담아서 미측정 성과 셋이 기록에서 통째로 사라졌고, 그래서
+    # 매니페스트만 보면 언제나 전원 통과였다.
     assert "sharpe" not in manifest.gates_passed
+    sharpe = next(gate for gate in manifest.gates if gate.name == "sharpe")
+    assert sharpe.measured is False
+    assert sharpe.passed is False
+    assert sharpe.value is None  # NaN이 아니다 — 엄밀한 JSON이어야 한다
+    assert "sharpe" in {gate.name for gate in manifest.blocking_gates()}
 
 
 # ---------------------------------------------------------------- 부트스트랩 승격
@@ -317,7 +334,20 @@ class _Args:
         self.supersede_reason = supersede_reason
 
 
-def _register(registry: ModelRegistry, bundle_id: str, tmp_path: Path) -> None:
+def _register(
+    registry: ModelRegistry, bundle_id: str, tmp_path: Path, *, gates=None
+) -> BundleManifest:
+    """번들 디렉터리와 `manifest.yaml`을 **실제로 만든다.**
+
+    종전 이 헬퍼는 매니페스트 객체만 만들고 파일을 쓰지 않았다. 2026-08-21 F-14로
+    `promote_to_live()`가 승격 직전 매니페스트를 다시 읽으므로, 파일이 없으면 승격이
+    거부된다 — 그것이 옳은 동작이다(판정할 재료가 없으면 통과시키지 않는다). 테스트는
+    운영과 같은 모양을 만들어야 한다.
+    """
+    import yaml
+
+    from messiah.models.registry import ManifestGate
+
     manifest = BundleManifest(
         bundle_id=bundle_id,
         horizon=Horizon.M30,
@@ -325,9 +355,20 @@ def _register(registry: ModelRegistry, bundle_id: str, tmp_path: Path) -> None:
         run_id="test",
         feature_set="v2026.07",
         validation_report="validation_report.json",
-        gates_passed={"calibration_brier": 0.1},
+        gates=tuple(
+            gates
+            if gates is not None
+            else (ManifestGate("calibration_brier", passed=True, value=0.1, threshold=0.5),)
+        ),
     )
-    registry.register(manifest, tmp_path / bundle_id)
+    bundle_dir = tmp_path / bundle_id
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "manifest.yaml").write_text(
+        yaml.safe_dump(manifest.to_yaml_dict(), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    registry.register(manifest, bundle_dir)
+    return manifest
 
 
 def test_the_first_bundle_may_become_the_champion(tmp_path):

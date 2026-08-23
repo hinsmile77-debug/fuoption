@@ -1178,6 +1178,11 @@ async def main(cfg: InstanceConfig) -> None:
         bus,
         feature_set=cfg.feature_set,
         sidecars=sidecar.build(resolved_spec),
+        # 발행 오프셋을 **1m 계열에 한해** 발행 시점의 롤링 스큐로 보정한다
+        # (2026-08-21 F-12). 합성기(`MultiHorizonBarComposer`)가 쓰는 것과 **같은**
+        # 콜러블이다 — 봉 경계를 판정한 축과 그 경계를 채점하는 축이 다르면, 계기가
+        # 자기가 재려는 오염의 영향권 안에 들어간다.
+        clock_skew_seconds=collector.clock_skew_seconds,
     )
     # 체결틱 원본 적재 (2026-08-04, F2). 지금까지 이 프로젝트는 틱을 한 번도 저장한 적이
     # 없다 — 받아서 분봉으로 집계하고 버렸다. 그래서 MS(마이크로구조) 30개가 통째로

@@ -36,11 +36,45 @@ from messiah.strategy.futures.expert import HorizonExpert
 
 @dataclass(frozen=True)
 class GateResult:
+    """관문 하나의 결과 — **통과·미달·미측정 셋을 전부 표현한다** (2026-08-21 F-14).
+
+    종전엔 `measured`가 없어서 "재 봤더니 미달"과 "아무도 안 쟀다"가 같은 모양
+    (`passed=False`)이었다. 미측정 쪽은 값을 `NaN`으로 때웠는데(마흐디 L18의 취지는
+    맞았지만 수단이 틀렸다) 그 대가로 `validation_report.json`이 엄밀한 JSON이 아니게
+    됐다 — `json.dumps`가 `NaN`을 그대로 쓰기 때문에 jq·브라우저가 거부한다.
+
+    지금은 **미측정을 `value=None` + `measured=False`로 적는다.** 엄밀한 JSON이면서
+    거짓 0도 아니다. `passed`는 미측정일 때 **반드시 False** — 승격 관문이
+    `all(gate.passed)`로 판정하므로 미측정이 통과로 새지 않는다.
+    """
+
     name: str
     passed: bool
-    value: float
-    threshold: float
+    value: float | None
+    threshold: float | None
     detail: str = ""
+    measured: bool = True
+
+    def to_dict(self) -> dict:
+        """엄밀 JSON 직렬화용 — `NaN`을 절대 내보내지 않는다.
+
+        `float("nan")`이 값으로 들어와도(옛 호출부) `None`으로 눕힌다. 파서가 거부하는
+        산출물을 만드느니 "못 쟀다"고 말하는 편이 낫다.
+        """
+
+        def _clean(x: float | None) -> float | None:
+            if x is None:
+                return None
+            return None if math.isnan(x) or math.isinf(x) else float(x)
+
+        return {
+            "name": self.name,
+            "passed": bool(self.passed),
+            "measured": bool(self.measured),
+            "value": _clean(self.value),
+            "threshold": _clean(self.threshold),
+            "detail": self.detail,
+        }
 
 
 @dataclass(frozen=True)
@@ -49,11 +83,19 @@ class ValidationReport:
 
     @property
     def passed(self) -> bool:
-        """전 관문 통과 시에만 True — 하나라도 미달이면 Registry 등록 거부(Ver 1.2 §8.3)."""
+        """전 관문 통과 시에만 True — 하나라도 미달이면 Registry 등록 거부(Ver 1.2 §8.3).
+
+        미측정 관문은 `passed=False`이므로 여기서 자동으로 걸린다 — **"안 쟀으니 통과"가
+        구조적으로 불가능하다**(F-14).
+        """
         return all(gate.passed for gate in self.gates)
 
     def failed_gates(self) -> list[GateResult]:
         return [gate for gate in self.gates if not gate.passed]
+
+    def unmeasured_gates(self) -> list[GateResult]:
+        """미달과 미측정을 가른다 — 사람이 "고칠 것"과 "잴 것"을 구별할 수 있게."""
+        return [gate for gate in self.gates if not gate.measured]
 
 
 @dataclass(frozen=True)
@@ -137,6 +179,47 @@ class Validator:
         avg_ms = _benchmark_latency_ms(expert, sample, n_calls=n_calls)
         return GateResult(
             "inference_latency_ms", avg_ms < cfg.latency_budget_ms, avg_ms, cfg.latency_budget_ms
+        )
+
+    def validate_meta_threshold(self, selection: object | None) -> GateResult:
+        """메타 임계가 **게이트 구실을 하는 값인가** (2026-08-21 F-6 ④).
+
+        차단 계층 하나가 열려 있는 채로 승격되는 것을 막는다. 두 가지를 함께 본다:
+
+        - **범위**: `0 < 임계 < 1`. 임계 0이면 `p >= 0`이 언제나 참이라 게이트가 통째로
+          없는 것과 같고, 1 이상이면 아무것도 통과 못 해 반대쪽으로 무의미하다.
+        - **출처**: `optimized`. 폴백은 "지지도 하한을 채우는 후보가 하나도 없어 격자 첫
+          칸으로 떨어졌다"는 뜻이라, 값이 우연히 범위 안이어도 근거가 없다.
+
+        2026-08-21 실측에서 현역 번들의 임계가 `0.0`이었고, 승격 관문 어디에도 그것을
+        묻는 항목이 없었다 — 그래서 아무도 몰랐다.
+
+        `selection`이 `None`이면 **미측정**이다(옛 번들엔 출처 키 자체가 없다). 미측정은
+        `passed=False`이므로 F-14의 승격 관문이 그대로 막는다 — 통과로 새지 않는다.
+        """
+        if selection is None:
+            return GateResult(
+                "meta_threshold_sane",
+                passed=False,
+                value=None,
+                threshold=None,
+                detail="미측정 — 임계값 출처가 번들에 기록돼 있지 않다(2026-08-21 F-6 이전 번들)",
+                measured=False,
+            )
+        value = float(getattr(selection, "value"))
+        source = str(getattr(selection, "source"))
+        support = getattr(selection, "support", None)
+        total = getattr(selection, "total", None)
+        min_support = getattr(selection, "min_support", None)
+        passed = (0.0 < value < 1.0) and source == "optimized"
+        return GateResult(
+            "meta_threshold_sane",
+            passed=passed,
+            value=value,
+            threshold=None,  # 단일 상한이 아니라 구간+출처 조건이다 — 숫자 하나로 못 적는다
+            detail=(
+                f"임계 {value:g} · 출처 {source} · 지지 {support}/{total} (하한 {min_support})"
+            ),
         )
 
     def validate_serialization(

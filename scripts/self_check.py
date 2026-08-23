@@ -560,13 +560,69 @@ def check_secrets(cfg: InstanceConfig) -> CheckResult:
 
 
 def check_bundle(cfg: InstanceConfig) -> CheckResult:
-    """live는 모델 번들 필수 + 번들 매니페스트 존재 확인 (L11 — 릴리스 일치)."""
+    """live는 모델 번들 필수 + 번들 매니페스트 존재 확인 (L11 — 릴리스 일치).
+
+    **dev/paper/replay에서도 조용히 넘어가지 않는다** (2026-08-21 F-14 ㉢ · G-3 연계).
+    종전엔 `dev — 생략` 한 마디였고, 그래서 승격 관문 관련 고침의 효과가 dev에서는 아예
+    보이지 않았다. 「생략」과 「통과」가 같은 초록색으로 뜨는 것이 이 저장소가 반복해서
+    다친 형태다 — 지금은 **미측정임을 명시**하고, 판정할 수 있는 부분(Registry의 현역
+    번들이 승격 관문을 유예받았는지)은 모드와 무관하게 판정한다.
+    """
+    # 유예 사실은 **기록으로 시작한다**(R18 — 첫날은 차단하지 않는다). 여기서 바로
+    # `ok=False`를 내면 오늘 세 프로세스가 전부 기동 실패한다 — 어제까지 돌던 상태를
+    # 코드 한 줄로 정지시키는 것은 F-14가 요청한 바가 아니다("코드만 먼저 넣고 기존
+    # 번들은 유예하되, 유예됐다는 사실을 매 기동 자가점검에 찍는다").
+    grandfathered = _grandfathered_live_bundles()
+    suffix = f"; [WARN] {grandfathered}" if grandfathered else ""
     if cfg.mode != "live":
-        return CheckResult("bundle", True, f"{cfg.mode} — 생략")
+        return CheckResult(
+            "bundle", True, f"{cfg.mode} — 릴리스 일치는 미측정(live 모드에서만 판정){suffix}"
+        )
     if cfg.model_bundle in ("", "none"):
         return CheckResult("bundle", False, "live 모드에 model_bundle 미지정")
     manifest = Path("data/models") / cfg.model_bundle / "manifest.yaml"
-    return CheckResult("bundle", manifest.exists(), str(manifest))
+    return CheckResult("bundle", manifest.exists(), f"{manifest}{suffix}")
+
+
+def _grandfathered_live_bundles() -> str:
+    """현역(live) 번들 중 승격 관문을 **판정받지 못한 채** 올라간 것을 문장으로 돌려준다.
+
+    2026-08-21 F-14가 승격 관문을 세우면서 기존 번들은 유예(grandfather)했다 — 옛
+    매니페스트 스키마에는 미달·미측정 관문이 애초에 기록돼 있지 않아 판정할 재료가 없기
+    때문이다. **유예는 통과가 아니다.** 그 사실이 매 기동 자가점검에 뜨지 않으면 유예가
+    영구화된다(금지계명 12).
+
+    판정 불가(Registry 없음·ml extras 없음)는 빈 문자열이다 — 자가점검을 죽이지 않는다.
+    """
+    db = Path("data/models/registry.db")
+    if not db.exists():
+        return ""
+    try:
+        from messiah.core.messages import BundleStatus
+        from messiah.models.registry import ModelRegistry, load_manifest
+
+        registry = ModelRegistry(db)
+        try:
+            records = registry.list_by_status(BundleStatus.LIVE)
+        finally:
+            registry.close()
+        problems: list[str] = []
+        for record in records:
+            try:
+                manifest = load_manifest(record.bundle_dir)
+            except Exception:  # noqa: BLE001 — 못 읽는 것도 사실이다
+                problems.append(f"{record.bundle_id}(매니페스트 판독 실패)")
+                continue
+            if manifest.legacy_gates:
+                problems.append(f"{record.bundle_id}(옛 스키마 — 관문 유예)")
+            elif manifest.blocking_gates():
+                names = ",".join(g.name for g in manifest.blocking_gates())
+                problems.append(f"{record.bundle_id}(미통과 관문 {names})")
+        if not problems:
+            return ""
+        return "[승격 관문 미판정 현역 번들] " + " · ".join(problems)
+    except Exception:  # noqa: BLE001 — ml extras 없는 venv에서도 자가점검은 살아야 한다
+        return ""
 
 
 def check_registry_consistency(cfg: InstanceConfig) -> CheckResult:

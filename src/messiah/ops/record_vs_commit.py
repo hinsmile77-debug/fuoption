@@ -63,6 +63,30 @@ def _today() -> date:
 # `- [x] ...` / `  - [X] ...` — 들여쓰기와 대소문자를 모두 받는다.
 _CLOSED = re.compile(r"^\s*[-*]\s*\[[xX]\]")
 
+#: **구현 종결**로 세는 항목의 머리표 — `NEXT_TODO.md`의 Fix / 고도화 항목 (2026-08-21 F-16).
+#:
+#: 나머지(`A-`/`B-`/`K-`/`M-`/`Q-`/`U-` 등 관측 시리즈)는 **관측 종결**이다. 「오늘 이
+#: 값이 얼마였나」를 확인하고 닫는 항목이라 커밋할 코드가 애초에 없다.
+_IMPLEMENTATION_PREFIX = re.compile(r"^\s*[-*]\s*\[[xX]\]\s*\**\s*(F|G)-", re.IGNORECASE)
+
+
+def classify_closed(line: str) -> str:
+    """닫힌 항목 한 줄이 **구현 종결인가 관측 종결인가** (2026-08-21 F-16 · 1-15).
+
+    ## 왜 갈라야 하나
+
+    이 축은 「완료라 적었는데 반입되지 않은 날」을 잡으려고 만들었다. 그런데 2026-08-21에
+    **점검 세션 자신이** 관측 항목 스물몇 건을 닫았고 — 「오늘 1m 오프셋이 얼마였나」 같은,
+    커밋할 코드가 애초에 없는 항목들이다 — 이 축이 그것을 「완료 처리 N건인데 미커밋」으로
+    읽어 적신호를 냈다. **측정 도구가 자기를 돌리는 세션의 산물을 결함으로 센 것**이다.
+
+    같은 형태를 이 저장소가 반복해서 맞았다: 2026-08-20 `b0e1ddd`("오염을 막으려 만든 축이
+    정작 그 오염을 못 막았다") · `60b6d95`("기록이 자기 자신을 채점하고 있었다").
+
+    반환은 `"implementation"` 또는 `"observation"`.
+    """
+    return "implementation" if _IMPLEMENTATION_PREFIX.match(line) else "observation"
+
 
 @dataclass
 class RecordVsCommit:
@@ -70,10 +94,13 @@ class RecordVsCommit:
 
     n_closed: int | None
     n_commits: int | None
-    # "ok" | "closed_without_commit" | "closed_with_uncommitted_source" | "unresolved"
+    # "ok" | "observation_only" | "closed_without_commit"
+    # | "closed_with_uncommitted_source" | "unresolved"
     verdict: str
     detail: str = ""
     closed_items: list[str] = field(default_factory=list)
+    # 그중 **구현 종결**(F-/G- 항목) 수 (2026-08-21 F-16). `None`은 미측정.
+    n_implementation: int | None = None
     # 하루 끝의 `src/`·`scripts/` 미커밋 파일 수 (2026-08-20 F-2). `None`은 미측정이다.
     dirty_files: int | None = None
 
@@ -88,6 +115,7 @@ class RecordVsCommit:
             "verdict": self.verdict,
             "detail": self.detail,
             "dirty_files": self.dirty_files,
+            "n_implementation": self.n_implementation,
             # 항목 문구를 담되 상한을 둔다 — `NEXT_TODO.md`가 480KB라 전량이면 리포트가
             # 그 파일의 사본이 된다. 사람이 "무엇을 닫았나"를 떠올리기엔 몇 줄이면 충분하다.
             "closed_items": self.closed_items[:5],
@@ -168,6 +196,10 @@ def assess(
     now = _closed_lines(now_text)
     newly = [line for line in now if line not in was]
     n_closed = len(newly)
+    # **관측 종결과 구현 종결을 가른다** (2026-08-21 F-16 · 1-15). 관측 항목은 커밋할
+    # 코드가 애초에 없으므로 「완료라 적었는데 반입 안 됨」의 대상이 아니다.
+    implementation = [line for line in newly if classify_closed(line) == "implementation"]
+    n_implementation = len(implementation)
 
     # **원안 규칙만으로는 정작 그 사고를 못 잡는다** (실측으로 확인).
     #
@@ -184,34 +216,56 @@ def assess(
         dirty = worktree_dirty_files() if is_today else None
     else:
         dirty = dirty_source_files
-    if n_closed > 0 and dirty:
+    # **관측만 닫은 날은 결함이 아니다** (2026-08-21 F-16). 점검 세션이 그날의 관측
+    # 항목을 닫는 것은 정상 운영이고, 그것을 「미반입」으로 세면 이 축이 매일 운다 —
+    # 그리고 매일 우는 축은 정작 진짜 사고가 난 날에도 안 읽힌다.
+    #
+    # 분류 근거를 `detail`에 반드시 남긴다: 진짜 구현 종결을 관측으로 오분류하면
+    # 원래 잡으려던 것을 못 잡게 되고, 그때 사람이 확인할 재료가 이 문장뿐이다.
+    if n_closed > 0 and n_implementation == 0:
+        return RecordVsCommit(
+            n_closed,
+            n_commits,
+            "observation_only",
+            f"완료 처리 {n_closed}건이 전부 관측 종결(F-/G- 항목 0건)이다 — "
+            f"커밋할 구현분이 없다 · 커밋 {n_commits}건"
+            + ("" if dirty is None else f" · 미커밋 {dirty}파일"),
+            closed_items=newly,
+            dirty_files=dirty,
+            n_implementation=n_implementation,
+        )
+    if n_implementation > 0 and dirty:
         return RecordVsCommit(
             n_closed,
             n_commits,
             "closed_with_uncommitted_source",
-            f"{n_closed}건을 완료로 적었는데 src/scripts에 미커밋 {dirty}파일이 남아 있다 — "
+            f"구현 {n_implementation}건(전체 {n_closed}건)을 완료로 적었는데 "
+            f"src/scripts에 미커밋 {dirty}파일이 남아 있다 — "
             "다음 기동은 커밋에 없는 코드로 돈다",
-            newly,
-            dirty,
+            closed_items=newly,
+            dirty_files=dirty,
+            n_implementation=n_implementation,
         )
-    if n_closed > 0 and n_commits == 0:
+    if n_implementation > 0 and n_commits == 0:
         return RecordVsCommit(
             n_closed,
             n_commits,
             "closed_without_commit",
-            f"{n_closed}건을 완료로 적었는데 그날 커밋이 0건이다 — "
-            "구현분이 반입되지 않은 채 다음 기동을 맞는다",
-            newly,
-            dirty,
+            f"구현 {n_implementation}건(전체 {n_closed}건)을 완료로 적었는데 그날 커밋이 "
+            "0건이다 — 구현분이 반입되지 않은 채 다음 기동을 맞는다",
+            closed_items=newly,
+            dirty_files=dirty,
+            n_implementation=n_implementation,
         )
     return RecordVsCommit(
         n_closed,
         n_commits,
         "ok",
-        f"완료 처리 {n_closed}건 · 커밋 {n_commits}건"
+        f"완료 처리 {n_closed}건(구현 {n_implementation}건) · 커밋 {n_commits}건"
         + ("" if dirty is None else f" · 미커밋 {dirty}파일"),
-        newly,
-        dirty,
+        closed_items=newly,
+        dirty_files=dirty,
+        n_implementation=n_implementation,
     )
 
 
@@ -219,5 +273,6 @@ def summarize(result: RecordVsCommit) -> list[str]:
     """사람이 읽는 한 줄 — **어긋남이 없는 날도 남긴다**(측정된 0과 미검사를 가른다)."""
     if result.verdict == "unresolved":
         return [f"  기록↔반입 대조: 판정 불가 — {result.detail}"]
-    mark = "⚠" if result.breached else "✅"
+    # 관측만 닫은 날은 결함도 통과도 아니다 — 잴 대상이 없었다는 사실을 그대로 적는다.
+    mark = "⚠" if result.breached else ("·" if result.verdict == "observation_only" else "✅")
     return [f"  {mark} 기록↔반입 대조: {result.detail}"]

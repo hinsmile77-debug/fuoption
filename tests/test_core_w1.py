@@ -193,3 +193,33 @@ def test_unregistered_log_tag_rejected() -> None:
     """태그 1개=심각도 1개 — 미등록 태그는 사용 불가 (R6 / L10)."""
     with pytest.raises(ValueError, match="미등록 태그"):
         mlog.log("RandomNewTag", "should fail")
+
+
+def test_level_override_is_refused_for_ordinary_tags() -> None:
+    """레벨은 등록부가 정한다 — 아무 태그나 호출부에서 올릴 수 있으면 R6가 무의미해진다
+    (2026-08-21 F-6 예외 통로)."""
+    import logging as _logging
+
+    with pytest.raises(ValueError, match="레벨 지정이 허용되지 않는다"):
+        mlog.log("SessionStart", "should fail", level=_logging.WARNING)
+
+
+def test_level_override_cannot_lower_severity() -> None:
+    """올리는 방향만 허용한다 — **조용해지는 방향의 예외**가 금지계명 12가 막는 그것이다."""
+    import logging as _logging
+
+    with pytest.raises(ValueError, match="낮출 수 없다"):
+        mlog.log("BundlePromotionRejected", "should fail", level=_logging.INFO)
+
+
+def test_level_override_escalates_a_whitelisted_tag(caplog) -> None:
+    """`MetaGateEvaluated`는 정상 사이클마다 나오는 INFO지만, 임계가 0이면 같은 태그가
+    「차단 계층이 열려 있다」는 사고 보고다 — 그 한 줄만 WARNING으로 올라가야 한다."""
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="messiah"):
+        mlog.log("MetaGateEvaluated", "정상", threshold=0.4)
+        mlog.log("MetaGateEvaluated", "게이트 무력", threshold=0.0, level=_logging.WARNING)
+
+    levels = [r.levelno for r in caplog.records if getattr(r, "tag", None) == "MetaGateEvaluated"]
+    assert levels == [_logging.INFO, _logging.WARNING]

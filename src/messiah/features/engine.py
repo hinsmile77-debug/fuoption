@@ -320,6 +320,59 @@ def _is_price_degenerate(history: Sequence[BarClosed]) -> bool:
     return len({bar.c_ticks for bar in history[-_DEGENERATE_WINDOW:]}) == 1
 
 
+#: 발행 오프셋을 **어느 시간축으로 쟀는가** (2026-08-21 F-12).
+#:
+#: `exchange_vs_local`: 봉 확정은 거래소 시각 경계, 발행 시각은 로컬 시계 — 두 축이다.
+#:   1m만 여기 해당하고, 롤링 스큐로 보정한다.
+#: `local_only`: 봉 도착도 발행도 로컬 시계 — 한 축이다. 3m 이상이 여기 해당하고,
+#:   보정하면 없던 계통오차가 생긴다.
+_PUBLISH_OFFSET_AXIS_EXCHANGE = "exchange_vs_local"
+_PUBLISH_OFFSET_AXIS_LOCAL = "local_only"
+
+#: 유예를 **몇 배** 넘겨야 한 줄 남기는가 (2026-08-21 F-15 ③).
+#:
+#: 1배로 잡으면 3m~30m이 매일 전량 걸린다 — 2026-08-21 실측 중앙값이 3m 586ms ~
+#: 30m 775ms로 유예 500ms를 상시 넘고 있고, 그것이 사실이지만 매일 400줄이면 경보가
+#: 닳는다(1-15와 같은 형태). 4배(2,000ms)는 그날 어느 Horizon의 중앙값보다도 크고,
+#: 실제 정체 군집(최대 5.5초)은 확실히 넘는 값이다.
+#:
+#: **F-12 이후에만 의미가 있다.** 보정 전 1m 오프셋은 오전 −495ms / 오후 +353ms로
+#: 미끄러져서, 절대 임계가 오전과 오후에 서로 다른 것을 재게 된다(1-11 정정).
+_PUBLISH_GRACE_ALERT_MULTIPLE = 4.0
+
+
+def _boundary_grace_ms() -> float:
+    """완성봉 유예(ms) — **합성기 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
+
+    `scripts/self_check.py._boundary_grace_seconds()` ·
+    `ops/integrity_report.boundary_grace_seconds()`와 **같은 출처**를 본다. 셋이 갈리면
+    자가점검이 인용하는 값과 채점에 쓰는 값이 달라진다(F-15 ②).
+    """
+    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+
+    return float(_BOUNDARY_GRACE_SECONDS) * 1000.0
+
+
+#: 같은 정체로 묶는 시간 폭 — 여러 Horizon 경계가 한 순간에 겹칠 때 (2026-08-21 F-8).
+#:
+#: 2026-08-21 실측에서 14군집 중 5군집이 2개 이상 Horizon이 함께 늦은 형태였다.
+#: 개별로 남기면 "한 Horizon이 늦었다"와 "루프가 멈췄다"가 로그에서 구분되지 않는다.
+_PUBLISH_STALL_CLUSTER_MS = 100.0
+
+#: 이 값을 넘는 오프셋은 **발행 지연이 아니다** — 리플레이·학습이다 (2026-08-21).
+#:
+#: `models/trainer.build_feature_vectors()`는 같은 `FeatureEngine`으로 과거 봉을 흘린다.
+#: 그때 `now()`는 벽시계고 `valid_until`은 몇 달 전이라 오프셋이 **수십억 ms**가 된다
+#: (첫 구현에서 학습 테스트가 `발행 유예 초과 — 5m 2377834874ms`를 봉마다 찍었다).
+#: 그것은 "늦게 발행했다"가 아니라 "지금 재생 중이다"이고, 경보로 올리면 진짜 신호가
+#: 그 아래 묻힌다.
+#:
+#: 1시간은 어떤 실측 정체보다도 크다(2026-08-21 최대 5.5초). 그리고 이 경계를 넘는
+#: **값 자체는 버리지 않는다** — `_publish_offsets`에 그대로 쌓여 세션 요약에 실린다.
+#: 조용히 없애는 것이 아니라, 경보 축에서만 뺀다.
+_PUBLISH_OFFSET_LIVE_CEILING_MS = 60 * 60 * 1000.0
+
+
 class FeatureEngine:
     """단일 심볼용 — 전 Horizon의 완성봉을 구독해 PX+VL Feature를 계산·발행한다.
 
@@ -344,6 +397,7 @@ class FeatureEngine:
         sidecars: Mapping[str, object] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = now_kst,
+        clock_skew_seconds: Callable[[], float | None] | None = None,
     ) -> None:
         """
         입력: `feature_set`은 `features/spec.py`가 아는 이름이어야 한다 — 미등록 이름은 기저
@@ -394,7 +448,22 @@ class FeatureEngine:
         # **완성봉 확정에서 발행까지 몇 ms 걸렸나** (2026-08-20 F-E). `(시각, 오프셋ms)` 쌍을
         # 세션 내내 모아 장 마감에 한 줄로 낸다 — 하루 700건 남짓이라 메모리는 무시할 수준이고,
         # 사이클마다 집계하면 그 자체가 예산을 먹는다.
-        self._publish_offsets: list[tuple[datetime, float]] = []
+        # (발행 시각, 오프셋ms, Horizon, 축) — 축을 함께 들고 있어야 세션 요약이
+        # "1m은 보정된 값, 3m+는 원래부터 한 축"임을 말할 수 있다 (2026-08-21 F-12).
+        self._publish_offsets: list[tuple[datetime, float, Horizon, str]] = []
+        # 발행 시점의 **롤링** 시계 스큐를 읽는 콜러블(보통 `TickCollector.clock_skew_seconds`).
+        # 없으면 보정하지 않는다 — 보정 못 하는 것이지 스큐가 0인 것이 아니다(L18).
+        self._clock_skew_seconds = clock_skew_seconds
+        # 아직 안 남긴 정체 군집 (2026-08-21 F-8) — (봉확정시각, [(Horizon, 오프셋ms)]).
+        #
+        # **왜 즉시 안 남기는가.** 같은 봉 확정 순간에 몇 개 Horizon이 걸릴지는 그 순간이
+        # 지나기 전에는 모른다. 즉시 남기면 3개짜리 군집이 세 줄이 되어 「묶는다」는 목적이
+        # 사라진다. 그래서 **다음 순간이 오거나 세션이 끝날 때** 한 줄로 flush한다.
+        #
+        # 대가: 그날 마지막 한 건은 세션 요약 시점에 남는다. `bar_confirm_kst`가 실제
+        # 시각을 정확히 말하므로 사후 분석에는 영향이 없다 — 이 축은 실시간 경보가 아니라
+        # 다음 날 세는 계기다(검증 기준이 「다음 거래일 건수 일치」다).
+        self._pending_stall: tuple[datetime, list[tuple[Horizon, float]]] | None = None
         # 피처별 세션 누적 통계 (2026-08-05, 고도화 3) — `_FeatureStat` 주석 참고.
         self._feature_stats: dict[Horizon, dict[str, _FeatureStat]] = {
             h: {} for h in self._horizons
@@ -874,7 +943,7 @@ class FeatureEngine:
         #
         # 확정 시각을 그대로 실으면 그 모호성이 **구조적으로** 사라진다. 값은 이미 손에 있다
         # (`vector.valid_until` = `bar_open_kst + Horizon길이`) — 새 입력이 필요 없다.
-        offset_ms = self._record_publish_offset(vector)
+        offset_ms, offset_axis, skew_ms = self._record_publish_offset(vector)
         mlog.log(
             "FeaturePublish",
             "FeatureVector 발행",
@@ -886,20 +955,151 @@ class FeatureEngine:
                 None if vector.valid_until is None else vector.valid_until.isoformat()
             ),
             publish_offset_ms=offset_ms,
+            # **어느 축으로 잰 값인지 로그가 스스로 말하게 한다** (2026-08-21 F-12).
+            # 종전엔 같은 이름의 필드가 Horizon에 따라 다른 것을 재고 있었고, 그 사실이
+            # 로그 어디에도 없어서 사람이 매번 코드를 읽어야 했다.
+            publish_offset_axis=offset_axis,
+            publish_offset_skew_ms=skew_ms,
         )
+        self._note_publish_grace(vector, offset_ms)
 
-    def _record_publish_offset(self, vector: FeatureVector) -> float | None:
-        """봉 확정 → 발행까지의 지연(ms). `valid_until`이 없으면 `None`(0이 아니다 — L18)."""
+    def _record_publish_offset(
+        self, vector: FeatureVector
+    ) -> tuple[float | None, str, float | None]:
+        """봉 확정 → 발행까지의 지연(ms)과 **그것을 어느 축으로 쟀는가**.
+
+        반환은 `(오프셋ms, 축, 적용한 스큐ms)`. `valid_until`이 없으면 오프셋은
+        `None`(0이 아니다 — L18).
+
+        ## 왜 1m에만 보정을 거는가 (2026-08-21 F-12)
+
+        축이 Horizon마다 다르다.
+
+        - **1m**: 봉 확정이 `bar_close: 1분봉 확정 timer`로 **거래소 시각 경계** 구동이다.
+          발행 시각은 로컬 시계다. 그래서 이 뺄셈은 **두 축을 섞는다** — 스큐만큼
+          계통오차가 붙고, 스큐가 장중에 미끄러지면 오프셋도 같이 미끄러진다.
+          2026-08-21 실측: 1m 시간대 중앙값이 09시 −495ms → 15시 +353ms로 **848ms**
+          이동했고, 음수(봉 닫히기 전 발행) 206건이 **전부 1m**이었다.
+        - **3m 이상**: 1m 봉이 **도착한 시점**을 기점으로 합성·발행한다. 양쪽 다 로컬
+          시계다 — 축이 하나다. 같은 날 이동폭이 3m +29ms · 5m −1ms · 10m +72ms로
+          사실상 미동이 없었고, 음수는 0건이었다.
+
+        **그래서 전 계열에 보정을 걸면 지금 평평한 다섯 개를 새로 휘게 만든다.** 부호가
+        반대인 계통오차를 없는 곳에 주입하는 셈이다. 장전 F-2·장중 F-7이 정확히 그
+        계획이었고, 장후 실측이 그 전에 잡았다.
+
+        ## 보정의 부호
+
+        스큐는 `거래소 시각 − 로컬 시계`다(`ops/clock_skew.py`). 봉 확정이 거래소 시각
+        `T_e`면 그 순간의 로컬 시계는 `T_e − skew`이므로, 로컬 시계로 찍은 발행 시각 `P`
+        기준 경과는 `P − (T_e − skew) = raw + skew`다. 실측 대조: 1m 하루 중앙값 −3.5ms에
+        스큐 +798ms를 더하면 +795ms — 3m(586ms) · 5m(596ms)와 같은 대역에 들어온다.
+
+        스큐를 못 재면(표본 부족) **보정하지 않고** 축만 정직하게 남긴다. `skew_ms`가
+        `None`인 것이 "보정 안 됨"의 지문이다.
+        """
+        axis = (
+            _PUBLISH_OFFSET_AXIS_EXCHANGE
+            if vector.horizon is Horizon.M1
+            else _PUBLISH_OFFSET_AXIS_LOCAL
+        )
         if vector.valid_until is None:
-            return None
+            return None, axis, None
         moment = self._now()
         try:
             offset_ms = (moment - vector.valid_until).total_seconds() * 1000.0
         except TypeError:  # naive/aware 혼재 — 못 재는 것이지 0이 아니다
-            return None
+            return None, axis, None
+
+        skew_ms: float | None = None
+        if axis == _PUBLISH_OFFSET_AXIS_EXCHANGE and self._clock_skew_seconds is not None:
+            try:
+                skew_seconds = self._clock_skew_seconds()
+            except Exception:  # noqa: BLE001 — 계기 하나가 발행을 막으면 본말전도다
+                skew_seconds = None
+            if skew_seconds is not None:
+                skew_ms = round(skew_seconds * 1000.0, 1)
+                offset_ms += skew_ms
+
         offset_ms = round(offset_ms, 1)
-        self._publish_offsets.append((moment, offset_ms))
-        return offset_ms
+        self._publish_offsets.append((moment, offset_ms, vector.horizon, axis))
+        return offset_ms, axis, skew_ms
+
+    def _note_publish_grace(self, vector: FeatureVector, offset_ms: float | None) -> None:
+        """유예를 크게 넘긴 발행을 모아 두고, 순간이 바뀌면 한 줄로 남긴다.
+
+        2026-08-21 F-15 ③ + F-8. 두 사건을 **가른다**:
+
+        - `PublishGraceExceeded` — 한 Horizon이 늦었다. 그 Horizon의 문제다.
+        - `PublishLoopStalled` — 같은 봉 확정 순간에 **여러 Horizon이 함께** 늦었다.
+          개별 Horizon의 문제가 아니라 발행 루프 자체가 멈춘 것이다.
+
+        종전엔 이 구분이 로그에 없어서 사람이 `FeaturePublish` 700여 줄을 초 단위로 묶어
+        세어야 했다(2026-08-21 1-11이 실제로 그 작업이었다). 그리고 그렇게 센 숫자는 척도
+        오염 때문에 오전/오후 결론이 뒤집혔다 — 그 오염을 없애는 것이 F-12이고, 그래서
+        **F-12가 이 계기의 선행**이다.
+
+        유예 상수는 `data/bar_composer._BOUNDARY_GRACE_SECONDS`를 그대로 읽는다 —
+        숫자를 새로 쓰지 않는다(F-15 ②).
+        """
+        if offset_ms is None or vector.valid_until is None:
+            return
+        threshold_ms = _boundary_grace_ms() * _PUBLISH_GRACE_ALERT_MULTIPLE
+        if not (threshold_ms < offset_ms < _PUBLISH_OFFSET_LIVE_CEILING_MS):
+            # 상한을 넘으면 리플레이·학습이다(상수 주석). 값은 `_publish_offsets`에
+            # 이미 들어갔으므로 사실이 사라지지는 않는다 — 경보 축에서만 뺀다.
+            return
+
+        confirm = vector.valid_until
+        pending = self._pending_stall
+        if pending is not None:
+            moment, members = pending
+            if abs((moment - confirm).total_seconds()) * 1000.0 <= _PUBLISH_STALL_CLUSTER_MS:
+                members.append((vector.horizon, offset_ms))
+                return
+            self._flush_publish_stall()
+        self._pending_stall = (confirm, [(vector.horizon, offset_ms)])
+
+    def _flush_publish_stall(self) -> None:
+        """모아 둔 군집을 **한 줄로** 남긴다 — 1건이면 유예 초과, 2건 이상이면 루프 정체."""
+        pending, self._pending_stall = self._pending_stall, None
+        if pending is None:
+            return
+        confirm, members = pending
+        threshold_ms = _boundary_grace_ms() * _PUBLISH_GRACE_ALERT_MULTIPLE
+        worst = max(offset for _horizon, offset in members)
+
+        if len(members) == 1:
+            horizon, offset_ms = members[0]
+            mlog.log(
+                "PublishGraceExceeded",
+                f"발행 유예 초과 — {horizon.value} {offset_ms:.0f}ms "
+                f"(기준 {threshold_ms:.0f}ms = 유예 {_boundary_grace_ms():.0f}ms × "
+                f"{_PUBLISH_GRACE_ALERT_MULTIPLE:g})",
+                symbol=self._symbol,
+                horizon=horizon.value,
+                publish_offset_ms=offset_ms,
+                grace_ms=round(threshold_ms, 1),
+                bar_confirm_kst=confirm.isoformat(),
+            )
+            return
+
+        # 굵기 순으로 적는다 — 문자열 정렬이면 "10m, 15m, 1m, 30m, 3m, 5m"가 되어
+        # 사람이 읽을 때 순서가 뜻을 잃는다.
+        ordered = sorted(
+            {horizon for horizon, _offset in members}, key=lambda h: HORIZON_SECONDS[h]
+        )
+        horizons = [horizon.value for horizon in ordered]
+        mlog.log(
+            "PublishLoopStalled",
+            f"발행 루프 정체 — {len(horizons)}개 Horizon이 함께 최대 {worst:.0f}ms 지연 "
+            f"({', '.join(horizons)})",
+            symbol=self._symbol,
+            stall_ms=round(worst, 1),
+            horizons=horizons,
+            bar_confirm_kst=confirm.isoformat(),
+            grace_ms=round(threshold_ms, 1),
+        )
 
     def log_publish_offsets(self) -> dict[str, float] | None:
         """세션 전체 발행 오프셋 분포를 **시간대 축과 함께** 한 줄로 남긴다 (2026-08-20 F-E).
@@ -912,6 +1112,8 @@ class FeatureEngine:
         `by_hour`가 G-D의 1차 소비처다 — 하루 한 숫자로는 「종일 나쁨」과 「갈수록 나빠짐」이
         같은 값으로 접힌다. 못 잰 날은 `measured=False`로 남긴다(L18).
         """
+        # 그날 마지막 군집을 여기서 내보낸다 — 안 하면 그 한 줄이 영영 안 남는다.
+        self._flush_publish_stall()
         if not self._publish_offsets:
             mlog.log(
                 "FeaturePublishOffset",
@@ -921,11 +1123,11 @@ class FeatureEngine:
                 measured=False,
             )
             return None
-        values = sorted(offset for _moment, offset in self._publish_offsets)
+        values = sorted(offset for _moment, offset, _h, _axis in self._publish_offsets)
         stats = _percentiles(values)
         by_hour: dict[str, dict[str, float]] = {}
         buckets: dict[int, list[float]] = {}
-        for moment, offset in self._publish_offsets:
+        for moment, offset, _horizon, _axis in self._publish_offsets:
             buckets.setdefault(moment.hour, []).append(offset)
         for hour, offsets in sorted(buckets.items()):
             hour_stats = _percentiles(sorted(offsets))
@@ -942,9 +1144,48 @@ class FeatureEngine:
             symbol=self._symbol,
             measured=True,
             by_hour=by_hour,
+            # Horizon × 시간대 (2026-08-21 F-12 검증 ㉡·㉢).
+            #
+            # 하루 한 표로는 "1m만 848ms 미끄러지고 나머지 다섯은 미동이 없다"를 볼 수
+            # 없다 — 전 Horizon을 한 통에 담으면 1m의 409건이 나머지를 눌러 버린다.
+            # 이 축이 F-12의 효과를 판정하는 재료다: 1m `by_hour` 중앙값의 하루 이동폭이
+            # 100ms 이내인가(오늘 848ms가 기준선), 3m가 오늘(29ms)보다 나빠지지 않았는가.
+            by_horizon=self._offsets_by_horizon(),
             **stats,
         )
         return stats
+
+    def _offsets_by_horizon(self) -> dict[str, dict[str, object]]:
+        """Horizon별 분포 + 시간대별 중앙값 + **축**과 하루 이동폭 (2026-08-21 F-12)."""
+        grouped: dict[str, list[tuple[datetime, float]]] = {}
+        axes: dict[str, str] = {}
+        for moment, offset, horizon, axis in self._publish_offsets:
+            grouped.setdefault(horizon.value, []).append((moment, offset))
+            axes[horizon.value] = axis
+
+        out: dict[str, dict[str, object]] = {}
+        for horizon_value, rows in grouped.items():
+            stats = _percentiles(sorted(offset for _m, offset in rows))
+            hourly: dict[str, float] = {}
+            hour_buckets: dict[int, list[float]] = {}
+            for moment, offset in rows:
+                hour_buckets.setdefault(moment.hour, []).append(offset)
+            for hour, offsets in sorted(hour_buckets.items()):
+                hourly[f"{hour:02d}"] = _percentiles(sorted(offsets))["p50"]
+            medians = list(hourly.values())
+            out[horizon_value] = {
+                "axis": axes[horizon_value],
+                "p50": stats["p50"],
+                "p90": stats["p90"],
+                "samples": stats["samples"],
+                "negative": float(sum(1 for _m, offset in rows if offset < 0)),
+                "by_hour_p50": hourly,
+                # 하루 이동폭 — 표본이 한 시간대뿐이면 못 잰다(0이 아니다 — L18).
+                "day_drift_ms": (
+                    round(max(medians) - min(medians), 1) if len(medians) >= 2 else None
+                ),
+            }
+        return out
 
     async def run_forever(self) -> None:
         patterns = [f"{TOPIC_BAR}.{h.value}.{self._symbol}" for h in self._horizons]

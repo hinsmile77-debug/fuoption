@@ -262,6 +262,33 @@ class MessageBus:
                 out.append((topic, eid, decode(fields[b"data"])))
         return out
 
+    async def stream_tail(self, topic: str, count: int = 1) -> list[tuple[str, BusMessage]]:
+        """스트림의 **마지막 n건**을 시간 오름차순으로 — 구독 전 1회 소급 적재용.
+
+        ## 왜 필요한가 (2026-08-21 F-9)
+
+        `stream_last_id()` + `read_streams()` 조합은 "지금부터"를 정확히 표현한다. 그건
+        옳은데, 화면을 새로 여는 사람에게는 **직전에 무슨 판단이 나왔는지**가 안 보인다.
+        2026-08-21에 13:03에 창을 열고 13:30까지 **27분**을 빈 화면으로 기다렸다 —
+        `decision.intent`는 30분 주기라 그 사이엔 아무것도 안 온다.
+
+        ## `$`를 두 번 쓰는 함정을 되살리지 않는다
+
+        소급 읽기와 이후 전진은 **같은 ID 축**을 써야 한다. 그래서 이 함수는 엔트리 ID를
+        함께 돌려주고, 호출측은 `last_ids`를 `stream_last_id()`가 아니라 **여기서 읽은
+        마지막 ID로** 고정한다. 그러지 않으면 소급분과 신규분 사이에 창이 다시 생긴다
+        (2026-08-05 P0-2와 같은 형태).
+
+        `xrevrange`는 최신순이라 **되돌려서** 돌려준다 — 캐시는 시간 오름차순으로 먹어야
+        마지막 값이 가장 최근 값이 된다.
+        """
+        entries = await self._redis.xrevrange(topic, count=max(1, count))
+        out: list[tuple[str, BusMessage]] = []
+        for entry_id, fields in reversed(entries or []):
+            eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+            out.append((eid, decode(fields[b"data"])))
+        return out
+
     async def stream_last_id(self, topic: str) -> str:
         """ "지금 이 스트림의 마지막 엔트리 ID" — `"$"`를 **구체 ID로 한 번만** 고정하는 용도.
 

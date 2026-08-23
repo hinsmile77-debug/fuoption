@@ -35,6 +35,7 @@ intel.regime은 별도로 구독해(`strategy/regime/runtime.py`가 발행) 최�
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Mapping
 
 import numpy as np
@@ -70,11 +71,15 @@ class FuturesAIService:
         bus: BusLike,
         *,
         meta_labelers: Mapping[Horizon, MetaLabeler] | None = None,
+        meta_threshold_sources: Mapping[Horizon, str] | None = None,
         aggregator: Aggregator | None = None,
     ) -> None:
         self._symbol = symbol
         self._experts = dict(experts)
         self._meta_labelers = dict(meta_labelers) if meta_labelers else {}
+        # 임계값이 최적화에서 왔는가 폴백에서 왔는가 (2026-08-21 F-6). 배선이 안 된
+        # 경로는 `"unknown"`이다 — "최적화였다"고 가정하지 않는다(L18).
+        self._meta_threshold_sources = dict(meta_threshold_sources or {})
         self._aggregator = aggregator or Aggregator()
         self._bus = bus
         self._latest_regime: RegimeState = _UNSEEN_REGIME.model_copy(update={"symbol": symbol})
@@ -142,14 +147,29 @@ class FuturesAIService:
         # 하루 14줄이다.
         probability = meta.predict_pass_probability(meta_features)
         passed = probability >= meta.threshold
+        # **임계 0은 게이트가 없는 것과 같다** (2026-08-21 F-6 · 1-8).
+        #
+        # `p >= 0`은 언제나 참이다. 즉 차단 계층 하나가 열린 채로 매일 판단이 나간다.
+        # 그런데 종전엔 그 상태가 정상 사이클과 **완전히 같은 INFO 한 줄**로 나갔다 —
+        # 하루 14줄 중 어느 것도 "지금 게이트가 없다"고 말하지 않았다.
+        #
+        # 태그별 고정 레벨(`core/logging.py` TAG_LEVELS)을 WARNING으로 올리면 정상
+        # 사이클 전량이 WARNING이 되어 경보가 닳는다. 태그를 새로 파면 같은 사실이 두
+        # 태그로 갈려 집계가 어긋난다. 그래서 **이 한 줄만** 호출부에서 올린다
+        # (`_LEVEL_ESCALATABLE` 참고 — 올리는 방향만 허용된다).
+        gate_disabled = meta.threshold <= 0.0
+        verdict = "통과" if passed else "차단"
+        detail = " (임계 0 — 게이트 무력)" if gate_disabled else ""
         mlog.log(
             "MetaGateEvaluated",
             f"meta {feature_vector.horizon.value} p={probability:.3f} "
-            f"(임계 {meta.threshold:g}) → {'통과' if passed else '차단'}",
+            f"(임계 {meta.threshold:g}){detail} → {verdict}",
+            level=logging.WARNING if gate_disabled else None,
             symbol=view.symbol,
             horizon=feature_vector.horizon.value,
             probability=probability,
             threshold=meta.threshold,
+            threshold_source=self._meta_threshold_sources.get(feature_vector.horizon, "unknown"),
             passed=passed,
             model_version=view.model_version,
             # **입력의 지문** (2026-08-20 F-F). 2026-08-20 장중에 이 확률이 3사이클 연속

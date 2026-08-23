@@ -113,6 +113,14 @@ TAG_LEVELS: dict[str, int] = {
     # `TickDeliveryLatency`가 회선 쪽 끝을 잰다면 이쪽은 내부 처리 쪽 끝을 잰다 —
     # 둘이 있어야 오프셋이 나빠진 날 원인을 가른다(유예 상향 vs 프로파일링).
     "FeaturePublishOffset": logging.INFO,
+    # 발행 유예 초과 · 발행 루프 정체 (2026-08-21 F-15 ③ · F-8).
+    #
+    # 둘을 **가른다**: 한 Horizon이 늦은 것(`PublishGraceExceeded`)과 같은 순간에 여러
+    # Horizon이 함께 멈춘 것(`PublishLoopStalled`)은 다른 사건이고 처방이 다르다.
+    # 종전엔 그 구분이 로그에 없어서 사람이 `FeaturePublish` 700여 줄을 초 단위로 묶어
+    # 세어야 했다(2026-08-21 1-11).
+    "PublishGraceExceeded": logging.WARNING,
+    "PublishLoopStalled": logging.WARNING,
     # 퇴화한 피처의 상수가 **야간 갭 때문인가** (2026-08-20 F-G).
     #
     # 창 60은 60분이 아니라 60봉이다. 10m에서 60봉 = 600분 ≈ 1.46 거래일이라 한 세션
@@ -205,6 +213,12 @@ TAG_LEVELS: dict[str, int] = {
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired
+    # 승격 관문 (2026-08-21 F-14). 종전엔 `promote_to_live()`가 관문을 아예 묻지 않았고,
+    # 매니페스트가 통과분만 담아서 미달·미측정이 사라졌다 — "검증된 것처럼 보이는 미검증
+    # 번들"이 실전으로 넘어갈 수 있는 상태였다.
+    "BundlePromotionRejected": logging.ERROR,  # 미달 또는 미측정 관문 때문에 live 승격 거부
+    "BundlePromotedWithLegacyGates": logging.WARNING,  # 옛 스키마라 관문 판정 불가 — 유예 승격
+    "BundlePromotedWithoutShadow": logging.WARNING,  # R18 섀도 20거래일 미달 또는 미측정
     "ShadowFillRecorded": logging.DEBUG,  # Shadow 가상 체결 — 고빈도, 정상 동작
     "ShadowPromotionProposed": logging.INFO,  # 승격 제안 발행 — 자동 승격 아님(사람 승인 전제)
     # 저장된 RegimeAI를 못 읽음 — 국면 없이 기동한다(그날 판단은 전부 NO_TRADE가 된다).
@@ -255,6 +269,9 @@ TAG_LEVELS: dict[str, int] = {
     # 웜스타트 버퍼로 기동 직후 국면을 **한 번 발행**했다 (2026-08-19 F-5). 이 줄이 없는
     # 날은 세션 첫 사이클이 `UNKNOWN`으로 나갔다는 뜻이다 — 그 자체가 관측 대상이다.
     "RegimeSeeded": logging.INFO,
+    # 국면 시드가 **버스로는 못 갔다** (2026-08-21 F-3). 같은 프로세스의 소비자는
+    # 직접 전달로 받았지만, 다른 프로세스의 국면 구독자는 아무것도 못 받았다는 뜻이다.
+    "RegimeSeedBusFailed": logging.WARNING,
     # 충전했는데도 `classify()` 하한(window+2)에 못 닿는다 — 그날 국면은 UNKNOWN으로
     # 시작하고, 아카이브가 얕다는 뜻이다. 조용히 콜드스타트로 넘어가지 않는다(금지계명 12).
     "RegimeWarmStartShort": logging.WARNING,
@@ -483,7 +500,31 @@ def _json_safe(o: Any) -> Any:
 
 
 def setup(instance_id: str, stream: Any = None) -> None:
-    handler = logging.StreamHandler(stream or sys.stdout)
+    """로깅 핸들러를 세운다.
+
+    **표현 불가한 글자 하나가 레코드를 통째로 없애지 않게 한다** (2026-08-21 F-1).
+
+    2026-08-21 UI 프로세스에서 `UnicodeEncodeError: 'cp949'`로 `UISnapshotFreshness`
+    한 줄이 통째로 사라졌다 — 그 줄이 그날 UI가 남긴 **유일한** 관측 기록이었다.
+    한국어 Windows의 기본 인코딩이 cp949라 `—`(em dash) 같은 글자를 못 쓰고, 파이썬
+    로깅은 인코딩 실패 시 그 레코드를 조용히 버린다(핸들러가 `handleError`로 삼킨다).
+
+    `errors="backslashreplace"`가 그 조용한 유실을 **시끄러운 흠집**으로 바꾼다 —
+    표현 못 하는 글자만 `—`로 남고 나머지 레코드는 살아남는다(금지계명 12의 취지).
+    원인 자체(자식 프로세스의 인코딩)는 `core/ui_launcher.py`가 막는다. 두 겹이다:
+    원인을 막고, 그래도 새면 자국을 남긴다.
+
+    `reconfigure()`는 `io.TextIOWrapper`에만 있다 — 테스트가 주입하는 `StringIO` 등에는
+    없으므로 `getattr` 가드가 필수다.
+    """
+    target = stream or sys.stdout
+    reconfigure = getattr(target, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            pass  # 재설정 불가한 스트림은 그대로 둔다 — 로깅 자체를 막지 않는다
+    handler = logging.StreamHandler(target)
     handler.setFormatter(JsonFormatter())
     _logger.handlers.clear()
     _logger.addHandler(handler)
@@ -542,10 +583,49 @@ def _source_mtime_text() -> str | None:
     return None if stamp is None else stamp.isoformat()
 
 
-def log(tag: str, msg: str, **fields: Any) -> None:
-    """태그 기반 로깅. 레벨은 태그 등록부가 결정한다 — 호출부는 레벨을 선택할 수 없다."""
+#: **레벨을 호출부가 올릴 수 있는 태그**(2026-08-21 F-6·F-14). 극히 예외다.
+#:
+#: 원칙은 그대로다 — 레벨은 등록부가 정한다(R6). 그러지 않으면 같은 태그가 파일마다
+#: 다른 심각도로 나가고, 로그를 레벨로 거르는 모든 도구가 무의미해진다.
+#:
+#: 그런데 **심각도가 값에 달린** 태그가 있다. `MetaGateEvaluated`는 정상 사이클마다
+#: 나오는 INFO인데, 그 안의 임계가 0이면 "차단 계층이 열려 있다"는 뜻이라 같은 태그가
+#: 사고 보고가 된다. 등록부 레벨을 WARNING으로 올리면 정상 사이클 수백 줄이 전부
+#: WARNING이 되어 경보가 닳는다(2026-08-21 1-15와 같은 형태). 태그를 새로 파면 같은
+#: 사실이 두 태그로 갈려 집계가 어긋난다.
+#:
+#: 그래서 **명시된 태그만, 올리는 방향으로만** 허용한다. 내리는 것은 금지다 — 조용해지는
+#: 방향의 예외는 금지계명 12가 막는 그것이다.
+_LEVEL_ESCALATABLE: frozenset[str] = frozenset(
+    {
+        "MetaGateEvaluated",
+        "BundlePromotedWithLegacyGates",
+        "BundlePromotedWithoutShadow",
+        "BundlePromotionRejected",
+    }
+)
+
+
+def log(tag: str, msg: str, level: int | None = None, **fields: Any) -> None:
+    """태그 기반 로깅. 레벨은 태그 등록부가 결정한다.
+
+    `level`은 `_LEVEL_ESCALATABLE`에 등록된 태그에 한해 **등록부 레벨보다 높은 값으로만**
+    올릴 수 있다(그 상수의 주석 참고). 그 밖의 태그나 내리는 방향은 `ValueError`다.
+    """
     if tag not in TAG_LEVELS:
         raise ValueError(
             f"미등록 태그 '{tag}' — core/logging.py TAG_LEVELS에 등록 후 사용 (SYSTEM.md R6)"
         )
-    _logger.log(TAG_LEVELS[tag], msg, extra={"tag": tag, "fields": fields})
+    effective = TAG_LEVELS[tag]
+    if level is not None:
+        if tag not in _LEVEL_ESCALATABLE:
+            raise ValueError(
+                f"'{tag}'는 호출부 레벨 지정이 허용되지 않는다 — "
+                "core/logging.py _LEVEL_ESCALATABLE 참고 (SYSTEM.md R6)"
+            )
+        if level < effective:
+            raise ValueError(
+                f"'{tag}': 레벨을 낮출 수 없다({effective} -> {level}) — 올리는 방향만 허용"
+            )
+        effective = level
+    _logger.log(effective, msg, extra={"tag": tag, "fields": fields})

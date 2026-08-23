@@ -168,7 +168,7 @@ def test_select_threshold_hand_computed():
     returns = [-5, -2, 3, 4, 1]
     candidates = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
-    best = select_threshold(probs, returns, candidates=candidates)
+    best = select_threshold(probs, returns, candidates=candidates).value
 
     assert best == pytest.approx(0.4)  # 평균 8/3 ≈ 2.667로 최대
 
@@ -187,7 +187,7 @@ def test_select_threshold_ties_prefer_higher_threshold():
     # 두 임계값 모두 동일 평균(1.0)을 내면 더 큰(보수적인) 쪽을 선택해야 함.
     probs = [0.5, 0.9]
     returns = [1.0, 1.0]
-    best = select_threshold(probs, returns, candidates=[0.0, 0.5, 0.9])
+    best = select_threshold(probs, returns, candidates=[0.0, 0.5, 0.9]).value
     assert best == pytest.approx(0.9)
 
 
@@ -257,8 +257,8 @@ def test_select_threshold_rejects_candidates_with_too_little_support():
     probs = [i / 100 for i in range(100)]
     returns = [1.0] * 99 + [500.0]  # 마지막(0.99) 하나만 압도적
 
-    lax = select_threshold(probs, returns, min_support_fraction=0.0)
-    strict = select_threshold(probs, returns, min_support_fraction=0.20)
+    lax = select_threshold(probs, returns, min_support_fraction=0.0).value
+    strict = select_threshold(probs, returns, min_support_fraction=0.20).value
 
     assert lax > strict  # 하한이 없으면 극단값을 고른다
     reached = sum(1 for p in probs if p >= strict)
@@ -269,7 +269,7 @@ def test_select_threshold_support_floor_scales_with_sample_size():
     probs = [i / 100 for i in range(100)]
     returns = [1.0] * 100
 
-    chosen = select_threshold(probs, returns, min_support_fraction=0.30)
+    chosen = select_threshold(probs, returns, min_support_fraction=0.30).value
 
     assert sum(1 for p in probs if p >= chosen) >= 30
 
@@ -280,6 +280,40 @@ def test_select_threshold_falls_back_when_no_candidate_meets_support():
     returns = [1.0, 2.0]
 
     # 후보가 둘 다 1건씩만 남기는데 하한은 2건 — 전부 탈락 → 폴백
-    chosen = select_threshold(probs, returns, candidates=[0.9, 0.95], min_support_fraction=1.0)
+    chosen = select_threshold(
+        probs, returns, candidates=[0.9, 0.95], min_support_fraction=1.0
+    ).value
 
     assert chosen == pytest.approx(0.9)
+
+
+# --------------------------------------------- F-6 · 임계값의 출처를 기록한다
+
+
+def test_selection_says_whether_the_threshold_was_optimized_or_a_fallback():
+    """**0으로 때우지 않고 사실을 싣는다** (2026-08-21 F-6 · 1-8).
+
+    종전엔 `float` 하나만 돌아와서, `thresholds.yaml`의 `0.0`이 "학습이 0을 최적이라
+    판단했다"인지 "지지도 하한을 채우는 후보가 없어 격자 첫 칸으로 떨어졌다"인지
+    저장 상태만 보고는 알 수 없었다. 그리고 임계 0은 **게이트가 통째로 무력**이라는
+    뜻이다 — `p >= 0`은 언제나 참이다.
+    """
+    optimized = select_threshold([0.1, 0.4, 0.8, 0.9], [-1.0, -1.0, 2.0, 3.0])
+    assert optimized.source == "optimized"
+    assert optimized.total == 4
+    assert optimized.support >= optimized.min_support
+    assert optimized.gate_disabled is False
+
+    # 후보가 둘 다 1건씩만 남기는데 하한은 2건 — 전부 탈락 → 폴백
+    fell_back = select_threshold(
+        [0.1, 0.95], [1.0, 2.0], candidates=[0.9, 0.95], min_support_fraction=1.0
+    )
+    assert fell_back.source == "fallback"
+    assert fell_back.min_support == 2
+
+
+def test_a_zero_threshold_is_reported_as_a_disabled_gate():
+    """임계 0을 「보수적인 값」으로 읽으면 안 된다 — 게이트가 **없는** 것이다."""
+    selection = select_threshold([0.0, 0.0], [1.0, 2.0], candidates=[0.0], min_support_fraction=1.0)
+    assert selection.value == 0.0
+    assert selection.gate_disabled is True

@@ -35,7 +35,7 @@ import statistics
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 import lightgbm as lgb
 import numpy as np
@@ -176,13 +176,41 @@ DEFAULT_MIN_SUPPORT_FRACTION = 0.05
 """
 
 
+@dataclass(frozen=True)
+class ThresholdSelection:
+    """임계값 하나와 **그 값이 어디서 왔는가** (2026-08-21 F-6).
+
+    종전엔 `select_threshold()`가 `float` 하나만 돌려줬다. 그래서 최적화가 고른 값과
+    폴백이 낸 값이 **저장 상태에서 구분되지 않았다** — `thresholds.yaml`에
+    `meta_labeler_threshold: 0.0`이 적혀 있어도 "학습이 0을 최적이라 판단했다"인지
+    "지지도 하한을 채우는 후보가 하나도 없어 격자의 첫 칸으로 떨어졌다"인지 알 수 없었다.
+
+    2026-08-21 실측에서 그 값이 실제로 0.0이었다. 임계 0이면 `probability >= 0`이 항상
+    참이라 **메타 게이트가 통째로 무력**이다 — 차단 계층 하나가 열린 채로 매일 판단이
+    나가고 있었고, 승격 관문에도 그것을 묻는 항목이 없었다.
+
+    `support`/`total`/`min_support`를 함께 싣는다 — 폴백이 왜 일어났는지가 그 셋에 있다.
+    """
+
+    value: float
+    source: Literal["optimized", "fallback"]
+    support: int
+    total: int
+    min_support: int
+
+    @property
+    def gate_disabled(self) -> bool:
+        """이 임계가 게이트를 무력화하는가 — `p >= 0`은 언제나 참이다."""
+        return self.value <= 0.0
+
+
 def select_threshold(
     pass_probabilities: Sequence[float],
     net_returns: Sequence[float],
     *,
     candidates: Sequence[float] | None = None,
     min_support_fraction: float = DEFAULT_MIN_SUPPORT_FRACTION,
-) -> float:
+) -> ThresholdSelection:
     """
     입력: `pass_probabilities`(신호별 MetaLabeler 통과확률)와 `net_returns`(그 신호를
          따랐을 때 비용차감 후 손익, 같은 순서로 대응). `min_support_fraction`은 후보
@@ -196,6 +224,9 @@ def select_threshold(
          적은 경우) 하한을 무시하고 가장 많은 신호를 남기는 후보로 폴백한다 — 임계값 선택이
          아예 불가능해지는 것보다 낫고, 그 상황은 `models/threshold_report.py`의 선택도달률로
          드러난다.
+    반환: `ThresholdSelection` — **값만이 아니라 출처를 함께 돌려준다** (2026-08-21 F-6).
+         종전 `float` 반환은 최적화 결과와 폴백을 같은 타입으로 내보내, 저장 상태에서
+         둘을 구분할 수 없게 만들었다. 0으로 때우지 않고 사실을 싣는다(마흐디 L18).
     """
     if len(pass_probabilities) != len(net_returns):
         raise ValueError("pass_probabilities와 net_returns 길이가 다르다")
@@ -206,6 +237,7 @@ def select_threshold(
     min_support = max(1, int(len(pass_probabilities) * min_support_fraction))
 
     best_threshold: float | None = None
+    best_support = 0
     best_score = float("-inf")
     fallback_threshold, fallback_support = grid[0], -1
     for threshold in grid:
@@ -220,7 +252,22 @@ def select_threshold(
         if score >= best_score:
             best_score = score
             best_threshold = threshold
-    return best_threshold if best_threshold is not None else fallback_threshold
+            best_support = len(selected)
+    if best_threshold is not None:
+        return ThresholdSelection(
+            value=best_threshold,
+            source="optimized",
+            support=best_support,
+            total=len(pass_probabilities),
+            min_support=min_support,
+        )
+    return ThresholdSelection(
+        value=fallback_threshold,
+        source="fallback",
+        support=max(fallback_support, 0),
+        total=len(pass_probabilities),
+        min_support=min_support,
+    )
 
 
 @dataclass(frozen=True)

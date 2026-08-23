@@ -241,8 +241,20 @@ async def test_ui_poll_loop_delivers_a_decision_that_arrives_during_the_block():
     assert cached.rationale == "첫 판단"
 
 
-async def test_ui_poll_loop_does_not_replay_history_from_before_startup():
-    """기동 전 이력까지 끌어오면 화면이 "방금 판단이 났다"고 거짓말한다."""
+async def test_ui_poll_loop_backfills_the_last_entry_without_calling_it_fresh():
+    """**창을 새로 열면 직전 판단부터 보여준다** (2026-08-21 F-9).
+
+    종전엔 구독 시작점을 "지금부터"로 잡아 이력을 아예 안 끌어왔다. 그 판단의 근거는
+    「기동 전 이력까지 끌어오면 화면이 "방금 판단이 났다"고 거짓말한다」였고, 그 걱정은
+    옳았다 — 다만 **처방이 과했다.** 2026-08-21에 13:03에 창을 열고 13:30까지 **27분**을
+    빈 화면으로 기다렸다(`decision.intent`는 30분 주기다).
+
+    지금은 마지막 1건을 끌어오되 **원래 발행 시각으로** 넣는다. 값은 보이고, 나이는
+    정직하다 — 신선도 배지가 그 나이로 계산되므로 오래된 값은 회색·앰버로 뜬다.
+    """
+
+    from messiah.core.timeutil import now_utc
+
     fake = _FakeRedis()
     fake.add("decision.intent", "1000-0", _intent("어제 판단"))
     bus = _bus_with(fake)
@@ -253,4 +265,38 @@ async def test_ui_poll_loop_does_not_replay_history_from_before_startup():
     with pytest.raises(_Stop):
         await _poll_streams_forever(bus, cache, poll_ms=0)
 
-    assert cache.get("DecisionIntent") is None
+    cached = cache.get("DecisionIntent")
+    assert isinstance(cached, DecisionIntent)
+    assert cached.rationale == "어제 판단"
+    # **「방금 왔다」고 말하지 않는다.** 나이는 메시지의 원래 발행 시각 기준이다.
+    age = cache.age_seconds("DecisionIntent")
+    assert age is not None
+    expected = (now_utc() - cached.ts_utc).total_seconds()
+    assert abs(age - expected) < 5.0
+
+
+async def test_backfill_and_forward_reads_share_one_id_axis():
+    """소급분과 이후 전진이 **같은 ID 축**을 써야 한다 — 아니면 둘 사이에 창이 다시
+    생긴다(2026-08-05 P0-2와 같은 형태). `$`도 다시 등장하면 안 된다."""
+    fake = _FakeRedis()
+    fake.add("decision.intent", "1000-0", _intent("직전 판단"))
+    bus = _bus_with(fake)
+
+    state = {"rounds": 0}
+
+    def _stop_after_a_few():
+        state["rounds"] += 1
+        if state["rounds"] >= 2:
+            raise _Stop
+
+    fake.on_block = _stop_after_a_few
+
+    with pytest.raises(_Stop):
+        await _poll_streams_forever(bus, StateCache(), poll_ms=0)
+
+    assert fake.xread_calls
+    first = fake.xread_calls[0]
+    # 소급으로 읽은 그 엔트리부터 전진한다 — 그 앞으로 되감지도, `$`로 건너뛰지도 않는다.
+    assert first["decision.intent"] == "1000-0"
+    for call in fake.xread_calls:
+        assert "$" not in call.values()

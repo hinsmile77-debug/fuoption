@@ -171,20 +171,24 @@ def _deferred_performance_gates() -> list[GateResult]:
     빼버리면 `validation_report.json`이 "관문 넷을 다 통과했다"처럼 읽힌다 — 실제로는 일곱
     중 넷이고, 나머지 셋은 아직 아무도 안 쟀다. 이 저장소가 반복해서 배운 것이 그것이다:
     **없는 것과 통과한 것을 같은 모양으로 두면 안 된다**(마흐디 L18).
-    `passed=False`라 `gates_passed`에도 안 담기므로 매니페스트가 통과를 주장하지 않는다.
 
-    **값은 `NaN`이다** — "0.0"으로 두면 측정된 0으로 읽히기 때문이다. 대가로
-    `validation_report.json`이 엄밀한 JSON이 아니게 된다(`json.dumps`가 `NaN`을 그대로
-    쓴다). Python은 그대로 되읽지만 브라우저·jq 같은 엄격한 파서는 거부할 수 있다 —
-    거짓 0보다 낫다고 판단했고, 성과 관문이 G1로 실제 값을 받으면 사라지는 상태다.
+    **값은 `None` + `measured=False`다** (2026-08-21 F-14). 종전엔 `NaN`이었다 — "0.0"으로
+    두면 측정된 0으로 읽히기 때문이었고 그 판단은 옳았지만, 대가로 `validation_report.json`이
+    엄밀한 JSON이 아니게 됐다(`json.dumps`가 `NaN`을 그대로 쓴다 — jq·브라우저가 거부).
+    `None`은 거짓 0도 아니고 엄밀한 JSON이기도 하다. 대가가 없다.
+
+    또한 이 관문들은 이제 **승격을 실제로 막는다** — `promote_to_live()`가 미측정을
+    `passed=False`로 취급한다. 종전엔 매니페스트가 통과분만 담아서 이 셋이 흔적 없이
+    사라졌고, 관문이 있으나 마나였다.
     """
     return [
         GateResult(
             name=name,
             passed=False,
-            value=float("nan"),
-            threshold=float("nan"),
+            value=None,
+            threshold=None,
             detail="미측정 — walk-forward 성과 시계열이 필요(scripts/run_g1_walk_forward.py)",
+            measured=False,
         )
         for name in ("sharpe", "max_drawdown", "negative_window_ratio")
     ]
@@ -253,6 +257,10 @@ async def build_one(
             validator.validate_feature_dependency(training.expert),
             validator.validate_latency(training.expert, sample_vector),
             validator.validate_serialization(training.expert, sample_vector, Path(tmp)),
+            # 차단 계층이 열린 채로 승격되지 않게 (2026-08-21 F-6 ④). 2026-08-21 실측에서
+            # 현역 번들의 메타 임계가 0.0이었고 — 게이트가 통째로 무력이라는 뜻이다 —
+            # 승격 관문 어디에도 그것을 묻는 항목이 없었다.
+            validator.validate_meta_threshold(training.threshold_selection),
         ]
     report = ValidationReport(gates=gates)
 
@@ -275,10 +283,20 @@ async def build_one(
 
 
 def model_gates_passed(report: ValidationReport) -> bool:
-    """모델 관문 넷만 본다 — 성과 셋은 의도적으로 `passed=False`이므로
-    `report.passed`를 쓰면 **항상 거짓**이 된다."""
-    deferred = {"sharpe", "max_drawdown", "negative_window_ratio"}
-    return all(gate.passed for gate in report.gates if gate.name not in deferred)
+    """**측정된** 관문만 본다 — 미측정(성과 셋)은 여기서 세지 않는다.
+
+    `report.passed`를 그대로 쓰면 성과 셋이 `passed=False`라 항상 거짓이 된다. 이 함수는
+    "지금 잴 수 있는 것 중에 미달이 있는가"라는 다른 질문에 답한다.
+
+    판정 기준을 이름 목록에서 `gate.measured`로 바꿨다 (2026-08-21 F-14) — 종전엔
+    `{"sharpe", "max_drawdown", "negative_window_ratio"}`를 여기 손으로 적어 두었고,
+    유예 목록이 바뀌면 이 집합이 조용히 낡는다. **미측정이라는 사실은 관문 자신이
+    말하게 한다.**
+
+    이 함수는 **승격 관문이 아니다.** 승격은 `ModelRegistry.promote_to_live()`가
+    미측정까지 포함해 막는다 — 여기서 통과했다고 실전에 올라가지 않는다.
+    """
+    return all(gate.passed for gate in report.gates if gate.measured)
 
 
 def _promote(registry: ModelRegistry, bundle_id: str, horizon: Horizon, args) -> str:
@@ -417,7 +435,7 @@ async def main() -> int:
                 "bundle_id": bundle_id,
                 "trained_range": list(trained_range),
                 "model_gates_passed": passed,
-                "gates": [gate.__dict__ for gate in report.gates],
+                "gates": [gate.to_dict() for gate in report.gates],
             }
             if not passed:
                 row["status"] = "gate-failed"

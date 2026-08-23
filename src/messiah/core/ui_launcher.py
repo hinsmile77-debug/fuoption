@@ -256,6 +256,18 @@ def launch_command_center(
     # 닫아서, 재기동할 때마다 이 프로세스에 파일 핸들이 하나씩 남았다 — 08-03에 2개, 크래시가
     # 잦은 날엔 더. 자식은 `Popen`이 fd를 이미 복제해 갔으므로 부모가 닫아도 자식의 로그
     # 쓰기에는 영향이 없다(수집 프로세스는 이 파일에 직접 쓰지 않는다).
+    # **자식에게 인코딩을 물려준다** (2026-08-21 F-1 — cp949 계열 네 번째 사고).
+    #
+    # 부모는 로그 파일을 UTF-8로 열지만 자식 프로세스는 그것을 모른다. 한국어 Windows의
+    # 기본값 cp949로 쓰다가 `—`(em dash) 하나를 만나면 `UnicodeEncodeError`가 나고,
+    # 파이썬 로깅은 그 레코드를 **통째로 버린다.** 2026-08-21에 UI가 남긴 유일한 관측
+    # 기록(`UISnapshotFreshness`)이 정확히 그렇게 사라졌다.
+    #
+    # 둘 다 넣는다. `PYTHONIOENCODING`은 표준 스트림만 바꾸고, 스트림릿이 중간에 스트림을
+    # 다시 감싸면 무력화될 수 있다. `PYTHONUTF8=1`은 UTF-8 모드를 켜서
+    # `locale.getpreferredencoding()` 자체를 UTF-8로 만든다 — 착수 전
+    # `grep -rn "open(" src/messiah/`로 인코딩 미지정 텍스트 `open()`이 없음을 확인했다.
+    child_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     try:
         with open(log_path, "a", encoding="utf-8") as log_file:
             process = popen(
@@ -263,6 +275,7 @@ def launch_command_center(
                 cwd=str(project_root),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
+                env=child_env,
             )
     except OSError as e:
         print(f"[{caller_tag}] Streamlit 기동 실패(본 작업은 계속): {e}", flush=True)

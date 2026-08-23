@@ -29,6 +29,22 @@ from pathlib import Path
 
 KST = timezone(timedelta(hours=9))
 
+# **종료 판정의 단일 출처** (2026-08-21 F-16 ③).
+#
+# 종전엔 같은 사실에 두 곳이 다른 답을 냈다 — 무결성 리포트는 조용히 건너뛰고, 이
+# 수집기는 적신호로 올렸다. 둘 다 사유를 대지 못했다. 이제 `ops/shutdown_watchdog`가
+# 그 판정을 혼자 한다.
+#
+# 이 스크립트는 원래 stdlib 전용이라 임포트가 실패해도 죽지 않는다 — 그 모듈도
+# stdlib만 쓰지만, 저장소 밖에서 이 스크립트만 복사해 돌리는 경우가 있다.
+_SRC = Path(__file__).resolve().parents[4] / "src"
+try:
+    if str(_SRC) not in sys.path:
+        sys.path.insert(0, str(_SRC))
+    from messiah.ops import shutdown_watchdog as _watchdog
+except Exception:  # noqa: BLE001 — 판정 하나 때문에 수집 전체를 잃지 않는다
+    _watchdog = None
+
 # ---------------------------------------------------------------- 기본 설정
 # configs/dailycheck_anchors.json 이 있으면 그 값이 우선한다.
 DEFAULT_CONFIG = {
@@ -378,6 +394,28 @@ def read_text(path: Path, limit=None) -> str:
 
 
 # ---------------------------------------------------------------- 로그 파싱
+#: 로깅이 레코드를 버렸다는 자국 (2026-08-21 F-4 ③).
+#:
+#: `Logging error`는 파이썬 로깅이 핸들러 예외를 삼킬 때 stderr에 찍는 머리말이고,
+#: `UnicodeEncodeError`/`cp949`는 이 PC에서 그 예외의 실제 사유다. 셋 중 하나라도
+#: 비-JSON 라인에 있으면 **그 자리에 있어야 할 JSON 한 줄이 사라진 것**이다.
+_ENCODING_FAILURE_RE = re.compile(r"Logging error|UnicodeEncodeError|codec can't encode|cp949")
+
+
+def _session_end_verdict(name: str, day):
+    """`ops/shutdown_watchdog.session_end_verdict()`에 물어본다 — 못 물으면 None.
+
+    None은 「판정 못 했다」이지 「정상」이 아니다 — 호출부가 종전 문구로 되돌아간다.
+    """
+    if _watchdog is None:
+        return None
+    try:
+        forced = _watchdog.forced_processes(day).get(name)
+        return _watchdog.session_end_verdict(name, has_start=True, has_end=False, forced=forced)
+    except Exception:  # noqa: BLE001 — 판정 하나가 수집을 막으면 본말전도다
+        return None
+
+
 class LogDigest:
     """로그 한 파일을 훑고 남길 것만 남긴다."""
 
@@ -405,6 +443,12 @@ class LogDigest:
         self.selfcheck: list[str] = []
         self.quoted: dict[str, list] = {}
         self.parse_errors = 0
+        # 로깅이 **레코드를 통째로 버린** 자국 (2026-08-21 F-4 ③).
+        #
+        # 2026-08-21에 UI가 남긴 유일한 관측 기록이 `UnicodeEncodeError: 'cp949'`로
+        # 사라졌는데, 그날 그것을 찾은 것은 사람이었다 — 비-JSON 라인을 눈으로 읽어서.
+        # 기계가 먼저 잡게 한다. JSON 행 수만 세면 **없어진 줄은 애초에 안 세어진다.**
+        self.encoding_failures: list[str] = []
 
     def scan(self):
         if not self.exists:
@@ -428,6 +472,9 @@ class LogDigest:
                     self.json_lines += 1
                     self._ingest(rec)
                 else:
+                    if _ENCODING_FAILURE_RE.search(stripped):
+                        if len(self.encoding_failures) < 20:
+                            self.encoding_failures.append(stripped)
                     if stripped.startswith(("[OK ]", "[WARN", "[FAIL", "[ERR", "self-check")):
                         self.selfcheck.append(stripped)
                     elif len(self.raw_preamble) < cap_pre:
@@ -1087,7 +1134,21 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             continue
         starts, ends = dg.session_markers()
         if starts and not ends and phase in ("post", "all"):
-            flags.append(f"`{name}`: SessionStart 있고 SessionEnd 없음 — 비정상 종료 의심")
+            # **설계된 강제 종료를 「비정상」이라 부르지 않는다** (2026-08-21 F-16 ② · 1-16).
+            #
+            # UI에는 정상 종료 경로가 없다 — 15:40에 워치독이 명령줄 매치로 찾아
+            # `Stop-Process -Force`로 죽인다. 그것이 설계이고, 매일 적신호 한 줄을
+            # 만들면서 진짜 신호를 목록 아래로 밀어냈다.
+            #
+            # 목록을 여기 박지 않는다 — 박으면 1-12와 같은 형태(정적 선언이 코드보다
+            # 낡는다)가 된다. **그날 워치독이 실제로 무엇을 죽였는지**에서 파생시킨다.
+            verdict = _session_end_verdict(name, day)
+            if verdict is None:
+                flags.append(f"`{name}`: SessionStart 있고 SessionEnd 없음 — 비정상 종료 의심")
+            elif verdict.is_finding:
+                flags.append(f"`{name}`: {verdict.reason}")
+            else:
+                flags.append(f"`{name}`: SessionEnd 없음 — {verdict.reason} (결함 아님)")
         if len(starts) > 1:
             flags.append(
                 f"`{name}`: SessionStart {len(starts)}회 ({', '.join(e['hhmm'] for e in starts[:5])}) — 중복 기동/재기동 확인 필요"
@@ -1104,6 +1165,14 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if odd:
             flags.append(
                 f"`{name}`: 기동 sha {', '.join(sorted(odd))} 가 HEAD `{head}` 와 다르다 — 옛 코드로 기동"
+            )
+        # **버려진 레코드를 센다** (2026-08-21 F-4 ③). JSON 행 수만 보면 없어진 줄은
+        # 애초에 안 세어진다 — 조용한 유실은 계기가 없으면 영영 안 보인다.
+        if dg.encoding_failures:
+            sample = truncate(dg.encoding_failures[0], 160)
+            flags.append(
+                f"`{name}`: 로깅 인코딩 실패 {len(dg.encoding_failures)}건 — **레코드가 통째로 "
+                f"버려졌다**(그 자리의 JSON 한 줄이 없다). 첫 줄: {sample}"
             )
         n_err = sum(v for k, v in dg.level_counts.items() if k in ("ERROR", "CRITICAL", "FATAL"))
         if n_err:

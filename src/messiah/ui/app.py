@@ -75,6 +75,7 @@ from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar
 from messiah.core.health import HEALTH_STALE_AFTER_SECONDS, health_cache_key
 from messiah.core.messages import (
     CIRCUIT_BREAKER_PHASE_WARMUP,
+    HORIZON_SECONDS,
     BusMessage,
     CircuitBreakerStatus,
     DecisionIntent,
@@ -372,7 +373,33 @@ async def _poll_streams_forever(
     여기서는 기동 시 한 번만 구체 ID로 고정하고(그게 "지금부터"의 정확한 표현이다), 그
     뒤로는 읽은 만큼만 전진한다. 블록도 토픽별이 아니라 한 번에 걸어 창 자체를 없앤다.
     """
-    last_ids = {topic: await bus.stream_last_id(topic) for topic in topics}
+    ## 창을 새로 열면 **직전 판단부터 보여준다** (2026-08-21 F-9)
+    #
+    # 종전엔 `stream_last_id()`로 "지금부터"를 잡고 시작했다. 그건 정확한 표현이지만,
+    # 화면을 새로 여는 사람에게는 다음 발행이 올 때까지 빈 칸이다. 2026-08-21에 13:03에
+    # 창을 열고 13:30까지 **27분**을 그렇게 기다렸다 — `decision.intent`가 30분 주기라
+    # 그 사이엔 아무것도 안 온다.
+    #
+    # 소급분과 이후 전진은 **같은 ID 축**을 쓴다: `last_ids`를 `stream_last_id()`가
+    # 아니라 여기서 읽은 마지막 ID로 고정한다. 그러지 않으면 둘 사이에 창이 다시 생긴다
+    # (2026-08-05 P0-2와 같은 형태).
+    #
+    # 소급된 값이 「방금 온 값」으로 보이면 더 나쁘다 — 신선도 배지는 메시지의 **원래
+    # 발행 시각**으로 계산하므로(`_FRESHNESS_LIMITS`), 오래된 값이면 배지가 회색·붉은색
+    # 으로 뜬다. 화면이 거짓말을 하지 않는다.
+    last_ids: dict[str, str] = {}
+    for topic in topics:
+        backfilled = await bus.stream_tail(topic, count=1)
+        for entry_id, message in backfilled:
+            last_ids[topic] = entry_id
+            # **원래 발행 시각으로 넣는다.** 지금 시각을 찍으면 어제 판단이 화면에서
+            # 「0초 전」으로 보인다 — 빈 칸을 채우려다 화면이 거짓말을 하게 만드는 것이라
+            # 원래 결함보다 나쁘다(F-9 회귀 위험 ②).
+            cache.update(
+                type(message).__name__, message, received_at=getattr(message, "ts_utc", None)
+            )
+        if topic not in last_ids:
+            last_ids[topic] = await bus.stream_last_id(topic)
     while True:
         for topic, entry_id, message in await bus.read_streams(last_ids, block_ms=poll_ms):
             last_ids[topic] = entry_id
@@ -716,16 +743,39 @@ def _candlestick_figure(bars: BarSeries, tick_size: float) -> go.Figure:
 # 마흐디 L18(값 없음과 정상을 혼동하지 않는다)이 정확히 막으려던 형태다. CB 배지가 이미
 # "미사용/데이터 없음"으로 쓰던 패턴을 나머지 토픽으로 넓힌 것이다.
 #
-# **②·③은 선언이지만 ①은 관측으로 판정한다** — 발행자의 heartbeat가 살아 있으면 ②/③,
-# 죽었으면 ①이다. 그래서 나중에 번들이 승격돼 발행이 시작된 뒤 그 프로세스가 죽으면,
-# 이 표는 "미배선"이라고 우기지 않고 "끊김"으로 바뀐다.
+# **①은 관측으로 판정한다** — 발행자의 heartbeat가 살아 있으면 ②/③, 죽었으면 ①이다.
+#
+# ## ②도 관측으로 판정한다 (2026-08-21 F-11 · 1-12)
+#
+# 종전엔 ②가 **선언**이었다. 아래 표에 "미배선 — Registry에 live 번들이 0개"라고 적혀
+# 있었고, 그 문장은 **2026-08-11에 번들이 승격된 뒤로 열흘째 거짓**이었다. 2026-08-21
+# 13:03에 창을 열었을 때 화면은 「미배선」이라고 말했고, 27분 뒤 13:30에 값이 정상으로
+# 들어왔다 — 배선은 처음부터 멀쩡했고 **주기가 아직 안 돌았을 뿐**이었다.
+#
+# 정적 선언은 코드보다 낡는다. 그리고 그 낡음은 아무 계기에도 안 잡힌다 — 문자열이기
+# 때문이다. 그래서 **그 문장에 도달하는 경로를 관측에 묶는다**: 「한 번도 안 왔다」에
+# 시간 조건을 붙여, 관측 창을 채우기 전까지는 「대기」라고만 말한다.
+#
+# 고정 문자열을 지우는 것이 목적이 아니다 — `OptionsView`처럼 **정말로 미배선인 것**은
+# 관측 창을 넘기고 나면 그대로 「미배선」이 나와야 하고, 아래 갈래가 그것을 자연히 만든다.
 _ABSENCE_REASON: dict[str, str] = {
-    "FuturesView": "미배선 — Registry에 live 번들이 0개라 FuturesAIService가 전문가 0개로 기동",
-    "OptionsView": "미배선 — OptionsAIService가 G2 러너에 결선되지 않음",
-    "RegimeState": "미배선 — 학습된 RegimeAI 인스턴스가 아직 없음(W20~21 알려진 갭)",
-    "DecisionIntent": "대기 — intel.futures가 없으면 MetaDecisionEngine이 판단할 게 없다",
-    "Fill": "대기 — 판단이 없으면 체결도 없다",
+    "FuturesView": "미배선 또는 끊김 — 관측 창 동안 intel.futures가 한 번도 안 왔다",
+    "OptionsView": "미배선 또는 끊김 — 관측 창 동안 intel.options가 한 번도 안 왔다",
+    "RegimeState": "미배선 또는 끊김 — 관측 창 동안 intel.regime이 한 번도 안 왔다",
+    "DecisionIntent": "미배선 또는 끊김 — 관측 창 동안 decision.intent가 한 번도 안 왔다",
+    "Fill": "미배선 또는 끊김 — 관측 창 동안 exec.fill이 한 번도 안 왔다",
 }
+
+#: 「미배선」이라고 말하기 전에 **얼마나 들어봐야 하는가** (2026-08-21 F-11 ㉡).
+#:
+#: 이 화면이 보는 토픽 중 가장 느린 것이 30분 주기다(구동 Horizon이 30m인 live 번들).
+#: 그 2배를 기다린다 — 1회 결손까지 흡수하고도 안 오면 그때는 주기 문제가 아니다.
+#: **이 시간 조건이 설계의 핵심이다.** 없으면 새 창이 매번 「미배선」을 잠깐 보여준다
+#: (`ever_seen`은 세션별이라 창을 새로 열면 리셋된다).
+#:
+#: 숫자를 새로 쓰지 않는다 — 가장 굵은 Horizon의 길이에서 파생시킨다(F-2가
+#: `_BOUNDARY_GRACE_SECONDS`에 세운 규율과 같다).
+_ABSENCE_OBSERVE_SECONDS = HORIZON_SECONDS[Horizon.M30] * 2
 
 # 위 토픽들의 발행 프로세스 — 전부 G2 러너 한 프로세스다(`scripts/run_g2_paper_trading.py`).
 # 그 heartbeat가 ①과 ②/③을 가르는 유일한 관측 근거다.
@@ -746,6 +796,8 @@ def _absence_reason(source, key: str) -> str | None:
     if isinstance(source.snapshot("LiveConnectionError").message, Health):
         return "끊김 — LIVE 연결 실패"
 
+    # **①「끊김」 판정은 손대지 않는다** (F-11 ㉠). 진짜 사고를 「대기」로 덮으면 이
+    # 변경이 원래 결함보다 나쁘다.
     publisher = _PUBLISHER_OF.get(key)
     if publisher is not None:
         snap = source.snapshot(health_cache_key(publisher))
@@ -754,7 +806,22 @@ def _absence_reason(source, key: str) -> str | None:
         if snap.badge == FreshnessBadge.STALE:
             return f"끊김 — {publisher} 응답 없음({snap.age_seconds:.0f}초)"
 
-    return _ABSENCE_REASON.get(key)
+    # 발행자는 살아 있다. 남은 질문은 「배선이 없다」인가 「아직 주기가 안 돌았다」인가고,
+    # 그것을 가르는 것은 **얼마나 들어봤는가**다 (2026-08-21 F-11).
+    listening = None
+    getter = getattr(source, "listening_seconds", None)
+    if callable(getter):
+        listening = getter()
+    if listening is None:
+        # 못 재면 판정하지 않는다 — 모르는 것을 「미배선」이라 부르지 않는다(L18).
+        return "대기 — 아직 수신 없음(관측 시간을 못 재 미배선 여부는 판정 불가)"
+    if listening < _ABSENCE_OBSERVE_SECONDS:
+        # **판정 근거를 화면에 함께 적는다.** 사람이 "왜 대기라고 하지"를 안 물어도 된다.
+        return (
+            f"대기 — 아직 수신 없음 (듣기 시작 후 {listening / 60:.0f}분 · "
+            f"{_ABSENCE_OBSERVE_SECONDS / 60:.0f}분까지 대기)"
+        )
+    return _ABSENCE_REASON.get(key, "미배선 또는 끊김 — 관측 창 동안 수신 없음")
 
 
 def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
@@ -1305,10 +1372,19 @@ def _log_snapshot_freshness_once(source, symbol: str, horizon: str, bar_dir: Pat
     봤다"**다(죽음은 상태판 프로브 `command_center_ui`가 따로 말한다). 2026-08-18까지 세
     국면 연속 P-9가 판정 불가였던 이유가 정확히 이 로그의 부재였다 — 화면이 무엇을
     그렸는지가 어느 파일에도 없어, 다음 자연 관측 기회(추석, 5주 뒤)를 기다려야 했다.
+
+    ## 「한 번만」 가드를 **성공 뒤로** 옮겼다 (2026-08-21 F-1 ③)
+
+    종전엔 가드를 세운 **다음** 로그를 시도했다. 2026-08-21에 그 로그가
+    `UnicodeEncodeError: 'cp949'`로 통째로 유실됐는데, 가드는 이미 소모된 뒤라
+    **그 세션에서 다시 시도하지 않았다** — 남은 것이 아무것도 없었다. 성공/실패 어느
+    쪽이든 한 번씩만 남기되, **성공 전에 소모되지는 않게** 한다.
+
+    가드는 여전히 세션별이다(창을 새로 열면 리셋). 그건 의도다 — 새 창은 새 첫 렌더고,
+    그 렌더가 무엇을 그렸는지는 별개의 사실이다.
     """
     if st.session_state.get("snapshot_freshness_logged"):
         return
-    st.session_state["snapshot_freshness_logged"] = True
     try:
         fields = _snapshot_freshness_fields(
             source, symbol, horizon, bar_dir, today=now_kst().date()
@@ -1320,12 +1396,16 @@ def _log_snapshot_freshness_once(source, symbol: str, horizon: str, bar_dir: Pat
             f"(지연 {fields['chart_lag_calendar_days']}일)",
             **fields,
         )
+        st.session_state["snapshot_freshness_logged"] = True
     except Exception as exc:  # noqa: BLE001 — 관측 도구가 화면을 죽이면 본말전도(R10은 지킨다)
         mlog.log(
             "UISnapshotFreshnessFailed",
             f"신선도 로그 실패 — 화면은 계속 그린다: {exc}",
             error=str(exc),
         )
+        # 실패도 한 번만 알린다 — 스트림릿 5초 재실행마다 같은 실패가 쌓이면 그것이
+        # 새 잡음이 된다. 소모 시점만 옮긴 것이지 재시도를 무한히 여는 것이 아니다.
+        st.session_state["snapshot_freshness_logged"] = True
 
 
 def _render_dashboard_body(

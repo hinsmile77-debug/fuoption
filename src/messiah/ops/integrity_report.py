@@ -209,6 +209,13 @@ class IntegrityReport:
     late_bar_drops: int
     # 그날 거래소 시각 − 로컬 시계(초). None은 못 쟀다는 뜻 — 0초와 구분한다(L18).
     clock_skew_seconds: float | None
+    # 그날 스큐가 **얼마나 움직였는가** (2026-08-21 F-13 · 1-10).
+    #
+    # 하루 한 숫자는 "종일 +0.8초"와 "아침 +0.3초에서 오후 +0.8초로 밀림"을 같은 값으로
+    # 접는다. 후자면 그 스큐로 보정한 모든 것이 시간대별로 다르게 틀린다 — 실측에서
+    # 3시간 30분에 531ms 움직였다. `None`은 표본이 2개 미만이라 못 잰다는 뜻이다.
+    # **판정하지 않는다**(R18 — 임계를 정할 근거가 아직 없다). 기록으로 시작한다.
+    clock_skew_range_seconds: float | None
     # 회선 수신 지연 **초과분**의 분위수 (2026-08-05 고도화 1, `ops/clock_skew.py`).
     #
     # **판정을 안 하는 축이다.** 임계를 정할 근거가 아직 없다 — 이 값을 며칠 모으는 것이
@@ -228,6 +235,18 @@ class IntegrityReport:
     # 1m p50이 09시 74.8ms → 14시 884.8ms(11.8배)였는데 종일 p90 1,083ms 하나로는 그 사실이
     # 보이지 않았다.
     publish_offset: dict[str, Any] | None
+    # **완성봉 유예를 매일 채점한다** (2026-08-21 F-15 · 1-14).
+    #
+    # "계산 결과를 봉이 닫힌 뒤 500ms 안에 내보낸다"는 약속이 상수 선언으로만 있었고,
+    # 리포트는 오프셋을 **기록만** 하고 그 상수와 대조하지 않았다. 그래서 3m~30m이
+    # 매번 유예를 넘기고 있었는데도(3m 586ms ~ 30m 775ms) 어느 축도 그것을 말하지
+    # 않았다 — 지킬 수 없는 기준이 매일 조용히 깨지고 있었다.
+    #
+    # **1단계는 `breaches`에 넣지 않는다**(R18). 지금 적용하면 전 계열이 매일 breach를
+    # 내고 경보가 닳는다. 임계 확정은 F-12(1m 축 보정) 실측이 며칠 쌓인 뒤 사람이 한다 —
+    # 유예 500ms 자체가 합성 직렬 비용(중앙값 ~690ms)보다 작아 **지킬 수 없는 값일 수
+    # 있고**, 상수를 바꾸는 결정은 코드가 아니라 사람이 한다.
+    publish_grace: dict[str, Any] | None
     # 일별 단일 통계에 붙는 **일중 추세** (2026-08-20 G-D). 판정이 아니라 표시다 —
     # 임계 승격은 20거래일 분포를 본 뒤(R18).
     intraday_trend: dict[str, Any]
@@ -419,6 +438,13 @@ class IntegrityReport:
     # 그때는 이 구분이 없었으므로 「0건 관측」이 아니라 「축이 없었다」이고, 그 사실은
     # `regime_distribution`이 같이 실려 읽힌다.
     regime_unseeded_cycles: int = 0
+    # 국면 시드가 **어느 경로로 갔는가** (2026-08-21 F-3, `RegimeSeeded.delivery`).
+    #
+    # `bus+direct`면 정상, `direct-only`면 버스 경로가 죽었다는 뜻이다 — 그 세션은 직접
+    # 전달로 버텼지만 다른 프로세스의 국면 구독자는 아무것도 못 받았다. 종전엔 그 구분이
+    # 로그에 없어서 "시드는 됐는데 버스로는 안 갔다"가 장후에 보이지 않았다.
+    # 빈 dict는 그날 `RegimeSeeded`가 없었다는 뜻(= 시드 자체가 없었다).
+    regime_seed_delivery: dict[str, int] = field(default_factory=dict)
     # **기여 의견 0의 사유 분포** (2026-08-14 F-5, `AggregatorNoContribution`).
     #
     # `n_experts=0`으로 가는 길이 여섯인데 어느 길이었는지 계측이 없어 `NEXT_TODO` W-2가
@@ -939,6 +965,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     no_contribution_cycles = 0
     # 국면을 한 번도 못 받은 상태에서 돈 사이클 수 (2026-08-19 F-5).
     regime_unseeded_cycles = 0
+    regime_seed_delivery: dict[str, int] = {}
     session_starts: list[str] = []
     # 기동 창 가드가 되돌려보낸 기동 (2026-08-07 P0-4) — `session_starts`에서 뺄 목록.
     refused_starts: list[str] = []
@@ -987,6 +1014,12 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             refused_starts.append(str(record.get("ts", ""))[11:19])
         elif tag == "SessionEnd":
             session_ends.append(str(record.get("ts", ""))[11:19])
+        elif tag == "RegimeSeeded":
+            # 2026-08-21 F-3 — 필드가 없는 옛 로그는 `unknown`으로 센다. "버스로 갔다"고
+            # 가정하지 않는다: 그때는 그 사실을 아무도 기록하지 않았다(L18).
+            delivery = record.get("delivery")
+            key = delivery if isinstance(delivery, str) and delivery else "unknown"
+            regime_seed_delivery[key] = regime_seed_delivery.get(key, 0) + 1
         elif tag in ("ClockSkewMeasured", "ClockSkewExceeded"):
             skew = record.get("skew_seconds")
             if isinstance(skew, (int, float)):
@@ -1101,6 +1134,10 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 hours = record.get("by_hour")
                 if isinstance(hours, dict):
                     publish_offset["by_hour"] = hours
+                # Horizon × 시간대 (2026-08-21 F-12) — `publish_grace` 축의 재료다.
+                per_horizon = record.get("by_horizon")
+                if isinstance(per_horizon, dict):
+                    publish_offset["by_horizon"] = per_horizon
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -1133,6 +1170,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "no_contribution_reasons": no_contribution_reasons,
         "no_contribution_cycles": no_contribution_cycles,
         "regime_unseeded_cycles": regime_unseeded_cycles,
+        "regime_seed_delivery": regime_seed_delivery,
         "session_starts": effective_starts,
         "refused_starts": all_refused,
         "session_ends": sorted(session_ends),
@@ -1141,8 +1179,14 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         # 절댓값이 가장 큰 표본 — 하루 중 시계가 동기되면 여러 값이 남는데, 그날 최악의
         # 상태가 판정 기준이다(그 시간대의 봉은 이미 그 스큐로 만들어졌다).
         "clock_skew_seconds": (max(clock_skews, key=abs) if clock_skews else None),
+        # 하루 중 이동폭 — F-13이 30분 주기 측정을 넣기 전에는 표본이 하루 1개뿐이라
+        # 이 값이 구조적으로 None이었다(그래서 1-10을 리포트가 못 봤다).
+        "clock_skew_range_seconds": (
+            round(max(clock_skews) - min(clock_skews), 3) if len(clock_skews) >= 2 else None
+        ),
         "delivery_latency": delivery_latency,
         "publish_offset": publish_offset,
+        "publish_grace": _publish_grace_axis(publish_offset),
         "degenerate_features": degenerate,
         "allowed_constant_values": allowed_constants,
         "nan_ratio_by_horizon": nan_summary,
@@ -1187,6 +1231,63 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- 탐지·복구 소유권 (고도화 4)
+
+
+def boundary_grace_seconds() -> float:
+    """완성봉 유예 — **합성기 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
+
+    `scripts/self_check.py._boundary_grace_seconds()`와 **같은 출처**를 본다. 자가점검
+    `bar_close` 줄이 인용하는 값과 리포트가 채점에 쓰는 값이 갈리면, 화면은 500ms를
+    말하는데 채점은 다른 숫자로 하는 상태가 된다(2026-08-21 F-15 ② — 숫자를 새로 쓰지
+    않는다는 F-2의 규율과 같다).
+    """
+    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+
+    return float(_BOUNDARY_GRACE_SECONDS)
+
+
+def _publish_grace_axis(publish_offset: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Horizon별 발행 오프셋을 **유예 상수와 대조**한다 (2026-08-21 F-15).
+
+    지금은 채점만 하고 판정하지 않는다 — `breaches`에 넣지 않는다(위 `publish_grace`
+    필드 주석). 못 잰 Horizon은 `measured=False`로 남긴다(L18): 그 세션에 그 Horizon
+    발행이 없었던 것과 유예를 지킨 것은 다른 사건이다.
+    """
+    if not publish_offset:
+        return None
+    per_horizon = publish_offset.get("by_horizon")
+    if not isinstance(per_horizon, Mapping) or not per_horizon:
+        return None
+    grace_ms = boundary_grace_seconds() * 1000.0
+    horizons: dict[str, Any] = {}
+    for name, stats in sorted(per_horizon.items()):
+        if not isinstance(stats, Mapping):
+            continue
+        p50 = stats.get("p50")
+        p90 = stats.get("p90")
+        measured = isinstance(p50, (int, float)) and isinstance(p90, (int, float))
+        horizons[str(name)] = {
+            "measured": measured,
+            "axis": stats.get("axis"),
+            "p50_ms": float(p50) if isinstance(p50, (int, float)) else None,
+            "p90_ms": float(p90) if isinstance(p90, (int, float)) else None,
+            "samples": stats.get("samples"),
+            "day_drift_ms": stats.get("day_drift_ms"),
+            # 유예를 넘겼는가 — **중앙값 기준**이다. p90으로 재면 꼬리 몇 건으로
+            # "매번 넘긴다"가 되고, 최댓값으로 재면 하루 한 건으로도 그렇게 된다.
+            "exceeds_grace": (bool(p50 > grace_ms) if measured else None),
+            "over_grace_ms": (round(float(p50) - grace_ms, 1) if measured else None),
+        }
+    if not horizons:
+        return None
+    exceeded = sorted(k for k, v in horizons.items() if v["exceeds_grace"])
+    return {
+        "grace_ms": round(grace_ms, 1),
+        "horizons": horizons,
+        "exceeded": exceeded,
+        # **판정이 아니라 기록이다**(R18). 이 값이 며칠 쌓여야 임계를 정할 근거가 된다.
+        "verdict": "recorded_only",
+    }
 
 
 def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
@@ -2497,8 +2598,10 @@ def build_report(
         horizon_findings=horizon_findings,
         late_bar_drops=late_bar_drops,
         clock_skew_seconds=clock_skew,
+        clock_skew_range_seconds=logs["clock_skew_range_seconds"],
         delivery_latency=logs["delivery_latency"],
         publish_offset=logs["publish_offset"],
+        publish_grace=logs["publish_grace"],
         intraday_trend=_intraday_trends(logs),
         record_vs_commit=_record_vs_commit(day),
         session_git_shas=logs["session_git_shas"],
@@ -2539,6 +2642,7 @@ def build_report(
         verdict_surface_gaps=surface_gaps,
         no_contribution_reasons=logs["no_contribution_reasons"],
         regime_unseeded_cycles=logs["regime_unseeded_cycles"],
+        regime_seed_delivery=logs["regime_seed_delivery"],
         breaches=breaches,
     )
 
@@ -2605,7 +2709,12 @@ def format_summary(report: IntegrityReport) -> str:
         lines.append("  피처 NaN 비율: " + " · ".join(parts))
 
     if report.clock_skew_seconds is not None:
-        lines.append(f"  시계 스큐(거래소−로컬): {report.clock_skew_seconds:+.2f}초")
+        movement = (
+            "  (하루 이동폭 미측정 — 표본 1개)"
+            if report.clock_skew_range_seconds is None
+            else f"  (하루 이동폭 {report.clock_skew_range_seconds * 1000:.0f}ms)"
+        )
+        lines.append(f"  시계 스큐(거래소−로컬): {report.clock_skew_seconds:+.2f}초{movement}")
     else:
         lines.append("  시계 스큐(거래소−로컬): 미측정")
 
@@ -2736,6 +2845,15 @@ def format_summary(report: IntegrityReport) -> str:
             f"  ❌ 국면 미수신 상태로 돈 사이클 {report.regime_unseeded_cycles}건 — "
             "웜스타트 시드가 첫 사이클에 안 닿았다(RegimeSeeded 로그 확인)"
         )
+    # **시드가 어느 경로로 갔는가** (2026-08-21 F-3). `direct-only`는 그 세션이 직접
+    # 전달로 버텼다는 뜻 — 다른 프로세스의 국면 구독자는 못 받았다.
+    if report.regime_seed_delivery:
+        direct_only = report.regime_seed_delivery.get("direct-only", 0)
+        parts = " · ".join(
+            f"{path} {count}건" for path, count in sorted(report.regime_seed_delivery.items())
+        )
+        mark = "❌" if direct_only else "✅"
+        lines.append(f"  {mark} 국면 시드 전달 경로: {parts}")
     if report.task_exit_codes:
         lines.extend(
             task_exit_codes.summarize(
@@ -2806,6 +2924,26 @@ def format_summary(report: IntegrityReport) -> str:
                 f"    {mark}일중 추세: {trend['first_hour']}시 {trend['first']:.0f}ms → "
                 f"{trend['last_hour']}시 {trend['last']:.0f}ms ({trend['ratio']}배)"
             )
+    # **유예 채점** (2026-08-21 F-15). 판정이 아니라 기록이다 — 이 값이 며칠 쌓여야
+    # 임계(또는 유예 상수 자체)를 정할 근거가 된다.
+    if report.publish_grace is not None:
+        grace = report.publish_grace
+        parts = []
+        for name, stat in grace["horizons"].items():
+            if not stat["measured"]:
+                parts.append(f"{name} 미측정")
+                continue
+            over = stat["over_grace_ms"]
+            sign = f"+{over:.0f}" if over >= 0 else f"{over:.0f}"
+            drift = stat.get("day_drift_ms")
+            drift_text = "" if drift is None else f"/이동 {drift:.0f}ms"
+            parts.append(f"{name} {stat['p50_ms']:.0f}ms({sign}{drift_text})")
+        exceeded = grace["exceeded"]
+        head = "유예 초과 없음" if not exceeded else f"유예 초과 {', '.join(exceeded)}"
+        lines.append(
+            f"  완성봉 유예 채점(기준 {grace['grace_ms']:.0f}ms · 기록만): {head} — "
+            + " · ".join(parts)
+        )
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
     # **어긋남이 없는 날도 한 줄 남긴다** (2026-08-20 G-2) — 측정된 0과 미검사를 가른다.
@@ -2820,6 +2958,7 @@ def format_summary(report: IntegrityReport) -> str:
                     verdict=str(report.record_vs_commit.get("verdict", "unresolved")),
                     detail=str(report.record_vs_commit.get("detail", "")),
                     dirty_files=report.record_vs_commit.get("dirty_files"),
+                    n_implementation=report.record_vs_commit.get("n_implementation"),
                 )
             )
         )

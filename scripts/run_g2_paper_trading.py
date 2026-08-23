@@ -115,7 +115,11 @@ from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
 from messiah.features import spec as feature_spec  # noqa: E402
-from messiah.models.registry import BundleStatus, ModelRegistry  # noqa: E402
+from messiah.models.registry import (  # noqa: E402
+    BundleStatus,
+    ModelRegistry,
+    load_threshold_selection,
+)
 from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
 from messiah.models.wiring_completeness import WiringCompleteness  # noqa: E402
@@ -208,18 +212,36 @@ def _load_futures_service(
     (모듈 docstring "오늘 당장 돌려도 거래가 발생하지 않는다" 참고)."""
     experts = {}
     meta_labelers = {}
+    threshold_sources = {}
     for horizon in Horizon:
         live = registry.get_live(horizon)
         if live is None:
             continue
         experts[horizon] = live.load_expert()
         meta_labelers[horizon] = live.load_meta_labeler()
+        # 임계값의 출처를 런타임까지 들고 온다 (2026-08-21 F-6) — `MetaGateEvaluated`가
+        # "임계 0"만 말하고 그 0이 어디서 왔는지는 말하지 않던 상태를 없앤다.
+        selection = load_threshold_selection(live.bundle_dir)
+        threshold_sources[horizon] = str(selection["source"])
+        if float(meta_labelers[horizon].threshold) <= 0.0:
+            print(
+                f"⚠ {horizon.value} meta 임계 0 — 게이트 무력 상태로 기동한다"
+                f"(출처 {selection['source']} · 지지 {selection.get('support')}"
+                f"/{selection.get('total')})",
+                flush=True,
+            )
     print(f"live 번들 결선: {[h.value for h in experts]} (feature_set={feature_set})", flush=True)
     # 이 프로세스는 피처를 만들지 않고 L1이 발행한 것을 받아 쓴다 — 그래서 **양쪽이 같은
     # 모양을 말하는지**가 결선 성립의 전제다(2026-08-11 F-1). 두 로그의 이 줄이 다르면
     # 번들이 붙어도 입력 벡터가 어긋난 채로 판단이 나간다.
     print(feature_spec.resolve(feature_set).describe(), flush=True)
-    return FuturesAIService(symbol, experts, bus, meta_labelers=meta_labelers)
+    return FuturesAIService(
+        symbol,
+        experts,
+        bus,
+        meta_labelers=meta_labelers,
+        meta_threshold_sources=threshold_sources,
+    )
 
 
 # 웜스타트 체인의 정본 (2026-08-14 F-1) — `run_l1_daily`와 **같은 함수**를 쓴다.
@@ -370,7 +392,7 @@ async def _seed_regime(runtime: RegimeRuntime, consumer: FuturesAIService, symbo
     (`_warm_start_regime()`과 같은 원칙). 다만 조용히 넘어가지 않는다(금지계명 12).
     """
     try:
-        state = await runtime.seed()
+        seeded = await runtime.seed()
     except Exception as exc:  # noqa: BLE001 — 시드 실패가 그날 운영을 막으면 안 됨
         mlog.log(
             "RegimeWarmStartFailed",
@@ -378,6 +400,7 @@ async def _seed_regime(runtime: RegimeRuntime, consumer: FuturesAIService, symbo
             symbol=symbol,
         )
         return
+    state, bus_ok = (None, False) if seeded is None else seeded
     if state is None:
         # 하한 미달이거나 판정 자체가 UNKNOWN이다. **발행하지 않은 사실을 남긴다** —
         # 시드가 빈 것과 그날 국면이 진짜 UNKNOWN인 것은 다르다(`RegimeRuntime.seed()`).
@@ -387,6 +410,23 @@ async def _seed_regime(runtime: RegimeRuntime, consumer: FuturesAIService, symbo
             flush=True,
         )
         return
+    # **직접 전달을 먼저 한다** (2026-08-21 F-3).
+    #
+    # 종전엔 로그가 먼저였다. 그래서 직접 전달이 실패해도 `RegimeSeeded`가 이미 찍혔고,
+    # 「시드했다」는 기록이 남는데 소비자는 못 받은 상태가 될 수 있었다. 로그는 일어난
+    # 일을 적는 것이지 하려던 일을 적는 것이 아니다.
+    await consumer.handle_regime(state)
+
+    if not bus_ok:
+        # 버스 경로가 죽었다 — 그 자체로 알려야 한다(금지계명 12). 이 세션은 직접 전달로
+        # 버티지만, 다른 프로세스의 국면 구독자는 아무것도 못 받는다.
+        mlog.log(
+            "RegimeSeedBusFailed",
+            f"국면 시드 버스 발행 실패 — 직접 전달만 성공했다: {runtime.last_seed_publish_error}",
+            symbol=symbol,
+            horizon=Horizon.M30.value,
+            error=runtime.last_seed_publish_error,
+        )
     mlog.log(
         "RegimeSeeded",
         f"기동 직후 국면 시드 {state.regime.value} (확신도 {state.confidence:.2f}) — "
@@ -395,9 +435,10 @@ async def _seed_regime(runtime: RegimeRuntime, consumer: FuturesAIService, symbo
         horizon=Horizon.M30.value,
         regime=state.regime.value,
         confidence=round(float(state.confidence), 4),
+        # SYSTEM.md 불변원칙 2의 예외 조문이 요구하는 필드 (2026-08-21 F-3). 조문이
+        # 필드 이름까지 정해 놓았는데 코드에 없었다 — 같은 커밋에 안 들어갔던 것이다.
+        delivery="bus+direct" if bus_ok else "direct-only",
     )
-    # 구독이 서기 전이라 버스 발행만으로는 안 닿는다(위 docstring) — 직접도 건넨다.
-    await consumer.handle_regime(state)
     print(f"국면 시드: {state.regime.value} (확신도 {state.confidence:.2f})", flush=True)
 
 

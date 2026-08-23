@@ -519,19 +519,21 @@ def check_schedule_drift(
     if sys.platform != "win32":
         return HostCheck("schedule_drift", available=False, ok=True, detail="Windows 전용 — 건너뜀")
 
+    # **네 작업 전부를 본다** (2026-08-21 F-5). 종전엔 `collection_tasks()`만 봐서
+    # Messiah-Shutdown(15:40) · Messiah-Postmarket(15:45)이 대조 대상에서 빠져 있었다 —
+    # 그 둘이 스케줄러에서 옮겨져도 아무 계기가 말하지 않았다.
     try:
-        expected = {
-            task.name: task.weekly for task in task_schedule.collection_tasks(schedule_path)
-        }
+        tasks = task_schedule.all_tasks(schedule_path)
     except task_schedule.ScheduleUnreadable as exc:
         # 정본을 못 읽으면 기동 창도 폴백을 쓰고 있다는 뜻이다 — 그 사실 자체가 알려야 할 상태다.
         return HostCheck(
             "schedule_drift", available=False, ok=True, detail=f"정본 읽기 실패({exc})"
         )
+    expected = {task.name: task.weekly for task in tasks}
+    # 기동 창 개념이 적용되는 작업 — 비수집 계열에는 창 비교 자체가 의미가 없다.
+    collection_names = {task.name for task in tasks if task.collection}
     if not expected:
-        return HostCheck(
-            "schedule_drift", available=False, ok=True, detail="정본에 수집 계열 작업이 없다"
-        )
+        return HostCheck("schedule_drift", available=False, ok=True, detail="정본에 작업이 없다")
 
     window_start = task_schedule.launch_window_start(schedule_path)
     try:
@@ -594,7 +596,11 @@ def check_schedule_drift(
             )
 
         shown.append(f"{name}={value}")
-        early = [t for t in times if t < window_start]
+        # **비수집 계열에는 기동 창을 대지 않는다** (2026-08-21 F-5). Shutdown 15:40 ·
+        # Postmarket 15:45는 창 밖이지만 정상이다 — 그쪽은 `run_l1_daily.py` 진입점을
+        # 안 타므로 창 가드에 걸리지 않는다. 여기에 창을 대면 정상 두 건이 매일 결함으로
+        # 올라오고, 그것이 곧 경보가 닳는 길이다.
+        early = [t for t in times if t < window_start] if name in collection_names else []
         if early:
             findings.append(
                 f"{name}: 등록 트리거 {', '.join(f'{t:%H:%M}' for t in early)}가 "
@@ -606,8 +612,13 @@ def check_schedule_drift(
             )
         elif want not in times:
             findings.append(
-                f"{name}: 등록 {value} ≠ 정본 {want:%H:%M} — 오늘은 돌지만 정본이 실제와 다르다. "
-                "둘 중 맞는 쪽으로 맞출 것(configs/scheduled_tasks.json 또는 재등록)"
+                f"{name}: 등록 {value} ≠ 정본 {want:%H:%M} — "
+                + (
+                    "오늘은 돌지만 정본이 실제와 다르다. "
+                    if name in collection_names
+                    else "비수집 계열이라 그날 수집이 죽는 일은 아니지만 정본이 거짓말을 한다. "
+                )
+                + "둘 중 맞는 쪽으로 맞출 것(configs/scheduled_tasks.json 또는 재등록)"
             )
 
     if findings:

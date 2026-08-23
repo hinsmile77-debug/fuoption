@@ -60,6 +60,14 @@ class RegimeRuntime:
         self._bus = bus
         self._horizon = driving_horizon
         self._history: deque[BarClosed] = deque(maxlen=history_limit)
+        # `seed()`의 버스 발행이 실패했을 때 그 예외 문자열 (2026-08-21 F-3).
+        # 반환값의 `bus_ok=False`가 **무엇 때문에** 거짓인지는 여기에만 남는다.
+        self._last_seed_publish_error: str | None = None
+
+    @property
+    def last_seed_publish_error(self) -> str | None:
+        """직전 `seed()`의 버스 발행 실패 사유 — 성공했거나 아직 안 했으면 None."""
+        return self._last_seed_publish_error
 
     @property
     def history_capacity(self) -> int:
@@ -110,7 +118,7 @@ class RegimeRuntime:
         self._history.extend(accepted)  # deque(maxlen)이 알아서 오래된 것부터 버린다
         return len(self._history)
 
-    async def seed(self) -> object | None:
+    async def seed(self) -> tuple[object, bool] | None:
         """웜스타트 버퍼로 **한 번 판정하고 발행한다** — 세션 첫 사이클을 위해 (2026-08-19 F-5).
 
         ## 왜 필요한가 — 매 세션의 첫 판단이 국면 없이 내려갔다
@@ -141,15 +149,30 @@ class RegimeRuntime:
         빈 것인지 구분이 사라진다. 그래서 판정이 UNKNOWN이면 발행도 로깅도 없이 None을
         돌려주고, 호출측이 그 사실을 남긴다(금지계명 12 — 조용한 폴백 금지).
 
-        반환: 발행한 `RegimeState`, 또는 발행하지 않았으면 None.
+        ## 버스 발행 성공 여부를 **돌려준다** (2026-08-21 F-3)
+
+        SYSTEM.md 불변원칙 2의 예외 조문이 `RegimeSeeded.delivery` 필드를 요구하는데
+        코드에 그 필드가 없었다 — 조문과 코드가 어긋난 상태였다. 필드를 채우려면 호출측이
+        **어느 경로로 갔는지**를 알아야 하고, 종전엔 `state`만 돌려줘서 알 수 없었다.
+
+        버스 발행 실패가 시드를 막지는 않는다 — 같은 프로세스의 소비자에게는 직접 전달이
+        살아 있기 때문이다. 다만 **조용히 넘어가지 않는다**: 실패했다는 사실이 반환값을
+        타고 나가 `delivery="direct-only"`로 기록되고, 호출측이 WARNING을 낸다.
+
+        반환: `(발행한 RegimeState, 버스 발행 성공 여부)`. 발행 안 했으면 None.
         """
         if len(self._history) < self.min_bars_for_classify:
             return None
         state = self._regime_ai.classify(self._bars())
         if state.regime == Regime.UNKNOWN:
             return None
-        await self._bus.publish(TOPIC_REGIME, state)
-        return state
+        bus_ok = True
+        try:
+            await self._bus.publish(TOPIC_REGIME, state)
+        except Exception as exc:  # noqa: BLE001 — 버스 실패가 시드를 막지 않는다
+            bus_ok = False
+            self._last_seed_publish_error = repr(exc)
+        return state, bus_ok
 
     def classify_now(self):
         """현재 버퍼로 **판정만** 한다 — 발행도, 로깅도, 버퍼 변경도 없다.
