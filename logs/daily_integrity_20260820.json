@@ -1,0 +1,644 @@
+{
+  "date": "2026-08-20",
+  "symbol": "A05609",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 410,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 0,
+      "longest_gap_minutes": 0,
+      "gaps": [],
+      "tail_gap_minutes": 0
+    }
+  ],
+  "restarts": 0,
+  "starts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "restarts_by_process": {
+    "l1_daily": 0,
+    "g2_paper": 0
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:20:16"
+    ],
+    "g2_paper": [
+      "08:25:30"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 41
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 409
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 136
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 81
+    }
+  },
+  "log_level_counts": {
+    "INFO": 98,
+    "DEBUG": 882,
+    "WARNING": 3
+  },
+  "tag_counts": {
+    "SessionStart": 4,
+    "CrashForensicsArmed": 4,
+    "LaunchWindowRefused": 2,
+    "FeatureWarmStart": 1,
+    "OptionChainPolled": 174,
+    "OptionChainPollRetried": 7,
+    "CollectorFirstTick": 1,
+    "ClockSkewMeasured": 1,
+    "FeaturePublish": 708,
+    "InvestorFlowPollRetried": 2,
+    "DailyCloseBarHandedOff": 1,
+    "FeatureHealthSummary": 3,
+    "FeatureHealthDegenerate": 1,
+    "FeatureHealthNotJudged": 2,
+    "TickDeliveryLatency": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "Recomposed": 1,
+    "IntegrityReportGenerated": 1,
+    "IntegrityThresholdBreached": 1,
+    "SessionEnd": 2,
+    "CommandCenterUIPortConfirmed": 1,
+    "RegimeWarmStart": 1,
+    "RegimeClassified": 14,
+    "MetaGateEvaluated": 14,
+    "AggregatorNoContribution": 14,
+    "DecisionEmitted": 14,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 0,
+  "clock_skew_seconds": 0.156,
+  "delivery_latency": {
+    "p50": 0.5125,
+    "p90": 0.9214,
+    "p99": 1.0251,
+    "max": 1.1434,
+    "samples": 20000.0
+  },
+  "session_git_shas": [
+    "50eff6c"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 409
+    },
+    "3m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 136
+    },
+    "5m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 81
+    },
+    "10m": {
+      "always_nan": [],
+      "constant": [
+        "px_max_ret_60"
+      ],
+      "judged": true,
+      "samples": 41
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 27,
+      "rolling_judged": true,
+      "rolling_days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "rolling_samples": 68
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 14,
+      "rolling_judged": true,
+      "rolling_days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "rolling_samples": 36
+    }
+  },
+  "allowed_constant_values": {
+    "ev_dow_fri": 0.0,
+    "ev_dow_mon": 0.0,
+    "ev_dow_thu": 1.0,
+    "ev_dow_tue": 0.0,
+    "ev_dow_wed": 0.0,
+    "ev_dte_fut": 15.0,
+    "ev_dte_opt_m": 15.0,
+    "ev_dte_opt_w": 0.0,
+    "ev_expiry_flag": 1.0,
+    "ev_holiday_adj": 0.0,
+    "ev_rollover_win": 0.0,
+    "px_gap_open": 0.03579765911666992
+  },
+  "volume_check": {
+    "date": "2026-08-20",
+    "symbol": "A05609",
+    "ratio": 0.9997889947578386,
+    "common_minutes": 410,
+    "archived_volume": 151623,
+    "official_volume": 151655,
+    "missing_minutes": 0,
+    "head_missing_minutes": 0,
+    "middle_missing_minutes": 0,
+    "tail_missing_minutes": 0,
+    "warn_ratio": 0.95,
+    "missing_minutes_limit": 20,
+    "head_missing_minutes_limit": 0,
+    "ok": true
+  },
+  "vol_axis": {
+    "date": "2026-08-20",
+    "symbol": "A05609",
+    "horizons": {
+      "5m": {
+        "samples": 290,
+        "window_days": 20,
+        "excluded_days": [],
+        "baseline_ic": 0.19448679327442903,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "px_high_dist_5"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "15m": {
+        "samples": 92,
+        "window_days": 20,
+        "excluded_days": [],
+        "baseline_ic": 0.38802151565124915,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "30m": {
+        "samples": 43,
+        "window_days": 20,
+        "excluded_days": [],
+        "baseline_ic": -0.028390214436726065,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 546.6GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 36% · 외부 파이썬 4개(누적 CPU 295초)"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      },
+      {
+        "name": "schedule_drift",
+        "available": true,
+        "ok": true,
+        "detail": "정본 일치 Messiah=08:20, Messiah-G2=08:25 (기동 창 08:15~)"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [],
+  "unmeasured_kinds": {
+    "accruing": [],
+    "failed": [],
+    "absent": []
+  },
+  "flat_price_minutes": 0,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 137977,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 434,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 99.8,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:21~15:34 · 카덴스 1분",
+      "window_start_kst": "08:20",
+      "expected_legs": 3,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 45,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 99.3,
+      "expectation_note": "",
+      "first_kst": "08:30",
+      "last_kst": "15:30",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 10.0,
+      "tail_gap_minutes": 5.0,
+      "longest_gap_minutes": 10.0,
+      "gaps": [],
+      "detail": "08:30~15:30 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 88,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:32",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 3.0,
+      "longest_gap_minutes": 9.0,
+      "gaps": [],
+      "detail": "08:21~15:32 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 174,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:23",
+      "last_kst": "15:34",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 3.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 4.0,
+      "gaps": [],
+      "detail": "08:23~15:34 · 카덴스 5분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "ticks",
+      "rows": 410,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:45",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:45~15:34 · 카덴스 1분",
+      "window_start_kst": "08:45",
+      "expected_legs": null,
+      "short_cycles": []
+    }
+  ],
+  "series_findings": [],
+  "observation_gaps": [],
+  "host_events": [
+    {
+      "event_id": 12,
+      "at_kst": "06:39:26",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "06:39:27",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "06:39:53",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [
+    "10m 피처 1개가 세션 내내 죽어 있었다(px_max_ret_60) — 모델에 죽은 입력이 들어간다"
+  ],
+  "series_contract": [],
+  "abnormal_exits": [],
+  "collection_start_lag_minutes": 0.3,
+  "task_exit_codes": {
+    "exits": [
+      {
+        "task": "Messiah",
+        "at_kst": "15:35:32",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "15:35:01",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:02",
+        "code": 0,
+        "win32_code": 0
+      }
+    ],
+    "available": true,
+    "detail": "작업 3개 · 기동 4회",
+    "launches": [
+      {
+        "task": "Messiah",
+        "at_kst": "08:20:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "08:25:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-Postmarket",
+        "at_kst": "15:45:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      }
+    ]
+  },
+  "irrecoverable_loss_minutes": 0.3,
+  "irrecoverable_loss_breakdown": {
+    "start_lag_minutes": 0.3,
+    "series_head_gap_minutes": 10.0,
+    "mid_session_gap_minutes": 0.0,
+    "mid_session_gap_by_process": {}
+  },
+  "mid_session_gap_minutes": 0.0,
+  "canonical_consumer_findings": [],
+  "regime_distribution": {
+    "HIGH_VOL": 1,
+    "RANGE": 10,
+    "TREND_DOWN": 1,
+    "TREND_UP": 2
+  },
+  "provisional": false,
+  "incomplete_day": false,
+  "incomplete_reason": [],
+  "session_coverage_pct_min": 99.3,
+  "symbol_mismatch_suspected": false,
+  "symbol_candidates": [],
+  "verdict_surface_gaps": [],
+  "regime_unseeded_cycles": 0,
+  "no_contribution_reasons": {
+    "blocked_by_meta": 14
+  },
+  "feature_health_rolling": [
+    {
+      "horizon": "10m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "samples": 101,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "15m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "samples": 68,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "1m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "samples": 1003,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "30m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "samples": 36,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "3m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "samples": 335,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "5m",
+      "days": [
+        "2026-08-18",
+        "2026-08-19",
+        "2026-08-20"
+      ],
+      "samples": 199,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    }
+  ],
+  "decision_funnel": {
+    "no_expert": 14
+  },
+  "meta_gate": {
+    "evaluations": 14,
+    "passes": 0,
+    "threshold": 0.7,
+    "p50": 0.0668,
+    "p90": 0.56,
+    "max": 0.6672
+  }
+}

@@ -375,7 +375,6 @@
 | **J-12** | 오늘 `SessionStart` 계수 → `abnormal_exits` | **판정 보류.** 1-3의 계수 오류가 F-3 전이라 오탐이 예상된다. 거절 1 + 실기동 1을 사람이 직접 확인할 것 | 오늘 장후(참고만) |
 | **C-1** | 로컬 PC `Get-Item scripts\run_g2_paper_trading.py \| select LastWriteTime` | 08:25:30 이전/이후. 1-1의 인과 확정 | **오늘 장후, 즉시 가능** |
 | **C-4** | `UISnapshotFreshness` | 브라우저로 `http://localhost:8511` 1회 개방 후 출현 여부 → **D-2 판정** | **즉시 가능** |
-
 ---
 
 *작성: messiah-daily-check 스킬 (예약 실행 08:45 KST) · 코드 변경 없음 · dev_memory 갱신 완료*
