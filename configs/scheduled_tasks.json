@@ -8,7 +8,12 @@
     "",
     "읽는 쪽: scripts/install_scheduled_tasks.ps1 (등록), src/messiah/ops/task_schedule.py (기동 창),",
     "src/messiah/ops/host_health.py check_schedule_drift (매일 실측 대조).",
-    "시각을 바꿀 때는 여기만 고치고 install_scheduled_tasks.ps1을 다시 돌린다."
+    "시각을 바꿀 때는 여기만 고치고 install_scheduled_tasks.ps1을 다시 돌린다.",
+    "",
+    "run_as_system: 그 작업을 SYSTEM 주체(RunLevel Highest)로 등록한다. 기본값 false는",
+    "기존 네 작업의 Interactive/Limited를 그대로 지킨다 - 수집 프로세스는 사용자 세션에서",
+    "돌아야 하고, 승격은 필요 없는 권한을 주는 일이다. Messiah-ClockResync만 true인 이유는",
+    "w32tm /resync가 비관리자에게 0x80070005(액세스 거부)를 돌려주기 때문이다(2026-08-23 실측)."
   ],
   "launch_window_margin_minutes": 5,
   "tasks": [
@@ -43,6 +48,15 @@
       "at_boot": false,
       "restart": false,
       "collection": false
+    },
+    {
+      "name": "Messiah-ClockResync",
+      "bat": "scripts\\resync_clock.bat",
+      "weekly": "08:10",
+      "at_boot": false,
+      "restart": false,
+      "collection": false,
+      "run_as_system": true
     }
   ]
 }

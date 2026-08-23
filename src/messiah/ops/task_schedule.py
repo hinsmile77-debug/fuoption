@@ -64,6 +64,13 @@ class ScheduledTask:
     at_boot: bool
     restart: bool
     collection: bool
+    #: SYSTEM 주체(RunLevel Highest)로 등록하는가 (2026-08-23).
+    #:
+    #: 기본값 `False`가 기존 네 작업의 Interactive/Limited를 그대로 지킨다 — 수집
+    #: 프로세스는 사용자 세션에서 돌아야 하고, 승격은 **필요 없는 권한을 주는 일**이다.
+    #: `Messiah-ClockResync`만 `True`인 이유는 `w32tm /resync`가 비관리자에게
+    #: `0x80070005`(액세스 거부)를 돌려주기 때문이다(2026-08-23 실측).
+    run_as_system: bool = False
 
 
 class ScheduleUnreadable(Exception):
@@ -93,6 +100,7 @@ def load_schedule(path: Path | str = DEFAULT_SCHEDULE_PATH) -> tuple[list[Schedu
                 at_boot=bool(item.get("at_boot", False)),
                 restart=bool(item.get("restart", False)),
                 collection=bool(item.get("collection", False)),
+                run_as_system=bool(item.get("run_as_system", False)),
             )
             for item in raw["tasks"]
         ]

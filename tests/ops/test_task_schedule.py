@@ -137,3 +137,81 @@ def test_the_real_schedule_file_parses():
     assert all(
         task.at_boot for task in tasks if task.collection
     ), "수집 작업에 부팅 트리거가 없으면 장중 재부팅에 관측이 죽는다(2026-08-06에 21분)"
+
+
+# ------------------------------------------- 실행 주체 (2026-08-23 시계 재동기)
+
+
+def test_run_as_system_defaults_to_false(tmp_path):
+    """**승격은 필요 없는 권한을 주는 일이다.** 정본이 명시하지 않으면 기본은 비승격 —
+    수집 프로세스 넷의 Interactive/Limited가 조용히 SYSTEM으로 바뀌면 안 된다."""
+    path = _write(tmp_path, [_task("Messiah", "08:20")])
+
+    task = task_schedule.all_tasks(path)[0]
+
+    assert task.run_as_system is False
+
+
+def test_run_as_system_is_read_from_the_canonical_file(tmp_path):
+    """`w32tm /resync`는 비관리자에게 0x80070005를 돌려준다(2026-08-23 실측) — 그 한
+    작업만 SYSTEM으로 등록해야 하고, 그 사실은 코드가 아니라 정본에 적힌다."""
+    path = tmp_path / "scheduled_tasks.json"
+    path.write_text(
+        json.dumps(
+            {
+                "launch_window_margin_minutes": 5,
+                "tasks": [
+                    {
+                        "name": "Messiah",
+                        "bat": "a.bat",
+                        "weekly": "08:20",
+                        "collection": True,
+                    },
+                    {
+                        "name": "Messiah-ClockResync",
+                        "bat": "scripts\\resync_clock.bat",
+                        "weekly": "08:10",
+                        "collection": False,
+                        "run_as_system": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    by_name = {task.name: task for task in task_schedule.all_tasks(path)}
+
+    assert by_name["Messiah-ClockResync"].run_as_system is True
+    assert by_name["Messiah"].run_as_system is False
+
+
+def test_a_system_task_outside_the_collection_set_does_not_move_the_window(tmp_path):
+    """08:10 재동기가 기동 창을 08:05로 끌어내리면 안 된다 — 그 작업은 수집이 아니다.
+
+    창이 앞당겨지면 그만큼 이른 기동을 허용하게 되고, 2026-08-10에 오전을 통째로 잃게 한
+    것이 바로 창과 트리거의 어긋남이었다.
+    """
+    path = tmp_path / "scheduled_tasks.json"
+    path.write_text(
+        json.dumps(
+            {
+                "launch_window_margin_minutes": 5,
+                "tasks": [
+                    {"name": "Messiah", "bat": "a.bat", "weekly": "08:20", "collection": True},
+                    {
+                        "name": "Messiah-ClockResync",
+                        "bat": "b.bat",
+                        "weekly": "08:10",
+                        "collection": False,
+                        "run_as_system": True,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert task_schedule.launch_window_start(path) == time(8, 15)
+    assert len(task_schedule.all_tasks(path)) == 2
+    assert [t.name for t in task_schedule.collection_tasks(path)] == ["Messiah"]

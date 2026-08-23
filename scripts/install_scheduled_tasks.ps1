@@ -95,6 +95,7 @@ $plan = @(
             Weekly  = $entry.weekly
             AtBoot  = [bool]$entry.at_boot
             Restart = [bool]$entry.restart
+            System  = [bool]$entry.run_as_system
         }
     }
 )
@@ -164,12 +165,28 @@ foreach ($item in $plan) {
     $argument = '/c "' + $bat + '"'
     $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument $argument -WorkingDirectory $repo
 
-    # **실행 주체는 기존 것을 그대로 쓴다.** `-Force` 재등록은 Principal도 새로 쓰는데,
-    # 기본값에 맡기면 LogonType/RunLevel이 조용히 바뀔 수 있고 그 사실은 **다음 거래일
-    # 08:35에 아무것도 안 뜨는 것으로만** 드러난다. 2026-08-06 실측 기존값은
-    # LogonType=Interactive / RunLevel=Limited이고, 새 작업도 같은 값으로 맞춘다.
+    # **정본이 `run_as_system`을 요구하면 그것이 기존 주체를 이긴다** (2026-08-23).
+    #
+    # 바로 아래 "기존 것을 그대로 쓴다" 규율의 예외다. 그 규율은 *조용한 강등*을 막으려는
+    # 것인데(등록이 Limited로 되돌아가면 다음 거래일 아침에야 드러난다), 이 갈래는 방향이
+    # 반대다 — 정본이 SYSTEM을 요구하는데 기존 등록이 Limited면 그 작업은 **매일 조용히
+    # 실패한다.** `w32tm /resync`는 비관리자에게 0x80070005(액세스 거부)를 돌려주고,
+    # 스케줄러에는 실패 코드만 남는다(2026-08-23 실측). 정본이 명시한 것을 기존 상태가
+    # 덮게 두지 않는다.
+    #
+    # 승격은 정본에 `run_as_system: true`라고 적힌 작업에만 걸린다 — 지금은
+    # Messiah-ClockResync 하나뿐이고, 나머지 넷은 기본값 false라 종전 경로 그대로다.
+    # 수집 프로세스에 SYSTEM을 주지 않는 이유는 필요가 없어서다: 사용자 세션에서 돌아야
+    # 하고, 승격은 **필요 없는 권한을 주는 일**이다.
     $current = Get-ScheduledTask -TaskName $item.Name -ErrorAction SilentlyContinue
-    if ($current) {
+    if ($item.System) {
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    }
+    elseif ($current) {
+        # **실행 주체는 기존 것을 그대로 쓴다.** `-Force` 재등록은 Principal도 새로 쓰는데,
+        # 기본값에 맡기면 LogonType/RunLevel이 조용히 바뀔 수 있고 그 사실은 **다음 거래일
+        # 08:35에 아무것도 안 뜨는 것으로만** 드러난다. 2026-08-06 실측 기존값은
+        # LogonType=Interactive / RunLevel=Limited이고, 새 작업도 같은 값으로 맞춘다.
         $principal = $current.Principal
     }
     else {
