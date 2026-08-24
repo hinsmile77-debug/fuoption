@@ -704,3 +704,20 @@ class SelfEvalReport(BusMessage):
     pnl_measurable: bool = False
     wiring_stage: str | None = None
     wiring_summary: str | None = None
+    # **표본을 어디서 어디까지 잘랐는가** (2026-08-24 F-27 · 2026-08-18 결정의 이행).
+    #
+    # `n_return_samples`가 왜 그 수인지는 종전에 **코드를 읽어야만** 알 수 있었다.
+    # 2026-08-24 기준 파일에 18행이 있는데 값은 6이었고, 그 차이는 「종목 필터가 12행을
+    # 뺐다」였다 — 그런데 그 12행은 잃은 성적이 아니라 **직전 월물의 성적**이다.
+    # 2026-08-18에 *"절단을 조용히 하면 나중에 「왜 40일인데 27행이냐」를 아무도 못 푼다"*는
+    # 결정이 이미 있었고, 여기가 그 결정을 이행하는 자리다.
+    #
+    # 모양: {"from": "YYYY-MM-DD", "rows_total": N, "rows_counted": M,
+    #        "excluded": {"roll_day": r, "not_countable": nc},
+    #        "legacy_rows_without_countable": u}
+    # None은 미측정(호출자가 안 넘겼다)이지 「자른 게 없다」가 아니다(L18).
+    sample_window: dict | None = None
+    # 이 날 성적이 **승격 근거로 쓰일 수 있는가** (2026-08-24 F-17 → F-27 흡수).
+    # 검증 관문을 못 채운 번들이 낸 성적은 지우지 않는다 — 지우면 왜 못 쓰는지가 사라진다.
+    promotion_evidence_eligible: bool | None = None
+    promotion_evidence_reason: str | None = None

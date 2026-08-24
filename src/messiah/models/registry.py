@@ -620,3 +620,28 @@ class ModelRegistry:
                 reason=reason,
             )
         )
+
+
+def unvalidated_live_gates(registry: "ModelRegistry") -> dict[str, list[str]]:
+    """현역 번들 중 **승격을 막는 관문이 남은 것** → {bundle_id: [관문 이름]} (F-17).
+
+    새 판정 로직을 만들지 않는다 — `BundleManifest.blocking_gates()`(미달과 미측정을
+    함께 돌려준다)를 그대로 재사용한다. **주문을 막지 않는다**: R18이 차단 계층을 3개로
+    고정하므로 네 번째 차단 계층을 신설하지 않고, 막을 것은 오늘의 거래가 아니라
+    **오늘의 성적이 승격 근거로 쓰이는 일**이다.
+    """
+    out: dict[str, list[str]] = {}
+    for horizon in Horizon:
+        record = registry.get_live(horizon)
+        if record is None:
+            continue
+        try:
+            blocking = record.manifest().blocking_gates()
+        except Exception as exc:  # noqa: BLE001
+            # 판정 재료를 못 읽는 것은 「관문을 통과했다」가 아니다 — 모르는 것을 좋은
+            # 쪽으로 가정하지 않는다(L18). 읽기 실패 자체를 막는 사유로 적는다.
+            out[record.bundle_id] = [f"manifest_unreadable({exc})"]
+            continue
+        if blocking:
+            out[record.bundle_id] = [gate.name for gate in blocking]
+    return out

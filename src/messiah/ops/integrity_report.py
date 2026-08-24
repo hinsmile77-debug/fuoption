@@ -479,6 +479,12 @@ class IntegrityReport:
     # 캐야 했고, `shortfall_ratio`가 없어 "손에 닿는 거리"와 "몇 배 떨어짐"이 구별되지
     # 않았다. None은 미측정(사이저가 한 번도 안 불렸다 = 판단이 리스크까지 못 갔다)이다.
     sizer_funnel: dict[str, Any] | None = None
+    # **검증 관문을 못 채운 번들이 현역인가** (2026-08-24 F-17 → F-27 흡수).
+    # {bundle_id, blocking: [...], traded: bool, promotion_evidence_eligible: bool}.
+    # 막는 것이 아니라 **표식**이다 — R18이 차단 계층을 3개로 고정하므로 네 번째 차단
+    # 계층을 신설하지 않는다. 막을 것은 오늘의 거래가 아니라 **오늘의 성적이 승격 근거로
+    # 쓰이는 일**이다. None은 미측정(그날 self_eval 산출물이 없다)이다.
+    bundle_gates_unvalidated: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1881,6 +1887,46 @@ def load_json_artifact(day: date, log_dir: Path, prefix: str) -> dict[str, Any] 
         return None
 
 
+def load_self_eval(day: date, log_dir: Path) -> dict[str, Any] | None:
+    """`logs/self_eval_YYYY-MM-DD.json` — 없거나 깨졌으면 None(= 미측정).
+
+    `load_json_artifact()`와 따로 있는 이유는 **파일명 규칙이 다르기 때문**이다(하이픈
+    날짜). 규칙을 통일하는 것은 산출물 이름을 바꾸는 변경이라 이 커밋의 몫이 아니다 —
+    지금 필요한 것은 그 파일을 읽는 것이지 이름을 고르는 것이 아니다.
+    """
+    path = log_dir / f"self_eval_{day.isoformat()}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _bundle_gates_axis(
+    self_eval: Mapping[str, Any] | None, sizer_funnel: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """미검증 번들 표식 — 그날 성적이 승격 근거로 쓰일 수 있는가 (F-17 · F-27).
+
+    `traded`가 따로 있는 이유: 관문을 못 채운 번들이 현역인 것과 **그 번들이 실제로
+    주문을 냈는가**는 다른 사실이다. 2026-08-24는 전자만 참이고 후자는 거짓이라
+    그날분 오염량이 0이었다 — 그 구별이 없으면 매일 같은 무게로 읽힌다.
+    """
+    if not self_eval:
+        return None
+    eligible = self_eval.get("promotion_evidence_eligible")
+    if eligible is None:
+        # F-27 이전의 self_eval이다 — 「깨끗하다」가 아니라 「안 쟀다」(L18).
+        return None
+    submitted = (sizer_funnel or {}).get("submitted")
+    return {
+        "promotion_evidence_eligible": bool(eligible),
+        "reason": self_eval.get("promotion_evidence_reason"),
+        "traded": bool(submitted) if submitted is not None else None,
+        "sample_window": self_eval.get("sample_window"),
+    }
+
+
 def _ui_activity_from_watchdog(
     *,
     ui_own: Sequence[str],
@@ -2277,6 +2323,10 @@ def build_report(
     # 호출측이 넘긴 로그 경로에서 역추론한다(`_infer_log_dir` docstring).
     resolved_log_dir = log_dir or _infer_log_dir(log_paths)
     vol_axis = load_json_artifact(day, resolved_log_dir, "vol_scorecard") or {}
+    # 미검증 번들 표식 (2026-08-24 F-17 → F-27 흡수) — 그날 self_eval이 정본이다.
+    bundle_gates_unvalidated = _bundle_gates_axis(
+        load_self_eval(day, resolved_log_dir), sizer_funnel
+    )
 
     # ---- 고도화 3: 세션 내내 죽어 있던 피처 ----
     #
@@ -2719,6 +2769,7 @@ def build_report(
         regime_distribution=regime_distribution,
         decision_funnel=decision_funnel,
         sizer_funnel=sizer_funnel,
+        bundle_gates_unvalidated=bundle_gates_unvalidated,
         meta_gate=meta_gate,
         symbol_mismatch_suspected=bool(symbol_candidates),
         symbol_candidates=symbol_candidates,
@@ -2870,6 +2921,21 @@ def format_summary(report: IntegrityReport) -> str:
     # **판단 뒤의 깔때기** (2026-08-24 F-23) — 판정은 안 하고 매일 보여만 준다.
     # 새로 답하는 것은 "0계약이 1계약까지 얼마나 모자랐나"다. 건수만으로는
     # 손에 닿는 거리와 몇 배 떨어진 거리가 같은 0으로 보인다.
+    # **오늘 성적을 승격 근거로 쓸 수 있는가** (2026-08-24 F-17 → F-27).
+    if report.bundle_gates_unvalidated is None:
+        lines.append("  승격 근거 자격: 미측정(그날 self_eval에 표식이 없다)")
+    else:
+        bg = report.bundle_gates_unvalidated
+        traded = bg.get("traded")
+        if traded is None:
+            traded_text = "거래 미측정"
+        else:
+            traded_text = "거래 있음" if traded else "거래 0건"
+        if bg.get("promotion_evidence_eligible"):
+            lines.append(f"  승격 근거 자격: ✅ 사용 가능 · {traded_text}")
+        else:
+            reason = bg.get("reason") or "사유 미기재"
+            lines.append(f"  승격 근거 자격: ❌ 사용 불가 · {traded_text} — {reason}")
     if report.sizer_funnel is None:
         lines.append("  주문 깔때기: 미측정(사이저 미도달 — 판단이 리스크까지 못 갔다)")
     else:

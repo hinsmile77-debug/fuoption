@@ -119,8 +119,9 @@ from messiah.models.registry import (  # noqa: E402
     BundleStatus,
     ModelRegistry,
     load_threshold_selection,
+    unvalidated_live_gates,
 )
-from messiah.models.self_evaluation import run_self_evaluation  # noqa: E402
+from messiah.models.self_evaluation import champion_sample, run_self_evaluation  # noqa: E402
 from messiah.models.shadow_manager import ShadowManager, evaluate_promotion  # noqa: E402
 from messiah.models.wiring_completeness import WiringCompleteness  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
@@ -500,6 +501,13 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
+_PROMOTION_TRADING_DAYS = 40
+"""Ver 1.1 §8 G2 통과기준 — 이 값을 코드가 바꾸지 않는다 (2026-08-24 F-27 경계).
+
+롤 주기(20~22거래일)와 40거래일 중 무엇이 정본인지는 **사람이 정할 문제**다. 여기서는
+표시용으로만 쓴다."""
+
+
 def _assess_wiring(
     registry: ModelRegistry,
     shadow_manager: ShadowManager,
@@ -549,8 +557,29 @@ async def _daily_close(
     end_equity = (await broker.account()).total_equity
     daily_return = float((end_equity - start_equity) / start_equity) if start_equity > 0 else 0.0
     returns_path = _LOG_DIR / "g2_daily_returns.jsonl"
-    _append_jsonl(returns_path, {"date": today, "symbol": symbol, "return": daily_return})
-    champion_returns = [r["return"] for r in _read_jsonl(returns_path) if r.get("symbol") == symbol]
+
+    # **이 날 성적을 승격 근거로 쓸 수 있는가** (2026-08-24 F-27, F-17 흡수).
+    #
+    # 두 표식이 **같은 파일의 같은 행**에 있어야 "이 날 성적은 왜 안 세는가"가 한 줄로
+    # 읽힌다. 성과 수치는 지우지 않는다 — 지우면 왜 못 쓰는지가 사라진다.
+    unmeasured = unvalidated_live_gates(registry)
+    _append_jsonl(
+        returns_path,
+        {
+            "date": today,
+            "symbol": symbol,
+            "return": daily_return,
+            "n_orders": gateway.accepted_orders,
+            # Position Reconciler 부재 — 0이 아니라 모름이다(L18).
+            "n_fills": None,
+            # 검증 관문을 못 채운 번들이 낸 성적은 승격 근거로 세지 않는다.
+            "countable": not unmeasured,
+            "bundle_ids": sorted(unmeasured) or None,
+            "gates_unmeasured": {b: sorted(g) for b, g in sorted(unmeasured.items())} or None,
+        },
+    )
+    sample = champion_sample(_read_jsonl(returns_path))
+    champion_returns = sample.returns
 
     wiring = _assess_wiring(registry, shadow_manager, pipeline, gateway)
     report = run_self_evaluation(
@@ -560,12 +589,32 @@ async def _daily_close(
         n_shadow_bundles=len(shadow_manager.active_bundles),
         instance_id=instance_id,
         wiring=wiring,
+        sample_window=sample.window,
+        promotion_evidence_eligible=not unmeasured,
+        promotion_evidence_reason=(
+            None
+            if not unmeasured
+            else "미측정·미달 관문이 남은 번들이 현역이다: "
+            + " · ".join(f"{b}({', '.join(sorted(g))})" for b, g in sorted(unmeasured.items()))
+        ),
     )
     (_LOG_DIR / f"self_eval_{today}.json").write_text(
         report.model_dump_json(indent=2), encoding="utf-8"
     )
     # 결선 상태를 **먼저** 찍는다 — 손익 숫자를 먼저 보여주면 사람은 그걸 성적으로 읽는다.
     print(f"결선 완성도: {wiring.summary()}", flush=True)
+    # **절단을 한 줄로 말한다** (2026-08-24 G-19). 재기만 하고 안 보이면 2026-08-18
+    # 결정이 여섯 거래일 묻혔던 일이 그대로 반복된다. 마지막 절이 핵심이다 —
+    # 분자가 아무리 늘어도 거래 발생일이 0이면 관문은 아무것도 안 묻는다.
+    window = sample.window
+    traded_days = sum(1 for r in _read_jsonl(returns_path) if (r.get("n_orders") or 0) > 0)
+    print(
+        f"승격 표본 {window['rows_counted']}/{_PROMOTION_TRADING_DAYS}거래일 "
+        f"(파일 {window['rows_total']}행 중 롤일 {window['excluded']['roll_day']}일 · "
+        f"셀 수 없는 날 {window['excluded']['not_countable']}일 제외 · "
+        f"기산 {window['from']}) · 그중 거래 발생일 {traded_days}일",
+        flush=True,
+    )
     if wiring.pnl_measurable:
         print(
             f"Self Evaluation: 누적 {len(champion_returns)}거래일 · "

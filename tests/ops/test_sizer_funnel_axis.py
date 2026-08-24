@@ -67,3 +67,45 @@ def test_session_streak_is_carried_through():
     axis = _sizer_funnel_axis(_raw(zero_qty=2, streak=streak), {"pass": 2})
     assert axis is not None
     assert axis["session_streak"] == streak
+
+
+# ---- F-17 → F-27 흡수분: 미검증 번들 표식 ----
+
+
+from messiah.ops.integrity_report import _bundle_gates_axis  # noqa: E402
+
+
+def test_missing_self_eval_is_unmeasured():
+    assert _bundle_gates_axis(None, {"submitted": 0}) is None
+
+
+def test_pre_f27_self_eval_is_unmeasured_not_clean():
+    """표식이 없는 옛 산출물은 「깨끗하다」가 아니라 「안 쟀다」다 (L18)."""
+    assert _bundle_gates_axis({"date": "2026-08-21"}, {"submitted": 0}) is None
+
+
+def test_todays_shape_ineligible_but_untraded():
+    """2026-08-24 — 관문 셋이 미측정인 번들이 현역이지만 주문은 0건이라 오염량이 0이다.
+
+    그 구별이 없으면 「현역이 미검증」과 「미검증이 실제로 성적을 냈다」가 같은 무게로
+    읽힌다.
+    """
+    axis = _bundle_gates_axis(
+        {
+            "promotion_evidence_eligible": False,
+            "promotion_evidence_reason": "미측정·미달 관문이 남은 번들이 현역이다: "
+            "real-20260820-2053-30m(max_drawdown, negative_window_ratio, sharpe)",
+            "sample_window": {"rows_total": 18, "rows_counted": 17},
+        },
+        {"submitted": 0},
+    )
+    assert axis is not None
+    assert axis["promotion_evidence_eligible"] is False
+    assert axis["traded"] is False
+    assert "real-20260820-2053-30m" in axis["reason"]
+    assert axis["sample_window"]["rows_counted"] == 17
+
+
+def test_traded_is_unmeasured_when_the_funnel_is():
+    axis = _bundle_gates_axis({"promotion_evidence_eligible": True}, None)
+    assert axis is not None and axis["traded"] is None

@@ -12,6 +12,23 @@ Ver 2.0 §7 원문이 요구하는 "Regime 정확도 집계"는 국면 판정의
 하는데, Regime은애초에 관측 불가능한 잠재 상태라 "정답"의 정의 자체가 없다(사후에 수익률로
 근사할 수는 있으나 그 방법론이 이번 스코프 밖) — `SelfEvalReport`에 관련 필드를 넣지 않았다.
 
+## 승격 표본은 **월물 경계에서 끊지 않는다** (2026-08-24 F-27)
+
+`g2_daily_returns.jsonl`의 행을 종전엔 `symbol == 오늘의 심볼`로 걸렀다. 그런데 선물
+월물은 한 달에 한 번 바뀌고(2026-08-14 A05608→A05609), 그 순간 **성적표가 0장으로
+돌아간다.** Ver 1.1 §8 G2 통과기준이 요구하는 40거래일은 롤 주기(20~22거래일)보다 길므로
+**그 시험은 지금 구조로 영원히 끝나지 않는다.** 2026-08-24 실측: 파일 18행, 집계에 쓰인
+표본 6개. 다음 롤(2026-09-11)이면 다시 0장이다.
+
+그래서 `champion_sample()`이 롤을 이어 붙인다 — **롤 당일 수익률 한 개만** 뺀다(그날은
+두 계약이 섞인 하루라 어느 쪽 성적도 아니다). 그리고 그 절단을 `sample_window`로
+리포트에 명시한다. 2026-08-18 결정 *"절단을 조용히 하면 나중에 「왜 40일인데 27행이냐」를
+아무도 못 푼다"* 의 이행이다.
+
+**관문 요구일수(40거래일)는 이 모듈이 바꾸지 않는다.** 롤 주기와 40거래일 중 무엇이
+정본인지는 사람이 정할 문제이고, 위험 성향이 아니라 승격 속도를 바꾸는 결정이다.
+여기서 하는 것은 **재는 것**까지다.
+
 ## Conformal 교정 갱신은 이 모듈이 아니라 `models/registry.save_conformal_state()`가 담당
 
 Self Evaluation은 그날의 (예측확률, 실제결과) 이력을 만들어 넘기기만 하고, 그 이력을 번들
@@ -83,6 +100,72 @@ def reconcile_slippage(
     )
 
 
+@dataclass(frozen=True)
+class ChampionSample:
+    """승격 표본과 **그 표본이 어떻게 잘렸는지** (2026-08-24 F-27)."""
+
+    returns: list[float]
+    window: dict
+
+
+def champion_sample(rows: Sequence[dict]) -> ChampionSample:
+    """`g2_daily_returns.jsonl` 전 행에서 승격 표본을 고른다 — 롤을 이어 붙여서.
+
+    입력은 파일에 적힌 순서 그대로의 행들이다(날짜 오름차순 가정). 각 행:
+    `{"date": ..., "symbol": ..., "return": ..., "countable": bool | 없음}`.
+
+    ## 빼는 것은 둘뿐이다
+
+    1. **롤 당일 한 개.** 직전 행과 `symbol`이 다른 날은 두 계약이 섞인 하루라 어느 쪽
+       성적도 아니다. 첫 행은 롤이 아니다(비교할 앞이 없다).
+    2. **`countable`이 명시적으로 `False`인 날.** 키가 **없는** 행은 빼지 않는다 —
+       「거래가 없었다」와 「그 시절엔 안 쟀다」는 다른 사실이고, 후자를 `False`로 채우면
+       기존 18행이 소급해서 「셀 수 없는 날」이 된다(L18). 그 수는 `sample_window`의
+       `legacy_rows_without_countable`로 따로 보인다.
+
+    종목 필터는 **없다.** 그것이 이 함수가 생긴 이유다 — 모듈 docstring 참고.
+    """
+    counted: list[float] = []
+    excluded = {"roll_day": 0, "not_countable": 0}
+    legacy = 0
+    first_counted: str | None = None
+    previous_symbol: str | None = None
+
+    for index, row in enumerate(rows):
+        symbol = row.get("symbol")
+        is_roll = index > 0 and symbol != previous_symbol
+        previous_symbol = symbol
+        if is_roll:
+            excluded["roll_day"] += 1
+            continue
+        if "countable" not in row:
+            legacy += 1
+        elif row.get("countable") is False:
+            excluded["not_countable"] += 1
+            continue
+        value = row.get("return")
+        if not isinstance(value, (int, float)):
+            # 값이 없는 행은 표본이 아니다. 조용히 0.0으로 읽으면 "본전인 날"이 된다.
+            excluded["not_countable"] += 1
+            continue
+        if first_counted is None:
+            first_counted = str(row.get("date", ""))
+        counted.append(float(value))
+
+    return ChampionSample(
+        returns=counted,
+        window={
+            "from": first_counted,
+            "rows_total": len(rows),
+            "rows_counted": len(counted),
+            "excluded": excluded,
+            # **절단이 아니라 이력의 나이다.** F-27 이전에 적힌 행은 `countable`을 갖고
+            # 있지 않다 — 그 수가 0이 되는 날이 이 축이 온전히 도는 첫날이다.
+            "legacy_rows_without_countable": legacy,
+        },
+    )
+
+
 def run_self_evaluation(
     *,
     date: str,
@@ -96,6 +179,9 @@ def run_self_evaluation(
     periods_per_year: float = 252.0,
     instance_id: str | None = None,
     wiring: WiringCompleteness | None = None,
+    sample_window: dict | None = None,
+    promotion_evidence_eligible: bool | None = None,
+    promotion_evidence_reason: str | None = None,
 ) -> SelfEvalReport:
     """하루치 챔피언 실현수익률(`champion_returns`, 비율 단위 — Position Reconciler 부재로
     호출자가 직접 산출해 넘긴다, 모듈 docstring)로 승률·PF·Sharpe·MDD를 집계하고, 그날의
@@ -142,6 +228,9 @@ def run_self_evaluation(
         pnl_measurable=measurable,
         wiring_stage=wiring.stage if wiring else None,
         wiring_summary=wiring.summary() if wiring else None,
+        sample_window=sample_window,
+        promotion_evidence_eligible=promotion_evidence_eligible,
+        promotion_evidence_reason=promotion_evidence_reason,
     )
     mlog.log(
         "SelfEvalReportGenerated",
@@ -154,5 +243,8 @@ def run_self_evaluation(
         # 이 필드가 로그에 있어야 나중에 "그날 Sharpe 0이 성적인지 무운영인지"를 되짚을 수 있다.
         pnl_measurable=report.pnl_measurable,
         wiring_stage=report.wiring_stage,
+        # **왜 그 표본 수인가**를 로그가 같이 말한다 (F-27). 종전엔 코드를 읽어야 알았다.
+        sample_window=report.sample_window,
+        promotion_evidence_eligible=report.promotion_evidence_eligible,
     )
     return report
