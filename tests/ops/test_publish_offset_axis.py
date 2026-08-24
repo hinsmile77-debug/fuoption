@@ -542,3 +542,72 @@ def test_a_real_stall_just_under_the_ceiling_still_cries(monkeypatch) -> None:
     engine._flush_publish_stall()
 
     assert [r["tag"] for r in records] == ["PublishGraceExceeded"]
+
+
+# ------------------------------- F-24 · 정체 경보가 다음 정체를 기다리지 않는다
+
+
+def test_a_stale_cluster_is_flushed_by_time_not_by_the_next_stall(monkeypatch) -> None:
+    """**08:56의 정체가 11:25에 기록됐다** (2026-08-24 이상점 1-12).
+
+    군집을 닫는 계기가 「다음 정체의 도착」 하나뿐이었다. 그래서 정체가 드문 날일수록
+    경보가 더 늦게 왔다 — 있어야 할 성질의 정반대다. 그날 7군집 중 6건이 3~149분 밀렸고
+    중앙 지연이 10분이었다.
+    """
+    from messiah.core import logging as mlog
+    from messiah.features import engine as engine_module
+
+    records: list[dict] = []
+    monkeypatch.setattr(mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, **f}))
+
+    confirm = datetime(2026, 8, 24, 8, 56, tzinfo=KST)
+    now = [confirm + timedelta(milliseconds=900)]
+    engine = _engine(now, horizons=[Horizon.M1, Horizon.M3])
+    records.clear()
+
+    clock = [1_000.0]
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: clock[0])
+
+    stalled = _vector(Horizon.M3, confirm - timedelta(seconds=HORIZON_SECONDS[Horizon.M3]))
+    engine._note_publish_grace(stalled, _grace_alert_ms() + 3_000.0)
+    assert records == [], "군집이 방금 열렸다 — 아직 닫지 않는다"
+
+    # 창의 2배가 지난 뒤 **정상** 발행 하나가 들어온다. 종전에는 이 줄이 아무것도 안 했다.
+    clock[0] += (engine_module._PUBLISH_STALL_FLUSH_MS / 1000.0) + 0.001
+    now[0] = confirm + timedelta(minutes=1)
+    healthy = _vector(Horizon.M1, confirm + timedelta(seconds=30))
+    engine._note_publish_grace(healthy, 120.0)
+
+    assert [r["tag"] for r in records] == ["PublishGraceExceeded"]
+    assert records[0]["bar_confirm_kst"] == confirm.isoformat()
+    # **경보가 얼마나 늦게 왔는지를 경보 자신이 말한다.**
+    assert records[0]["detection_lag_ms"] == pytest.approx(60_000.0, abs=1.0)
+
+
+def test_a_fresh_cluster_is_not_split_by_a_late_arrival(monkeypatch) -> None:
+    """창 안에 도착한 것은 한 줄, 창 밖은 두 줄 — 시간 flush가 군집을 쪼개지 않는다.
+
+    같은 정체가 두 줄로 쪼개지는 것이 애초에 군집화가 막으려던 것이므로, flush 창을
+    군집 창의 2배로 두어 여유를 준다.
+    """
+    from messiah.core import logging as mlog
+    from messiah.features import engine as engine_module
+
+    records: list[dict] = []
+    monkeypatch.setattr(mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, **f}))
+
+    confirm = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
+    engine = _engine([confirm], horizons=[Horizon.M1, Horizon.M3, Horizon.M5])
+    records.clear()
+    clock = [500.0]
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: clock[0])
+
+    for index, horizon in enumerate((Horizon.M1, Horizon.M3, Horizon.M5)):
+        # 창 2배 **안쪽**에서 늦게 도착한다 — 같은 군집이어야 한다.
+        clock[0] += (engine_module._PUBLISH_STALL_FLUSH_MS / 1000.0) / 4.0
+        vector = _vector(horizon, confirm - timedelta(seconds=HORIZON_SECONDS[horizon]))
+        engine._note_publish_grace(vector, _grace_alert_ms() + 3_000.0 + index)
+
+    engine._flush_publish_stall()
+    assert [r["tag"] for r in records] == ["PublishLoopStalled"], "한 줄이어야 한다"
+    assert records[-1]["horizons"] == ["1m", "3m", "5m"]

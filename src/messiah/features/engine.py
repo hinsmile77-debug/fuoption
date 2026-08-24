@@ -359,6 +359,17 @@ def _boundary_grace_ms() -> float:
 #: 개별로 남기면 "한 Horizon이 늦었다"와 "루프가 멈췄다"가 로그에서 구분되지 않는다.
 _PUBLISH_STALL_CLUSTER_MS = 100.0
 
+#: 군집을 **시간으로** 닫는 상한 — 다음 정체를 기다리지 않는다 (2026-08-24 F-24).
+#:
+#: 종전 주석은 *"그날 마지막 한 건은 세션 요약 시점에 남는다"* 며 대가를 한 건으로
+#: 적었다. 2026-08-24 실측은 그것이 과소평가였다: 그날 7군집 중 **6건이 3~149분 밀렸고**
+#: 중앙 지연이 10분이었다. 08:56에 생긴 정체가 11:25에 기록됐다 — 군집을 닫는 유일한
+#: 계기가 「다음 정체의 도착」이었기 때문이다.
+#:
+#: 값을 새로 쓰지 않고 군집 창의 2배로 유도한다(F-15 ②). 2배인 이유: 늦게 도착한
+#: Horizon이 이미 닫힌 군집에 속하면 같은 정체가 두 줄로 쪼개진다 — 그 여유분이다.
+_PUBLISH_STALL_FLUSH_MS = _PUBLISH_STALL_CLUSTER_MS * 2.0
+
 #: 이 값을 넘는 오프셋은 **발행 지연이 아니다** — 리플레이·학습이다 (2026-08-21).
 #:
 #: `models/trainer.build_feature_vectors()`는 같은 `FeatureEngine`으로 과거 봉을 흘린다.
@@ -460,10 +471,16 @@ class FeatureEngine:
         # 지나기 전에는 모른다. 즉시 남기면 3개짜리 군집이 세 줄이 되어 「묶는다」는 목적이
         # 사라진다. 그래서 **다음 순간이 오거나 세션이 끝날 때** 한 줄로 flush한다.
         #
-        # 대가: 그날 마지막 한 건은 세션 요약 시점에 남는다. `bar_confirm_kst`가 실제
-        # 시각을 정확히 말하므로 사후 분석에는 영향이 없다 — 이 축은 실시간 경보가 아니라
-        # 다음 날 세는 계기다(검증 기준이 「다음 거래일 건수 일치」다).
-        self._pending_stall: tuple[datetime, list[tuple[Horizon, float]]] | None = None
+        # **대가는 한 건이 아니었다** (2026-08-24 F-24). 위 주석은 종전에
+        # *"그날 마지막 한 건은 세션 요약 시점에 남는다"* 고 적혀 있었다. 2026-08-24
+        # 실측은 7군집 중 **6건이 3~149분 밀렸고** 중앙 지연이 10분이었다 — 08:56의
+        # 정체가 11:25에 기록됐다. 군집을 닫는 계기가 「다음 정체의 도착」 하나뿐이라,
+        # 정체가 드문 날일수록 경보가 더 늦게 온다(있어야 할 성질의 정반대다).
+        # 이제 `_PUBLISH_STALL_FLUSH_MS`가 지나면 다음 정체를 기다리지 않고 닫는다.
+        #
+        # 세 번째 원소는 군집을 연 시점의 monotonic 시각이다 — 벽시계를 쓰면 시계
+        # 동기가 군집 수명을 바꾼다.
+        self._pending_stall: tuple[datetime, list[tuple[Horizon, float]], float] | None = None
         # 피처별 세션 누적 통계 (2026-08-05, 고도화 3) — `_FeatureStat` 주석 참고.
         self._feature_stats: dict[Horizon, dict[str, _FeatureStat]] = {
             h: {} for h in self._horizons
@@ -1042,6 +1059,10 @@ class FeatureEngine:
         유예 상수는 `data/bar_composer._BOUNDARY_GRACE_SECONDS`를 그대로 읽는다 —
         숫자를 새로 쓰지 않는다(F-15 ②).
         """
+        # **정상 발행도 군집을 닫는다** (2026-08-24 F-24). 아래 조기 반환들보다 먼저
+        # 부른다 — 이 자리를 지나 내려가는 것은 「또 정체가 났다」뿐이고, 그것만
+        # 계기로 삼는 것이 149분 지연의 원인이었다.
+        self._flush_stale_publish_stall()
         if offset_ms is None or vector.valid_until is None:
             return
         threshold_ms = _boundary_grace_ms() * _PUBLISH_GRACE_ALERT_MULTIPLE
@@ -1053,21 +1074,38 @@ class FeatureEngine:
         confirm = vector.valid_until
         pending = self._pending_stall
         if pending is not None:
-            moment, members = pending
+            moment, members, _opened = pending
             if abs((moment - confirm).total_seconds()) * 1000.0 <= _PUBLISH_STALL_CLUSTER_MS:
                 members.append((vector.horizon, offset_ms))
                 return
             self._flush_publish_stall()
-        self._pending_stall = (confirm, [(vector.horizon, offset_ms)])
+        self._pending_stall = (confirm, [(vector.horizon, offset_ms)], time.monotonic())
+
+    def _flush_stale_publish_stall(self) -> None:
+        """군집이 `_PUBLISH_STALL_FLUSH_MS`보다 오래 열려 있으면 닫는다 (F-24)."""
+        pending = self._pending_stall
+        if pending is None:
+            return
+        _confirm, _members, opened = pending
+        if (time.monotonic() - opened) * 1000.0 >= _PUBLISH_STALL_FLUSH_MS:
+            self._flush_publish_stall()
 
     def _flush_publish_stall(self) -> None:
         """모아 둔 군집을 **한 줄로** 남긴다 — 1건이면 유예 초과, 2건 이상이면 루프 정체."""
         pending, self._pending_stall = self._pending_stall, None
         if pending is None:
             return
-        confirm, members = pending
+        confirm, members, _opened = pending
         threshold_ms = _boundary_grace_ms() * _PUBLISH_GRACE_ALERT_MULTIPLE
         worst = max(offset for _horizon, offset in members)
+        # **경보가 얼마나 늦게 왔는지를 경보 자신이 말한다** (2026-08-24 F-24).
+        # 이 값이 없으면 "08:56 정체"라고 적힌 줄이 11:25에 남았다는 사실을 로그만
+        # 보고는 알 수 없다. 못 재면 None이다 — 0이 아니다(L18).
+        detection_lag_ms: float | None
+        try:
+            detection_lag_ms = round((self._now() - confirm).total_seconds() * 1000.0, 1)
+        except TypeError:  # naive/aware 혼재
+            detection_lag_ms = None
 
         if len(members) == 1:
             horizon, offset_ms = members[0]
@@ -1081,6 +1119,7 @@ class FeatureEngine:
                 publish_offset_ms=offset_ms,
                 grace_ms=round(threshold_ms, 1),
                 bar_confirm_kst=confirm.isoformat(),
+                detection_lag_ms=detection_lag_ms,
             )
             return
 
@@ -1099,6 +1138,7 @@ class FeatureEngine:
             horizons=horizons,
             bar_confirm_kst=confirm.isoformat(),
             grace_ms=round(threshold_ms, 1),
+            detection_lag_ms=detection_lag_ms,
         )
 
     def log_publish_offsets(self) -> dict[str, float] | None:
