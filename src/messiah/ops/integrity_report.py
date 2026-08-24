@@ -1057,6 +1057,12 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 # 이 플래그를 보고 판정 불가를 낸다.
                 if record.get("truncated") is not None:
                     delivery_latency["truncated"] = bool(record["truncated"])
+                # **위아래 숫자가 어느 모집단에서 나왔는가** (2026-08-24 F-29).
+                # 절단은 F-H가 이미 자백하게 만들었지만 「두 벌」은 자백돼 있지 않았다 —
+                # 위 분위수는 링버퍼 끝 토막이고 `by_hour`는 전량이다.
+                population = record.get("population")
+                if isinstance(population, str) and population:
+                    delivery_latency["population"] = population
                 hours = record.get("by_hour")
                 if isinstance(hours, dict):
                     delivery_latency["by_hour"] = hours

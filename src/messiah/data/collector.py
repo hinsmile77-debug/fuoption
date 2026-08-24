@@ -648,11 +648,17 @@ class TickCollector:
             if truncated
             else f"표본 {int(stats['samples'])}건(전량)"
         )
+        # **모집단이 두 벌이라는 사실을 문장에도 남긴다** (2026-08-24 F-29 · 이상점 1-17).
+        # 위 분위수는 링버퍼 끝 토막이고 아래 `by_hour`는 전량이다. 절단은 F-H가 이미
+        # 자백하게 만들었지만, 절단된 날 두 숫자를 나란히 놓은 사람은 여전히
+        # 「시간대별로는 괜찮은데 전체는 왜 나쁘지」를 못 푼다 — 같은 것을 재고 있다고
+        # 믿기 때문이다. `by_hour`의 `p90_tail`이 그 비교를 가능하게 하는 칸이다.
+        note = " · 위 분위수=링버퍼 구간 / by_hour=전량(p90_tail로 비교)" if truncated else ""
         mlog.log(
             "TickDeliveryLatency",
             f"회선 수신 지연 상한 — p50 {stats['p50']:.3f}s · p90 {stats['p90']:.3f}s · "
             f"p99 {stats['p99']:.3f}s · 최대 {stats['max']:.3f}s "
-            f"({scope}, frac(t)만큼 과대평가된 상한)",
+            f"({scope}, frac(t)만큼 과대평가된 상한){note}",
             symbol=self._symbol,
             measured=True,
             by_hour=self._clock_skew.delivery_latency_by_hour(),

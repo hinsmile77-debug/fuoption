@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
+from typing import Any
 
 from messiah.core.timeutil import ensure_aware
 
@@ -106,7 +107,11 @@ class ClockSkewTracker:
 
     def __init__(self, *, window: int = _WINDOW, latency_capacity: int = _LATENCY_CAPACITY) -> None:
         self._samples: deque[float] = deque(maxlen=window)
-        self._latencies: deque[float] = deque(maxlen=latency_capacity)
+        # **(시(hour), 지연)** 쌍으로 든다 (2026-08-24 F-29). 값만 들면 링버퍼가
+        # **어느 시간대의** 표본을 들고 있는지 알 수 없고, 그러면 위 요약과 아래
+        # `by_hour`를 나란히 놓아도 두 숫자가 왜 다른지 설명할 수 없다.
+        # 용량은 그대로다 — 링버퍼를 키우지 않는다(메모리 상한은 의도된 설계다).
+        self._latencies: deque[tuple[int, float]] = deque(maxlen=latency_capacity)
         self._latency_capacity = latency_capacity
         # **관측한 총 건수** — `len(self._latencies)`와 다르다 (2026-08-20 F-H).
         # 링버퍼가 넘치면 후자는 상한에 붙박이고, 그러면 "20,000건 봤다"와 "20,000건까지만
@@ -146,7 +151,7 @@ class ClockSkewTracker:
         delta = (ts_exchange - received).total_seconds()
         self._samples.append(delta)
         latency = max(self._samples) - delta
-        self._latencies.append(latency)
+        self._latencies.append((ts_exchange.hour, latency))
         self._latency_observed += 1
         # 시간대는 **거래소 시각** 기준이다 — 로컬 시계는 지금 재고 있는 대상이라
         # 그것으로 버킷을 나누면 재려는 것으로 자를 눈금을 만드는 셈이 된다.
@@ -175,7 +180,7 @@ class ClockSkewTracker:
         """
         if len(self._latencies) < MIN_SAMPLES:
             return None
-        ordered = sorted(self._latencies)
+        ordered = sorted(value for _hour, value in self._latencies)
         truncated = self._latency_observed > len(self._latencies)
         return {
             "p50": _quantile(ordered, 0.50),
@@ -188,22 +193,44 @@ class ClockSkewTracker:
             "truncated": truncated,
             "capacity": float(self._latency_capacity),
             "observed_total": float(self._latency_observed),
+            # **이 숫자들이 어느 모집단에서 나왔는가** (2026-08-24 F-29).
+            #
+            # 절단은 2026-08-20 F-H가 이미 자백하게 만들었다. 자백돼 있지 않던 것은
+            # **「두 벌」** 이다 — 위 분위수는 링버퍼 끝 토막이고 `by_hour`는 전량이라,
+            # 같은 리포트의 위아래 숫자가 서로 다른 모집단에서 나온다. 2026-08-24
+            # 이상점 1-17이 그것이다. 라벨이 없으면 둘을 나란히 놓은 사람이
+            # 「시간대별로는 괜찮은데 전체는 왜 나쁘지」를 영원히 못 푼다.
+            "population": "tail_ringbuffer",
         }
 
-    def delivery_latency_by_hour(self) -> dict[str, dict[str, float]]:
+    def delivery_latency_by_hour(self) -> dict[str, dict[str, Any]]:
         """시간대별 지연 분포 (2026-08-20 F-H · C-6). 링버퍼에 덮여도 하루의 모양이 남는다.
 
         `features/engine.log_publish_offsets()`의 `by_hour`와 **같은 자료구조**다 —
         `ops/integrity_report.hourly_trend()`가 둘 다 같은 헬퍼로 읽는다. 「회선이 나빠졌다」와
         「내부 처리가 밀렸다」는 두 축을 같은 눈금으로 나란히 놓아야 갈린다.
         """
-        out: dict[str, dict[str, float]] = {}
+        # 링버퍼가 **실제로 들고 있는** 구간을 시간대별로 갈라 둔다 (2026-08-24 F-29) —
+        # 그래야 위 요약(끝 토막)과 이 표(전량)를 같은 눈금으로 비교할 수 있다.
+        tail_by_hour: dict[int, list[float]] = {}
+        for hour, value in self._latencies:
+            tail_by_hour.setdefault(hour, []).append(value)
+
+        out: dict[str, dict[str, Any]] = {}
         for hour, values in sorted(self._latency_by_hour.items()):
             ordered = sorted(values)
+            tail = sorted(tail_by_hour.get(hour, []))
             out[f"{hour:02d}"] = {
                 "p50": _quantile(ordered, 0.50),
                 "p90": _quantile(ordered, 0.90),
                 "samples": float(len(ordered)),
+                # 이 표는 **전량**이다 — 링버퍼에 덮이지 않는다(그것이 이 축의 존재 이유다).
+                "population": "all",
+                # 같은 시간대를 **링버퍼 구간만** 잘라낸 값. 위 요약과 직접 비교할 수 있는
+                # 유일한 숫자다. 그 시간대가 링버퍼에 한 건도 안 남았으면 None이다 —
+                # 0이 아니다(L18).
+                "p90_tail": (_quantile(tail, 0.90) if tail else None),
+                "samples_tail": float(len(tail)),
             }
         return out
 
