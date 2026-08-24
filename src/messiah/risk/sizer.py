@@ -16,6 +16,27 @@ kelly_scaled    = edge × fractional_kelly                       # 예: edge×0.
 qty             = floor(vol_target_qty × kelly_scaled × (1 − uncertainty))
 ```
 
+## 0계약은 「정상 동작」이 아니라 **거리**다 (2026-08-24 · F-23)
+
+`qty < min_qty`로 접힌 사이클은 종전에 `SizerZeroQty` 한 줄로 "정상 동작"이라 적히고
+끝났다. 그 문구가 **18거래일 연속 주문 0건**을 눈멀게 했다 — 0이 몇 번 났는지는 셌지만
+**1계약까지 얼마나 모자랐는지**를 아무도 재지 않아서, 문턱이 손에 닿을 거리인지 몇 배
+떨어져 있는지를 판단할 근거가 없었다.
+
+이제 매 0계약마다 두 값을 남긴다:
+
+    # 1.0에 얼마나 가까웠나
+    shortfall_ratio         = raw_qty / min_qty
+    # 지금 조건에서 1계약이 되려면 edge가 얼마여야 하나
+    edge_needed_for_min_qty = min_qty / (vol_target_qty × fractional_kelly × (1−uncertainty))
+
+**문턱을 바꾸지 않는다.** 문턱 변경은 위험 성향을 바꾸는 변경이라 R18의 섀도 계측
+20거래일이 선행이다. 이 축은 **그 20거래일을 시작시키는 계측**이다
+(`configs/pending_verifications.yaml` — `order-path-live`).
+
+세션이 끝나면 `log_session_summary()`가 건수와 최댓값을 `SizerZeroQtyStreak`(WARNING)
+한 줄로 낸다 — 사이클마다 우는 대신 하루에 한 번 운다.
+
 ## R1은 여기서 사이징 상한으로 강제한다
 
 `risk/risk_engine.py` 모듈 docstring 참고 — `risk_pct`를 `vol_target_pct`와
@@ -50,6 +71,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from messiah.core import logging as mlog
 from messiah.core.messages import DecisionIntent, OrderKind, OrderRequest, Side
@@ -69,6 +91,11 @@ class SizerConfig:
 class PositionSizer:
     def __init__(self, config: SizerConfig | None = None) -> None:
         self._config = config or SizerConfig()
+        # 세션 누계 (F-23) — 사이클마다 우는 대신 세션 끝에 한 줄 낸다.
+        self._zero_qty_count = 0
+        self._shortfall_ratio_max: float | None = None
+        self._shortfall_ratios: list[float] = []
+        self._sized_calls = 0
 
     def size(
         self,
@@ -90,6 +117,7 @@ class PositionSizer:
         """
         if stop_distance_ticks <= 0:
             raise ValueError("stop_distance_ticks는 0보다 커야 함")
+        self._sized_calls += 1
         if equity <= 0:
             return 0
 
@@ -108,6 +136,16 @@ class PositionSizer:
 
         qty = math.floor(raw_qty)
         if qty < cfg.min_qty:
+            # **1계약까지 얼마나 모자랐나** (F-23). 건수만으로는 "손에 닿는 거리"와
+            # "몇 배 떨어져 있음"이 구별되지 않는다 — 그 구별이 18거래일을 눈멀게 했다.
+            shortfall_ratio = raw_qty / cfg.min_qty if cfg.min_qty > 0 else None
+            denom = vol_target_qty * cfg.fractional_kelly * uncertainty_penalty
+            edge_needed = (cfg.min_qty / denom) if denom > 0 else None
+            self._zero_qty_count += 1
+            if shortfall_ratio is not None:
+                self._shortfall_ratios.append(shortfall_ratio)
+                if self._shortfall_ratio_max is None or shortfall_ratio > self._shortfall_ratio_max:
+                    self._shortfall_ratio_max = shortfall_ratio
             mlog.log(
                 "SizerZeroQty",
                 f"사이징 결과 {qty}계약(raw={raw_qty:.3f}) — 주문 생성 안 함",
@@ -116,9 +154,42 @@ class PositionSizer:
                 edge=edge,
                 edge_source=edge_source,
                 uncertainty_penalty=uncertainty_penalty,
+                vol_target_qty=vol_target_qty,
+                kelly_scaled=kelly_scaled,
+                shortfall_ratio=shortfall_ratio,
+                edge_needed_for_min_qty=edge_needed,
+                min_qty=cfg.min_qty,
             )
             return 0
         return qty
+
+    def log_session_summary(self) -> dict[str, Any] | None:
+        """세션 누계를 한 줄로 낸다 (F-23) — 0계약이 한 건도 없었으면 아무것도 안 낸다.
+
+        **왜 세션 끝인가.** `SizerZeroQty`는 사이클마다 뜨므로 INFO다. 그런데 "오늘 하루
+        내내 한 번도 1계약에 못 닿았다"는 사실은 INFO 서른 줄이 아니라 WARNING 한 줄로
+        보여야 한다 — 18거래일 동안 전자만 있었고 후자가 없었다.
+
+        반환: 낸 내용(리포트가 그대로 쓸 수 있게) 또는 None.
+        """
+        if self._zero_qty_count == 0:
+            return None
+        ratios = sorted(self._shortfall_ratios)
+        p50 = ratios[(len(ratios) - 1) // 2] if ratios else None
+        payload: dict[str, Any] = {
+            "zero_qty_cycles": self._zero_qty_count,
+            "sized_calls": self._sized_calls,
+            "shortfall_ratio_max": self._shortfall_ratio_max,
+            "shortfall_ratio_p50": p50,
+        }
+        best = self._shortfall_ratio_max
+        mlog.log(
+            "SizerZeroQtyStreak",
+            f"세션 내 0계약 {self._zero_qty_count}건 — 1계약까지 최대 도달률 "
+            + (f"{best:.3f}" if best is not None else "미측정"),
+            **payload,
+        )
+        return payload
 
     def build_order_request(
         self,

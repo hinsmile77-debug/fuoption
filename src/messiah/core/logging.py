@@ -145,7 +145,15 @@ TAG_LEVELS: dict[str, int] = {
     # 신선도 로그 자체가 실패 — 관측 도구가 화면을 죽이면 본말전도라 화면은 계속 그리되,
     # 조용히 삼키지는 않는다(R10).
     "UISnapshotFreshnessFailed": logging.WARNING,
-    "SizerZeroQty": logging.INFO,  # Sizer 계산 결과 0계약 — 주문 생성 안 함(정상 동작)
+    # Sizer 계산 결과 0계약 — 주문은 안 나간다. **종전 주석은 여기에 "(정상 동작)"이라
+    # 적혀 있었고, 그 네 글자가 18거래일 연속 주문 0건을 눈멀게 했다**(2026-08-24 이상점
+    # 1-11). 0계약 한 건은 정상일 수 있지만 하루 종일 0계약은 정상인지 아닌지를 **재야**
+    # 아는 것이고, 그 거리를 이제 `shortfall_ratio`가 같은 줄에 싣는다.
+    # 레벨은 INFO 유지 — 사이클마다 뜬다. 하루 누계는 아래 `SizerZeroQtyStreak`가 낸다.
+    "SizerZeroQty": logging.INFO,
+    # 세션 누계 (2026-08-24 F-23) — "오늘 하루 한 번도 1계약에 못 닿았다"는 사실은
+    # INFO 서른 줄이 아니라 WARNING 한 줄로 보여야 한다. 0계약이 0건인 날은 안 뜬다.
+    "SizerZeroQtyStreak": logging.WARNING,
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
     # 구독 루프가 메시지 하나를 처리하다 실패했다 (2026-08-07 P0-1). **루프는 살아 있다** —
     # 그게 이 태그의 존재 이유다. 2026-08-07엔 이 격리가 없어 `KillSignal` 한 건이

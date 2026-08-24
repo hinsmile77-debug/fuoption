@@ -541,6 +541,11 @@ async def _daily_close(
 ) -> None:
     """봉 flush는 `run_l1_daily.py`의 책임(그 프로세스가 실제 Collector/Composer를 갖고
     있다) — 이 스크립트는 자기 것이 없으므로 flush할 것도 없다."""
+    # **오늘 하루 한 번도 1계약에 못 닿았는가** (2026-08-24 F-23) — 손익보다 먼저 낸다.
+    # `SizerZeroQty`는 사이클마다 뜨는 INFO라 하루 누계가 어디에도 없었고, 그래서
+    # 18거래일 연속 주문 0건이 "정상 동작" 서른 줄로만 남았다.
+    pipeline.sizer.log_session_summary()
+
     end_equity = (await broker.account()).total_equity
     daily_return = float((end_equity - start_equity) / start_equity) if start_equity > 0 else 0.0
     returns_path = _LOG_DIR / "g2_daily_returns.jsonl"

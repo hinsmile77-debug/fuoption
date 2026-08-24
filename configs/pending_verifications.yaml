@@ -653,3 +653,30 @@ verifications:
     max: 0.5
     consecutive_days: 3
     deadline: 2026-08-21
+
+  # 2026-08-24 신설 (F-23) — **18거래일 동안 기한 없이 떠 있던 것에 기한을 준다.**
+  #
+  # 라이브 결선(2026-08-11 `2ac5339`) 이후 오늘까지 주문은 **한 건도** 나가지 않았다.
+  # 그 사실이 매일 리포트에 있었지만 어느 등록부 항목도 그것을 묻지 않았다 — L15가
+  # "라이브 미검증 항목은 검증 기한을 명기한다"고 요구하는데, 정작 **결선 그 자체**에
+  # 기한이 없었다. 기한 없는 미검증은 미검증인 채로 영원히 산다.
+  #
+  # 무엇을 묻는가: ③Risk Engine ④Sizer ⑤OrderGateway가 **주문 하나로 관통되는가**.
+  # `decision_funnel`은 ②까지만 보고, `sizer_funnel`(F-23 신설)이 그 뒤를 본다.
+  #
+  # **기한을 날짜가 아니라 거래일 수로 적는다** (G-14 선행 적용). 20거래일은 R18이
+  # 위험 성향 변경에 요구하는 섀도 계측 기간과 같은 값이다 — 이 기간 안에 주문이 한 건도
+  # 안 나가면 그때가 "문턱을 낮출 것인가"를 사람이 결정할 자리다(2026-08-24 사용자 조치 6).
+  #
+  # 축이 `instrument`가 아니라 `outcome`인 이유: 이 항목이 묻는 것은 「재고 있는가」가
+  # 아니라 「실제로 관통됐는가」다. 재는 것은 `sizer_funnel`이 이미 한다.
+  - id: order-path-live
+    summary: "③Risk·④Sizer·⑤OrderGateway가 주문 1건으로 관통되는가(2026-08-24 F-23) — 라이브 결선 실효"
+    registered: 2026-08-24
+    fix_committed: null
+    metric: orders_submitted
+    min: 1
+    # 1거래일 — 한 번 관통되면 사슬이 배선됐다는 사실은 확정이다. 그 뒤의 성적은
+    # 이 항목이 아니라 Self Evaluation이 묻는다.
+    consecutive_days: 1
+    deadline_trading_days: 20

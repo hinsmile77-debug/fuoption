@@ -350,6 +350,15 @@ METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     # 없다는 사실을 잡지 못했다** — 아무도 "계산되는가"를 예측치로 적지 않았기 때문이다.
     # 넉 달간 앙상블 멤버 하나가 죽어 있었고, 넉 달 동안 "개선"해 온 대상이 애초에 없었다.
     "tick_rows": lambda r: float(r.get("tick_rows", 0)),
+    # **주문이 한 건이라도 나갔는가** (2026-08-24 F-23). ③④⑤ 전 계층이 주문 하나로
+    # 관통되는지를 묻는 유일한 축이다 — 18거래일 동안 `주문 0건`은 어디에도 기한을 갖고
+    # 있지 않았고, 기한 없는 미검증은 미검증인 채로 영원히 산다(L15).
+    # 축이 없던 옛 리포트는 None(판정 불가)이지 0이 아니다(L18).
+    "orders_submitted": lambda r: (
+        None
+        if not isinstance(r.get("sizer_funnel"), dict)
+        else float((r["sizer_funnel"] or {}).get("submitted") or 0)
+    ),
     # 시계 스큐는 부호가 아니라 **크기**가 판정 대상이다 (2026-08-05) — 어느 쪽으로 벌어져도
     # 완성봉 경계 판정이 깨진다. 못 잰 날은 None(판정 불가)이지 0이 아니다.
     "clock_skew_abs_seconds": lambda r: (
@@ -613,6 +622,16 @@ class PendingVerification:
     control_min: float = 0.0
     control_summary: str = ""
     deadline: date | None = None
+    # **기한을 「날짜」가 아니라 「채점 가능한 거래일 수」로 적는다** (2026-08-24 G-14).
+    #
+    # 달력 날짜로 적으면 휴장·주말이 기한을 조용히 먹는다 — 2026-08-18에 세 건이 정확히
+    # 그렇게 `기한 불가`가 됐고, 처방은 매번 "기한을 다시 잡아라"였다. 반복되는 연장은
+    # 곧 기한이 없는 것과 같다. N을 적으면 **리포트가 있는 날 N일째**가 기한이 되므로
+    # 휴장이 몇 번 들어와도 잴 수 있는 날은 항상 N일이다.
+    #
+    # `deadline`과 **함께 쓸 수 없다**(로더가 거부한다) — 기한이 둘이면 어느 쪽이 정본인지
+    # 매번 사람이 판단해야 하고, 그 판단은 기한이 없는 것과 같다.
+    deadline_trading_days: int | None = None
     # **채점 시작점을 뒤로 미는 날짜** (2026-08-10 B-3). `registered`를 고쳐 쓰지 않는
     # 이유는 그 값이 **수정이 들어간 날**이라는 사실 기록이기 때문이다 — 그걸 덮으면
     # 이력에서 "언제 고쳤나"가 사라진다. `since`는 "언제 다시 세기 시작했나"를 따로 적는다.
@@ -776,6 +795,12 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
                 f"{entry.get('id', '?')}: 알 수 없는 지표 '{metric}' — "
                 f"사용 가능: {sorted(METRIC_EXTRACTORS)}"
             )
+        if entry.get("deadline") and entry.get("deadline_trading_days") is not None:
+            # 기한이 둘이면 어느 쪽이 정본인지 매번 사람이 판단해야 한다 (2026-08-24 G-14).
+            raise RegistryError(
+                f"{entry.get('id', '?')}: `deadline`과 `deadline_trading_days`를 함께 적을 수 "
+                f"없다 — 기한이 둘이면 기한이 없는 것과 같다"
+            )
         if entry.get("max") is None and entry.get("min") is None:
             raise RegistryError(f"{entry.get('id', '?')}: max/min 중 최소 하나는 있어야 한다")
         axis = str(entry.get("axis", "outcome"))
@@ -819,6 +844,11 @@ def load_registry(path: Path = DEFAULT_REGISTRY_PATH) -> list[PendingVerificatio
                 metric=metric,
                 consecutive_days=int(entry.get("consecutive_days", 1)),
                 deadline=_as_date(entry["deadline"]) if entry.get("deadline") else None,
+                deadline_trading_days=(
+                    int(entry["deadline_trading_days"])
+                    if entry.get("deadline_trading_days") is not None
+                    else None
+                ),
                 since=_as_date(entry["since"]) if entry.get("since") else None,
                 # 2026-08-20 G-H — 비어 있으면 위반이 `재발`이 아니라 `기전 미상`이다.
                 fix_committed=(
@@ -1072,6 +1102,26 @@ def _latest_control(
     return None
 
 
+def effective_deadline(item: PendingVerification, report_days: Sequence[date]) -> date | None:
+    """이 항목의 **실효 기한** — 달력 날짜이거나, 채점 가능일 N일째다 (2026-08-24 G-14).
+
+    `deadline_trading_days: N`이면 채점 시작점(`scored_after`) **뒤로 리포트가 있는 날**을
+    세어 N번째 날이 기한이다. 아직 N일이 안 찼으면 None — **기한이 없는 게 아니라 아직
+    안 왔다.** 그 둘을 섞으면 등록 당일에 기한 초과가 뜬다.
+
+    달력 날짜를 안 쓰는 이유: 휴장·주말이 기한을 조용히 먹는다. 2026-08-18에 세 항목이
+    그렇게 `기한 불가`가 됐고 처방은 매번 "기한을 다시 잡아라"였다.
+    """
+    if item.deadline is not None:
+        return item.deadline
+    if item.deadline_trading_days is None:
+        return None
+    scorable = sorted(day for day in report_days if day > item.scored_after)
+    if len(scorable) < item.deadline_trading_days:
+        return None
+    return scorable[item.deadline_trading_days - 1]
+
+
 def _scorable_days_until(
     item: PendingVerification, report_days: list[date], last_violation: date | None
 ) -> int:
@@ -1081,10 +1131,11 @@ def _scorable_days_until(
     없었으면 채점 시작점(`scored_after`)이 기산점이다. 달력이 아니라 **리포트가 있는 날**을
     센다: 휴장·주말은 채점할 수 없는 날이고, 08-17이 정확히 그 자리였다.
     """
-    if item.deadline is None:
+    deadline = effective_deadline(item, report_days)
+    if deadline is None:
         return len(report_days)
     start = max(last_violation or item.scored_after, item.scored_after)
-    return sum(1 for day in report_days if start < day <= item.deadline)
+    return sum(1 for day in report_days if start < day <= deadline)
 
 
 def _trading_days_since(
@@ -1301,7 +1352,8 @@ def _verdict_for(
             )
         return _verdict(VerificationStatus.VERIFIED, f"{clean_streak}거래일 연속 기준 충족 {note}")
 
-    if item.deadline is not None and today > item.deadline:
+    deadline = effective_deadline(item, report_days or [])
+    if deadline is not None and today > deadline:
         # **못 고친 것과 잴 날이 없었던 것을 가른다** (2026-08-18 F-0818P-4).
         #
         # 종전엔 둘 다 `기한 초과`였다. 그 문구는 "수정이 안 들었다"로 읽히는데, 08-18에
@@ -1312,13 +1364,13 @@ def _verdict_for(
         if usable < item.consecutive_days:
             return _verdict(
                 VerificationStatus.UNREACHABLE,
-                f"기한 {item.deadline.isoformat()}까지 채점 가능일이 {usable}일뿐이었다"
+                f"기한 {deadline.isoformat()}까지 채점 가능일이 {usable}일뿐이었다"
                 f"(필요 {item.consecutive_days}일) — 못 고친 게 아니라 잴 날이 없었다. "
                 f"기한 재조정 필요 {note}",
             )
         return _verdict(
             VerificationStatus.OVERDUE,
-            f"기한 {item.deadline.isoformat()} 경과 — "
+            f"기한 {deadline.isoformat()} 경과 — "
             f"아직 {clean_streak}/{item.consecutive_days}일 {note}",
         )
 

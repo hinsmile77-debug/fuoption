@@ -315,6 +315,11 @@ class TradingPipeline:
         self._last_collector_health: Health | None = None
 
     @property
+    def sizer(self) -> PositionSizer:
+        """세션 종료 시 누계를 낼 수 있게 노출한다 (2026-08-24 F-23)."""
+        return self._sizer
+
+    @property
     def decisions_emitted(self) -> int:
         """그날 발행한 `DecisionIntent` 수(NO_TRADE 포함) — 결선 완성도 판정 입력.
 

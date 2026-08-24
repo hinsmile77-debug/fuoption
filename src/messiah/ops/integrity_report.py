@@ -473,6 +473,12 @@ class IntegrityReport:
     # 아무도 판단할 수 없었다. None은 미측정(`MetaGateEvaluated` 0건 — 이 계측 이전의 로그
     # 이거나 Meta-Labeler 미배선)이다.
     meta_gate: dict[str, Any] | None = None
+    # 사이저 깔때기 (2026-08-24 F-23). `decision_funnel`이 **판단**까지의 관문을 세고,
+    # 이 축은 그 뒤 **주문까지**의 관문을 센다 — 판단 통과 → 리스크 승인 → 사이징 →
+    # 제출. 18거래일 동안 "주문 0건"이 어느 계층에서 접혔는지를 사람이 매일 로그로
+    # 캐야 했고, `shortfall_ratio`가 없어 "손에 닿는 거리"와 "몇 배 떨어짐"이 구별되지
+    # 않았다. None은 미측정(사이저가 한 번도 안 불렸다 = 판단이 리스크까지 못 갔다)이다.
+    sizer_funnel: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -990,6 +996,12 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     meta_gate_passes = 0
     meta_gate_threshold: float | None = None
     meta_gate_digests: list[str] = []
+    # 사이저 깔때기 재료 (2026-08-24 F-23).
+    risk_rejects = 0
+    sizer_zero_qty = 0
+    orders_submitted = 0
+    shortfall_ratios: list[float] = []
+    sizer_streak: dict[str, Any] | None = None
 
     # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
     # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
@@ -1098,6 +1110,23 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             gate = record.get("gate")
             if isinstance(gate, str) and gate:
                 decision_gates[gate] = decision_gates.get(gate, 0) + 1
+        elif tag == "RiskReject":
+            risk_rejects += 1
+        elif tag == "OrderSubmit":
+            orders_submitted += 1
+        elif tag == "SizerZeroQty":
+            # **건수가 아니라 거리를 모은다** (2026-08-24 F-23). 건수는 종전에도 있었고,
+            # 그 건수만으로는 문턱이 손에 닿는지 몇 배 떨어져 있는지를 못 갈랐다.
+            sizer_zero_qty += 1
+            ratio = record.get("shortfall_ratio")
+            if isinstance(ratio, (int, float)):
+                shortfall_ratios.append(float(ratio))
+        elif tag == "SizerZeroQtyStreak":
+            sizer_streak = {
+                "zero_qty_cycles": record.get("zero_qty_cycles"),
+                "sized_calls": record.get("sized_calls"),
+                "shortfall_ratio_max": record.get("shortfall_ratio_max"),
+            }
         elif tag == "MetaGateEvaluated":
             # 확률 **분포**를 모은다 (2026-08-18 F-0818I-1) — 통과/차단 건수는 이미
             # `blocked_by_meta`가 말하고 있고, 이 축이 새로 답하는 것은 "얼마나 가까운가"다.
@@ -1193,6 +1222,15 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "circuit_breaker_events": cb_events,
         "regime_counts": regime_counts,
         "decision_gates": decision_gates,
+        # 판단 뒤 관문 (2026-08-24 F-23). `sized_calls`는 세션 요약이 있을 때만 정확하다 —
+        # 없으면 None으로 두고 「못 쟀다」로 올린다(L18: 0과 못 잼을 섞지 않는다).
+        "sizer_funnel_raw": {
+            "risk_rejects": risk_rejects,
+            "zero_qty": sizer_zero_qty,
+            "submitted": orders_submitted,
+            "shortfall_ratios": shortfall_ratios,
+            "streak": sizer_streak,
+        },
         # 요약 통계로 접어서 낸다 — 원값 14개를 리포트에 다 실으면 이 파일이 로그의 사본이
         # 된다. 분포의 모양(중앙·상단·최대)과 임계의 거리만 있으면 판정에 충분하다.
         "meta_gate": (
@@ -1288,6 +1326,44 @@ def _publish_grace_axis(publish_offset: Mapping[str, Any] | None) -> dict[str, A
         # **판정이 아니라 기록이다**(R18). 이 값이 며칠 쌓여야 임계를 정할 근거가 된다.
         "verdict": "recorded_only",
     }
+
+
+def _sizer_funnel_axis(
+    raw: Mapping[str, Any] | None, decision_funnel: Mapping[str, int] | None
+) -> dict[str, Any] | None:
+    """판단 통과 → 리스크 → 사이징 → 제출의 건수와 **1계약까지의 거리** (F-23).
+
+    None을 내는 조건은 **사이저가 하루 종일 한 번도 안 불린 것**이 아니라 **그 사실조차
+    로그로 확인되지 않는 것**이다 — 판단이 한 건도 안 났으면(사슬 미배선) 미측정이고,
+    판단은 났는데 리스크·사이저가 0건이면 그건 **0건이라는 측정값**이다(L18).
+    """
+    if not raw:
+        return None
+    risk_rejects = int(raw.get("risk_rejects") or 0)
+    zero_qty = int(raw.get("zero_qty") or 0)
+    submitted = int(raw.get("submitted") or 0)
+    ratios = sorted(float(r) for r in (raw.get("shortfall_ratios") or []))
+    cycles = int(decision_funnel.get("pass", 0)) if decision_funnel else 0
+    if not (cycles or risk_rejects or zero_qty or submitted):
+        # 사슬이 판단까지도 못 갔다 — 이 축이 말할 것이 없다.
+        return None
+    axis: dict[str, Any] = {
+        # 판단 사슬 ⑤통과 건수 = 사이저 앞까지 도달한 사이클
+        "cycles": cycles,
+        "risk_rejects": risk_rejects,
+        "risk_approved": max(cycles - risk_rejects, 0) if cycles else None,
+        "zero_qty": zero_qty,
+        "submitted": submitted,
+        # **못 잰 것은 None이다.** 0계약이 있는데 비율이 하나도 없으면 그것은 F-23 이전
+        # 코드의 로그다 — 0.0으로 채우면 "1계약에 하나도 못 닿았다"는 거짓말이 된다.
+        "shortfall_ratio_p50": (ratios[(len(ratios) - 1) // 2] if ratios else None),
+        "shortfall_ratio_max": (ratios[-1] if ratios else None),
+        "shortfall_samples": len(ratios),
+    }
+    streak = raw.get("streak")
+    if streak:
+        axis["session_streak"] = dict(streak)
+    return axis
 
 
 def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
@@ -2178,6 +2254,13 @@ def build_report(
         dict(sorted(logs["decision_gates"].items())) if logs["decision_gates"] else None
     )
 
+    # ---- 사이저 깔때기 (2026-08-24 F-23) ----
+    #
+    # **여기서도 판정은 안 한다.** 0계약이 정상일 수 있다(우위가 없으면 안 쏘는 것이
+    # 설계다). 잡으려는 것은 「하루 종일 0계약」이 어느 거리에서의 0인가를 매일 자동으로
+    # 세어 두는 것이고, 그 판정은 R18의 섀도 계측 20거래일이 답한다.
+    sizer_funnel = _sizer_funnel_axis(logs.get("sizer_funnel_raw"), decision_funnel)
+
     # Meta-Labeler 통과확률 (2026-08-18 F-0818I-1) — 계측 실패 감지는 `unmeasured` 블록에서.
     meta_gate: dict[str, Any] | None = logs["meta_gate"]
 
@@ -2635,6 +2718,7 @@ def build_report(
         host_events=[event.to_dict() for event in observation.events],
         regime_distribution=regime_distribution,
         decision_funnel=decision_funnel,
+        sizer_funnel=sizer_funnel,
         meta_gate=meta_gate,
         symbol_mismatch_suspected=bool(symbol_candidates),
         symbol_candidates=symbol_candidates,
@@ -2783,6 +2867,23 @@ def format_summary(report: IntegrityReport) -> str:
         passed = report.decision_funnel.get("pass", 0)
         tail = "" if passed else " — Risk·Sizer·OrderGateway 미검증"
         lines.append(f"  판단 사슬: {funnel}{tail}")
+    # **판단 뒤의 깔때기** (2026-08-24 F-23) — 판정은 안 하고 매일 보여만 준다.
+    # 새로 답하는 것은 "0계약이 1계약까지 얼마나 모자랐나"다. 건수만으로는
+    # 손에 닿는 거리와 몇 배 떨어진 거리가 같은 0으로 보인다.
+    if report.sizer_funnel is None:
+        lines.append("  주문 깔때기: 미측정(사이저 미도달 — 판단이 리스크까지 못 갔다)")
+    else:
+        sf = report.sizer_funnel
+        best = sf.get("shortfall_ratio_max")
+        near = (
+            f" · 1계약까지 최대 도달률 {best:.3f}"
+            if isinstance(best, (int, float))
+            else " · 도달률 미측정(F-23 이전 로그)"
+        )
+        lines.append(
+            f"  주문 깔때기: 판단통과={sf.get('cycles')} 리스크거절={sf.get('risk_rejects')} "
+            f"0계약={sf.get('zero_qty')} 제출={sf.get('submitted')}{near}"
+        )
     # **임계까지의 거리** (2026-08-18 F-0818I-1) — `blocked_by_meta` 건수는 위 사슬이 이미
     # 말하고, 이 줄이 새로 답하는 것은 "그 벽이 얼마나 두꺼운가"다. 판정은 안 한다(R18).
     if report.meta_gate:
