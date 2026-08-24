@@ -7331,6 +7331,122 @@ UNKNOWN(가중치 0.5 고정)'이라는 특정 가정이다."* 읽고도 기본�
       단위 문제로 빠졌고 이쪽은 안 빠졌다. **거래 0건은 성과 관문 전부의 미측정 조건**이다
 
 
+## 2026-08-24 장중 점검 (14:45) — 어제 고친 것들의 첫 실전 채점 ([MW0601])
+
+기동 04:57 부팅 트리거 2건 `LaunchWindowRefused`(설계대로 거절) · 08:20:33 L1 ·
+08:20:41 UI · 08:25:27 G2 — **전부 sha `aa89b81`**, 화면 상태판도 "전 프로세스 동일" 확인.
+
+### C 시리즈 채점
+
+- [x] **C-1 (F-13) 통과** — `ClockSkewMeasured` **12건**(기준선 어제 1건) · `delta_seconds`
+      출현 · `samples=600`(롤링 창 만석). 08:45 −0.181s → 14:15 −0.147s, **하루 대역 44ms.**
+      어제 진단(±40ppm)과 처방(1024초 폴링)이 **둘 다 실측으로 확인됐다** —
+      예측 최대 이탈 `40ppm × 1024s = 41ms`, 실측 대역 **44ms**. 08-21은 3.5시간에 531ms였다
+- [x] **C-4 (F-12) 통과** — `1m` = `exchange_vs_local` 351건 · `3m~30m` = `local_only` 257건.
+      1m 스큐 보정 **351/351건** 적용(예 −139.5ms). 3m+ 에는 한 건도 안 흘렀다
+- [x] **C-5 · C-6 (F-14) 통과** — `manifest.gates` 7개 · `legacy_gates=False` ·
+      엄격 JSON 파싱 성공 · `registry.db=live` vs `manifest.initial_status=candidate`
+      (매니페스트가 현재 상태를 주장하지 않는다 = 정본 단일화 확인).
+      미통과 관문 3종(`sharpe`·`max_drawdown`·`negative_window_ratio`)이 이름으로 뜬다
+- [x] **C-10 (F-6) 통과** — `MetaGateEvaluated` 12건 전부 `threshold_source=unknown`
+      (옛 번들이라 예상대로) · 임계 0.0 · **12건 전부 WARNING으로 승격**.
+      어제까지 INFO로 조용하던 「차단 계층이 열려 있다」가 이제 시끄럽다
+- [x] **C-11 (F-3) 통과** — `RegimeSeeded.delivery = **bus+direct**` ·
+      `RegimeSeedBusFailed` 0건. `RegimeWarmStart bars_by_source={A05609: 71, A05608: 129}`
+      — **(바) 판정 재료 확보**(어제 56/144에서 71/129로 이동, 롤 이후 근월물 비중 증가 중)
+- [x] **C-14 (F-8·F-15) 통과** — `PublishGraceExceeded` 11건 · `PublishLoopStalled` **4건**.
+      군집이 실제로 묶였다: 11:35 `['1m','5m']` 2711.9ms · 11:46 `['1m','5m']` 2377.9ms ·
+      13:10 `['1m','3m']` 2846.4ms
+- [x] **C-17 통과** — 두 pass 사이클 전부 `net_er_detail`에 `p_favorable`·`p_adverse` 기록
+- [x] **F-1 실전 검증 통과** — `logs/ui_20260824.log`에 `UISnapshotFreshness` **깨끗한 JSON
+      한 줄** · `Logging error` **0건**. 어제까지 이 자리가 cp949로 통째로 사라졌다
+- [x] **F-11 실전 검증 통과** — 화면이 「미배선」 단정 대신
+      *"미배선 또는 끊김 — 관측 창 동안 intel.options가 한 번도 안 왔다"* 를 말한다
+- [x] **브라우저 자동 열림 확인** — 08:20:38 서버 기동 → **08:20:41 첫 렌더**(3초).
+      Streamlit은 클라이언트가 붙어야 스크립트를 돌리므로 브라우저가 열렸다는 뜻이다.
+      **「낮에 한 번 열어 주세요」는 더 필요 없다** — 그 판정을 F-1이 자동화했다
+- [ ] **C-2 · C-3 · C-7 · C-8 · C-9** — 장후 산출물 필요(`FeaturePublishOffset` 세션 요약 ·
+      `publish_grace` 축 · `record_vs_commit` · 증거 수집기 §9). 15:45 배치 뒤 채점
+- [ ] **C-18 미통과** — `pnl_measurable` 여전히 `false`. 주문 0건이라 그렇다(아래 P0)
+
+### ⚠ P0 — 오늘 주문 0건의 직접 원인: **같은 산식이 사이저에 그대로 남아 있다**
+
+어제 `strategy/pipeline.py`의 `edge = max(0, min(1, 2*confidence - 1))`을 고쳤는데,
+**`risk/sizer.py:89`에 글자까지 같은 줄이 하나 더 있다.** 그래서 벽이 한 칸 뒤로만 밀렸다:
+
+| | 어제까지 | 오늘 10:30 | 오늘 11:00 |
+|---|---|---|---|
+| pipeline `edge` | 0.0 (항상) | **0.1386** | **0.1626** |
+| `net_er` | −1.62틱 (항상) | **+12.05틱** | **+16.33틱** |
+| 리스크 엔진 | RiskReject | **승인** | **승인** |
+| sizer `edge` | — | **0.0** | **0.0** |
+| 결과 | 거절 | `zero_qty` | `zero_qty` |
+
+**17거래일 만에 리스크 엔진이 처음으로 승인했다.** 그리고 사이저가 0계약으로 지웠다.
+`SizerZeroQty` 로그가 `"edge": 0.0, "raw_qty": 0.0`으로 그것을 정확히 말한다.
+오늘 |S| 최대는 **0.2418**(11:00)로 임계 0.20을 실제로 넘었다 — 신호는 있었다.
+
+**같은 숫자를 두 곳에서 계산하면 갈린다**는 이 저장소의 규율을 내가 어제 어겼다.
+`pipeline.py`만 고치고 `sizer.py`를 안 봤다. 사이저 모듈 docstring이 그 산식을
+"`edge` 근사 (알려진 갭) — 대칭 페이오프(b=1)를 가정"이라고 이미 적어 놨는데도 놓쳤다.
+
+- [ ] **F-17 (P0) `edge` 산식을 단일 출처로 만든다 — 장후 적용**
+      `pipeline._directional_edge()`를 사이저도 쓰게 한다. `sizer.size()`는 `intent`만 받으므로
+      **서명 변경**이 필요하다(`view` 또는 `edge`를 인자로). 두 곳이 각자 계산하는 구조 자체를
+      없애는 것이 요점이다 — 값을 맞추는 것이 아니라 **계산 지점을 하나로 만든다.**
+      **회귀 위험**: 사이저의 `edge`는 Kelly 분수에 곱해진다. `p_fav − p_adv`는 `2p−1`보다
+      **큰 값**이 나오므로(오늘 0.14 vs 0.0) 계약수가 0에서 양수로 바뀐다 — 즉 **이 수정이
+      실제로 주문을 낸다.** 첫날은 반드시 사람이 볼 것
+      **검증**: `SizerZeroQty`의 `edge`가 pipeline의 `net_er_detail.edge`와 같은 값인가
+
+### P1 — `decision.intent`가 정상 상태의 98%를 STALE로 표시한다
+
+화면 스크린샷: **같은 105초**에 `intel.futures` **LIVE** / `decision.intent` **STALE**.
+
+`DecisionIntent`에는 `cadence_seconds`도 `valid_until`도 **없다**(`core/messages.py` 실측).
+`ui/app.py`의 `_STALE_AFTER`에도 항목이 없어 `DEFAULT_STALE_AFTER_SECONDS = 30.0`으로
+떨어진다. 발행 주기는 30분(1800초)이니 **정상 구간 1770/1800초 = 98.3%가 STALE**이다.
+UI 로그가 그것을 그대로 찍었다 — `DecisionIntent: {"cadence_seconds": null}`.
+
+**2026-08-14 F-4가 `intel.futures`에 대해 고친 것과 정확히 같은 결함이다.** 그 함수
+(`ui/data_source.derived_stale_after`) docstring이 *"거래일의 99.4%가 STALE이고 그 앰버의
+뜻('그 프로세스가 죽었거나 멈췄다')은 틀렸다. 화면이 종일 늑대소년이었다"* 라고 적어 놨고,
+`intel.futures`는 `cadence_seconds` 필드를 얻어 고쳐졌는데 **`decision.intent`는 그 수정에서
+빠졌다.** 같은 30분 격자로 나가는 토픽인데 한쪽만 고쳐진 것이다.
+
+- [ ] **F-18 (P1) `DecisionIntent`에 `cadence_seconds`를 싣는다 — 장후 적용**
+      `MetaDecisionEngine.decide()`가 `view.cadence_seconds`를 그대로 물려주면 된다
+      (해석이 아니라 전달 — 새 숫자를 만들지 않는다). `Fill`도 같은 처지인지 함께 확인.
+      **검증**: 화면에서 `decision.intent`가 발행 직후 LIVE이고 45분(1.5×30분) 뒤 STALE
+
+### 정정 — 계약 승수는 이 저장소에 있다
+
+어제 손익 단위를 틱으로 정하면서 *"원으로 바꾸려면 계약 승수가 필요한데 그 값이 이
+저장소 어디에도 없다"* 고 적었다. **틀렸다.** `risk/sizer.py`에
+`DEFAULT_POINT_VALUE_KRW = Decimal("50000")`이 있고 `SizerConfig.point_value_krw`로 쓰인다.
+
+다만 그 모듈 docstring이 「`point_value_krw` (알려진 갭)」 절에서 *"공개적으로 50,000원으로
+알려져 있으나 이 프로젝트가 KIS API로 직접 실측(계약승수 필드)한 값은 아니다"* 라고
+명시한다. 즉 **placeholder이지 실측이 아니다.**
+
+- [ ] **G1 `max_drawdown` 채점 가능성 재검토** — 승수가 있으므로 틱을 자본 비율로 바꿀 수
+      있다. 단 그 값이 실측이 아니라는 사실을 산출물에 **함께 실어야** 한다
+      (`point_value_measured: false`). 안 실으면 placeholder로 계산한 MDD가 실측처럼 읽힌다 —
+      2026-08-21 F-14가 없앤 것과 같은 형태다
+- [ ] **KIS 마스터파일에서 계약승수 실측** — `symbol_master.py`가 그 필드를 아직 안 읽는다.
+      이걸 읽으면 위 항목과 사이저의 placeholder가 동시에 해소된다
+
+### 오늘 관측치 (참고)
+
+- 로그 레벨: INFO 62 · DEBUG 761 · **WARNING 27** (ERROR·CRITICAL **0건**).
+  WARNING 전량이 어제 넣은 계기다 — `MetaGateEvaluated` 12(임계 0 승격) ·
+  `PublishGraceExceeded` 11 · `PublishLoopStalled` 4. **오탐 없음**
+- 판단 12건 · 갈래 `score` 10 · `pass` 2 · `n_experts` 전부 1 (`no_expert` 0건)
+- |S| min 0.0034 / p50 0.0939 / **max 0.2418**
+- 화면: 봉 합성기 254개 · 거래량 항등식 일치(유실 0) · 소급 불가 손실 없음 ·
+  Regime RANGE · 위클리 만기 **오늘**(2026-08-24) · 먼슬리 D-13
+
+
 ### 등록부 유지보수
 
 - [ ] **`archiver-restart-restore` 검증 기한 재조정** — 기한 2026-08-20까지 채점 가능일이
@@ -7339,3 +7455,422 @@ UNKNOWN(가중치 0.5 고정)'이라는 특정 가정이다."* 읽고도 기본�
       가르려면 채워야 한다. 장후 배치가 오늘도 같은 안내를 냈다
       (ui-crash-isolation · ui-restart-observability · crash-forensics-armed ·
       tick-collection-live · clock-sync-restored 외)
+
+## 2026-08-24 08:52 — 장전 점검 ([MW0601])
+
+리포트 `logs/dailycheck/2026-08-24_report.md` · 증거 `logs/dailycheck/evidence_20260824_pre.md`
+**코드 변경 0건**(개장 8분 전 · R11 · 금지계명 3·4). 아래 전부 **적용 시점 15:35 이후**.
+
+### Fix — 오늘 장후 적용
+
+- [ ] **F-17 (P0) 검증받지 않은 번들이 낸 주문에 표식을 박는다** — 이상점 1-1.
+      R18에 따라 **네 번째 차단 계층을 신설하지 않는다.** 계측·표식만.
+      - [ ] `core/logging.py` `TAG_LEVELS`에 `UnvalidatedBundleTraded` = **WARNING** 등록 (R6)
+      - [ ] `execution/order_gateway.py::submit()` — 세션 **첫 주문 1회**에 위 태그로
+            `bundle_id`·`blocking_gates`·`meta_threshold`·`meta_threshold_source` 기록.
+            **주문은 막지 않는다.** 로깅 실패가 주문을 막지 않게 `try/except` 격리(R7)
+      - [ ] `models/registry.py::BundleManifest.blocking_gates()` **재사용** — 새 판정 로직 금지
+      - [ ] `ops/integrity_report.py` — `bundle_gates_unvalidated: {bundle_id, blocking, traded}`
+      - [ ] `run_postmarket.py`의 `self_eval` 산출 — `promotion_evidence_eligible: false` + 사유.
+            **성과 수치는 지우지 않는다**(지우면 왜 못 쓰는지가 사라진다)
+      - [ ] `scripts/self_check.py::_grandfathered_live_bundles()` — 반환 문자열에
+            **경과 거래일 수** 추가 `(… · 유예 N거래일째)`
+      - [ ] **오늘 산출물에 소급 적용 가능하게** 만들 것 — 08-24 로그로 재실행
+      - [ ] 검증: `pytest tests/execution/ tests/models/` · replay로 태그 정확히 1건 ·
+            **기한 2026-08-25 장전**
+- [ ] **F-18 (P1) 합격선 0의 출처를 「없다」와 「폴백이다」로 가른다** — 이상점 1-2 · `C-10`
+      - [ ] `scripts/backfill_threshold_source.py` **신규** — 학습 산출물의 `threshold_selection`이
+            있으면 현역 번들 `thresholds.yaml`에 사후 기입, 없으면 **`unrecorded_pre_f6`** 명시
+      - [ ] `models/registry.py` — `THRESHOLD_SOURCE_UNKNOWN`(키 없음) vs `unrecorded_pre_f6`
+            주석 구분. **상수는 늘리되 판정 분기는 늘리지 않는다**
+      - [ ] `configs/pending_verifications.yaml` — `C-10` 마감 조건을
+            *"`threshold_source`가 `unknown`이 아닐 것"* 으로 정정
+      - [ ] 현역 번들 파일 수정이므로 **백업 후** 진행 · `load_threshold_selection()` 왕복 테스트
+      - [ ] 산출물이 없으면 **재학습이 유일한 답**임을 기록으로 남긴다 (영구 「확인 필요」 금지)
+- [ ] **F-19 (P1) 검증 기한의 산술적 도달 가능성을 등록 시점과 매일 아침에 묻는다** — 1-3 · 1-4
+      - [ ] `ops/fix_verification.py::_usable_days()`(1078행) — `since` 없으면 **연속 카운트가
+            마지막으로 끊긴 날**을 시작점으로. 지금은 `since` 없는 항목이 「기한 불가」 판정 불가
+      - [ ] 항목 로딩부(821행) — `days_remaining`·`days_needed` 계산해 부착
+      - [ ] `_verdict()`(1304행) — `days_remaining < days_needed`도 `UNREACHABLE` 후보로
+            (기한이 지나기 **전에** 알린다)
+      - [ ] `scripts/self_check.py::check_pending_deadlines()` **신규 CheckResult** —
+            *"등록부 23건 · 기한 도달 불가 N건(항목명) · 기한 임박 M건"*
+      - [ ] **회귀 확인**: 08-18~08-21 리포트로 재채점해 **판정이 바뀌는 항목 전수 열거 후** 커밋
+      - [ ] `pytest tests/ops/test_fix_verification.py` + 신규 3케이스(도달 가능/불가/경과)
+      - [ ] **기한 2026-08-25 장전** — 자가점검에 해당 줄 출현
+- [ ] **F-20 (P2) 등록부 22건 `fix_committed` 기입** — 이상점 1-4. **자동화하지 않는다**
+      (자동 추정은 틀린 sha를 권위 있게 만든다). `DECISION_LOG.md`를 항목명으로 grep해
+      후보를 뽑아 두고 사람이 확정. 예상 40분
+- [ ] **F-21 (P2) 완성봉 유예 값 정본화** — 이상점 1-5. **사용자 결정 선행**(사용자 조치 5)
+      - [ ] 유지 시: `features/engine.py` 발행부에서 유예 초과를 **건수로 세고 WARNING 승격**
+            (현재 DEBUG로 조용히 지나간다 — 금지계명 12)
+      - [ ] 상향 시: `configs/instance.yaml`로 설정화 + **SYSTEM.md 불변원칙 3의 「500ms」 개정**.
+            헌법과 코드가 어긋난 채로 두지 않는다
+      - [ ] 어느 쪽이든 `daily_integrity`의 `publish_grace` 축(F-15 · `C-7`)이 매일 채점
+
+### 고도화
+
+- [ ] **G-13 「거동을 바꾸는 변경」을 별도 등급으로 다룬다** — 근거: `d468402`가 17거래일 0건을
+      여는 변경인데 오늘 아침 자가점검 15항목 어디에도 그 사실이 없었다.
+      커밋 트레일러 `Behavior-Change: starts-trading | changes-risk-appetite | changes-sizing` +
+      `self_check.py`가 **직전 기동 이후 커밋 범위**에서 읽어 한 줄로 낸다.
+      후보 하나가 이미 대기 중 — 「배리어 폭 미반영」 수정은 **위험 성향을 바꾸는 변경**이다
+- [ ] **G-14 검증 기한을 「날짜」가 아니라 「채점 가능 거래일 수」로 등록한다** — 근거: 오늘
+      같은 형태 **2건 동시 관측**(`no-degenerate-features` 3일 필요/2일 확보 ·
+      `archiver-restart-restore` 5일 필요/3일 가능). `deadline: <date>` →
+      `deadline_trading_days: <n>`, 절대 날짜는 파생값. 연속 카운트가 끊기면 자동 재계산되어
+      **기한 재조정이라는 수작업 자체가 사라진다.**
+      **경계**: 재계산 **3회 초과 시 사람에게 넘긴다** — 반복되는 연장은 기한이 없는 것과 같다
+- [ ] **G-15 웜스타트의 「과거」가 어느 계약의 과거인지를 판정에 실어 보낸다** — 근거: 오늘
+      국면 200봉 중 **129봉(64.5%)** 이 만기 지난 A05608, Feature 1,200봉 중 203봉(16.9%).
+      `RegimeSeeded`가 싣는 것은 `confidence: 0.5913` 하나뿐 — **확신도는 구성을 모른 채
+      계산된 값이다.** `strategy/regime/runtime.py`에 `stale_contract_ratio` 필드 추가,
+      `RegimeState`까지 전달. **확신도를 자동으로 깎지 않는다**(차단 로직 신설 = R18 섀도
+      20거래일 선행). 재는 것만. 다음 롤 2026-09-11이 롤 전후 관통 표본을 만든다
+
+### 오늘 장중 관측 (C 시리즈 계속)
+
+- [ ] **C-16** `OrderSubmit`·`Fill` **1건 이상** — `d468402`가 실제로 주문을 내는가.
+      0건이면 `edge` 위쪽에 또 다른 벽이 있다. **㉢의 유일한 실증**
+- [ ] **C-17** `net_er_detail`에 `p_favorable`·`p_adverse` 출현
+- [ ] **C-18** `MetaGateEvaluated` **WARNING 승격** · 메시지에 `(임계 0 — 게이트 무력)` ·
+      `threshold_source`는 **`unknown` 예상**(1-2에서 장전에 이미 확정)
+- [ ] **C-19** `ClockSkewMeasured` **2건째** · `delta_seconds`가 `null`이 아닐 것 → F-13 마감
+      (오늘 08:45:04 1건 · `skew_seconds: -0.181` · `delta_seconds: null`)
+- [ ] **C-20** `AggregatorLateTickDropped` 계열 건수 — 회선 p90 930ms인데 전일 드롭 0건이었다.
+      **「진짜 0」인가 「세는 계기가 없다」인가**
+- [ ] **C-21** `publish_offset_ms` 09시대 분포 — 전일 09시대 p50 −289.6ms, 1m 축 보정 후
+      유지되는가 (F-12 회귀 감시)
+- [ ] **C-22** 판단 깔때기 단계별 통과·거부 — `RegimeClassified` → `MetaGateEvaluated` →
+      `DecisionEmitted` → `RiskReject` → `OrderSubmit`. **어디서 몇 개가 줄어드는가**
+- [ ] **C-23** 시드 `TREND_DOWN`(확신도 0.5913)이 09:00 이후 실제 데이터로 바뀌는가, 고정인가
+- [ ] **C-24** 화면(포트 8511) 배지가 `NO_DATA` → `LIVE`로 바뀌는가 — F-1·F-11 실사용 검증
+
+### 장후에 읽기만 할 것 (오늘 코드 변경 금지)
+
+- [ ] **확인 필요 (가) 판정** — `strategy/regime/runtime.py` 웜스타트 입력 조립부가
+      **가격을 쓰는지 수익률을 쓰는지**, 계약 경계에서 차분을 끊는지. 수익률이면 롤 갭은
+      200봉 중 1지점 이상치라 무시 가능, 수준·장기 이동평균이면 판정을 통째로 끈다. 30분
+
+### 사용자 결정 대기 (장전 사용자 조치)
+
+- [ ] **1** 오늘 그대로 거래하게 둘지 — **권고 ㉮ 그대로 관측**(무응답 시 자동으로 ㉮). 09:00 전
+- [ ] **3** 오늘 성적을 승격 근거로 쓰지 않겠다는 확인 (F-17이 코드로 박는다)
+- [ ] **4** 검증 마감일 2건 재설정 — `archiver-restart-restore`(5거래일) ·
+      `no-degenerate-features`(3거래일). **코드가 임의로 늘리지 않는다**
+- [ ] **5** 완성봉 유예 500ms를 지킬 수 있는 값으로 볼지 (F-21 선행 조건)
+
+### 해소·마감 처리 (2026-08-24 장전 확인)
+
+- [x] **F-1** 화면 프로세스 구조화 로그 인코딩 — `ui_20260824.log` JSON 2행 · 한글 무손실
+- [x] **F-3** `RegimeSeeded.delivery` — `"bus+direct"` 출현
+- [x] **F-5** 스케줄 정본 대조 2종 → **5종 전부** · `schedule_drift=정본 일치`
+- [x] **F-11** `UISnapshotFreshness`가 선언이 아니라 관측값(`badge`·`age_seconds`)으로 보고
+- [x] **C-4 / F-12** `publish_offset_axis` 발행 11건 전부 출현 —
+      1m=`exchange_vs_local`(skew −143.4ms) · 3m·5m·10m=`local_only`
+- [x] **C-5 / F-14 계측분** manifest 관문 7개 `passed`·`measured` 2축 ·
+      `validation_report.json` `NaN` 0건 엄격 파싱 성공. **차단분은 F-17로 이월**
+- [x] **C-6** `registry.py:119` — `initial_status`는 패킹 시점 기록, registry.db가 정본.
+      `candidate` vs `live`는 **불일치가 아니라 설계**. 전일 1-13의 "두 곳이 다르다" 해소
+- [x] **C-9 / F-16** 증거 수집기 §9에서 `ui` SessionEnd 항목 소멸
+- [x] **U-2 결정 — 「Established 연결 수」를 장전 체크리스트에 넣지 않는다.**
+      `CollectorFirstTick`·컴포넌트 age·`irrecoverable_loss.clean`이 이미 답한다.
+      **그 셋이 답하지 못하는 날이 관측되면 그때 넣는다** — 미리 늘리면 회색이 하나 더 는다
+
+## 2026-08-24 12:40 — 장중 점검 ([MW0601])
+
+관측 09:00~12:40 KST. 코드 변경 0건(R11). 깔때기 `8→8→2→2→0→0` — ⑤ Sizer에서 전멸.
+
+### Fix — 오늘 장후 적용 (순서 변경: F-22를 ①로, F-17을 ③으로)
+
+- [ ] **F-22 (P1) 사이저의 우위 산식을 `_directional_edge()` 한 벌로 통일** — 이상점 1-10 · `C-16`
+- [ ] `risk/sizer.py:89` `edge = max(0.0, min(1.0, 2.0*intent.confidence-1.0))` **삭제**
+- [ ] `PositionSizer.size()`에 `edge: float` **필수 인자** 추가 — **기본값 주지 않는다**
+      (기본값이 있으면 안 넘긴 호출부가 조용히 옛 동작을 한다)
+- [ ] `strategy/pipeline.py:454` 호출부가 415행 `edge`를 그대로 전달 — **재계산 금지**
+- [ ] `sizer.py` docstring 14·29행 / `pipeline.py` docstring 20행 상호 참조 정정
+      (지금 두 문서가 서로를 정본으로 가리키는데 코드는 갈라져 있다)
+- [ ] `SizerZeroQty`에 `edge_source: "directional"` 추가
+- [ ] `grep -rn "\.size(" src/ tests/` 전수 — 필수 인자라 전부 깨진다(그게 목적)
+- [ ] 기존 사이저 테스트 10건이 `intent.confidence`로 edge를 유도 → 명시 전달로 수정
+- [ ] **신규 종단 replay** — 오늘 10:30·11:00 스냅샷으로 `0.3488·0.3652 → floor 0` 재현.
+      **합격 조건은 「주문이 나가는 것」이 아니라 「같은 0이지만 이유가 다른 0」**
+- [ ] **기한 2026-08-25 장전**
+
+- [ ] **F-23 (P1) 0계약이 1계약까지 얼마나 모자랐는지를 잰다** — 이상점 1-11
+- [ ] `sizer.py` `SizerZeroQty`에 `vol_target_qty` · `kelly_scaled` ·
+      `shortfall_ratio`(=raw_qty/min_qty) · `edge_needed_for_min_qty` 추가
+      (오늘 값이면 `shortfall_ratio: 0.349` · `edge_needed: 0.3974`)
+- [ ] `core/logging.py:148` 주석의 **"(정상 동작)" 삭제** — 그 딱지가 18거래일을 눈멀게 했다
+- [ ] `SizerZeroQtyStreak`(WARNING) 신규 `TAG_LEVELS` 등록(R6 — 미등록 시 `ValueError`)
+- [ ] `ops/integrity_report.py`에 `sizer_funnel` 축 — **G-17 대비 6단 전량으로 만든다**
+- [ ] `configs/pending_verifications.yaml`에 `order-path-live` 신규 등록 —
+      `metric: orders_submitted` · `min: 1` · **`deadline_trading_days: 20`**(G-14 선행 적용).
+      18거래일째 기한 없이 떠 있던 것에 기한을 준다
+- [ ] **기한 2026-08-25 장전**
+- [ ] **이 Fix가 답하지 않는 것**: 문턱을 낮출 것인가 → 사용자 조치 6. R18 20거래일 선행
+
+- [ ] **F-24 (P2) 정체 경보를 시간으로 flush** — 이상점 1-12
+- [ ] `features/engine.py:1054` 군집 연 시점 monotonic 저장
+- [ ] 발행 루프에서 `_PUBLISH_STALL_CLUSTER_MS`의 **2배** 경과 시 다음 군집 안 기다리고 flush
+      (상수 신설 금지 — 기존 상수에서 유도, F-15 ② 원칙)
+- [ ] `_flush_publish_stall()`에 `detection_lag_ms`(flush시각 − bar_confirm) 추가
+- [ ] `engine.py:462-465` 주석 정정 — "그날 마지막 한 건"이 아니라 **모든 건이 한 건씩 밀린다**
+      (오늘 7건 중 6건이 3~149분)
+- [ ] `tests/features/test_publish_grace.py`에 「창 안 도착 한 줄 / 창 밖 도착 두 줄」 케이스
+- [ ] **기한 2026-08-25 장중**
+
+- [ ] **F-25 (P2) `bars_used`가 판정에 실제 쓴 봉 수를 말하게 한다** — 이상점 1-13 · **G-15 선행**
+- [ ] `regime/service.py:172` 이후 `bars_in_filter`(=len(tail), 82) ·
+      `observations_used`(=observations.shape[0], 61) 반환
+- [ ] `regime/runtime.py:207` `bars_used=len(bars)` → `history_len=len(bars)` **개명**,
+      `bars_used`에는 `bars_in_filter`
+- [ ] `grep -rn "bars_used" src/ scripts/ tests/` 전수 — 읽는 곳 함께 수정(R14 3종 세트 정신)
+- [ ] `DECISION_LOG.md`에 "2026-08-24 이전 리포트의 `bars_used`는 이력 버퍼 길이였다" 명시 —
+      옛 리포트 재독 시 같은 오독 방지
+- [ ] **기한 2026-08-25 장전** — `{history_len: 200, bars_used: 82, observations_used: 61}`
+
+### 고도화
+
+- [ ] **G-16 「같은 개념이 두 곳에서 따로 계산되는가」를 커밋 관문으로** — 근거: `edge`가
+      `pipeline.py`·`sizer.py`에 독립 구현돼 있었고 `pytest` 2,274건이 못 잡았다
+      (두 벌이 각자의 테스트를 가졌기 때문)
+- [ ] `# CANON: <개념명>` / `# MIRRORS: <개념명>` 주석 규약
+- [ ] `scripts/check_canon.py` 신규 + `.pre-commit-config.yaml` 등록 —
+      중복 CANON 실패 · 고아 MIRRORS 실패
+- [ ] **정적 분석으로 산식 동일성을 판별하지 않는다** — 판별기가 틀리면 틀린 초록 도장이
+      된다(2026-08-21 F-14가 없앤 것과 같은 형태). 사람 선언 + 기계는 중복만
+- [ ] 첫 적용 3개: `edge` · `cost_ticks`(cost_model ↔ 백테스트 하네스) ·
+      `atr_ticks`(px_core ↔ pipeline.compute_atr — `_directional_edge()` docstring ㉡이 자백)
+
+- [ ] **G-17 판단 깔때기 일일 자동 집계** — 근거: 오늘 표를 로그 5종 손으로 맞춰 만들었고
+      그게 없었으면 「⑤ 전멸」이 안 보였다. 어제 `13→13→1→0`(④ 전멸) vs 오늘
+      `8→8→2→2→0`(⑤ 전멸) — **벽 이동은 두 날을 겹쳐야 보인다**
+- [ ] `daily_integrity_*.json`에 6단 전량(`regime·meta_gate·score_gate·risk·sizer·gateway`)
+- [ ] 장후 배치가 전일 대비 이동을 한 줄로 — "어제 ④ 13건 전멸 → 오늘 ⑤ 2건 전멸. 벽 한 칸 이동"
+- [ ] **단계 이름을 설정으로 빼지 않는다** — 불변원칙 5·R18이 고정한 구조다
+- [ ] **F-23과 함께 만든다** — 나중에 확장하면 비용 차가 크다
+
+- [ ] **G-15 ⬇️ P2로 강등 · F-25 선행** — 근거: 판정 모집단이 200봉이 아니라 82봉이라
+      이전 월물 노출이 64.5%가 아니라 **13.4%**이고, 유일한 노출 경로 `px_trend_r2`도
+      필터의 가장 오래된 쪽이라 옅어진다. 오늘 국면 4회 전환이 직접 증거.
+      **폐기하지 않는 이유**: 다음 롤 2026-09-11(D+18)에 비중이 다시 100%에 가까워진다
+
+### 오늘 장후 관측 (K 시리즈)
+
+- [ ] **K-1** 12:30 이후 `SizerZeroQty` 추가 건수 · 오후 `DecisionEmitted` 중 `gate: pass` 건수 —
+      ⑤ 도달이 더 나오면 `shortfall_ratio` 표본이 는다
+- [ ] **K-2** 세션 종료 시 **12:26 확정 군집이 실제로 flush되는가** — 1-12 유실 경로의 실증
+- [ ] **K-3** `daily_integrity_20260824.json`의 `degenerate_feature_count` — 0이어도 연속 2일이라
+      `no-degenerate-features` 미충족. **`OVERDUE`인가 `UNREACHABLE`인가**를 본다
+- [ ] **K-4** `self_eval_20260824.json` · `g2_daily_returns.jsonl` — **거래 0건인 날의 성과 파일이
+      어떤 모양인가.** 승격 심사 표본으로 셀 수 있는 날인지가 갈린다 (F-17 설계 재료)
+- [ ] **K-5** `delivery_latency` 세션 요약(전일 p90 930.1ms에서 움직였는가) ·
+      `publish_offset` 세션 분포(`local_only` 5계열 중앙값이 588~651ms 대역 유지하는가) —
+      **F-21 결정 재료**
+- [ ] **K-6** `SessionEnd` 3프로세스 전부(R13) · `record_vs_commit.verdict`(전일 `C-8`) ·
+      `fix_verification` 채점
+
+### 사용자 결정 대기 (장중 갱신)
+
+- [ ] **2** 화면(`http://localhost:8511`) 한 번 열기 — **아직 미이행.** `ui_20260824.log`가
+      08:20:41 이후 0행 증가. 화면 수정 2건이 나흘째 미검증
+- [ ] **3** 오늘 성적을 승격 근거로 쓰지 않겠다는 확인 — **급한 정도 ⬇️**(오늘 거래 0건이라
+      오염될 성적 자체가 없다). 규칙은 F-17로 박는다
+- [ ] **4** 검증 마감일 2건 재설정 — **미이행.** `git diff -w configs/pending_verifications.yaml` 0줄
+- [ ] **5** 완성봉 유예 500ms 정본화(F-21 선행) — 장중 실측: 402건 중 236건(58.7%) 초과.
+      **1m만 유예 안쪽(중앙 299.7ms)**, `local_only` 5계열 169건 **전량 초과**(중앙 588~651ms).
+      **축 보정 확대는 기각** — 스큐 안정(−0.137~−0.181초)한데도 5계열이 고르게 모였다
+- [ ] **6 🆕** 계약수 문턱을 낮출지 — **지금 정하지 않는다.** F-23으로 20거래일 재고 나서
+      결정. 지금 필요한 동의는 **"재는 것부터 시작한다"** 하나
+
+### 해소·마감 처리 (2026-08-24 장중 확인)
+
+- [x] **C-17** `net_er`에 `p_favorable: 0.1802` · `p_adverse: 0.0416` 출현
+- [x] **C-18** `MetaGateEvaluated` 8건 전량 WARNING · `(임계 0 — 게이트 무력)` ·
+      `threshold_source: "unknown"` — 장전 1-2 예측 적중
+- [x] **C-19 / F-13** `ClockSkewMeasured` 8건 · 09:15:05부터 `delta_seconds` 전부 실수값
+      (표본 600). 스큐 −0.137~−0.181초 안정. **F-13 마감**
+- [x] **C-21 / F-12** 1m 09시대 p50 **+265.4ms**(전일 −289.6ms) — 음수 소멸.
+      시간대 이동폭 40ms(전일 848ms). **회귀 없음**
+- [x] **C-22** 깔때기 6단 실측 `8→8→2→2→0→0`
+- [x] **C-23** 시드 TREND_DOWN(0.5913)이 **4회 전환** — 고정 아님
+- [x] **확인 필요 (가)** — **롤 갭 보정 불필요.** `px_autocorr`는 세션 경계 쌍 제외로 롤 갭
+      자동 배제 · `vl_vol_ratio`는 비율이라 상쇄 · `px_trend_r2`만 노출인데 판정 모집단 82봉 중
+      이전 월물 11봉(13.4%)이고 필터의 가장 오래된 쪽. 국면 4회 전환이 직접 증거
+- [ ] **C-16** ❌ 미충족(주문 0건) → **이상점 1-10 · 1-11로 승계.** 체크 안 한다
+- [ ] **C-20** 🔄 부분 — 장중 0건이고 **계기는 있다**(`logging.py:430` · `bar_composer.py:492`).
+      전일 0건 해석·세션 합계는 장후로
+- [ ] **C-24** 🔄 미관측 — 사용자가 화면을 안 열었다. **결함 아님**
+- [ ] **↩️ C-14 정정** — 장전이 "F-8 미적용 · 계기 없다"로 분류한 것은 **오분류**.
+      F-8은 적용돼 있고 오늘 2건(11:35:02 · 11:46:02). 대신 지연 결함 발견 → 1-12
+
+## 2026-08-24 16:05 — 장후 점검 ([MW0601])
+
+### Fix — 오늘 밤 적용 (최종 순서 ①~⑫ · 합계 475분)
+
+- [ ] **① F-22(50분)** `edge` 산식 통일 — `risk/sizer.py:89`를 `strategy/pipeline.py`의
+      `_directional_edge()` 한 벌로. 대응 1-10. **검증 기한 2026-08-25 장전**
+- [ ] **② F-23(60분)** `SizerZeroQty`에 `shortfall_ratio`(1계약까지 얼마나 모자랐나) ·
+      연속 0계약 일수. 대응 1-11. **오늘 표본 2건뿐이라 더 급하다.** 기한 2026-08-25 장전
+- [ ] **③ F-26(50분) 🆕** 수급 폴러 사이클 결산 — 대응 1-14
+  - [ ] `data/investor_flow_poller.py:83-98` `_poll_one()`이 성공/실패를 **반환**하게
+        (지금은 `raw is None`이면 조용히 `return`)
+  - [ ] `poll_once()`(77-81행)가 끝에서 다리 수를 세고 `expected = len(self._sector_codes)`에
+        못 미치면 **WARNING** `InvestorFlowLegShortfall`
+  - [ ] 필드 `market_code`·`cycle_kst`·`expected_legs`·`got_legs`·`missing_sectors`·
+        `cause`(`retry_exhausted`/`empty_payload`/`publish_failed`/`unknown`) — **`cause` 생략 금지**
+        (09:31 원인 세 가설을 가르는 유일한 수단)
+  - [ ] `core/logging.py`에 태그 등록 — WARNING 단일 심각도(R6)
+  - [ ] `data/option_chain_poller.py`에도 같은 형태 — `expected_legs_per_cycle()`(193행) 재사용
+  - [ ] **정상일에 매 사이클 한 줄이 늘지 않게** — 결손 시에만
+  - [ ] **검증 기한 2026-08-25 장후** — replay로 09:31에 1건 재현 + `cause` 값 확인
+- [ ] **④ F-27(70분) 🆕** 승격 표본 롤 연속 집계 + 「셀 수 있는 날」 표식 — 대응 1-15 ·
+      **F-17 흡수**
+  - [ ] `scripts/run_g2_paper_trading.py:546` 기록 스키마에 `n_orders`·`n_fills`·`countable`
+  - [ ] **기존 18행 고치지 않는다** — 키 부재는 `countable: null`(=모른다). **`false`로
+        채우지 않는다**(「거래 없었다」 ≠ 「그 시절엔 안 쟀다」)
+  - [ ] `:547` 필터를 `symbol ==` 단독에서 `countable is not False` + 롤 연속 집계로.
+        롤 당일 수익률 한 개만 제외
+  - [ ] `models/self_evaluation.py:90-137` 반환에 `sample_window`
+        = `{from, rows_total, rows_counted, excluded:{pre_start, roll_day, not_countable}}`
+        — **2026-08-18 결정의 How to apply 이행**
+  - [ ] `models/shadow_manager.py:246-258` 기준선도 같은 리스트를 쓴다 — 함께 확인
+  - [ ] **F-17 합류** — 행에 `bundle_id`·`gates_unmeasured` 함께
+  - [ ] **관문 요구일수(40거래일)는 이 커밋에서 바꾸지 않는다** — 사용자 조치 6
+  - [ ] **검증 기한 2026-08-25 장후** — `self_eval`에 `sample_window` 출현 · `rows_total: 18`
+- [ ] **⑤ F-19(40분)** 검증 기한 도달 가능성 검사 — 장전 1-3·1-4
+- [ ] **⑥ F-25(30분)** `bars_used` → `{history_len, bars_used, observations_used}` = `{200,82,61}`.
+      **G-15 선행.** 기한 2026-08-25 장전
+- [ ] **⑦ F-24(40분)** 정체 경보 시간 flush + `detection_lag_ms` — 대응 1-12.
+      **오늘 기준선: 22건 · 중앙 10.0분 · 최대 149.0분.** 기한 2026-08-25 장중
+- [ ] **⑧ F-28(35분) 🆕** 리플레이 판별을 값 크기 → 세션 여부로 — 대응 1-16
+  - [ ] `features/engine.py` 엔진 생성 시 `live: bool`(또는 `mode`) 수신 · `:1045-1051`에서
+        리플레이면 경보 축 차단
+  - [ ] `_PUBLISH_OFFSET_LIVE_CEILING_MS`(373행)는 **지우지 않고 2차 방어로 남긴다**
+  - [ ] **기본값을 `replay`로** — 라이브 경로가 명시적으로 `live=True`를 넘긴다(안전한 쪽이 기본)
+  - [ ] 호출부 확인 — `scripts/run_vol_scorecard.py`(`build_feature_vectors`) · `models/trainer.py`
+  - [ ] **검증 기한 2026-08-25 장후** — 장후 배치 4단계 `발행 유예 초과` 0줄
+- [ ] **⑨ F-18(30분)** 합격선 0의 출처 — 장전 1-2 · `C-10`
+- [ ] **⑩ F-29(30분) 🆕** 회선 지연 모집단 라벨 — 대응 1-17
+  - [ ] `data/collector.py:624` `log_delivery_latency()` — 상단 `population: "tail_ringbuffer"` ·
+        `by_hour` `population: "all"`
+  - [ ] 절단된 날은 `by_hour`에 `p90_tail` 한 칸 더 — 위아래 비교 가능하게
+  - [ ] **링버퍼 용량은 늘리지 않는다**(메모리 상한은 의도된 설계)
+  - [ ] **검증 기한 2026-08-25 장후**
+- [ ] **⑪ F-20(40분)** 등록부 `fix_committed` 기입 22건 — 장전 1-4. **오늘도 22건 그대로**
+- [ ] **⑫ F-21** 완성봉 유예 정본화 — **사용자 조치 4 선행**
+- [ ] **하루에 다 못 넣으면 ①~④가 최소선** (주문 경로 + 영구 손실 경보 + 승격 표본 · 3시간 50분)
+
+### 고도화
+
+- [ ] **G-18 🆕 `irrecoverable_loss`에 `leg_shortfall` 축** — 근거: 같은 날 두 장부가 반대로
+      말했다(`status_snapshot` `clean: true` vs `daily_integrity` `breaches` 1건)
+  - [ ] `clean`은 **시간 축과 다리 축이 둘 다 깨끗할 때만** true
+  - [ ] `ops/series_coverage.py:567-568`이 이미 `lost`를 계산한다 — **계산은 있고 배선만 없다**
+  - [ ] **`clean`의 뜻이 바뀌는 변경** — 이전 리포트의 `clean: true`는 다른 뜻임을 DECISION_LOG에 명시
+  - [ ] **F-26과 함께** — 실시간으로 만들어 놓고 장부에 안 넣으면 장중 화면은 여전히 못 본다
+- [ ] **G-19 🆕 「이 날을 승격 표본으로 세는가」를 매일 한 줄로** — 근거: 오늘 `n_return_samples: 6`이
+      왜 6인지 코드를 읽어야 알 수 있었고, 08-18 결정이 6거래일간 묻혔다
+  - [ ] 형식: *"승격 표본 17/40거래일 (파일 18행 중 롤일 1일 제외 · 기산 2026-08-18) ·
+        그중 거래 발생일 0일"* — **마지막 절이 핵심**
+  - [ ] F-27과 별도 항목인 이유: F-27은 **재는 것**, G-19는 **매일 보이게 하는 것**
+- [ ] **G-20 🆕 「같은 문구 = 같은 사건」 강제** — 근거: 장후 배치가 라이브와 글자 하나 안 다른
+      문구를 11줄 찍었다(1-16). R6은 태그-심각도만 묶고 **문구 재사용은 안 막는다**
+  - [ ] `mlog.log()`가 세션 시작 시 역할(`live`/`batch`/`replay`/`train`)을 받아 `role` 필드로
+  - [ ] 라이브 전용 태그 목록 + `role != "live"`면 `TagRoleViolation`
+  - [ ] **G-16과 같은 계열** — F-28은 한 곳만 막는다. 다른 태그에도 있는지는 **오늘 확인 못 했다**
+- [ ] **G-16 · G-17**(장중분) 유지 · **G-15 P2 유지 · F-25 선행**
+
+### 다음 거래일(2026-08-25) 관측 예정 (L 시리즈)
+
+- [ ] **L-1** 등록부 `no-degenerate-features` — **`기한 불가`(UNREACHABLE)로 떠야 한다.**
+      `기한 초과`로 뜨면 `_scorable_days_until` 계산이 틀린 것. 사용자가 기한을 고쳤으면 안 뜬다
+- [ ] **L-2** `flow_intraday/K2I`의 `short_cycles` — **빈 배열이어야 한다.** 또 나오면 12거래일 4회.
+      F-26이 들어갔으면 실시간 `InvestorFlowLegShortfall`도 함께 뜨는가
+- [ ] **L-3** F-22 검증 — `raw_qty 0.3488·0.3652 → floor 0` 재현 + `edge_source: "directional"`
+- [ ] **L-4** F-23 검증 — `shortfall_ratio` 출현 · `pending_verifications.yaml`에 `order-path-live` 등재
+- [ ] **L-5** F-27 검증 — `self_eval`에 `sample_window` · `rows_total: 18` · 기산일 명시
+- [ ] **L-6** F-25 검증 — `{history_len: 200, bars_used: 82, observations_used: 61}`
+- [ ] **L-7** F-24 검증 — `detection_lag_ms` 출현 · 최대값이 군집 창 2배 이내
+      (**오늘 기준선 중앙 10.0분 · 최대 149.0분**)
+- [ ] **L-8** 회선 p90(오늘 926.4ms) · `local_only` 5계열 p50(오늘 595.8~693.6ms) — **F-21 3일차 표본**
+- [ ] **L-9** `MetaGateEvaluated` 최대 확률 — **오늘 0.6646.** 내일도 0.5 이상이면
+      「합격선 0.5만 놔도 대부분 걸린다」가 두 날의 사실이 된다(F-18 설계 재료)
+- [ ] **L-10** 장후 배치 4단계 — F-28 후 `발행 유예 초과` 0줄
+
+### 사용자 결정 대기 (장후 갱신 — 이 목록이 장중 목록을 대체한다)
+
+- [ ] **1** **"고치는 작업 시작해"** — 12건 · 약 7시간 55분(핵심 4건이면 3시간 50분)
+- [ ] **2** 화면(`http://localhost:8511`) 한 번 열기 — **나흘째 미이행.** `ui_20260824.log` 9행 그대로.
+      **내일 낮**에(오늘은 15:40 워치독이 이미 정리했다)
+- [ ] **3** 검증 마감일 **하나만** 재조정 — **두 개에서 하나로 줄었다.**
+      `archiver-restart-restore`는 오늘 자동 졸업(5거래일 연속 충족). `no-degenerate-features`만 남음
+- [ ] **4** 완성봉 유예 500ms 정본화 — **나흘째.** 종일 실측: 1m만 p50 314.6ms로 안쪽,
+      나머지 5계열 p50 595.8~693.6ms 전량 초과. **회선이 아니라 자체 처리 지연 · 하루 종일 안정**
+- [ ] **5** 계약수 문턱 — **지금 정하지 않는다.** 오후 ⑤ 도달 0건이라 표본이 오전 2건뿐.
+      지금 필요한 동의는 **"재는 것부터 시작한다"** 하나
+- [ ] **6 🆕** **성적 세는 방식 ㉠이어서 세기 / ㉡나눠 세되 요구일수 재정의** — 9월 11일 롤 전까지.
+      **제가 양단점 정리해 드린 뒤 결정**
+- [ ] **7** 재시동 — **불필요.** `code_version.stale: false` · 프로세스는 15:35 정상 종료.
+      **다만 오늘 밤 커밋을 오늘 안에 끝내야 내일 08:20 기동이 새 코드로 뜬다**(금지계명 10)
+
+### 해소·마감 처리 (2026-08-24 장후 확인)
+
+- [x] **K-1** 오후 ⑤ 도달 0건 확인 — 표본 2건 고정
+- [x] **K-2** 세션 종료 flush 정상(15:35:05 · 지연 3.1분) — **장중 1-12 ㉡ 정정**
+- [x] **K-3** `degenerate_features` 6 Horizon 청정 · 오늘은 `회복 중`, 내일 `UNREACHABLE`
+- [x] **K-4** 거래 0건인 날의 성과 파일 모양 확인 → **1-15로 승계**
+- [x] **K-5** 회선 p90 926.4ms · 발행 오프셋 세션 분포 · `negative: 0.0` 전 Horizon
+- [x] **K-6** `SessionEnd` 2프로세스 · `record_vs_commit.verdict: ok` · 채점 23건 재발 0
+- [x] **C-1** `ClockSkewMeasured` 14건 · 스큐 −0.181초(이동폭 44ms)
+- [x] **C-2·C-3** `day_drift_ms` 1m 187.9(전일 848) 외 5계열
+- [x] **C-7** `publish_grace` 축 존재 · `verdict: recorded_only`
+- [x] **C-8** `record_vs_commit.verdict: "ok"` — 전일 이월 마감
+- [x] **C-12** 마감 — **답은 「장부가 두 벌이다」**(→ G-18)
+- [x] **C-13** 마감 — **답은 「모집단이 두 벌이다」**(→ 1-17 · F-29)
+- [x] **C-20** `late_bar_drops: 0` — 계기 있고 진짜 0건
+- [x] **장전 1-3** 판정 완료 — 오늘분 청정 · 내일 `기한 불가`로 뜬다
+- [x] **장전 1-4 ㉠** `archiver-restart-restore` 자동 졸업 — **사용자 조치에서 제거**
+- [ ] **C-16** ❌ 종일 미충족(주문 0건) → 1-10·1-11로 승계. 체크 안 한다
+- [ ] **C-24** 🔄 미관측 — 사용자가 화면을 나흘째 안 열었다. **결함 아님**
+- [ ] **확인 필요 (나) 🆕** 09:31 다리가 **왜** 빠졌는지 미확정 — 500 오류 4건과 시각이 하나도
+      안 겹치고 09:31엔 `Retried`도 `Error`도 없다. 가설 ㉠빈 응답 ㉡시각 키 어긋남 ㉢루프 지연.
+      **F-26의 `cause` 필드가 답을 낸다**
+
+---
+
+## 2026-08-24 야간 — Fix 구현 결과 (커밋 12건, `9ae8061` ~ `509744d`)
+
+> 근거 전문: `logs/dailycheck/2026-08-24_report.md` · 결정 기록: `DECISION_LOG.md` 2026-08-24 절
+
+- [x] **F-22** 사이저의 `edge` 사본 제거 — 정본은 `pipeline._directional_edge()` 하나 (`9ae8061`)
+- [x] **F-23** `shortfall_ratio`·`edge_needed_for_min_qty`·`SizerZeroQtyStreak`·`sizer_funnel`
+      + 등록부 `order-path-live`(`deadline_trading_days: 20`) (`6d3e69c`)
+- [x] **F-26** 두 폴러가 사이클 끝에서 다리 수를 세고 결손 시 그 자리에서 운다 (`902cf0f`)
+- [x] **F-27**(F-17 흡수) 승격 표본 롤 연속 집계 + `sample_window` + 미검증 번들 표식
+      (`55bf655`) — 실측 6 → **17**
+- [x] **F-30 🆕** 연속 계열 다리 묶음을 벽시계 분이 아니라 **키 되풀이**로 (`b566a7b`)
+- [x] **F-19** `deadline_pressure()` + self_check `deadlines` 줄 (`ebf2078`)
+- [x] **F-25** `history_len` / `bars_used` / `observations_used` 분리 (`45e4106`)
+- [x] **F-24** 정체 군집을 시간으로 flush + `detection_lag_ms` (`c787660`)
+- [x] **F-28** `FeatureEngine(mode=...)` — 기본 `replay`, 라이브만 명시 (`a7cf734`)
+- [x] **F-18** `unrecorded_pre_f6` + 사후 기입 스크립트 + 빌드 기록에 출처 (`16e0a87`)
+- [x] **F-29** 회선 지연 모집단 라벨 + `p90_tail` (`b5598a8`)
+- [x] **F-20** 후보 도구 + 확정 1건 (22 → **21**) (`509744d`)
+
+### 사람이 이어받을 것
+
+- [ ] **F-21** 완성봉 유예 값 정본화 — **사용자 조치 4 결정 선행**(착수 안 함)
+- [ ] **F-20 잔여 21건** — `python scripts/suggest_fix_commits.py`로 후보를 내고 사람이 확정
+- [ ] **F-18 후속** 현역 번들의 임계 0.0이 최적화인지 폴백인지는 **재학습만이 답한다**
+      (그 사실을 `meta_labeler_threshold_note`에 남겨 뒀다)
+- [ ] **승격 표본 세는 방식** — 이어서 세기 vs 나눠 세기 (사용자 조치 6)
+- [ ] **`no-degenerate-features` 기한 재설정** — 코드가 옮기지 않는다 (사용자 조치 3)
+
+### 정정 (이 작업 중 확인된 사실)
+
+- [x] **확인 필요 (나) — 답이 나왔다.** 09:31 다리는 **빠지지 않았다.** 아카이브 1,302행 =
+      434사이클 × 3다리로 정확히 나누어떨어지고, 09:30:59.994에 발사된 틱 하나의 첫 다리가
+      앞 분 버킷에 떨어진 **계측 인공물**이었다. 가설 ㉠㉡㉢ 전부 아니다 →
+      **이상점 1-14의 「이번 달 세 번째」에서 오늘 건은 빠져야 한다**(08-06·08-10은 진짜).
