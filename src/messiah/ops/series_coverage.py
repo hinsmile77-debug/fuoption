@@ -358,8 +358,28 @@ def _leg_completeness(
     옵션체인이 분 단위로 묶여 09:02가 2다리, 09:12가 1다리인 것처럼 보였다(테스트가 잡았다).
 
     - 사이클 `_MIN_CYCLES_FOR_LEGS`개 이상 → 폴링 격자다. 사이클로 묶는다.
-    - 사이클이 정확히 1개 → 끊김 없는 연속 계열이다. 분으로 묶는다.
+    - 사이클이 정확히 1개 → 끊김 없는 연속 계열이다. **다리 키가 되풀이되는 지점**으로
+      묶는다(아래 참고).
     - 그 사이(2~4개) → **판정하지 않는다.** 어느 쪽인지 가릴 근거가 없다.
+
+    ## 연속 계열을 분이 아니라 키 되풀이로 묶는 이유 (2026-08-24 F-30)
+
+    종전엔 연속 계열을 **벽시계 분**으로 묶었다. 그래서 틱 하나가 분 경계보다 몇 ms
+    일찍 발사되면 그 사이클의 첫 다리가 **앞 분 버킷**에 떨어지고, 뒤 분이 결손처럼
+    보였다. 2026-08-24 실측이 정확히 그 형태다:
+
+        09:30:01·09:30:03·09:30:05  F001·OC01·OP01   → 09:30 버킷 {F001,OC01,OP01}
+        09:30:59.994                F001             → 09:30 버킷에 흡수(집합이라 티가 안 남)
+        09:31:01·09:31:02           OC01·OP01        → 09:31 버킷 {OC01,OP01} = **2/3다리**
+
+    그날 리포트는 이것을 *"09:31 사이클 2/3다리 — 영구 소실"* 로 올렸지만 **잃은 자료는
+    없었다.** 아카이브는 1,302행 = 434사이클 × 3다리로 정확히 나누어떨어졌고, 다리 수가
+    3이 아닌 분 버킷은 09:30과 09:31 둘뿐이며 합이 6이었다.
+
+    한 사이클 안에서 같은 다리 키는 **정확히 한 번** 온다. 그러니 키가 되풀이되는 순간이
+    곧 다음 사이클의 시작이고, 이 규칙은 발사 시각의 흔들림과 무관하다. 재시도로 다리
+    하나가 수십 초 늦어도(`data/poll_retry.RETRY_BUDGET_SECONDS` = 40초) 같은 사이클에
+    남는다 — 시간 간격으로 자르는 규칙이 못 하는 일이다.
 
     정상 다리 수는 그날 묶음들의 **최빈값**이다. 상수(42·3)를 적지 않는 이유는 카덴스와
     같다 — `strike_window`나 업종 목록이 바뀌면 그 상수가 조용히 거짓이 된다. 동수면 큰
@@ -384,8 +404,15 @@ def _leg_completeness(
             if index >= 0:
                 buckets[starts[index]].add(key)
     elif len(cycles) == 1:
-        for minute, key in pairs:
-            buckets.setdefault(minute, set()).add(key)
+        # 키가 되풀이되는 순간이 다음 사이클의 시작이다 (2026-08-24 F-30).
+        current: set[str] = set()
+        opened: datetime | None = None
+        for stamp, key in pairs:
+            if opened is None or key in current:
+                opened = stamp
+                current = set()
+                buckets[opened] = current
+            current.add(key)
     else:
         return None, []
 
@@ -436,12 +463,10 @@ def measure(
     keys = list(leg_keys) if leg_keys is not None else None
     if keys is not None and len(keys) != len(stamps):
         keys = None  # 길이가 어긋나면 짝을 신뢰할 수 없다 — 시간 축만 본다
+    # **분으로 자르지 않는다** (2026-08-24 F-30). 아래 `_leg_completeness()`가 벽시계
+    # 분으로 묶던 것이 「틱이 몇 ms 일찍 발사되면 결손처럼 보이는」 인공물의 원인이었다.
     pairs = (
-        sorted(
-            (ts.replace(second=0, microsecond=0), key)
-            for ts, key in zip(stamps, keys)
-            if start <= ts <= end
-        )
+        sorted((ts, key) for ts, key in zip(stamps, keys) if start <= ts <= end)
         if keys is not None
         else []
     )
