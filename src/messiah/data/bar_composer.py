@@ -136,7 +136,36 @@ _TARGET_HORIZON_SECONDS: dict[Horizon, int] = {
     h: s for h, s in HORIZON_SECONDS.items() if h != Horizon.M1
 }
 
-_BOUNDARY_GRACE_SECONDS = 0.5  # Ver 1.2 §2.2 "지연 틱 유예 500ms"
+#: 합성 스케줄러의 **위상 오프셋** — 경계 + 이만큼에 발사한다 (2026-08-24 F-21 개명).
+#:
+#: ## 이 값은 「늦은 틱 유예」가 아니다
+#:
+#: 종전 이름은 `_BOUNDARY_GRACE_SECONDS`였고 주석이 *Ver 1.2 §2.2 "지연 틱 유예 500ms"* 를
+#: 가리켰다. 그 이름 때문에 세 소비처가 이 값을 **마감 시한**으로 읽었다 —
+#: `features/engine`의 발행 경보, `ops/integrity_report`의 `publish_grace` 채점,
+#: `scripts/self_check`의 `bar_close` 한 줄. 그 결과가 2026-08-24까지 6거래일 연속 경고다.
+#:
+#: **늦은 틱을 실제로 막는 값은 따로 있다.**
+#:
+#:     1분봉   `data/normalizer.MINUTE_CLOSE_GRACE_SECONDS`      = 2.0초
+#:     합성봉  `_MAX_CONSTITUENT_WAIT_SECONDS`(겹④, 아래)        = 5.0초
+#:
+#: 이 상수가 하는 일은 둘뿐이다: 스케줄러가 **언제 처음 들여다보는가**(`run_forever`)와,
+#: 거래소 경계가 아직 안 지났을 때의 **여유 폭**(`_defer_until_boundary_passed`).
+#: 어느 쪽도 안전장치가 아니다 — 안전은 겹④가 맡는다.
+#:
+#: ## 0.5초를 유지하는 근거 (2026-08-24 실측, 2거래일 598건)
+#:
+#: 대기를 걷어낸 **순수 계산 시간**(= 합성봉 발행 − max(이 위상, 마지막 1분봉 발행))은
+#: p50 111ms · p90 289ms · p99 479ms · 최대 602ms다. 이 위상은 병목이 아니다.
+#: 낮추면 겹④ 폴링만 늘고, 올리면 합성봉이 그만큼 늦게 나간다 — **바꿀 근거가 없다는
+#: 것이 유지의 근거**다.
+#:
+#: ## 이 값을 밖에서 읽지 말 것
+#:
+#: 합성기 밖의 어떤 판정도 이 값을 기준으로 삼으면 안 된다. 발행 지연의 예산은
+#: `features/engine._PUBLISH_SLA_MS`이고, 늦은 틱의 예산은 위 두 상수다.
+_COMPOSE_SCHEDULER_PHASE_SECONDS = 0.5
 
 # 스케줄러가 쐈는데 거래소 시각으로 경계가 아직 안 지났을 때 더 기다릴 수 있는 상한.
 # 이만큼을 넘는 스큐는 `self_check`의 clock 항목이 애초에 기동을 거부하는 영역이고
@@ -610,7 +639,9 @@ class MultiHorizonBarComposer:
         shortfall = (boundary - exchange_now).total_seconds()
         if shortfall <= 0:
             return
-        await self._sleep(min(shortfall + _BOUNDARY_GRACE_SECONDS, _MAX_FLUSH_DEFER_SECONDS))
+        await self._sleep(
+            min(shortfall + _COMPOSE_SCHEDULER_PHASE_SECONDS, _MAX_FLUSH_DEFER_SECONDS)
+        )
 
     async def _flush_bucket(self, horizon: Horizon) -> None:
         """버킷을 비우고 합성봉 1개를 확정한다 — 대기 판단 없이 지금 즉시."""
@@ -677,7 +708,8 @@ class MultiHorizonBarComposer:
     async def run_forever(self) -> None:
         """
         계산: `bar.1m.{symbol}` 구독 태스크 1개 + Horizon마다 `FixedTickScheduler`
-             (phase_offset=500ms) 태스크 1개, 총 1+len(targets)개를 asyncio.gather로 동시
+             (phase_offset=`_COMPOSE_SCHEDULER_PHASE_SECONDS`) 태스크 1개, 총
+             1+len(targets)개를 asyncio.gather로 동시
              구동한다. 어느 하나가 예외로 죽으면(재연결은 이 클래스의 책임이 아님) 전부
              함께 종료된다.
         """
@@ -686,7 +718,7 @@ class MultiHorizonBarComposer:
         )
         scheduler_tasks = [
             FixedTickScheduler(
-                tick_seconds=seconds, phase_offset_seconds=_BOUNDARY_GRACE_SECONDS
+                tick_seconds=seconds, phase_offset_seconds=_COMPOSE_SCHEDULER_PHASE_SECONDS
             ).run_forever(lambda h=horizon: self.flush_due_horizon(h))
             for horizon, seconds in self._targets.items()
         ]

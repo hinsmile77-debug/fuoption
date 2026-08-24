@@ -774,7 +774,8 @@ _ABSENCE_REASON: dict[str, str] = {
 #: (`ever_seen`은 세션별이라 창을 새로 열면 리셋된다).
 #:
 #: 숫자를 새로 쓰지 않는다 — 가장 굵은 Horizon의 길이에서 파생시킨다(F-2가
-#: `_BOUNDARY_GRACE_SECONDS`에 세운 규율과 같다).
+#: 합성기 위상 상수에 세운 규율과 같다. 그 상수는 2026-08-24 F-21에서
+#: `_COMPOSE_SCHEDULER_PHASE_SECONDS`로 개명됐다 — 파생 규율만 인용한다).
 _ABSENCE_OBSERVE_SECONDS = HORIZON_SECONDS[Horizon.M30] * 2
 
 # 위 토픽들의 발행 프로세스 — 전부 G2 러너 한 프로세스다(`scripts/run_g2_paper_trading.py`).

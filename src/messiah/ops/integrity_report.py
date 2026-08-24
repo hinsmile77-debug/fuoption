@@ -235,18 +235,28 @@ class IntegrityReport:
     # 1m p50이 09시 74.8ms → 14시 884.8ms(11.8배)였는데 종일 p90 1,083ms 하나로는 그 사실이
     # 보이지 않았다.
     publish_offset: dict[str, Any] | None
-    # **완성봉 유예를 매일 채점한다** (2026-08-21 F-15 · 1-14).
+    # **Horizon별 발행 오프셋 — 기록만 한다** (2026-08-21 F-15 → 2026-08-24 F-21 개정).
     #
-    # "계산 결과를 봉이 닫힌 뒤 500ms 안에 내보낸다"는 약속이 상수 선언으로만 있었고,
-    # 리포트는 오프셋을 **기록만** 하고 그 상수와 대조하지 않았다. 그래서 3m~30m이
-    # 매번 유예를 넘기고 있었는데도(3m 586ms ~ 30m 775ms) 어느 축도 그것을 말하지
-    # 않았다 — 지킬 수 없는 기준이 매일 조용히 깨지고 있었다.
+    # 종전엔 이 축이 오프셋을 합성 스케줄러 위상(500ms)과 대조해 `exceeds_grace`를 냈다.
+    # **그 대조가 틀렸다.** 3m~30m의 오프셋에는 그 위상 0.5초가 구조적으로 들어 있어
+    # 500ms 아래로 내려갈 수 없다 — 2거래일 598건 중 500ms 미만이 **0건**이고 최소가
+    # 532ms였다. 값을 자기 자신과 비교하고 있었던 셈이고, 그래서 5개 계열이 매일
+    # `exceeds_grace: true`를 받았다.
     #
-    # **1단계는 `breaches`에 넣지 않는다**(R18). 지금 적용하면 전 계열이 매일 breach를
-    # 내고 경보가 닳는다. 임계 확정은 F-12(1m 축 보정) 실측이 며칠 쌓인 뒤 사람이 한다 —
-    # 유예 500ms 자체가 합성 직렬 비용(중앙값 ~690ms)보다 작아 **지킬 수 없는 값일 수
-    # 있고**, 상수를 바꾸는 결정은 코드가 아니라 사람이 한다.
+    # 이제 이 축은 **판정하지 않는다.** 예산 채점은 아래 `publish_sla`가 맡는다.
+    # 여기 남는 것은 종단 지연의 모양(Horizon별 분포·시간대 이동폭)이고, 그것은
+    # 「회선이 나빠졌나 내부가 밀렸나」를 가르는 재료로 여전히 쓸모가 있다.
     publish_grace: dict[str, Any] | None
+    # **발행 예산 채점** (2026-08-24 F-21).
+    #
+    # 재는 값이 다르다 — `bar_to_publish_ms`(봉 도착 → 발행, monotonic)다. 위 오프셋에서
+    # **기다린 시간을 걷어낸 것**이고, 엔진이 자기 몫으로 쓴 시간만 남는다. 실측
+    # (2거래일 598건) p50 111ms · p90 289ms · p99 479ms · 최대 602ms.
+    #
+    # 예산 1,000ms는 관측 최대 위로 66% 여유다(`features/engine._PUBLISH_SLA_MS`).
+    # **아직 `breaches`에 넣지 않는다**(R18) — 새 축이 며칠 돌아 본 뒤 사람이 승격한다.
+    # 축이 없던 날은 None(미측정)이지 0이 아니다(L18).
+    publish_sla: dict[str, Any] | None
     # 일별 단일 통계에 붙는 **일중 추세** (2026-08-20 G-D). 판정이 아니라 표시다 —
     # 임계 승격은 20거래일 분포를 본 뒤(R18).
     intraday_trend: dict[str, Any]
@@ -987,6 +997,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     clock_skews: list[float] = []
     delivery_latency: dict[str, float] | None = None
     publish_offset: dict[str, Any] | None = None
+    bar_to_publish: dict[str, Any] | None = None
     degenerate: dict[str, dict[str, list[str]]] = {}
     allowed_constants: dict[str, float] = {}
     nan_by_horizon: dict[str, list[float]] = {}
@@ -1179,6 +1190,10 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 per_horizon = record.get("by_horizon")
                 if isinstance(per_horizon, dict):
                     publish_offset["by_horizon"] = per_horizon
+                # 예산이 채점하는 축 (2026-08-24 F-21) — 없으면 None(F-21 이전 로그).
+                measured_sla = record.get("bar_to_publish")
+                if isinstance(measured_sla, dict):
+                    bar_to_publish = measured_sla
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -1228,6 +1243,8 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "delivery_latency": delivery_latency,
         "publish_offset": publish_offset,
         "publish_grace": _publish_grace_axis(publish_offset),
+        "bar_to_publish": bar_to_publish,
+        "publish_sla": _publish_sla_axis(bar_to_publish),
         "degenerate_features": degenerate,
         "allowed_constant_values": allowed_constants,
         "nan_ratio_by_horizon": nan_summary,
@@ -1283,32 +1300,38 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
 # ---------------------------------------------------------------- 탐지·복구 소유권 (고도화 4)
 
 
-def boundary_grace_seconds() -> float:
-    """완성봉 유예 — **합성기 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
+def publish_sla_ms() -> float:
+    """발행 예산(ms) — **엔진 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
 
-    `scripts/self_check.py._boundary_grace_seconds()`와 **같은 출처**를 본다. 자가점검
-    `bar_close` 줄이 인용하는 값과 리포트가 채점에 쓰는 값이 갈리면, 화면은 500ms를
-    말하는데 채점은 다른 숫자로 하는 상태가 된다(2026-08-21 F-15 ② — 숫자를 새로 쓰지
-    않는다는 F-2의 규율과 같다).
+    2026-08-24 F-21에서 `boundary_grace_seconds()`를 대체했다. 종전 함수는 합성 스케줄러
+    위상(`data/bar_composer`)을 읽어 발행 오프셋을 채점했는데, 그 위상은 오프셋 자체에
+    구조적으로 들어 있는 값이라 **자기 자신과 비교하는 채점**이었다.
     """
-    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+    from messiah.features.engine import _PUBLISH_SLA_MS
 
-    return float(_BOUNDARY_GRACE_SECONDS)
+    return float(_PUBLISH_SLA_MS)
 
 
 def _publish_grace_axis(publish_offset: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """Horizon별 발행 오프셋을 **유예 상수와 대조**한다 (2026-08-21 F-15).
+    """Horizon별 발행 오프셋의 **모양만** 남긴다 (2026-08-21 F-15 → 2026-08-24 F-21 개정).
 
-    지금은 채점만 하고 판정하지 않는다 — `breaches`에 넣지 않는다(위 `publish_grace`
-    필드 주석). 못 잰 Horizon은 `measured=False`로 남긴다(L18): 그 세션에 그 Horizon
-    발행이 없었던 것과 유예를 지킨 것은 다른 사건이다.
+    ## 유예 대조를 걷어냈다
+
+    종전에는 각 Horizon의 p50을 합성 스케줄러 위상(500ms)과 대조해 `exceeds_grace`를
+    냈다. 그 대조가 틀렸다 — 3m~30m의 오프셋에는 그 위상 0.5초가 **구조적으로** 들어
+    있어서 500ms 아래로 내려갈 수가 없다(2거래일 598건 중 500ms 미만 0건 · 최소 532ms).
+    값이 자기 자신을 더한 수와 비교되고 있었고, 그래서 다섯 계열이 매일 `true`를 받았다.
+
+    예산 채점은 `_publish_sla_axis()`가 맡는다. 여기 남는 것은 **종단 지연의 모양**이고,
+    그것은 「회선이 나빠졌나 내부가 밀렸나」를 가르는 재료로 여전히 쓸모가 있다.
+
+    못 잰 Horizon은 `measured=False`로 남긴다(L18).
     """
     if not publish_offset:
         return None
     per_horizon = publish_offset.get("by_horizon")
     if not isinstance(per_horizon, Mapping) or not per_horizon:
         return None
-    grace_ms = boundary_grace_seconds() * 1000.0
     horizons: dict[str, Any] = {}
     for name, stats in sorted(per_horizon.items()):
         if not isinstance(stats, Mapping):
@@ -1323,19 +1346,58 @@ def _publish_grace_axis(publish_offset: Mapping[str, Any] | None) -> dict[str, A
             "p90_ms": float(p90) if isinstance(p90, (int, float)) else None,
             "samples": stats.get("samples"),
             "day_drift_ms": stats.get("day_drift_ms"),
-            # 유예를 넘겼는가 — **중앙값 기준**이다. p90으로 재면 꼬리 몇 건으로
-            # "매번 넘긴다"가 되고, 최댓값으로 재면 하루 한 건으로도 그렇게 된다.
-            "exceeds_grace": (bool(p50 > grace_ms) if measured else None),
-            "over_grace_ms": (round(float(p50) - grace_ms, 1) if measured else None),
         }
     if not horizons:
         return None
-    exceeded = sorted(k for k, v in horizons.items() if v["exceeds_grace"])
     return {
-        "grace_ms": round(grace_ms, 1),
         "horizons": horizons,
-        "exceeded": exceeded,
-        # **판정이 아니라 기록이다**(R18). 이 값이 며칠 쌓여야 임계를 정할 근거가 된다.
+        # **판정하지 않는다.** 이 축은 기록이고, 채점은 `publish_sla`가 한다.
+        "verdict": "recorded_only",
+    }
+
+
+def _publish_sla_axis(bar_to_publish: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """발행 예산 채점 — 봉 도착 → 발행 경과 (2026-08-24 F-21).
+
+    입력은 엔진 세션 요약의 `bar_to_publish` 블록이다. 없으면 **None(미측정)** 이고
+    0건이 아니다(L18) — F-21 이전 로그가 정확히 그 상태다.
+
+    **아직 `breaches`에 넣지 않는다**(R18). 새 축이 며칠 돌아 본 뒤 사람이 승격한다.
+    """
+    if not bar_to_publish:
+        return None
+    sla_ms = float(bar_to_publish.get("sla_ms") or publish_sla_ms())
+    samples = bar_to_publish.get("samples")
+    if not isinstance(samples, (int, float)) or samples <= 0:
+        return None
+    horizons: dict[str, Any] = {}
+    per_horizon = bar_to_publish.get("by_horizon")
+    if isinstance(per_horizon, Mapping):
+        for name, stats in sorted(per_horizon.items()):
+            if not isinstance(stats, Mapping):
+                continue
+            horizons[str(name)] = {
+                "p50_ms": stats.get("p50"),
+                "p90_ms": stats.get("p90"),
+                "max_ms": stats.get("max"),
+                "samples": stats.get("samples"),
+                "over_sla": stats.get("over_sla"),
+            }
+    over = bar_to_publish.get("over_sla")
+    return {
+        "sla_ms": sla_ms,
+        "p50_ms": bar_to_publish.get("p50"),
+        "p90_ms": bar_to_publish.get("p90"),
+        "p99_ms": bar_to_publish.get("p99"),
+        "max_ms": bar_to_publish.get("max"),
+        "samples": float(samples),
+        "over_sla": over,
+        # 예산을 넘긴 비율 — 건수만으로는 표본이 적은 날과 나쁜 날이 같아 보인다.
+        "over_sla_ratio": (
+            round(float(over) / float(samples), 4) if isinstance(over, (int, float)) else None
+        ),
+        "horizons": horizons,
+        # **판정이 아니라 기록이다**(R18). 며칠 쌓인 뒤 사람이 승격한다.
         "verdict": "recorded_only",
     }
 
@@ -2741,6 +2803,7 @@ def build_report(
         delivery_latency=logs["delivery_latency"],
         publish_offset=logs["publish_offset"],
         publish_grace=logs["publish_grace"],
+        publish_sla=logs["publish_sla"],
         intraday_trend=_intraday_trends(logs),
         record_vs_commit=_record_vs_commit(day),
         session_git_shas=logs["session_git_shas"],
@@ -3097,25 +3160,35 @@ def format_summary(report: IntegrityReport) -> str:
                 f"    {mark}일중 추세: {trend['first_hour']}시 {trend['first']:.0f}ms → "
                 f"{trend['last_hour']}시 {trend['last']:.0f}ms ({trend['ratio']}배)"
             )
-    # **유예 채점** (2026-08-21 F-15). 판정이 아니라 기록이다 — 이 값이 며칠 쌓여야
-    # 임계(또는 유예 상수 자체)를 정할 근거가 된다.
+    # **종단 지연의 모양** (2026-08-21 F-15 → 2026-08-24 F-21). 판정은 아래 예산이 한다.
     if report.publish_grace is not None:
-        grace = report.publish_grace
         parts = []
-        for name, stat in grace["horizons"].items():
+        for name, stat in report.publish_grace["horizons"].items():
             if not stat["measured"]:
                 parts.append(f"{name} 미측정")
                 continue
-            over = stat["over_grace_ms"]
-            sign = f"+{over:.0f}" if over >= 0 else f"{over:.0f}"
             drift = stat.get("day_drift_ms")
             drift_text = "" if drift is None else f"/이동 {drift:.0f}ms"
-            parts.append(f"{name} {stat['p50_ms']:.0f}ms({sign}{drift_text})")
-        exceeded = grace["exceeded"]
-        head = "유예 초과 없음" if not exceeded else f"유예 초과 {', '.join(exceeded)}"
+            parts.append(f"{name} {stat['p50_ms']:.0f}ms{drift_text}")
+        lines.append("  발행 오프셋 Horizon별(대기 포함 · 기록만): " + " · ".join(parts))
+    # **발행 예산 채점** (2026-08-24 F-21) — 대기를 걷어낸 값이라 여기서 처음으로
+    # 「느린가」를 물을 수 있다. 판정이 아니라 기록이다(R18).
+    if report.publish_sla is None:
+        lines.append("  발행 예산: 미측정(bar_to_publish 없음 — F-21 이전 로그)")
+    else:
+        sla = report.publish_sla
+        ratio = sla.get("over_sla_ratio")
+        ratio_text = "미측정" if ratio is None else f"{ratio:.1%}"
+        worst = ", ".join(
+            f"{name} {stat['max_ms']:.0f}ms"
+            for name, stat in sla["horizons"].items()
+            if isinstance(stat.get("max_ms"), (int, float))
+        )
         lines.append(
-            f"  완성봉 유예 채점(기준 {grace['grace_ms']:.0f}ms · 기록만): {head} — "
-            + " · ".join(parts)
+            f"  발행 예산 {sla['sla_ms']:.0f}ms(기록만): p50 {sla['p50_ms']:.0f}ms · "
+            f"p90 {sla['p90_ms']:.0f}ms · 최대 {sla['max_ms']:.0f}ms · "
+            f"초과 {sla['over_sla']:.0f}/{sla['samples']:.0f}건({ratio_text})"
+            + (f" — Horizon별 최대 {worst}" if worst else "")
         )
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")

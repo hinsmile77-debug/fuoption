@@ -77,7 +77,9 @@ def check_timezone() -> CheckResult:
 # 초기값이고, 이만큼 어긋나면 `EventCalendar.minutes_to_close` 기반 마감 전 청산·세션
 # 게이트가 전부 그만큼 늦게 걸린다.
 CLOCK_OFFSET_FAIL_SECONDS = 5.0
-# 넘으면 경고만 — 완성봉 유예 500ms가 무의미해지기 시작하는 지점
+# 넘으면 경고만 — 이만큼 시계가 밀리면 완성봉 경계 판정 자체가 흔들리기 시작한다
+# (2026-08-24 F-21에서 문구 정정: 종전엔 「완성봉 유예 500ms」를 인용했는데,
+#  그 500ms는 합성 스케줄러 위상이라 늦은 틱과 무관한 값이었다).
 # (`ops/clock_skew.py` WARN_THRESHOLD_SECONDS와 같은 값).
 CLOCK_OFFSET_WARN_SECONDS = 2.0
 
@@ -179,7 +181,9 @@ def check_clock(
         parts.append(f"임계 {CLOCK_OFFSET_FAIL_SECONDS:.0f}초 초과 — 기동 거부")
         return CheckResult("clock", False, " · ".join(parts))
     if offset is not None and abs(offset) > CLOCK_OFFSET_WARN_SECONDS:
-        parts.append(f"경고: 완성봉 유예 500ms보다 큼(임계 {CLOCK_OFFSET_WARN_SECONDS:.0f}초)")
+        parts.append(
+            f"경고: 완성봉 경계 판정이 흔들리는 구간(임계 {CLOCK_OFFSET_WARN_SECONDS:.0f}초)"
+        )
     return CheckResult("clock", True, " · ".join(parts))
 
 
@@ -209,9 +213,9 @@ def check_host(*, collector=None) -> CheckResult:
 
 
 def _previous_delivery_latency(
-    *, today: date | None = None, log_dir: Path | None = None
+    *, today: date | None = None, log_dir: Path | None = None, key: str = "p90"
 ) -> tuple[float | None, str]:
-    """직전 거래일의 회선 수신 지연 `p90` — (값, 출처 설명). 못 읽으면 (None, 사유).
+    """직전 거래일의 회선 수신 지연 분위수 — (값, 출처 설명). 못 읽으면 (None, 사유).
 
     `fix_verification.load_daily_reports()`를 재사용한다 (2026-08-18 G-0818P-2). 그쪽은
     **정본 선별 규칙**(잠정본 `_pre_recompose` 제외 · 오심볼 리포트 제외 · 파일명과 내용
@@ -228,9 +232,28 @@ def _previous_delivery_latency(
         return None, "직전 거래일 리포트 없음"
     day = past[-1]
     latency = reports[day].get("delivery_latency")
-    if not isinstance(latency, dict) or not isinstance(latency.get("p90"), (int, float)):
+    if not isinstance(latency, dict) or not isinstance(latency.get(key), (int, float)):
         return None, f"{day.isoformat()} 리포트에 회선 지연 없음"
-    return float(latency["p90"]), day.isoformat()
+    return float(latency[key]), day.isoformat()
+
+
+def _previous_late_bar_drops(
+    *, today: date | None = None, log_dir: Path | None = None
+) -> int | None:
+    """직전 거래일의 `late_bar_drops` — **유예 부족의 직접 증거** (2026-08-24 F-21).
+
+    유예 대 회선 지연 대조는 **선행 지표**다. 실제로 무엇을 잃었는지는 이 값이 말한다 —
+    둘을 같은 줄에 놓아야 「예산이 빠듯하다」와 「실제로 버렸다」가 구별된다.
+    """
+    from messiah.ops import fix_verification as fv
+
+    reports = fv.load_daily_reports(log_dir or Path("logs"))
+    cutoff = today or now_kst().date()
+    past = [day for day in sorted(reports) if day < cutoff]
+    if not past:
+        return None
+    value = reports[past[-1]].get("late_bar_drops")
+    return int(value) if isinstance(value, (int, float)) else None
 
 
 def check_bar_close(cfg: InstanceConfig) -> CheckResult:
@@ -260,45 +283,59 @@ def check_bar_close(cfg: InstanceConfig) -> CheckResult:
 
 
 def _grace_vs_latency_note(*, today: date | None = None, log_dir: Path | None = None) -> str:
-    """완성봉 유예를 **전일 회선 실측**과 대조한 한 줄 (2026-08-18 G-0818P-2).
+    """1분봉 마감 유예를 **전일 회선 실측**과 대조한 한 줄
+    (2026-08-18 G-0818P-2 → 2026-08-24 F-21 정정).
 
-    ## 왜 이 축에 붙이나
+    ## 종전 대조가 틀렸다
 
-    `check_clock`은 시계 오프셋을 재면서 *"경고: 완성봉 유예 500ms보다 큼"* 을 붙인다 —
-    즉 **완성봉 예산을 이미 판단 기준으로 쓰고 있다.** 그런데 정작 그 예산을 실제로 잡아먹는
-    회선 지연은 어느 축도 예산과 대조하지 않았다. 2026-08-18 실측:
+    이 줄은 **합성 스케줄러 위상(500ms)** 을 회선 지연 p90(930ms)과 대조하고
+    *"완성봉이 늦은 틱을 놓칠 수 있다"* 를 붙였다. 그래서 6거래일 연속 경고가 났다.
 
-        delivery_latency  p50 0.5204 · p90 0.9271 · p99 1.0323   (유예 0.500)
+    **늦은 틱을 실제로 막는 값은 그 500ms가 아니다.** 1분봉은
+    `data/normalizer.MINUTE_CLOSE_GRACE_SECONDS`(2.0초)로 닫히고, 그 값은 2026-08-11 G-4가
+    3거래일 회선 실측(p90 0.921~0.931 · 최대 1.396)을 보고 **관측 최대 위로 43% 여유**를
+    두어 정한 것이다. 500ms는 스케줄러가 언제 처음 들여다보는가일 뿐이다.
 
-    **중앙값이 이미 예산을 넘는다.** 장중 점검이 "발행이 500ms를 상시 초과(69.6%)"를
-    발행 로직 문제로 봤는데, 원인은 발행이 아니라 회선이 예산보다 느린 것이었다.
+    ## p99로 대조하고 최대는 문장에만 남긴다
 
-    **임계를 자동으로 바꾸지 않는다(R18)** — 말하게만 한다. 유예 조정은 며칠치 분포를 본 뒤
-    별건으로 결정할 일이고, 그 분포가 매 아침 이 줄로 쌓인다. 판정(ok)도 뒤집지 않는다:
+    최대로 대조하면 12거래일 중 3일(08-12 2.55초 · 08-19 4.06초 · 08-21 2.37초)에 울리는데
+    **그 세 날 모두 `late_bar_drops`가 0**이었다 — 하루 한 건의 꼬리로 매번 우는 것은
+    늑대소년이다. p99는 14거래일 내내 1.02~1.04초로 2.0초를 한 번도 안 넘었고, 분포가
+    진짜로 밀리는 날 처음 운다.
+
+    ## `late_bar_drops`를 같은 줄에 놓는다
+
+    유예 대 지연 대조는 **선행 지표**다. 실제로 무엇을 잃었는지는 `late_bar_drops`가
+    말한다 — 둘을 나란히 놓아야 「예산이 빠듯하다」와 「실제로 버렸다」가 구별된다
+    (2026-08-19 G-4의 negative control과 같은 규율).
+
+    **임계를 자동으로 바꾸지 않는다(R18)** — 말하게만 한다. 판정(ok)도 뒤집지 않는다:
     이 사실로 기동을 막으면 D-day 40거래일 관문의 분모를 계측이 갉아먹는다.
     """
-    grace = _boundary_grace_seconds()
-    p90, source = _previous_delivery_latency(today=today, log_dir=log_dir)
-    if p90 is None:
+    grace = _minute_close_grace_seconds()
+    p99, source = _previous_delivery_latency(today=today, log_dir=log_dir, key="p99")
+    if p99 is None:
         # 못 잰 것을 "정상"으로 접지 않는다(L18) — 다만 이 축의 판정은 아니다.
         return f" · 회선 대조 불가({source})"
-    verdict = "경고: " if p90 > grace else ""
-    tail = " — 완성봉이 늦은 틱을 놓칠 수 있다" if p90 > grace else ""
+    drops = _previous_late_bar_drops(today=today, log_dir=log_dir)
+    drops_text = "미측정" if drops is None else f"{drops}건"
+    verdict = "경고: " if p99 > grace else ""
+    tail = " — 완성봉이 늦은 틱을 놓칠 수 있다" if p99 > grace else ""
     return (
-        f" · {verdict}유예 {grace * 1000:.0f}ms vs 전일 회선 p90 {p90 * 1000:.0f}ms({source}){tail}"
+        f" · {verdict}1분봉 유예 {grace * 1000:.0f}ms vs 전일 회선 p99 "
+        f"{p99 * 1000:.0f}ms({source}) · 늦은 봉 폐기 {drops_text}{tail}"
     )
 
 
-def _boundary_grace_seconds() -> float:
-    """완성봉 유예 — **합성기 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
+def _minute_close_grace_seconds() -> float:
+    """1분봉 마감 유예 — **정규화기 상수를 그대로 읽는다**(두 번째 상수를 만들지 않는다).
 
-    `data/bar_composer.py`는 polars에 의존하지 않아 여기서 임포트해도 가볍다. 값이 저쪽에서
-    바뀌면 이 대조도 자동으로 따라간다 — 리포트가 옛 기준으로 조용히 채점하는 형태
-    (`ops/integrity_report`의 `min_samples` 처리와 같은 규율)를 피한다.
+    2026-08-24 F-21에서 `_boundary_grace_seconds()`(합성 스케줄러 위상)를 대체했다.
+    저쪽은 늦은 틱을 막는 값이 아니었다 — 이쪽이 그 값이다.
     """
-    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+    from messiah.data.normalizer import MINUTE_CLOSE_GRACE_SECONDS
 
-    return float(_BOUNDARY_GRACE_SECONDS)
+    return float(MINUTE_CLOSE_GRACE_SECONDS)
 
 
 def check_prev_postmarket(

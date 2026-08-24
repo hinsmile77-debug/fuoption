@@ -325,35 +325,65 @@ def test_clean_tree_passes(monkeypatch) -> None:
 # 어느 축도 예산과 대조하지 않았다. 2026-08-18 실측 p50 0.5204 — 중앙값이 이미 예산을 넘는다.
 
 
-def _integrity_report(directory, day: str, p90: float | None) -> None:
+def _integrity_report(
+    directory, day: str, p99: float | None, *, late_bar_drops: int | None = 0
+) -> None:
+    """대조 축이 p90 → **p99**로 바뀌었다 (2026-08-24 F-21) — 인자도 그 값이다."""
     import json
 
     payload = {"date": day, "symbol": "A05609"}
-    if p90 is not None:
-        payload["delivery_latency"] = {"p50": p90 - 0.4, "p90": p90, "p99": p90 + 0.1}
+    if p99 is not None:
+        payload["delivery_latency"] = {"p50": p99 - 0.5, "p90": p99 - 0.1, "p99": p99}
+    if late_bar_drops is not None:
+        payload["late_bar_drops"] = late_bar_drops
     (directory / f"daily_integrity_{day.replace('-', '')}.json").write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8"
     )
 
 
 def test_the_grace_note_warns_when_the_line_is_slower_than_the_budget(tmp_path: Path) -> None:
-    """2026-08-18 실측 형태(p90 927ms > 유예 500ms) — 이 문장이 매 아침 분포를 쌓는다."""
-    _integrity_report(tmp_path, "2026-08-18", 0.9271)
+    """예산(1분봉 유예 2.0초)을 회선 p99가 실제로 넘는 날 — 그때만 운다."""
+    _integrity_report(tmp_path, "2026-08-18", 2.4)
 
     note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
 
     assert "경고" in note
-    assert "927ms" in note
+    assert "2400ms" in note
     assert "2026-08-18" in note, "어느 날 실측인지 없으면 사람이 다시 캐야 한다"
 
 
-def test_the_grace_note_is_quiet_when_the_line_is_fast_enough(tmp_path: Path) -> None:
-    _integrity_report(tmp_path, "2026-08-18", 0.21)
+def test_the_real_measured_distribution_is_quiet(tmp_path: Path) -> None:
+    """**2026-08-24까지 14거래일 실측 p99는 1.02~1.04초다** (2026-08-24 F-21).
+
+    종전 대조(합성 스케줄러 위상 500ms vs 회선 p90 930ms)는 그 분포에서 매일 울었고,
+    6거래일 연속 경고가 그것이다. 늦은 틱을 실제로 막는 값은 1분봉 유예 2.0초이고,
+    그 값 기준으로는 이 분포가 조용하다.
+    """
+    _integrity_report(tmp_path, "2026-08-21", 1.0233)
+
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 24), log_dir=tmp_path)
+
+    assert "경고" not in note
+    assert "1023ms" in note, "조용해도 값은 남긴다 — 분포는 매일 쌓여야 한다"
+    assert "2000ms" in note, "대조 대상이 합성 위상이 아니라 1분봉 유예여야 한다"
+
+
+def test_the_note_carries_what_was_actually_lost(tmp_path: Path) -> None:
+    """유예 대 지연은 **선행 지표**다 — 실제로 버린 봉 수를 같은 줄에 놓는다."""
+    _integrity_report(tmp_path, "2026-08-18", 1.02, late_bar_drops=7)
 
     note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
 
-    assert "경고" not in note
-    assert "210ms" in note, "조용해도 값은 남긴다 — 분포는 매일 쌓여야 한다"
+    assert "늦은 봉 폐기 7건" in note
+
+
+def test_a_report_without_late_bar_drops_says_unmeasured(tmp_path: Path) -> None:
+    """축이 없던 리포트는 **미측정**이지 0건이 아니다(L18)."""
+    _integrity_report(tmp_path, "2026-08-18", 1.02, late_bar_drops=None)
+
+    note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
+
+    assert "늦은 봉 폐기 미측정" in note
 
 
 def test_a_missing_report_says_so_instead_of_passing_silently(tmp_path: Path) -> None:
@@ -374,17 +404,21 @@ def test_a_report_without_the_latency_field_is_not_treated_as_zero(tmp_path: Pat
 
 def test_today_report_is_not_used_as_yesterday(tmp_path: Path) -> None:
     """오늘 리포트는 아직 없다 — 기동 시점에 존재하면 그건 어제 것이어야 한다."""
-    _integrity_report(tmp_path, "2026-08-19", 5.0)  # 오늘(있을 수 없는 값)
-    _integrity_report(tmp_path, "2026-08-18", 0.9271)
+    _integrity_report(tmp_path, "2026-08-19", 9.0)  # 오늘(있을 수 없는 값)
+    _integrity_report(tmp_path, "2026-08-18", 1.0233)
 
     note = sc._grace_vs_latency_note(today=date(2026, 8, 19), log_dir=tmp_path)
 
-    assert "927ms" in note
-    assert "5000ms" not in note
+    assert "1023ms" in note
+    assert "9000ms" not in note
 
 
-def test_the_grace_comes_from_the_composer_constant() -> None:
-    """두 번째 상수를 만들지 않는다 — 합성기에서 바뀌면 이 대조도 따라가야 한다."""
-    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
+def test_the_grace_comes_from_the_minute_close_constant() -> None:
+    """두 번째 상수를 만들지 않는다 — 정규화기에서 바뀌면 이 대조도 따라가야 한다.
 
-    assert sc._boundary_grace_seconds() == float(_BOUNDARY_GRACE_SECONDS)
+    **합성기 상수가 아니라 정규화기 상수다** (2026-08-24 F-21). 늦은 틱을 막는 것은
+    1분봉 마감 유예이고, 합성 스케줄러 위상은 그 역할을 한 적이 없다.
+    """
+    from messiah.data.normalizer import MINUTE_CLOSE_GRACE_SECONDS
+
+    assert sc._minute_close_grace_seconds() == float(MINUTE_CLOSE_GRACE_SECONDS)

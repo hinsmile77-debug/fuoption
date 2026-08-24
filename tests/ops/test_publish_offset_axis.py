@@ -359,18 +359,25 @@ def test_summary_reports_drift_per_horizon(monkeypatch) -> None:
     assert by_horizon["3m"]["day_drift_ms"] == pytest.approx(0.0, abs=0.1)
 
 
-# ------------------------------- F-15 ③ · F-8 · 유예 초과와 루프 정체를 가른다
+# ------------------------------- F-15 ③ · F-8 · 예산 초과와 루프 정체를 가른다
+#
+# **재는 값이 바뀌었다** (2026-08-24 F-21). 종전 입력은 `publish_offset_ms`(대기 포함)에
+# 합성 스케줄러 위상의 4배(2,000ms)를 대조했고, 이제는 `bar_to_publish_ms`(봉 도착 →
+# 발행, monotonic)에 실측에서 온 절대 예산 `_PUBLISH_SLA_MS`를 대조한다.
 
 
-def _grace_alert_ms() -> float:
-    from messiah.features.engine import _PUBLISH_GRACE_ALERT_MULTIPLE, _boundary_grace_ms
+def _sla_ms() -> float:
+    from messiah.features.engine import _PUBLISH_SLA_MS
 
-    return _boundary_grace_ms() * _PUBLISH_GRACE_ALERT_MULTIPLE
+    return _PUBLISH_SLA_MS
 
 
 def test_a_normal_publish_does_not_cry(monkeypatch) -> None:
-    """유예를 조금 넘는 것은 매일 있는 일이다 — 2026-08-21 실측 중앙값이 3m 586ms ·
-    30m 775ms였다. 그걸 전부 경보로 올리면 **경보가 닳는다**(1-15와 같은 형태)."""
+    """**실측 분포 전체가 조용해야 한다** (2026-08-24 F-21).
+
+    2거래일 598건의 순수 계산 시간은 p50 111ms · p90 289ms · p99 479ms · 최대 602ms였다.
+    예산 1,000ms는 그 최대 위로 66% 여유다 — 정상적인 하루는 한 줄도 안 나온다.
+    """
     from messiah.core import logging as mlog
 
     records: list[dict] = []
@@ -379,9 +386,25 @@ def test_a_normal_publish_does_not_cry(monkeypatch) -> None:
     vector = _vector(Horizon.M3, bar_open)
     engine = _engine([vector.valid_until + timedelta(milliseconds=775)], horizons=[Horizon.M3])
     records.clear()  # 엔진 생성이 남기는 `FeatureSetUnregistered`는 이 테스트의 관심사가 아니다
-    engine._note_publish_grace(vector, 775.0)
+    for elapsed in (111.0, 289.0, 479.0, 602.0):
+        engine._note_publish_sla(vector, elapsed)
 
     assert [r["tag"] for r in records] == []
+
+
+def test_the_old_offset_would_have_cried_every_cycle() -> None:
+    """종전 기준이 왜 못 쓰는 값이었는지를 테스트가 기억한다.
+
+    3m~30m의 발행 오프셋에는 합성 스케줄러 위상 0.5초가 **구조적으로** 들어 있어
+    500ms 아래로 내려갈 수 없다 — 2거래일 598건 중 500ms 미만이 **0건**이고 최소가
+    532ms였다. 값이 자기 자신을 더한 수와 비교되고 있었다.
+    """
+    from messiah.data.bar_composer import _COMPOSE_SCHEDULER_PHASE_SECONDS
+
+    phase_ms = _COMPOSE_SCHEDULER_PHASE_SECONDS * 1000.0
+    measured_minimums = {"3m": 543.0, "5m": 556.0, "10m": 534.0, "15m": 532.0, "30m": 561.0}
+    for horizon, floor in measured_minimums.items():
+        assert floor > phase_ms, f"{horizon}는 위상보다 작아질 수 없다"
 
 
 def test_one_late_horizon_is_a_grace_breach_not_a_stall(monkeypatch) -> None:
@@ -394,11 +417,13 @@ def test_one_late_horizon_is_a_grace_breach_not_a_stall(monkeypatch) -> None:
     vector = _vector(Horizon.M3, bar_open)
     engine = _engine([bar_open], horizons=[Horizon.M3])
     records.clear()
-    engine._note_publish_grace(vector, _grace_alert_ms() + 1.0)
+    engine._note_publish_sla(vector, _sla_ms() + 1.0)
     engine._flush_publish_stall()
 
     assert [r["tag"] for r in records] == ["PublishGraceExceeded"]
     assert records[0]["horizon"] == "3m"
+    assert records[0]["sla_ms"] == _sla_ms()
+    assert records[0]["bar_to_publish_ms"] == _sla_ms() + 1.0
 
 
 def test_several_horizons_at_the_same_instant_are_one_stall(monkeypatch) -> None:
@@ -419,7 +444,7 @@ def test_several_horizons_at_the_same_instant_are_one_stall(monkeypatch) -> None
     for horizon in (Horizon.M1, Horizon.M3, Horizon.M5):
         seconds = HORIZON_SECONDS[horizon]
         vector = _vector(horizon, confirm - timedelta(seconds=seconds))
-        engine._note_publish_grace(vector, _grace_alert_ms() + 3_000.0)
+        engine._note_publish_sla(vector, _sla_ms() + 3_000.0)
     assert records == [], "순간이 안 끝났으면 아직 남기지 않는다"
 
     engine._flush_publish_stall()
@@ -439,7 +464,7 @@ def test_a_new_instant_flushes_the_previous_cluster(monkeypatch) -> None:
     records.clear()
     for minute in (0, 5):
         vector = _vector(Horizon.M1, datetime(2026, 8, 21, 9, minute, tzinfo=KST))
-        engine._note_publish_grace(vector, _grace_alert_ms() + 2_000.0)
+        engine._note_publish_sla(vector, _sla_ms() + 2_000.0)
 
     assert [r["tag"] for r in records] == ["PublishGraceExceeded"]
     assert records[0]["bar_confirm_kst"].endswith("09:01:00+09:00")
@@ -454,7 +479,7 @@ def test_the_last_cluster_of_the_day_is_flushed_by_the_summary(monkeypatch) -> N
     engine = _engine([datetime(2026, 8, 21, 15, 30, tzinfo=KST)], horizons=[Horizon.M1])
     records.clear()
     vector = _vector(Horizon.M1, datetime(2026, 8, 21, 15, 30, tzinfo=KST))
-    engine._note_publish_grace(vector, _grace_alert_ms() + 2_000.0)
+    engine._note_publish_sla(vector, _sla_ms() + 2_000.0)
     assert records == []
 
     engine.log_publish_offsets()
@@ -462,20 +487,35 @@ def test_the_last_cluster_of_the_day_is_flushed_by_the_summary(monkeypatch) -> N
     assert "PublishGraceExceeded" in [r["tag"] for r in records]
 
 
-def test_grace_threshold_reads_the_composer_constant() -> None:
-    """**숫자를 새로 쓰지 않는다** (F-15 ②) — 자가점검이 인용하는 값과 채점에 쓰는 값이
-    갈리면, 화면은 500ms를 말하는데 채점은 다른 숫자로 하는 상태가 된다."""
-    from messiah.data.bar_composer import _BOUNDARY_GRACE_SECONDS
-    from messiah.features.engine import _boundary_grace_ms
-    from messiah.ops.integrity_report import boundary_grace_seconds
+def test_sla_threshold_reads_the_engine_constant() -> None:
+    """**숫자를 새로 쓰지 않는다** (F-15 ②) — 리포트가 채점하는 값과 엔진이 경보하는
+    값이 갈리면, 화면은 한 숫자를 말하고 채점은 다른 숫자로 하는 상태가 된다."""
+    from messiah.features.engine import _PUBLISH_SLA_MS
+    from messiah.ops.integrity_report import publish_sla_ms
 
-    assert _boundary_grace_ms() == _BOUNDARY_GRACE_SECONDS * 1000.0
-    assert boundary_grace_seconds() == _BOUNDARY_GRACE_SECONDS
+    assert publish_sla_ms() == _PUBLISH_SLA_MS
 
 
-def test_publish_grace_axis_scores_each_horizon_without_judging() -> None:
-    """**1단계는 기록만 한다**(R18). 지금 판정하면 3m~30m 전 계열이 매일 breach를 낸다 —
-    그것이 사실이지만, 임계 확정은 F-12 실측이 며칠 쌓인 뒤 사람이 한다."""
+def test_the_composer_phase_is_no_longer_a_deadline() -> None:
+    """합성 스케줄러 위상을 **판정에 쓰는 곳이 하나도 없어야 한다** (2026-08-24 F-21).
+
+    이름이 `_BOUNDARY_GRACE_SECONDS`이던 시절 세 소비처가 그것을 마감 시한으로 읽었고,
+    그 오독이 6거래일 연속 경고의 원인이었다.
+    """
+    from pathlib import Path
+
+    for path in (
+        Path("src/messiah/features/engine.py"),
+        Path("src/messiah/ops/integrity_report.py"),
+        Path("scripts/self_check.py"),
+    ):
+        source = path.read_text(encoding="utf-8")
+        assert "_COMPOSE_SCHEDULER_PHASE_SECONDS" not in source, f"{path}가 위상을 읽는다"
+        assert "_BOUNDARY_GRACE_SECONDS" not in source, f"{path}에 옛 이름이 남아 있다"
+
+
+def test_publish_grace_axis_keeps_the_shape_and_drops_the_verdict() -> None:
+    """**유예 대조를 걷어냈다** (2026-08-24 F-21). 남는 것은 종단 지연의 모양뿐이다."""
     from messiah.ops.integrity_report import _publish_grace_axis
 
     axis = _publish_grace_axis(
@@ -489,10 +529,10 @@ def test_publish_grace_axis_scores_each_horizon_without_judging() -> None:
     )
     assert axis is not None
     assert axis["verdict"] == "recorded_only"
-    assert axis["grace_ms"] == 500.0
-    assert axis["exceeded"] == ["1m", "3m"]  # 30m 320ms는 유예 안쪽
-    assert axis["horizons"]["3m"]["over_grace_ms"] == 86.0
-    assert axis["horizons"]["30m"]["exceeds_grace"] is False
+    assert "grace_ms" not in axis and "exceeded" not in axis
+    assert "exceeds_grace" not in axis["horizons"]["3m"]
+    assert axis["horizons"]["3m"]["p50_ms"] == 586.0
+    assert axis["horizons"]["1m"]["axis"] == "exchange_vs_local"
 
 
 def test_publish_grace_axis_is_none_without_the_horizon_axis() -> None:
@@ -503,14 +543,13 @@ def test_publish_grace_axis_is_none_without_the_horizon_axis() -> None:
     assert _publish_grace_axis({"p50": 500.0}) is None
 
 
-def test_a_replayed_bar_is_not_a_publish_delay(monkeypatch) -> None:
-    """**학습·리플레이를 「유예 초과」라고 부르면 안 된다** (2026-08-21 구현 중 발견).
+def test_a_suspended_process_is_not_a_publish_delay(monkeypatch) -> None:
+    """**상한을 넘는 경과는 「느린 것」이 아니다** (2026-08-21 → 2026-08-24 F-21 개정).
 
-    `models/trainer.build_feature_vectors()`는 같은 엔진으로 과거 봉을 흘린다. 그때
-    `now()`는 벽시계고 `valid_until`은 몇 달 전이라 오프셋이 수십억 ms가 된다 — 첫
-    구현에서 학습 테스트가 `발행 유예 초과 — 5m 2377834874ms`를 봉마다 찍었다.
-    그것은 「늦게 발행했다」가 아니라 「지금 재생 중이다」이고, 경보로 올리면 진짜 신호가
-    그 아래 묻힌다.
+    종전에 이 상한이 막던 것은 리플레이의 벽시계 오프셋(수십억 ms)이었다. 재는 값이
+    monotonic 경과로 바뀌면서 그 경로는 구조적으로 사라졌지만(리플레이도 계산은 빠르다),
+    상한 자체는 그대로 옳다 — 한 시간짜리 「계산」은 프로세스가 멈췄다 깨어난 것이고,
+    그것을 발행 예산 경보로 올리면 진짜 신호가 묻힌다.
 
     다만 **값 자체는 버리지 않는다** — 세션 요약에는 그대로 실린다.
     """
@@ -519,12 +558,12 @@ def test_a_replayed_bar_is_not_a_publish_delay(monkeypatch) -> None:
 
     records: list[dict] = []
     monkeypatch.setattr(mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, **f}))
-    bar_open = datetime(2026, 3, 2, 10, 0, tzinfo=KST)
+    bar_open = datetime(2026, 8, 21, 10, 0, tzinfo=KST)
     vector = _vector(Horizon.M5, bar_open)
-    engine = _engine([datetime(2026, 8, 21, 10, 0, tzinfo=KST)], horizons=[Horizon.M5])
+    engine = _engine([datetime(2026, 8, 21, 10, 5, tzinfo=KST)], horizons=[Horizon.M5])
     records.clear()
 
-    engine._note_publish_grace(vector, _PUBLISH_OFFSET_LIVE_CEILING_MS + 1.0)
+    engine._note_publish_sla(vector, _PUBLISH_OFFSET_LIVE_CEILING_MS + 1.0)
     engine._flush_publish_stall()
 
     assert records == []
@@ -541,7 +580,7 @@ def test_a_real_stall_just_under_the_ceiling_still_cries(monkeypatch) -> None:
     engine = _engine([bar_open], horizons=[Horizon.M5])
     records.clear()
 
-    engine._note_publish_grace(vector, 5_528.8)
+    engine._note_publish_sla(vector, 5_528.8)
     engine._flush_publish_stall()
 
     assert [r["tag"] for r in records] == ["PublishGraceExceeded"]
@@ -572,14 +611,14 @@ def test_a_stale_cluster_is_flushed_by_time_not_by_the_next_stall(monkeypatch) -
     monkeypatch.setattr(engine_module.time, "monotonic", lambda: clock[0])
 
     stalled = _vector(Horizon.M3, confirm - timedelta(seconds=HORIZON_SECONDS[Horizon.M3]))
-    engine._note_publish_grace(stalled, _grace_alert_ms() + 3_000.0)
+    engine._note_publish_sla(stalled, _sla_ms() + 3_000.0)
     assert records == [], "군집이 방금 열렸다 — 아직 닫지 않는다"
 
     # 창의 2배가 지난 뒤 **정상** 발행 하나가 들어온다. 종전에는 이 줄이 아무것도 안 했다.
     clock[0] += (engine_module._PUBLISH_STALL_FLUSH_MS / 1000.0) + 0.001
     now[0] = confirm + timedelta(minutes=1)
     healthy = _vector(Horizon.M1, confirm + timedelta(seconds=30))
-    engine._note_publish_grace(healthy, 120.0)
+    engine._note_publish_sla(healthy, 120.0)
 
     assert [r["tag"] for r in records] == ["PublishGraceExceeded"]
     assert records[0]["bar_confirm_kst"] == confirm.isoformat()
@@ -609,7 +648,7 @@ def test_a_fresh_cluster_is_not_split_by_a_late_arrival(monkeypatch) -> None:
         # 창 2배 **안쪽**에서 늦게 도착한다 — 같은 군집이어야 한다.
         clock[0] += (engine_module._PUBLISH_STALL_FLUSH_MS / 1000.0) / 4.0
         vector = _vector(horizon, confirm - timedelta(seconds=HORIZON_SECONDS[horizon]))
-        engine._note_publish_grace(vector, _grace_alert_ms() + 3_000.0 + index)
+        engine._note_publish_sla(vector, _sla_ms() + 3_000.0 + index)
 
     engine._flush_publish_stall()
     assert [r["tag"] for r in records] == ["PublishLoopStalled"], "한 줄이어야 한다"
@@ -636,7 +675,7 @@ def test_replay_mode_does_not_cry_at_all(monkeypatch) -> None:
     records.clear()
 
     vector = _vector(Horizon.M3, confirm - timedelta(seconds=HORIZON_SECONDS[Horizon.M3]))
-    engine._note_publish_grace(vector, _grace_alert_ms() + 5_000.0)
+    engine._note_publish_sla(vector, _sla_ms() + 5_000.0)
     engine._flush_publish_stall()
 
     assert [r["tag"] for r in records] == [], "리플레이는 경보 축을 아예 안 탄다"
