@@ -172,6 +172,12 @@ TAG_LEVELS: dict[str, int] = {
     # 가른다 — 둘을 같은 태그로 남기면 `InvestorFlowPollError` 건수가 "잃은 행 수"를 더 이상
     # 뜻하지 않게 된다. 2026-08-10에 이 폴러엔 재시도가 아예 없어 3행을 그대로 잃었다.
     "InvestorFlowPollRetried": logging.INFO,
+    # **사이클이 다리 수를 못 채웠다** (2026-08-24 F-26). 개별 실패 태그와 성격이 다르다 —
+    # 저쪽은 「이 다리가 실패했다」이고 이쪽은 「이 사이클이 결손으로 끝났다」다. 그 차이가
+    # 중요한 이유: 2026-08-24 09:31에 3다리 중 2다리만 남았는데 **개별 실패 태그가 하나도
+    # 안 떴다.** 결손은 여섯 시간 뒤 장후 집계에서야 드러났고 수급은 소급 경로가 없다.
+    # 단일 심각도 WARNING(R6) — 결손이 있을 때만 낸다.
+    "InvestorFlowLegShortfall": logging.WARNING,
     # 수급 스냅샷 적재 실패 — 장중 수급은 **과거 조회가 없어** 놓치면 영원히 못 받는다
     # (`data/flow_archiver.py`). 수집 루프는 계속되므로 WARNING이되 조용히는 안 된다.
     "InvestorFlowArchiveError": logging.WARNING,  # REST 폴링 1회 실패 — 다음 틱에 자연 재시도(L22)
@@ -208,6 +214,9 @@ TAG_LEVELS: dict[str, int] = {
     # 다리 1개가 재시도로 **살아났다** — 결손이 아니므로 WARNING이 아니다. 태그를 가르지 않으면
     # `OptionChainPollError` 건수가 "잃은 다리 수"를 더 이상 뜻하지 않게 된다.
     "OptionChainPollRetried": logging.INFO,
+    # 위 `InvestorFlowLegShortfall`과 같은 계열 (2026-08-24 F-26). 2026-08-10 14:30
+    # `option_chain/regular` 41/42가 같은 병이었다(`pending_verifications.yaml` 주석).
+    "OptionChainLegShortfall": logging.WARNING,
     # 기준가 없어 사이클 스킵 — 전량 폴링 폴백을 **일부러 안 하는** 정상 동작이지만(전량은
     # 1,356다리 = 22.6분), 조용하면 "옵션이 안 모인다"의 원인을 못 찾으므로 WARNING으로 남긴다.
     "OptionChainSkipped": logging.WARNING,

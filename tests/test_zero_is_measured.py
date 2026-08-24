@@ -150,13 +150,18 @@ def test_poll_one_reports_whether_it_published() -> None:
 
     창 크기만 적으면 절반이 조용히 실패한 사이클과 온전한 사이클이 같은 줄로 나간다 —
     그건 이 태그를 만든 이유와 정반대다.
+
+    2026-08-24 F-26에서 `bool` → `str | None`로 바뀌었다: **성공이면 None, 실패면 사유.**
+    결손 경보가 「몇 다리가 빠졌나」에 더해 **왜 빠졌나**를 같은 줄에 실어야 하기 때문이다.
     """
     import inspect
 
+    from messiah.data.investor_flow_poller import InvestorFlowPoller
     from messiah.data.option_chain_poller import OptionChainPoller
 
-    signature = inspect.signature(OptionChainPoller._poll_one)
-    assert signature.return_annotation == "bool"
+    assert inspect.signature(OptionChainPoller._poll_one).return_annotation == "str | None"
+    # 같은 규율이 수급 폴러에도 있어야 한다 — 두 폴러가 같은 병을 앓았다.
+    assert inspect.signature(InvestorFlowPoller._poll_one).return_annotation == "str | None"
 
 
 def test_polled_tag_is_debug_not_warning() -> None:

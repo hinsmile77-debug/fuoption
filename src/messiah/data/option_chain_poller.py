@@ -81,6 +81,7 @@ from messiah.broker.kis.symbol_master import IndexDerivativesMaster, OptionLeg
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_RAW, BusLike
 from messiah.core.messages import OptionQuoteSnapshot
+from messiah.core.timeutil import now_kst
 from messiah.data import poll_retry
 
 # 재시도 계층의 정본은 `data/poll_retry.py`다 (2026-08-10 A-4). 여기 있던 상수와
@@ -241,9 +242,24 @@ class OptionChainPoller:
 
         window = select_atm_window(chain, spot, self._strike_window)
         published = 0
+        failures: dict[str, str] = {}
         for leg in window:
-            if await self._poll_one(leg):
+            try:
+                cause = await self._poll_one(leg)
+            except Exception as exc:  # noqa: BLE001
+                # L22 — 다리 하나의 예상 밖 실패가 남은 41다리를 막으면 안 된다.
+                mlog.log(
+                    "OptionChainPollError",
+                    f"예상 밖 실패: {exc}",
+                    underlying=self._underlying,
+                    series=self._series,
+                    symbol=leg.symbol,
+                )
+                cause = "unknown"
+            if cause is None:
                 published += 1
+            else:
+                failures[leg.symbol] = cause
 
         # **성공도 남긴다** (2026-08-14 F-6).
         #
@@ -264,6 +280,28 @@ class OptionChainPoller:
             spot=spot,
             nearest=chain[0].month_label,
         )
+
+        # **결손은 그 자리에서 운다** (2026-08-24 F-26). 위 `OptionChainPolled`는 DEBUG라
+        # 정상 사이클을 조용히 지나가게 하는 것이 목적이고, 그 조용함이 결손까지 덮었다.
+        # 2026-08-10 14:30 `option_chain/regular` 41/42가 같은 병이었다 — 장후 커버리지
+        # 집계에서야 드러났고, 옵션 체인도 소급 조회 경로가 없다.
+        if failures:
+            causes = sorted(set(failures.values()))
+            mlog.log(
+                "OptionChainLegShortfall",
+                f"{published}/{len(window)}다리 발행 — {len(failures)}다리 결손(소급 불가)",
+                underlying=self._underlying,
+                series=self._series,
+                cycle_kst=now_kst().isoformat(),
+                expected_legs=len(window),
+                got_legs=published,
+                # 창이 상장 행사가보다 넓으면 `len(window)`가 이보다 작다 — 둘을 같이
+                # 실어야 「창이 좁았다」와 「다리를 잃었다」가 구별된다.
+                window_expected_legs=self.expected_legs_per_cycle,
+                missing_symbols=sorted(failures),
+                cause=causes[0] if len(causes) == 1 else "mixed",
+                causes_by_symbol=dict(sorted(failures.items())),
+            )
 
     def _report_empty_chain(self, listed: bool) -> None:
         """빈 체인의 이유를 가려서 딱 필요한 만큼만 운다 — 모듈 docstring의 표 그대로."""
@@ -302,16 +340,20 @@ class OptionChainPoller:
                 cycles=self._empty_streak,
             )
 
-    async def _poll_one(self, leg: OptionLeg) -> bool:
-        """다리 1개를 조회해 발행한다 — **발행에 성공했으면 True** (2026-08-14 F-6).
+    async def _poll_one(self, leg: OptionLeg) -> str | None:
+        """다리 1개를 조회해 발행한다 — **성공이면 None, 실패면 그 사유**.
 
-        반환값이 생긴 이유: 사이클 요약(`OptionChainPolled`)이 "몇 다리를 **실제로**
-        내보냈나"를 말해야 하기 때문이다. 창 크기만 적으면 절반이 조용히 실패한 사이클과
-        온전한 사이클이 같은 줄로 나간다 — 그건 이 태그를 만든 이유와 정반대다.
+        반환값이 생긴 이유(2026-08-14 F-6): 사이클 요약(`OptionChainPolled`)이 "몇 다리를
+        **실제로** 내보냈나"를 말해야 하기 때문이다. 창 크기만 적으면 절반이 조용히
+        실패한 사이클과 온전한 사이클이 같은 줄로 나간다.
+
+        `bool`에서 사유 문자열로 바꾼 이유(2026-08-24 F-26): 결손 경보가 「몇 다리가
+        빠졌나」에 더해 **왜 빠졌나**를 같은 줄에 실어야 한다. 알려진 실패 경로를 하나도
+        안 탄 결손(`unknown`)이 있다는 것 자체가 정보다.
         """
         raw = await self._fetch_with_retry(leg)
         if raw is None:
-            return False
+            return "retry_exhausted"
 
         snapshot = OptionQuoteSnapshot(
             underlying=self._underlying,
@@ -332,8 +374,8 @@ class OptionChainPoller:
                 series=self._series,
                 symbol=leg.symbol,
             )
-            return False
-        return True
+            return "publish_failed"
+        return None
 
     async def _fetch_with_retry(self, leg: OptionLeg) -> dict | None:
         """다리 1개를 조회한다 — 재시도 계층의 정본은 `data/poll_retry.py`다 (2026-08-10 A-4).

@@ -31,6 +31,25 @@ FL Feature(`fl_frgn_cum` 등)로 이어지는 정규화는 그 근거가 생긴 
 
 정본은 `data/poll_retry.py`다. 옮기면서 복사하지 않았다 — 같은 코드가 두 곳에 있으면
 한쪽만 고쳐지고, 그게 이 저장소가 반복한 실패 형태다.
+
+## 다리 수는 **그 자리에서** 센다 (2026-08-24 F-26)
+
+2026-08-24 09:31 사이클이 3다리 중 2다리만 남겼다. **그 순간의 로그에는 아무 경보도
+없었다** — 재시도 소진(`InvestorFlowPollError`)도, 발행 실패도 아니었기 때문이다. 결손은
+여섯 시간 뒤 장후 커버리지 집계에서야 드러났고, 수급은 소급 조회 경로가 없으므로 그때는
+이미 **영구 소실**이었다. 12거래일에 세 번째다(08-06 4행 · 08-10 3행 · 08-24 1행).
+
+종전 구조가 그것을 못 본 이유는 단순하다: `poll_once()`가 다리를 순차로 돌기만 하고
+**끝에서 세지 않았다.** 실패한 다리가 자기 태그를 내는 경로들만 로그를 남겼고, 그 어느
+경로도 안 탄 결손은 아무 흔적이 없었다.
+
+이제 사이클 끝에서 성공 다리 수를 세고, `expected`에 못 미치면 그 자리에서
+`InvestorFlowLegShortfall`(WARNING)을 낸다. `cause`가 세 갈래를 가른다 —
+`retry_exhausted` / `publish_failed` / `unknown`. **`unknown`이 나오는 것 자체가 정보다**:
+알려진 실패 경로를 하나도 안 탔다는 뜻이고, 08-24 09:31이 정확히 그 형태였다.
+
+결손이 있을 때만 낸다 — 정상일에 매 사이클 한 줄이 늘면 이 태그가 로그를 못 읽게 만든다
+(`OptionChainPollEmpty`가 2026-08-07에 22번 울고 강등된 전례).
 """
 
 from __future__ import annotations
@@ -42,6 +61,7 @@ from messiah.broker.kis.rest_client import KISRestClient
 from messiah.core import logging as mlog
 from messiah.core.bus import TOPIC_RAW, BusLike
 from messiah.core.messages import InvestorFlowSnapshot
+from messiah.core.timeutil import now_kst
 from messiah.data import poll_retry
 
 
@@ -76,11 +96,55 @@ class InvestorFlowPoller:
 
     async def poll_once(self) -> None:
         """등록된 sector_code 전부를 순차 조회·발행한다. 하나가 실패해도 나머지는
-        계속 시도한다(L22 — 항목 하나의 실패가 루프 전체를 죽이면 안 됨)."""
-        for sector_code in self._sector_codes:
-            await self._poll_one(sector_code)
+        계속 시도한다(L22 — 항목 하나의 실패가 루프 전체를 죽이면 안 됨).
 
-    async def _poll_one(self, sector_code: str) -> None:
+        **사이클 끝에서 다리 수를 센다** (2026-08-24 F-26) — 모듈 docstring 참고.
+        """
+        cycle_kst = now_kst()
+        failures: dict[str, str] = {}
+        for sector_code in self._sector_codes:
+            try:
+                cause = await self._poll_one(sector_code)
+            except Exception as exc:  # noqa: BLE001
+                # **L22 — 다리 하나의 실패가 사이클 전체를 죽이면 안 된다.** 종전에는
+                # `_poll_one()` 안의 예상 밖 예외(스냅샷 조립 등)가 그대로 밖으로 나가
+                # 남은 업종이 통째로 안 돌았다. 그 경로엔 태그도 없었다 — 결손이
+                # 「알려진 실패 경로를 하나도 안 탄 채」 생기는 자리가 여기다.
+                mlog.log(
+                    "InvestorFlowPollError",
+                    f"예상 밖 실패: {exc}",
+                    market_code=self._market_code,
+                    sector_code=sector_code,
+                )
+                cause = "unknown"
+            if cause is not None:
+                failures[sector_code] = cause
+
+        expected = len(self._sector_codes)
+        got = expected - len(failures)
+        if got >= expected:
+            return
+
+        causes = sorted(set(failures.values()))
+        mlog.log(
+            "InvestorFlowLegShortfall",
+            f"{cycle_kst:%H:%M} 사이클 {got}/{expected}다리 — 수급은 소급 경로가 없다(영구 소실)",
+            market_code=self._market_code,
+            cycle_kst=cycle_kst.isoformat(),
+            expected_legs=expected,
+            got_legs=got,
+            missing_sectors=sorted(failures),
+            cause=causes[0] if len(causes) == 1 else "mixed",
+            causes_by_sector=dict(sorted(failures.items())),
+        )
+
+    async def _poll_one(self, sector_code: str) -> str | None:
+        """다리 1개를 조회해 발행한다 — **성공이면 None, 실패면 그 사유** (F-26).
+
+        사유를 반환값으로 올리는 이유: 사이클 요약이 「몇 다리가 왜 빠졌나」를 말해야
+        하는데, 실패 경로마다 자기 태그를 내고 끝나면 **아무 태그도 안 탄 결손**은
+        흔적이 없다. 2026-08-24 09:31이 정확히 그 형태였다.
+        """
         raw = await poll_retry.fetch_with_retry(
             lambda: asyncio.to_thread(
                 self._rest_client.get_investor_flow, self._market_code, sector_code
@@ -95,7 +159,9 @@ class InvestorFlowPoller:
             sector_code=sector_code,
         )
         if raw is None:
-            return
+            # `fetch_with_retry`가 이미 `InvestorFlowPollError`를 냈다 — 여기서 또 울지
+            # 않는다. 사이클 요약이 이 사유를 집계한다.
+            return "retry_exhausted"
 
         snapshot = InvestorFlowSnapshot(
             market_code=self._market_code, sector_code=sector_code, raw=raw
@@ -109,3 +175,5 @@ class InvestorFlowPoller:
                 market_code=self._market_code,
                 sector_code=sector_code,
             )
+            return "publish_failed"
+        return None
