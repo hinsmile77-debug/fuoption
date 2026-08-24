@@ -204,7 +204,14 @@ class RegimeRuntime:
             horizon=self._horizon.value,
             regime=state.regime.value,
             confidence=round(float(state.confidence), 4),
-            bars_used=len(bars),
+            # **이름이 재는 것과 맞아야 한다** (2026-08-24 F-25).
+            #   history_len       이력 버퍼 길이 — 종전에 `bars_used`라 적던 값이다
+            #   bars_used         판정 필터에 실제로 들어간 봉 수
+            #   observations_used 그 봉에서 만들어진 관측 수(워밍업 소진분 제외)
+            # 2026-08-24 실측: 200 / 82 / 61. 종전 로그는 셋 다 200이라 말했다.
+            history_len=len(bars),
+            bars_used=state.bars_in_filter,
+            observations_used=state.observations_used,
             min_bars=self.min_bars_for_classify,
             rule_override=state.rule_override,
         )

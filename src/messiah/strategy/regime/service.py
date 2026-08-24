@@ -172,7 +172,13 @@ class RegimeAI:
         # `bars`가 짧으면 있는 만큼만 쓰고, 그 경우 startprob의 영향이 남는다(줄어들 뿐이다).
         tail = bars[-(min_length + _FILTER_OBSERVATIONS) :]
         observations, _ = build_observations(tail, self._window)
+        # **판정이 실제로 본 것**을 여기서 확정해 실어 보낸다 (2026-08-24 F-25).
+        # `len(bars)`(이력 버퍼)와 다르다 — 그 차이가 로그를 두 배 이상 부풀렸다.
+        bars_in_filter = len(tail)
+        observations_used = int(observations.shape[0])
         if observations.shape[0] == 0:
+            # **필터는 돌았다** — 꼬리를 잘랐고 관측이 0개로 나왔을 뿐이다. 그 사실을
+            # 그대로 싣는다: 「봉을 안 썼다」가 아니라 「82봉에서 관측이 0개였다」다.
             return self._emit(
                 symbol,
                 Regime.UNKNOWN,
@@ -180,6 +186,8 @@ class RegimeAI:
                 transition_prob={},
                 rule_override=None,
                 bars=bars,
+                bars_in_filter=bars_in_filter,
+                observations_used=observations_used,
             )
 
         # **시퀀스 전체**를 넘기고 마지막 시점을 읽는다(위 docstring "관측 하나만 넘기면").
@@ -200,6 +208,8 @@ class RegimeAI:
                 transition_prob=transition_prob,
                 rule_override=override.reason,
                 bars=bars,
+                bars_in_filter=bars_in_filter,
+                observations_used=observations_used,
             )
         return self._emit(
             symbol,
@@ -208,6 +218,8 @@ class RegimeAI:
             transition_prob=transition_prob,
             rule_override=None,
             bars=bars,
+            bars_in_filter=bars_in_filter,
+            observations_used=observations_used,
         )
 
     def _emit(
@@ -219,7 +231,12 @@ class RegimeAI:
         transition_prob: dict[str, float],
         rule_override: str | None,
         bars: Sequence[BarClosed],
+        bars_in_filter: int | None = None,
+        observations_used: int | None = None,
     ) -> RegimeState:
+        """`bars_in_filter`·`observations_used`의 기본값이 None인 것이 의도다 (F-25) —
+        하한 미달로 조기 반환한 경로는 **필터를 돌린 적이 없다.** 그 경우를 0으로 적으면
+        「봉을 0개 썼다」가 되는데, 사실은 「쓰지 않았다」다(L18)."""
         if regime == self._last_regime:
             self._state_duration += 1
         else:
@@ -239,6 +256,8 @@ class RegimeAI:
             rule_override=rule_override,
             valid_until=valid_until,
             cadence_seconds=cadence,
+            bars_in_filter=bars_in_filter,
+            observations_used=observations_used,
         )
 
     def _transition_prob_from_state(self, state: int) -> dict[str, float]:

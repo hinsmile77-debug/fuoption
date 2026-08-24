@@ -345,6 +345,17 @@ class RegimeState(BusMessage):
     # (2026-08-14 F-4가 고쳤다고 적은 경로가 라이브에서 0회 사용됐다).
     # 두 의미를 **필드로 갈라** 같은 이름에 두 뜻이 얹히는 것을 끝낸다.
     cadence_seconds: float | None = None
+    # **판정에 실제로 들어간 봉 수** (2026-08-24 F-25). `runtime.py`가 로그에 찍던
+    # `bars_used`는 실은 **이력 버퍼 길이**였다 — 2026-08-24 실측으로 로그는 200이라
+    # 적었지만 필터에 들어간 것은 최근 82봉이었다. 이름이 재는 것과 맞아야 한다
+    # (F-12가 `publish_offset_axis`로 한 것과 같은 처방).
+    #
+    #   bars_in_filter    `classify()`가 잘라 쓴 꼬리 길이(= len(tail))
+    #   observations_used 그 꼬리에서 실제로 만들어진 관측 수(워밍업 소진분 제외)
+    #
+    # None은 미측정(판정이 하한 미달로 조기 반환됐거나 옛 코드)이지 0이 아니다(L18).
+    bars_in_filter: int | None = None
+    observations_used: int | None = None
 
 
 class ExpertView(BusMessage):

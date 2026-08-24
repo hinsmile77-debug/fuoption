@@ -892,8 +892,12 @@ async def test_a_risk_rejected_pass_cycle_is_preserved_with_its_inputs(tmp_path)
     assert snap["risk"]["reason"], "기각 사유가 비면 재현이 안 된다"
     # Net ER의 **구성요소**가 남아야 -1.62가 어디서 나왔는지 사후에 조립된다.
     assert snap["net_er"]["net_expected_return_ticks"] < 0
-    for key in ("edge", "atr_ticks", "cost_ticks", "confidence", "bars_used"):
+    for key in ("edge", "atr_ticks", "cost_ticks", "confidence", "bars_used", "history_len"):
         assert key in snap["net_er"]
+    # **이름이 재는 것과 맞아야 한다** (2026-08-24 F-25): `bars_used`는 ATR이 실제로
+    # 소비한 봉 수(window+1)이고, 이력 버퍼 길이는 `history_len`이 따로 말한다.
+    assert snap["net_er"]["bars_used"] <= snap["net_er"]["atr_window"] + 1
+    assert snap["net_er"]["history_len"] >= snap["net_er"]["bars_used"]
     # 판단을 만든 입력 — 주입된 provider에서 온다.
     assert snap["expert_views"]["30m"]["p_up"] == 0.9
     assert snap["meta_features"]["30m"]["ens_std"] == 0.02

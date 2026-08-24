@@ -222,7 +222,11 @@ async def test_classification_is_logged_for_the_report_axis(monkeypatch):
     assert tags == ["RegimeClassified"]
     fields = logged[0][1]
     assert fields["regime"] in {r.value for r in Regime}
-    assert fields["bars_used"] == 101
+    # **이름이 재는 것과 맞아야 한다** (2026-08-24 F-25). 종전엔 `bars_used`가
+    # 이력 버퍼 길이(101)였다 — 판정 필터가 실제로 본 것은 그 꼬리 82봉이다.
+    assert fields["history_len"] == 101
+    assert fields["bars_used"] == 82
+    assert fields["observations_used"] == 61
     assert fields["min_bars"] == regime_ai.min_bars_for_classify
 
 

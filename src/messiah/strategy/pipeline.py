@@ -431,7 +431,12 @@ class TradingPipeline:
             "p_favorable": view.agg_p_up if intent.side == Side.LONG else view.agg_p_down,
             "p_adverse": view.agg_p_down if intent.side == Side.LONG else view.agg_p_up,
             "atr_window": self._atr_window,
-            "bars_used": len(bars),
+            # **이름이 재는 것과 맞아야 한다** (2026-08-24 F-25). 종전엔 `bars_used`가
+            # M1 이력 버퍼 길이였다 — 2026-08-24 실측으로 105·135였지만 ATR(14)이 실제로
+            # 소비한 것은 늘 마지막 15봉뿐이다(`features/px_core.atr()`가
+            # `bars[-(window+1):]`를 쓴다). 국면 로그가 앓던 것과 같은 병이다.
+            "history_len": len(bars),
+            "bars_used": min(len(bars), self._atr_window + 1),
         }
 
         minutes_to_close = (
