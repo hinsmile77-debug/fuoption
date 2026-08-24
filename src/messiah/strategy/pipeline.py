@@ -17,9 +17,10 @@
 Ver 1.1 §4-1 "Meta 의도의 기대수익에서 비용을 차감"이 요구하는 "기대수익"은 이 시스템
 어디에도 아직 크기(magnitude) 예측 모델이 없다 — `HorizonExpert`는 방향 확률만 내고
 움직임 폭은 예측하지 않는다(`strategy/futures/expert.py` 설계 자체가 그렇다). 이 파이프라인은
-`edge = clip(2×confidence−1, 0, 1)`(Sizer와 동일한 근사, `risk/sizer.py` 참고) ×
+`edge = p_favorable − p_adverse`(`_directional_edge()` — 이 모듈이 **정본**이다) ×
 `ATR(M1, 14봉)`(기대이동폭 근사)로 기대수익을 추정한다 — 원문이 명시한 공식이 아니라 이
 구현의 명시적 선택이다. 크기 예측 Expert나 실측 캘리브레이션이 생기면 교체할 자리.
+사이저는 이 근사를 갖지 않는다 — 같은 `edge`를 인자로 받는다(2026-08-24 F-22).
 
 ## ATR·시장충격 재료는 M1봉 전용
 
@@ -456,6 +457,9 @@ class TradingPipeline:
             equity=account.total_equity,
             tick_size=self._tick_size,
             stop_distance_ticks=atr_ticks,
+            # 415행에서 이미 계산한 값을 **그대로** 넘긴다 — 재계산은 곧 두 벌이다(F-22).
+            edge=edge,
+            edge_source="directional",
         )
         if qty == 0:
             self._record_pass_cycle(
