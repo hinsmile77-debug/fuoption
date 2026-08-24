@@ -430,12 +430,20 @@ async def main() -> int:
                 print(f"    {mark} {gate.name:24s} {gate.value:.4f} (임계 {gate.threshold})")
 
             passed = model_gates_passed(report)
+            # **임계의 출처를 빌드 기록에도 남긴다** (2026-08-24 F-18).
+            #
+            # 2026-08-20 빌드 기록에는 이 값이 없었다. 그래서 현역 번들의 임계 0.0이
+            # 최적화인지 폴백인지를 **어디에서도** 되짚을 수 없게 됐고, 재학습 말고는
+            # 답할 방법이 남지 않았다. 번들 파일이 지워져도 이 기록은 남는다.
+            from messiah.models.registry import load_threshold_selection
+
             row = {
                 "horizon": horizon.value,
                 "bundle_id": bundle_id,
                 "trained_range": list(trained_range),
                 "model_gates_passed": passed,
                 "gates": [gate.to_dict() for gate in report.gates],
+                "threshold_selection": load_threshold_selection(bundle_dir),
             }
             if not passed:
                 row["status"] = "gate-failed"
