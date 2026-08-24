@@ -370,6 +370,13 @@ _PUBLISH_STALL_CLUSTER_MS = 100.0
 #: Horizon이 이미 닫힌 군집에 속하면 같은 정체가 두 줄로 쪼개진다 — 그 여유분이다.
 _PUBLISH_STALL_FLUSH_MS = _PUBLISH_STALL_CLUSTER_MS * 2.0
 
+#: **2차 방어다** (2026-08-24 F-28). 1차는 `mode`다 — 리플레이·학습 경로가 스스로
+#: 그렇다고 말한다. 값으로 가르는 이 상한은 지우지 않고 남긴다: 상한을 넘는 값이
+#: 라이브라고 주장하면 그것은 라이브가 아니다(2026-08-21 최대 5.5초).
+#: 상한만으로 부족했던 이유는 **당일 재합성**이다 — 장후 배치가 그날 봉을 다시 흘리면
+#: 오프셋이 몇 분 단위라 1시간 상한 **안쪽**에 들어온다. 2026-08-24 장후 배치가
+#: 라이브와 글자 하나 다르지 않은 경보 문구를 11줄 찍은 것이 그 형태다(이상점 1-16).
+#:
 #: 이 값을 넘는 오프셋은 **발행 지연이 아니다** — 리플레이·학습이다 (2026-08-21).
 #:
 #: `models/trainer.build_feature_vectors()`는 같은 `FeatureEngine`으로 과거 봉을 흘린다.
@@ -409,6 +416,7 @@ class FeatureEngine:
         monotonic: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = now_kst,
         clock_skew_seconds: Callable[[], float | None] | None = None,
+        mode: str = "replay",
     ) -> None:
         """
         입력: `feature_set`은 `features/spec.py`가 아는 이름이어야 한다 — 미등록 이름은 기저
@@ -416,12 +424,22 @@ class FeatureEngine:
              `core/config.py` 검증기가 기동 시점에 먼저 거부한다).
              `sidecars`는 카테고리가 요구하는 봉 밖 상태(`features/sidecar.DailySidecar`) —
              FL이면 `{"flow": FlowHistory(...)}`.
+             `mode`는 `"live"` 또는 `"replay"`(기본) — **기본값이 replay인 것이 의도다**
+             (2026-08-24 F-28). 발행 유예 경보는 「지금 늦게 내보냈다」는 뜻인데,
+             과거 봉을 다시 흘리는 경로에서는 그 문장이 애초에 성립하지 않는다.
+             기본을 `live`로 두면 새 호출부가 조용히 라이브로 취급돼 라이브와 글자 하나
+             다르지 않은 경보를 찍는다 — 2026-08-24 장후 배치가 정확히 그랬다(11줄).
+             안전한 쪽을 기본으로 둔다: 라이브 경로가 **명시적으로** `mode="live"`를
+             넘긴다.
         실패 조건: 스펙이 요구하는 사이드카가 빠졌거나, 스펙이 안 쓰는 사이드카를 넣었으면
                   **여기서** ValueError. 둘 다 "붙인 줄 알았는데 안 붙었다"의 서로 다른
                   얼굴이고, 런타임에는 `nan_ratio`로만 흐릿하게 드러난다(2026-08-04에
                   FL이 정확히 그렇게 7곳 전부에서 빠져 있었다).
         """
+        if mode not in ("live", "replay"):
+            raise ValueError(f"mode는 'live' 또는 'replay' — 받은 값: {mode!r}")
         self._symbol = symbol
+        self._live = mode == "live"
         self._bus = bus
         self._feature_set = feature_set
         self._spec = feature_spec.resolve(feature_set)
@@ -1062,6 +1080,11 @@ class FeatureEngine:
         # **정상 발행도 군집을 닫는다** (2026-08-24 F-24). 아래 조기 반환들보다 먼저
         # 부른다 — 이 자리를 지나 내려가는 것은 「또 정체가 났다」뿐이고, 그것만
         # 계기로 삼는 것이 149분 지연의 원인이었다.
+        if not self._live:
+            # **리플레이는 경보 축을 아예 안 탄다** (2026-08-24 F-28). 값은
+            # `_publish_offsets`에 이미 들어갔으므로 사실이 사라지지는 않는다 —
+            # 세션 요약은 그대로 나온다.
+            return
         self._flush_stale_publish_stall()
         if offset_ms is None or vector.valid_until is None:
             return

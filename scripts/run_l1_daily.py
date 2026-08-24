@@ -1178,6 +1178,10 @@ async def main(cfg: InstanceConfig) -> None:
         bus,
         feature_set=cfg.feature_set,
         sidecars=sidecar.build(resolved_spec),
+        # **라이브 경로만 명시적으로 선언한다** (2026-08-24 F-28) — 발행 유예 경보가
+        # 「지금 늦게 내보냈다」는 뜻을 갖는 유일한 자리다. 기본값은 `replay`라
+        # 장후 배치·학습·백테스트는 그 경보를 안 찍는다.
+        mode="live",
         # 발행 오프셋을 **1m 계열에 한해** 발행 시점의 롤링 스큐로 보정한다
         # (2026-08-21 F-12). 합성기(`MultiHorizonBarComposer`)가 쓰는 것과 **같은**
         # 콜러블이다 — 봉 경계를 판정한 축과 그 경계를 채점하는 축이 다르면, 계기가

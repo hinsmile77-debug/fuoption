@@ -127,7 +127,7 @@ class _NullBus:
         return None
 
 
-def _engine(now_value: list[datetime], *, skew_seconds=None, horizons=None):
+def _engine(now_value: list[datetime], *, skew_seconds=None, horizons=None, mode="live"):
     from messiah.features.engine import FeatureEngine
 
     return FeatureEngine(
@@ -137,6 +137,9 @@ def _engine(now_value: list[datetime], *, skew_seconds=None, horizons=None):
         horizons=horizons or [Horizon.M1],
         now=lambda: now_value[0],
         clock_skew_seconds=None if skew_seconds is None else (lambda: skew_seconds),
+        # 이 파일의 관심사는 **라이브 경보 축**이다 — 기본값 `replay`는 그 축을 통째로
+        # 끄므로(2026-08-24 F-28) 여기서는 명시적으로 라이브라고 말한다.
+        mode=mode,
     )
 
 
@@ -611,3 +614,68 @@ def test_a_fresh_cluster_is_not_split_by_a_late_arrival(monkeypatch) -> None:
     engine._flush_publish_stall()
     assert [r["tag"] for r in records] == ["PublishLoopStalled"], "한 줄이어야 한다"
     assert records[-1]["horizons"] == ["1m", "3m", "5m"]
+
+
+# ------------------------------- F-28 · 장후 배치가 라이브 경보 문구를 찍지 않는다
+
+
+def test_replay_mode_does_not_cry_at_all(monkeypatch) -> None:
+    """**2026-08-24 장후 배치가 라이브와 글자 하나 다르지 않은 경보를 11줄 찍었다**
+    (이상점 1-16).
+
+    값의 크기로 거르던 상한(1시간)이 못 잡은 이유는 **당일 재합성**이다 — 그날 봉을
+    다시 흘리면 오프셋이 몇 분 단위라 상한 안쪽에 들어온다. 판별의 근거를
+    「값이 얼마나 큰가」가 아니라 「지금이 라이브 세션인가」로 바꾼다.
+    """
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, **f}))
+    confirm = datetime(2026, 8, 24, 10, 0, tzinfo=KST)
+    engine = _engine([confirm], horizons=[Horizon.M3], mode="replay")
+    records.clear()
+
+    vector = _vector(Horizon.M3, confirm - timedelta(seconds=HORIZON_SECONDS[Horizon.M3]))
+    engine._note_publish_grace(vector, _grace_alert_ms() + 5_000.0)
+    engine._flush_publish_stall()
+
+    assert [r["tag"] for r in records] == [], "리플레이는 경보 축을 아예 안 탄다"
+
+
+def test_replay_still_keeps_the_offsets_for_the_session_summary() -> None:
+    """**값은 버리지 않는다** — 경보 축에서만 뺀다. 세션 요약은 그대로 나온다."""
+    bar_open = datetime(2026, 8, 24, 10, 0, tzinfo=KST)
+    vector = _vector(Horizon.M1, bar_open)
+    engine = _engine([vector.valid_until + timedelta(milliseconds=4_200)], mode="replay")
+    offset, _axis, _skew = engine._record_publish_offset(vector)
+    assert offset == pytest.approx(4_200.0, abs=0.1)
+    assert engine._publish_offsets, "리플레이에서도 분포는 쌓인다"
+
+
+def test_the_safe_default_is_replay() -> None:
+    """기본을 `live`로 두면 새 호출부가 조용히 라이브로 취급된다.
+
+    2026-08-24의 사고가 정확히 그 형태였다 — 아무도 "이건 리플레이다"라고 말할
+    수단이 없었다.
+    """
+    from messiah.features.engine import FeatureEngine
+
+    engine = FeatureEngine("A05609", _NullBus(), feature_set="v-test", horizons=[Horizon.M1])
+    assert engine._live is False
+
+
+def test_an_unknown_mode_is_rejected_not_guessed() -> None:
+    from messiah.features.engine import FeatureEngine
+
+    with pytest.raises(ValueError, match="mode"):
+        FeatureEngine("A05609", _NullBus(), feature_set="v-test", mode="배치")
+
+
+def test_the_live_entrypoint_declares_itself() -> None:
+    """라이브 경로가 **명시적으로** 선언하는지는 소스로 확인한다 —
+    `run_l1_daily.py`의 `__main__`은 Docker와 KIS를 건드리므로 import하지 않는다
+    (`tests/test_non_trading_day_gate.py`와 같은 규율)."""
+    from pathlib import Path
+
+    source = Path("scripts/run_l1_daily.py").read_text(encoding="utf-8")
+    assert 'mode="live"' in source
