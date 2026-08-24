@@ -1122,6 +1122,72 @@ def effective_deadline(item: PendingVerification, report_days: Sequence[date]) -
     return scorable[item.deadline_trading_days - 1]
 
 
+def _remaining_trading_days(today: date, deadline: date) -> int | None:
+    """오늘(배타)부터 기한(포함)까지 **남은 거래일 수** — 못 세면 None (2026-08-24 F-19).
+
+    휴장일 달력이 그 연도를 모르면 `EventCalendar`가 예외를 던진다(L3 — 침묵 실패 금지).
+    그때는 **0이 아니라 None**이다: 「기한이 촉박하다」와 「달력을 못 읽었다」는 다른
+    사실이고, 못 읽은 것을 0으로 읽으면 등록부 전체가 하룻밤에 `기한 불가`로 뒤집힌다.
+    """
+    if deadline <= today:
+        return 0
+    try:
+        from messiah.core.event_calendar import EventCalendar
+
+        return EventCalendar.from_file().trading_days_until(today, deadline)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def deadline_pressure(
+    item: PendingVerification,
+    clean_streak: int,
+    today: date,
+    report_days: Sequence[date],
+) -> dict[str, Any]:
+    """이 항목의 기한이 **산술적으로 닿을 수 있는가** (2026-08-24 F-19).
+
+    이미 있는 사후 판정(`_scorable_days_until()`)을 **사전 경보**로 옮긴 것이다. 새 개념을
+    만들지 않는다 — 세는 방식은 그대로고, 보는 시점만 기한 **전**으로 당긴다.
+
+    왜 필요한가: 2026-08-18에 세 항목이 `기한 불가`를 받았고 처방은 매번 "기한을 다시
+    잡아라"였다. 그 판정은 **기한이 지난 뒤에야** 났다 — 즉 이미 늦은 뒤에 늦었다고
+    말한 것이다. 2026-08-24 아침에도 `no-degenerate-features`가 같은 자리에 있었고,
+    필요한 3거래일 중 2일밖에 확보되지 않는다는 사실은 그날 아침에 이미 산술로 확정돼
+    있었다. 사람이 기한을 옮길 수 있는 시점은 그때뿐이다.
+
+    반환 키:
+      `deadline`         실효 기한(`deadline_trading_days`면 아직 None일 수 있다)
+      `days_needed`      아직 모자란 연속 거래일 수
+      `days_remaining`   오늘 이후 기한까지의 거래일 수 — 못 세면 None
+      `reachable`        False면 산술적으로 못 닿는다. None은 판정 불가(모른다)
+    """
+    deadline = effective_deadline(item, report_days)
+    days_needed = max(item.consecutive_days - clean_streak, 0)
+    if deadline is None:
+        # 기한이 아직 안 왔거나(거래일 기준) 아예 없다 — 압박을 계산할 근거가 없다.
+        return {
+            "deadline": None,
+            "days_needed": days_needed,
+            "days_remaining": None,
+            "reachable": None,
+        }
+    remaining = _remaining_trading_days(today, deadline)
+    reachable: bool | None
+    if days_needed == 0:
+        reachable = True
+    elif remaining is None:
+        reachable = None
+    else:
+        reachable = remaining >= days_needed
+    return {
+        "deadline": deadline,
+        "days_needed": days_needed,
+        "days_remaining": remaining,
+        "reachable": reachable,
+    }
+
+
 def _scorable_days_until(
     item: PendingVerification, report_days: list[date], last_violation: date | None
 ) -> int:
@@ -1351,6 +1417,29 @@ def _verdict_for(
                 f"회복(위반 {len(violations)}회) {note}",
             )
         return _verdict(VerificationStatus.VERIFIED, f"{clean_streak}거래일 연속 기준 충족 {note}")
+
+    # ⑤′ **기한이 지나기 전에 알린다** (2026-08-24 F-19).
+    #
+    # 종전에는 기한이 **지난 뒤에야** `기한 불가`가 났다 — 이미 늦은 뒤에 늦었다고 말한
+    # 셈이다. 사람이 기한을 옮길 수 있는 시점은 아직 기한 안일 때뿐이다.
+    # `reachable`이 None(달력을 못 읽었다)이면 판정하지 않는다 — 모르는 것을 근거로
+    # 실명을 선고하면 새 오탐원이 된다(⓪과 같은 규율).
+    # 기한이 **이미 지난** 항목은 아래 ⑤가 본다 — 그쪽은 「못 고쳤다」와 「잴 날이
+    # 없었다」를 채점 가능일로 가르고, 그 구별은 2026-08-18에 얻은 것이다. 여기서
+    # 가로채면 그 판정이 사라진다.
+    pressure = deadline_pressure(item, clean_streak, today, report_days or [])
+    if (
+        pressure["reachable"] is False
+        and pressure["deadline"] is not None
+        and today <= pressure["deadline"]
+    ):
+        return _verdict(
+            VerificationStatus.UNREACHABLE,
+            f"기한 {pressure['deadline'].isoformat()}까지 남은 거래일 "
+            f"{pressure['days_remaining']}일 < 필요 {pressure['days_needed']}일 — "
+            f"못 고친 게 아니라 잴 날이 모자란다. **지금** 기한을 다시 잡을 것 "
+            f"(연속 {clean_streak}/{item.consecutive_days}일) {note}",
+        )
 
     deadline = effective_deadline(item, report_days or [])
     if deadline is not None and today > deadline:

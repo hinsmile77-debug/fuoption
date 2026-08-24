@@ -478,6 +478,88 @@ def check_calendar(*, today: date | None = None) -> CheckResult:
     )
 
 
+_DEADLINE_SLACK_DAYS = 2
+"""여유가 이 값 이하로 줄면 「임박」이라 부른다 (2026-08-24 F-19).
+
+2가 아니라 0으로 두면 도달 불가가 되기 **하루 전**에야 처음 뜬다 — 그날은 이미 기한을
+옮길 시간이 아니다. 이 값 자체는 미검증 초기값이고, 며칠 돌려 보고 조정할 자리다."""
+
+
+def check_pending_deadlines(*, today: date | None = None) -> CheckResult:
+    """등록부의 기한이 **산술적으로 닿을 수 있는가**를 아침마다 묻는다 (2026-08-24 F-19).
+
+    ## 왜 아침인가
+
+    등록부의 `기한 불가` 판정은 종전에 **기한이 지난 뒤에야** 났다 — 이미 늦은 뒤에
+    늦었다고 말한 셈이다. 2026-08-18에 세 항목이 그렇게 걸렸고 처방은 매번 "기한을 다시
+    잡아라"였다. 사람이 기한을 옮길 수 있는 시점은 아직 기한 안일 때뿐이고, 그 시점은
+    아침이다.
+
+    ## `[OK ]`를 깨지 않는다
+
+    기한이 촉박한 것은 **오늘 수집을 막을 이유가 아니다**(`check_host`·`check_rollover`와
+    같은 원칙). 대신 문장으로 반드시 뜬다 — 조용히 두면 이 계기가 오늘 하루만 쓰인
+    장식이 된다(금지계명 12).
+    """
+    try:
+        from messiah.ops import fix_verification as fv
+
+        items = fv.load_registry()
+        reports = fv.load_daily_reports(Path("logs"))
+    except Exception as exc:  # noqa: BLE001
+        # 등록부를 못 읽는 것도 사실이다 — 자가점검을 죽이지는 않되 조용히 넘기지 않는다.
+        return CheckResult("deadlines", True, f"등록부 판독 실패({exc}) — 판정 불가")
+    if not items:
+        return CheckResult("deadlines", True, "등록부 0건")
+
+    cutoff = today or now_kst().date()
+    # **오늘 이후의 리포트는 없는 셈 친다.** 실운영에서는 애초에 없지만, 소급 재채점
+    # (「그날 아침이면 뭐라고 했을까」)에서 미래를 보면 그날의 판단을 재현할 수 없다.
+    reports = {day: value for day, value in reports.items() if day <= cutoff}
+    report_days = sorted(reports)
+    verdicts = {v.id: v for v in fv.evaluate(items, reports, today=cutoff)}
+
+    unreachable: list[str] = []
+    imminent: list[str] = []
+    unknown = 0
+    for item in items:
+        verdict = verdicts.get(item.id)
+        if verdict is not None and verdict.status in (
+            fv.VerificationStatus.VERIFIED,
+            fv.VerificationStatus.OVERDUE,
+        ):
+            continue
+        streak = verdict.clean_days if verdict is not None else 0
+        pressure = fv.deadline_pressure(item, streak, cutoff, report_days)
+        if pressure["reachable"] is False:
+            unreachable.append(
+                f"{item.id}(남은 {pressure['days_remaining']}일 < 필요 {pressure['days_needed']}일)"
+            )
+        elif pressure["reachable"] is None and pressure["deadline"] is not None:
+            # 달력을 못 읽었다 — 「여유 있다」가 아니다(L18).
+            unknown += 1
+        elif (
+            pressure["days_remaining"] is not None
+            and pressure["days_needed"] > 0
+            and pressure["days_remaining"] - pressure["days_needed"] <= _DEADLINE_SLACK_DAYS
+        ):
+            imminent.append(
+                f"{item.id}(여유 {pressure['days_remaining'] - pressure['days_needed']}일)"
+            )
+
+    parts = [f"등록부 {len(items)}건"]
+    parts.append(
+        f"기한 도달 불가 {len(unreachable)}건"
+        + (f" — {' · '.join(unreachable)}" if unreachable else "")
+    )
+    parts.append(
+        f"기한 임박 {len(imminent)}건" + (f" — {' · '.join(imminent)}" if imminent else "")
+    )
+    if unknown:
+        parts.append(f"기한 판정 불가 {unknown}건(휴장일 달력)")
+    return CheckResult("deadlines", True, " · ".join(parts))
+
+
 def check_git_state(mode: str) -> CheckResult:
     """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제).
 
@@ -691,6 +773,8 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     results.append(check_rollover())
     # 휴장일 달력이 언제 바닥나는가 — 바닥난 다음이 아니라 그 전에 묻는다(2026-08-17).
     results.append(check_calendar())
+    # 등록부의 기한이 산술적으로 닿는가 — 기한이 지난 뒤가 아니라 그 전에 묻는다(F-19).
+    results.append(check_pending_deadlines())
     if cfg is not None:
         results.append(check_bar_close(cfg))
         results.append(check_git_state(cfg.mode))
