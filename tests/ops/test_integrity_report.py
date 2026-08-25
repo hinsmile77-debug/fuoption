@@ -275,10 +275,26 @@ def _report(
     *,
     logs: dict[str, list[Path]],
     crash=_no_crashes,
+    host=None,
     tick_rows: int = 5000,
 ):
     """`tick_rows` 기본값이 0이 아닌 이유: **정상 운영일에는 틱이 쌓인다.** 0으로 두면
-    "깨끗한 날"이라는 픽스처가 실제로는 수집이 끊긴 날을 모델링하게 된다."""
+    "깨끗한 날"이라는 픽스처가 실제로는 수집이 끊긴 날을 모델링하게 된다.
+
+    ## 호스트도 주입한다 (2026-08-25)
+
+    아래 `_report2`가 같은 이유로 이미 주입하고 있었다 — *"실제 `host_health.collect()`를
+    부르면 테스트가 그 PC의 디스크·전원 상태를 타서 다른 기계에서 다르게 깨진다."*
+    **이 판형만 그 규율을 안 따르고 있었다.**
+
+    그 대가가 2026-08-25 야간에 드러났다: 장 마감 후 Docker 데몬이 내려가자
+    `호스트 위생: docker: daemon 무응답`이 `breaches`에 섞여 들어와, **「깨끗한 날에는
+    위반이 없다」를 단언하는 테스트 5건이 한꺼번에 빨간불**이 됐다. 코드가 틀린 것이
+    아니라 **그 PC가 밤이었을 뿐**이고, 그 빨간불은 아무 처방으로도 이어지지 않는다.
+
+    호스트 위생 축 자체를 검증하는 테스트는 `host=`로 나쁜 호스트를 명시적으로 넣는다 —
+    그때는 그것이 픽스처이지 환경이 아니다.
+    """
     return build_report(
         day=_DAY,
         symbol="A05608",
@@ -287,6 +303,7 @@ def _report(
         log_paths=logs,
         crash_collector=crash,
         tick_dir=_write_ticks(tmp_path, tick_rows),
+        host_collector=host or _healthy_host(),
     )
 
 

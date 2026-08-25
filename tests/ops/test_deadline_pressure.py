@@ -106,15 +106,53 @@ def test_a_passed_deadline_still_gets_the_old_two_way_split():
 
 
 def test_self_check_line_reproduces_20260824():
-    """실제 등록부·리포트로 2026-08-24 아침을 재현한다."""
+    """2026-08-24 아침의 그 문장을 **픽스처로** 재현한다.
+
+    ## 왜 실제 등록부를 안 읽는가 (2026-08-25)
+
+    종전 이 테스트는 `configs/pending_verifications.yaml`을 그대로 읽어 `no-degenerate-features`
+    가 「기한 도달 불가」로 뜨는지 봤다. 그 항목은 2026-08-25에 **검증을 마치고 등록부에서
+    나갔고**(streak 3/3), 그러자 이 테스트가 깨졌다.
+
+    깨진 것이 옳다 — 등록부는 **매일 바뀌는 운영 파일**이고, 항목이 통과해서 사라지는 것이
+    그 정상 수명이다. 역사적 사실을 가변 파일에 고정하면, 사실이 변한 것이 아니라 파일이
+    변했을 뿐인 날에도 빨간불이 켜진다. 그 빨간불은 아무 처방으로도 이어지지 않는다.
+
+    그래서 재현할 값(그날의 등록부 모양)은 여기 픽스처로 박고, 실제 파일에 대해서는
+    **모양이 아니라 계기가 도는지**만 아래 테스트가 본다.
+    """
+    # 2026-08-24 아침의 그 항목: 대응 수정이 08-20 저녁에 들어가 첫 채점이 08-21,
+    # 3거래일 연속이 필요한데 기한은 08-24 — 그날 남은 거래일은 0일이었다.
+    item = _item(
+        id="no-degenerate-features",
+        metric="degenerate_feature_count",
+        deadline=date(2026, 8, 24),
+        consecutive_days=3,
+        registered=date(2026, 8, 6),
+    )
+    pressure = deadline_pressure(
+        item, clean_streak=2, today=date(2026, 8, 24), report_days=[date(2026, 8, 21)]
+    )
+    assert pressure["reachable"] is False
+    assert pressure["days_remaining"] == 0
+    assert pressure["days_needed"] == 1
+
+
+def test_the_self_check_line_still_renders_against_the_live_registry():
+    """계기가 실제 등록부에서 **돌기는 하는가** — 내용이 아니라 동작을 본다.
+
+    `[OK ]`를 깨지 않는다는 것이 이 줄의 설계다(기한이 촉박한 것은 오늘 수집을 막을 이유가
+    아니다). 그 성질은 등록부에 무엇이 들어 있든 참이어야 한다.
+    """
     import sys
     from pathlib import Path
 
     sys.path.insert(0, str(Path("scripts").resolve()))
     import self_check
 
-    result = self_check.check_pending_deadlines(today=date(2026, 8, 24))
-    # `[OK ]`를 깨지 않는다 — 기한이 촉박한 것은 오늘 수집을 막을 이유가 아니다.
+    result = self_check.check_pending_deadlines(today=date(2026, 8, 25))
     assert result.ok is True
-    assert "no-degenerate-features" in result.detail
-    assert "기한 도달 불가 1건" in result.detail
+    assert "등록부" in result.detail
+    # **「기한 도달 불가」가 0건이라고 말할 수 있어야 한다** — 문장 자체가 빠지면
+    # 「없다」와 「안 셌다」가 구분되지 않는다(L18).
+    assert "기한 도달 불가" in result.detail

@@ -89,20 +89,65 @@ def test_no_symbol_filter_at_all():
     assert sample.returns == [0.01, 0.03]
 
 
-def test_live_file_yields_seventeen_not_six():
-    """2026-08-24 실측 — 종전 필터는 6, 롤 연속 집계는 17이다."""
+def test_the_20260824_file_yielded_seventeen_not_six():
+    """2026-08-24 실측 — 종전 필터는 6, 롤 연속 집계는 17이다.
+
+    ## 왜 실제 파일을 안 읽는가 (2026-08-25)
+
+    종전 이 테스트는 `logs/g2_daily_returns.jsonl`을 **직접 읽어** 6과 17을 단언했다.
+    그 파일은 **매 거래일 한 행씩 늘어나는 운영 로그**다. 08-25 장 마감이 19번째 행을
+    붙이자(A05609 7행) 두 단언이 동시에 깨졌다 — 계산이 틀려서가 아니라 **하루가 지나서**다.
+
+    처방이 없는 빨간불이다. 그래서 08-24의 파일 모양을 여기 픽스처로 박는다. 실제 파일에
+    대해서는 **날짜가 지나도 참인 성질**만 아래 테스트가 본다.
+
+    (같은 형태를 2026-08-25 야간에 세 곳에서 고쳤다 — `test_deadline_pressure.py` ·
+    `test_undiagnosed_verdict.py` · 여기. 셋 다 「운영 파일에 역사적 사실을 고정」이었다.)
+    """
+    # 2026-08-24 시점의 파일 — A05608 12행 + A05609 6행, 08-14가 롤 당일.
+    rows = _rows(
+        *[(f"2026-07-{day:02d}", "A05608", 0.0) for day in (29, 30, 31)],
+        *[(f"2026-08-{day:02d}", "A05608", 0.0) for day in (3, 4, 5, 6, 7, 10, 11, 12, 13)],
+        ("2026-08-14", "A05609", 0.0),  # 롤 당일 — 두 계약이 섞인 하루
+        *[(f"2026-08-{day:02d}", "A05609", 0.0) for day in (18, 19, 20, 21, 24)],
+    )
+    assert len(rows) == 18
+    sample = champion_sample(rows)
+    legacy_filter = [r for r in rows if r.get("symbol") == rows[-1].get("symbol")]
+    assert len(legacy_filter) == 6, "종전 필터는 롤 뒤 6행만 봤다"
+    assert sample.window["rows_counted"] == 17
+    assert sample.window["excluded"]["roll_day"] == 1
+    # 그날까지 전 행이 return 0.0이라 **값 자체는 안 바뀐다** — 값이 생기는 날부터 달라진다.
+    assert set(sample.returns) == {0.0}
+
+
+def test_the_live_file_still_counts_across_the_roll():
+    """실제 파일에 대해 **날짜가 지나도 참인 성질**만 본다 — 숫자가 아니라 부등식이다.
+
+    F-27이 고친 것은 「롤 뒤 계약만 센다」였다. 그 수정이 살아 있다면, 파일이 며칠 더
+    쌓이든 **집계 표본은 마지막 계약의 행수보다 많아야** 한다(롤 당일 한 행만 빠지므로).
+    이 부등식은 08-26에도 09-11 롤 뒤에도 참이다.
+    """
     rows = [
         json.loads(line)
         for line in io.open("logs/g2_daily_returns.jsonl", encoding="utf-8")
         if line.strip()
     ]
+    if not rows:
+        return  # 아직 한 행도 없는 환경 — 못 잰 것이지 위반이 아니다(L18)
     sample = champion_sample(rows)
     legacy_filter = [r for r in rows if r.get("symbol") == rows[-1].get("symbol")]
-    assert len(legacy_filter) == 6
-    assert sample.window["rows_counted"] == 17
-    assert sample.window["excluded"]["roll_day"] == 1
-    # 오늘까지 전 행이 return 0.0이라 **값 자체는 안 바뀐다** — 값이 생기는 날부터 달라진다.
-    assert set(sample.returns) == {0.0}
+    assert sample.window["rows_total"] == len(rows)
+    # 롤이 한 번이라도 있었다면 집계가 종전 필터보다 넓다. 롤 전이면 같다 — 둘 다 정상이다.
+    assert sample.window["rows_counted"] >= len(legacy_filter)
+    # **버린 행은 전부 사유가 적혀 있어야 한다** — 총계와 안 맞으면 어딘가에서 행이
+    # 조용히 사라지는 것이고, 그건 「거래가 없었다」로 위장된 결손이다(L18).
+    assert (
+        sample.window["rows_counted"] + sum(sample.window["excluded"].values())
+        == (sample.window["rows_total"])
+    )
+    # 사유는 **알려진 갈래만** 나와야 한다. 새 갈래가 생기면 여기서 먼저 걸려 사람이 본다.
+    assert set(sample.window["excluded"]) <= {"roll_day", "not_countable"}
 
 
 # ---- F-17 흡수분: 검증받지 않은 번들이 낸 성적에 표식을 박는다 ----

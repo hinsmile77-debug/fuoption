@@ -93,24 +93,30 @@ def test_undeclared_entries_are_listed_not_blocked() -> None:
     assert fv.undeclared_fix_state(items) == ["a", "c"]
 
 
-def test_the_real_registry_declares_the_degenerate_entry() -> None:
-    """실제 등록부가 이 항목의 수정 상태를 **선언**하고 있어야 한다.
+def test_a_declared_entry_in_the_real_registry_carries_a_real_sha() -> None:
+    """실제 등록부에서 **선언한 항목은 sha가 실제로 있어야 한다.**
 
-    선언이 없으면 종전 의미(무조건 `재발`)로 돌아가고, 이 축은 만들어만 두고 아무도 안 쓰는
-    상태가 된다 — 이 저장소가 반복해서 배운 실패 형태다.
+    선언이 빈 값이면 종전 의미(무조건 `재발`)로 돌아가고, 이 축은 만들어만 두고 아무도 안
+    쓰는 상태가 된다 — 이 저장소가 반복해서 배운 실패 형태다.
 
-    값은 2026-08-20 저녁에 `f15aa58`(세션 경계 전환 + 번들 재학습)로 채워졌다. 그래서 이제
-    이 항목의 위반은 `기전 미상`(WARNING)이 아니라 `재발`(ERROR)이다 — 고친 것이 안 듣는
-    상황이 되기 때문이고, 그때는 원인을 다시 봐야 한다.
+    ## 왜 특정 항목을 지목하지 않는가 (2026-08-25)
+
+    종전 이 테스트는 `no-degenerate-features` 하나를 이름으로 못박고 있었다. 그 항목은
+    2026-08-25에 **검증을 마치고 등록부에서 나갔다**(08-21·08-24·08-25 `streak 3/3`,
+    파일 머리 규칙 *"검증 완료로 굳으면 이 파일에서 지운다"*). 통과해서 사라지는 것이
+    등록부 항목의 정상 수명이므로, 그 수명을 테스트가 막아서는 안 된다.
+
+    지킬 값은 특정 id가 아니라 **선언의 무결성**이다: 선언했다면 sha가 있고, 있다면
+    「미착수」와 모순되지 않는다. 그건 어느 항목이 들어오고 나가든 참이어야 한다.
     """
-    items = {item.id: item for item in fv.load_registry()}
-    entry = items.get("no-degenerate-features")
-    assert entry is not None
-    assert entry.fix_state_declared, "`fix_committed:` 키가 등록부에 있어야 한다"
-    assert (
-        entry.fix_committed
-    ), "2026-08-20 F-G 2단계로 값 전환과 재학습이 끝났다 — 그 sha가 적혀 있어야 한다"
-    assert not entry.fix_is_pending
+    declared = [item for item in fv.load_registry() if item.fix_state_declared]
+    for entry in declared:
+        assert entry.fix_committed or entry.fix_is_pending, (
+            f"{entry.id}: `fix_committed:` 키를 두고 값이 비어 있다 — "
+            "선언은 했는데 무엇을 고쳤는지 말하지 않는 상태다"
+        )
+        if entry.fix_committed:
+            assert not entry.fix_is_pending, f"{entry.id}: sha가 있는데 「미착수」로 적혀 있다"
 
 
 def test_undiagnosed_needs_attention_but_is_not_an_error() -> None:
