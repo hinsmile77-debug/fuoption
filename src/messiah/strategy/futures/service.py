@@ -51,7 +51,11 @@ from messiah.core.messages import (
     Regime,
     RegimeState,
 )
-from messiah.strategy.futures.aggregator import Aggregator
+from messiah.strategy.futures.aggregator import (
+    META_THRESHOLD_ADJUSTMENT,
+    META_THRESHOLD_ADJUSTMENT_SOURCE,
+    Aggregator,
+)
 from messiah.strategy.futures.expert import HorizonExpert
 from messiah.strategy.futures.meta_labeler import (
     MetaLabeler,
@@ -146,6 +150,27 @@ class FuturesAIService:
         # 임계 자체는 건드리지 않는다(R18) — 말하게만 한다. 배선 Horizon이 30m 하나라
         # 하루 14줄이다.
         probability = meta.predict_pass_probability(meta_features)
+        # **설계표를 배선하되, 판정은 아직 바꾸지 않는다** (2026-08-25 F-41 · ㉠섀도).
+        #
+        # `META_THRESHOLD_ADJUSTMENT`(Ver 1.2 §7.1)는 넉 달간 정의만 되어 있었고 어느
+        # 호출자도 쓰지 않았다(1-12). 여기가 그 유일한 사용처다.
+        #
+        # 실판정에 즉시 반영하지 않는 이유는 R18(게이트 신설은 섀도 20거래일 후 승격)이고,
+        # 실질적 이유는 따로 있다: 2026-08-25 실측 8건이 **전부** 보정 후 임계에 걸린다.
+        # 즉 켜는 순간 관문이 전량 차단으로 돈다. 「전량 통과」와 「전량 차단」은 **둘 다
+        # 관문이 판단을 안 하는 상태**이고, 어느 쪽이 옳은지는 20거래일 분포가 답한다.
+        #
+        # **국면을 아직 못 받았으면 보정을 넣지 않는다** — 첫 사이클에 「보수적으로
+        # UNKNOWN +0.10」을 먹이면 「안 온 것」과 「UNKNOWN으로 판정된 것」이 다시 한 몸이
+        # 된다. 2026-08-19 F-5가 정확히 그 둘을 갈랐다.
+        base = meta.threshold
+        adjustment = (
+            META_THRESHOLD_ADJUSTMENT.get(self._latest_regime.regime, 0.0)
+            if self._regime_received
+            else 0.0
+        )
+        threshold_shadow = base + adjustment
+        passed_shadow = probability >= threshold_shadow
         passed = probability >= meta.threshold
         # **임계 0은 게이트가 없는 것과 같다** (2026-08-21 F-6 · 1-8).
         #
@@ -157,7 +182,13 @@ class FuturesAIService:
         # 사이클 전량이 WARNING이 되어 경보가 닳는다. 태그를 새로 파면 같은 사실이 두
         # 태그로 갈려 집계가 어긋난다. 그래서 **이 한 줄만** 호출부에서 올린다
         # (`_LEVEL_ESCALATABLE` 참고 — 올리는 방향만 허용된다).
-        gate_disabled = meta.threshold <= 0.0
+        # **보정 후 임계로 무력 여부를 판정한다** (2026-08-25 F-41).
+        #
+        # 그래야 배선이 승격된 날 경보가 **자동으로 그친다** — 국면별로. 그리고 그때
+        # 추세 국면만 계속 우는데, 그것이 1-14의 정확한 크기다: 설계표 §7.1이 추세 칸을
+        # 「기본」(보정 0)으로 적었으므로, 기본 임계가 0인 한 추세장의 관문은 열려 있다.
+        # 표에 없는 값을 지어 넣어 조용하게 만드는 대신, 매일 울게 둔다(F-44).
+        gate_disabled = threshold_shadow <= 0.0
         verdict = "통과" if passed else "차단"
         detail = " (임계 0 — 게이트 무력)" if gate_disabled else ""
         mlog.log(
@@ -168,9 +199,27 @@ class FuturesAIService:
             symbol=view.symbol,
             horizon=feature_vector.horizon.value,
             probability=probability,
+            # 기존 이름은 **실판정에 쓰인 값**으로 유지한다 — 장후 리포트와 과거 로그
+            # 파서가 이 이름을 읽는다. 섀도는 새 이름으로만 붙인다(R6: 태그를 새로 파지
+            # 않고 필드를 더한다).
             threshold=meta.threshold,
             threshold_source=self._meta_threshold_sources.get(feature_vector.horizon, "unknown"),
             passed=passed,
+            # 설계표 배선의 섀도 축 (2026-08-25 F-41 · F-44). 20거래일 뒤 승격 판단의 재료다.
+            threshold_base=base,
+            threshold_regime_adj=adjustment,
+            threshold_shadow=threshold_shadow,
+            passed_shadow=passed_shadow,
+            # **보정이 어느 국면에서 왔는지**와 **그 값의 출처**를 함께 싣는다. 값만 남기면
+            # 20거래일 뒤에 "이 0.0이 설계값인가 배선 누락인가"를 다시 조사하게 된다 —
+            # 2026-08-25에 그 조사가 실제로 있었다(F-44 선행 조사 15분).
+            regime=self._latest_regime.regime.value,
+            regime_received=self._regime_received,
+            threshold_adj_source=(
+                META_THRESHOLD_ADJUSTMENT_SOURCE.get(self._latest_regime.regime, "미등재")
+                if self._regime_received
+                else "국면 미수신 — 보정 없음(2026-08-19 F-5)"
+            ),
             model_version=view.model_version,
             # **입력의 지문** (2026-08-20 F-F). 2026-08-20 장중에 이 확률이 3사이클 연속
             # 비트 단위로 같았다(08-19는 9사이클이 전부 달랐다). 확률만 남고 입력이 안 남아
