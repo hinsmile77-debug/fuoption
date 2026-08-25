@@ -825,6 +825,57 @@ def _drop_refused_starts(starts: Sequence[str], refused: Sequence[str]) -> list[
 # 후 승격). 2026-08-20 실측 `publish_offset` 1m ratio ≈ 11.8이 첫 표본이다.
 INTRADAY_DRIFT_RATIO = 3.0
 
+# **축마다 배율의 뜻이 다르다** (2026-08-25 F-43).
+#
+# 2026-08-25에 이 감시기는 `drift: false`를 냈고, 같은 하루의 1분봉 1,000ms 초과율은
+# 1.7% → 25.7%(15.1배)였다. 감시기가 틀린 것이 아니라 **한 축(중앙값)만 봤다**. 중앙값은
+# 그날 1.06배로 실제로 안 움직였다 — 나빠진 것은 꼬리뿐이었다.
+#
+# 이 계기의 설계 근거(2026-08-20 F-E)가 스스로 *"계단은 기울기로 안 잡힌다"* 고 적어 두고도
+# 그 교훈을 **기울기 → 계단**에만 적용하고 **중앙값 → 꼬리**에는 적용하지 않은 것이 1-13이다.
+#
+# 임계는 여전히 자의적이고 **판정이 아니라 표시**다(R18). p90을 2.0으로 잡은 것은 꼬리가
+# 중앙값보다 원래 잘 움직이기 때문이다.
+#
+# ⚠ **그리고 2.0은 2026-08-25를 못 잡는다** — 그날 전 Horizon p90은 1.90배였다.
+# 3거래일 실측을 나란히 놓으면 이렇게 된다:
+#
+#     08-21  p90 09시 638ms → 15시 1,666ms = 2.61배   (걸린다)
+#     08-24  p90 09시 873ms → 15시 1,918ms = 2.20배   (걸린다)
+#     08-25  p90 09시 745ms → 15시 1,417ms = 1.90배   (안 걸린다)
+#
+# 관측 하나에 맞춰 1.8로 낮추는 것은 임계를 지어내는 일이므로 하지 않는다. 08-25를
+# 이름으로 잡는 축은 `over_1000_ratio`(1.7% → 25.7%)이고, 그 축은 상류 카운터가 필요해
+# **F-43 적용 다음 거래일부터** 존재한다. 그 사실을 여기 적어 둔다 — 적지 않으면 다음
+# 사람이 "왜 08-25는 안 걸렸나"를 처음부터 다시 조사한다.
+INTRADAY_DRIFT_RATIO_BY_KEY: dict[str, float] = {
+    "p50": INTRADAY_DRIFT_RATIO,
+    "p90": 2.0,
+    "over_1000_ratio": INTRADAY_DRIFT_RATIO,
+}
+
+# 초과율 축은 **첫 시간대가 0이면 배율이 성립하지 않는다** — 그런데 그 날이 오히려 나쁜
+# 날이다(09시 0.0 → 15시 0.25는 배율이 정의되지 않을 뿐 최악의 하루다). 배율만 보면
+# `ratio: None → drift: false`가 되어 정확히 거꾸로 읽힌다.
+#
+# 그래서 이 축만 **절대 바닥**을 함께 본다. 0.10은 자의적이다 — "열 번에 한 번이 예산을
+# 넘으면 본다"는 뜻이고, 2026-08-25 실측(09시 0.017 · 15시 0.257)에서 아침을 안 건드리고
+# 오후만 잡는 자리다. 첫 표본이 하루뿐이므로 20거래일 분포를 본 뒤 사람이 조인다(R18).
+#
+# **ms 축에는 바닥을 두지 않는다** — 두려고 시도했고, 3거래일 실측이 기각했다.
+# `p90 > 예산(1,000ms)`를 바닥으로 잡으면 08-21·08-24·08-25 **사흘 전부**가 걸린다
+# (초과 시간대 3·6·6개). 매일 울리는 표시는 표시가 아니다. 예산 초과는 이미
+# `publish_sla` 축이 채점하고 있고, 이 축이 묻는 것은 「오늘 안에서 나빠졌는가」다.
+INTRADAY_OVER_RATIO_FLOOR = 0.10
+
+# 축별 절대 바닥 — **배율이 성립하지 않거나 배율만으로 거꾸로 읽히는 축**에만 둔다.
+INTRADAY_DRIFT_FLOOR_BY_KEY: dict[str, float] = {
+    "over_1000_ratio": INTRADAY_OVER_RATIO_FLOOR,
+}
+
+# 눈금이 「비율」인 축 — 반올림 자리와 바닥 판정이 ms 축과 다르다.
+_RATIO_KEYS = frozenset({"over_1000_ratio", "over_grace_ratio"})
+
 # 표본 수가 시간대 중앙값의 이 비율에 못 미치면 **부분 시간대**로 보고 양 끝 계산에서 뺀다.
 # 0.5인 이유: 개장 전 웜업(08시)과 마감 잔여(15시)는 실제로 한 시간의 1/4~1/3 분량이고,
 # 정상 시간대는 서로 비슷하다 — 2026-08-20 1m 실측 08시 15건 · 15시 24건 vs 정상 59~60건.
@@ -923,26 +974,48 @@ def hourly_trend(by_hour: Mapping[str, Any], *, key: str = "p50") -> dict[str, A
     first_hour, first = full[0]
     last_hour, last = full[-1]
     ratio = None if first <= 0 else round(last / first, 2)
+    # **비율 축을 소수 1자리로 자르면 값 자체가 사라진다** (2026-08-25 F-43) —
+    # 2026-08-25 09시 초과율 0.017이 `round(.., 1)`으로는 0.0이 되고, 그러면 배율의
+    # 분모가 0이 되어 「못 잼」으로 빠져나간다. 눈금이 다른 축을 같은 자리로 반올림하면
+    # 그것 자체가 계기 고장이다.
+    digits = 4 if key in _RATIO_KEYS else 1
     return {
         "first_hour": first_hour,
         "last_hour": last_hour,
-        "first": round(first, 1),
-        "last": round(last, 1),
+        "first": round(first, digits),
+        "last": round(last, digits),
         "ratio": ratio,
-        "slope": _slope([(int(h), v) for h, v in full]),
+        "slope": _slope([(int(h), v) for h, v in full], digits=digits),
         # **계단은 기울기로 안 잡힌다** (2026-08-20 장후 F-E 승격분).
         #
         # 그날 발행 오프셋은 선형 악화가 아니라 11시 계단 + 고원이었다. 09→15시 회귀직선은
         # 그 계단을 완만한 상승으로 뭉갠다 — 기울기만 보면 「종일 조금씩 나빠졌다」로 읽히고,
         # 그건 처방이 다른 이야기다(점진 악화면 자원, 계단이면 그 시각에 무슨 일이 있었나).
-        "step_detected": _step_hour(full),
+        "step_detected": _step_hour(full, key=key),
         "hours": len(full),
         "dropped": dropped,
-        "drift": bool(ratio is not None and ratio >= INTRADAY_DRIFT_RATIO),
+        # **축 이름을 값과 함께 싣는다** (2026-08-25 F-43) — 세 축이 나란히 놓이는
+        # 순간 "1.66배"만으로는 무엇의 1.66배인지 말할 수 없게 된다.
+        "key": key,
+        "drift": _is_drift(key, ratio, last),
     }
 
 
-def _step_hour(points: Sequence[tuple[str, float]]) -> str | None:
+def _is_drift(key: str, ratio: float | None, last: float) -> bool:
+    """축별 임계로 일중 악화를 **표시**한다 (2026-08-25 F-43).
+
+    배율과 바닥의 **OR**다. 배율만 보면 첫 시간대가 0인 축에서 최악의 하루가 `None`으로
+    빠져나가고(위 `INTRADAY_OVER_RATIO_FLOOR` 주석), 바닥만 보면 축마다 눈금이 달라
+    ms 축에는 쓸 수조차 없다. 바닥이 있는 축은 지금 초과율 하나뿐이다.
+    """
+    threshold = INTRADAY_DRIFT_RATIO_BY_KEY.get(key, INTRADAY_DRIFT_RATIO)
+    if ratio is not None and ratio >= threshold:
+        return True
+    floor = INTRADAY_DRIFT_FLOOR_BY_KEY.get(key)
+    return floor is not None and last >= floor
+
+
+def _step_hour(points: Sequence[tuple[str, float]], *, key: str = "p50") -> str | None:
     """앞뒤 구간 p50 비율이 임계를 넘는 **경계 시각** — 없으면 `None` (2026-08-20 F-E).
 
     각 경계에서 「그 앞 전부의 중앙값」과 「그 뒤 전부의 중앙값」을 비교한다. 인접 두 점만
@@ -952,6 +1025,7 @@ def _step_hour(points: Sequence[tuple[str, float]]) -> str | None:
     """
     if len(points) < 3:
         return None
+    threshold = INTRADAY_DRIFT_RATIO_BY_KEY.get(key, INTRADAY_DRIFT_RATIO)
     best: tuple[float, str] | None = None
     for index in range(1, len(points)):
         before = [value for _hour, value in points[:index]]
@@ -960,13 +1034,17 @@ def _step_hour(points: Sequence[tuple[str, float]]) -> str | None:
         if head <= 0:
             continue
         ratio = tail / head
-        if ratio >= INTRADAY_DRIFT_RATIO and (best is None or ratio > best[0]):
+        if ratio >= threshold and (best is None or ratio > best[0]):
             best = (ratio, points[index][0])
     return None if best is None else best[1]
 
 
-def _slope(points: Sequence[tuple[int, float]]) -> float | None:
-    """시간당 변화량(최소자승). 양 끝 두 점만 보는 `ratio`가 못 보는 것을 본다."""
+def _slope(points: Sequence[tuple[int, float]], *, digits: int = 1) -> float | None:
+    """시간당 변화량(최소자승). 양 끝 두 점만 보는 `ratio`가 못 보는 것을 본다.
+
+    `digits`는 축의 눈금이다 — ms 축과 비율 축이 같은 자리로 반올림되면 비율 쪽이
+    통째로 0이 된다(2026-08-25 F-43).
+    """
     if len(points) < 2:
         return None
     n = float(len(points))
@@ -976,7 +1054,7 @@ def _slope(points: Sequence[tuple[int, float]]) -> float | None:
     if denominator == 0:
         return None
     numerator = sum((x - mean_x) * (y - mean_y) for x, y in points)
-    return round(numerator / denominator, 1)
+    return round(numerator / denominator, digits)
 
 
 def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
@@ -1194,6 +1272,11 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 measured_sla = record.get("bar_to_publish")
                 if isinstance(measured_sla, dict):
                     bar_to_publish = measured_sla
+                # **손실까지 남은 여유** (2026-08-25 F-43). 없으면 안 담는다 —
+                # F-43 이전 로그이지 여유 0이 아니다(L18).
+                headroom = record.get("grace_headroom")
+                if isinstance(headroom, dict):
+                    publish_offset["grace_headroom"] = headroom
         elif tag == "FeaturePublish":
             horizon = str(record.get("horizon", "?"))
             ratio = record.get("nan_ratio")
@@ -1440,6 +1523,17 @@ def _sizer_funnel_axis(
     return axis
 
 
+# 계열별로 **어떤 축을 병행해서 볼 것인가** (2026-08-25 F-43).
+#
+# `delivery_latency`에 꼬리 축을 안 넣는 이유: 그쪽 `by_hour`에는 초과 카운터가 없다
+# (회선 지연에는 「예산 1,000ms」에 해당하는 경계가 아직 정의된 적이 없다). 소비처가 없는
+# 축을 미리 만들지 않는다 — 2026-08-14 F-4가 남긴 교훈이다.
+_INTRADAY_KEYS: dict[str, tuple[str, ...]] = {
+    "publish_offset": ("p50", "p90", "over_1000_ratio"),
+    "delivery_latency": ("p50",),
+}
+
+
 def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
     """일중 추세를 재는 축들을 한자리에 모은다 (2026-08-20 G-D).
 
@@ -1456,10 +1550,37 @@ def _intraday_trends(logs: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(source, Mapping):
             continue
         by_hour = source.get("by_hour")
-        if isinstance(by_hour, Mapping):
-            trend = hourly_trend(by_hour, key="p50")
-            if trend is not None:
-                trends[name] = trend
+        if not isinstance(by_hour, Mapping):
+            continue
+        # **중앙값 축을 맨 앞에 둔다** — 반환 dict의 최상위 필드가 그것이고, 과거 리포트를
+        # 읽는 눈과 기존 소비처가 그 이름들을 안다(`first`/`last`/`ratio`/`slope`).
+        trend = hourly_trend(by_hour, key="p50")
+        if trend is None:
+            continue
+        # **꼬리 축은 상류가 실어 준 만큼만 본다** (2026-08-25 F-43). `over_1000_ratio`는
+        # F-43 이전 로그에 없다 — 없으면 `hourly_trend`가 `None`을 내고 그 축은 그냥
+        # 빠진다. **없는 축을 0으로 채우지 않는다**(L18: 못 잰 것과 0을 안 합친다).
+        axes: dict[str, Any] = {}
+        for key in _INTRADAY_KEYS.get(name, ("p50",)):
+            axis = trend if key == "p50" else hourly_trend(by_hour, key=key)
+            if axis is not None:
+                axes[key] = axis
+        fired = sorted(key for key, axis in axes.items() if axis.get("drift"))
+        trends[name] = {
+            **trend,
+            "axes": axes,
+            # **⚠는 세 축의 OR다** (2026-08-25 F-43 · 1-13). 종전엔 최상위 `drift`가
+            # p50 하나였고, 2026-08-25에 꼬리가 15배 나빠진 하루가 그 필드에서
+            # `false`로 나갔다.
+            "drift": bool(fired),
+            # 걸린 축의 **이름**을 함께 낸다 — "⚠"만 보면 무엇이 나빠졌는지 다시
+            # 사람이 뒤져야 하고, 그 뒤짐이 2026-08-25 장후 점검 그 자체였다.
+            "drift_axes": fired,
+            # p50 축 단독 판정을 **버리지 않고** 남긴다. 「중앙값은 그대로인데 꼬리만
+            # 나빠졌다」와 「전체가 밀렸다」는 처방이 다르고, 두 값이 나란히 있어야
+            # 그 구분이 리포트에서 바로 읽힌다.
+            "drift_p50_only": bool(trend.get("drift")),
+        }
     return trends
 
 
@@ -3156,10 +3277,34 @@ def format_summary(report: IntegrityReport) -> str:
         trend = (report.intraday_trend or {}).get("publish_offset")
         if trend and trend.get("ratio") is not None:
             mark = "⚠ " if trend.get("drift") else ""
+            fired = trend.get("drift_axes") or []
+            # **걸린 축의 이름을 ⚠ 옆에 적는다** (2026-08-25 F-43 · 1-13). 종전엔
+            # 중앙값 축 한 줄뿐이라 「무엇이 나빠졌나」를 사람이 다시 뒤져야 했다.
+            fired_text = f" [{'·'.join(fired)}]" if fired else ""
             lines.append(
-                f"    {mark}일중 추세: {trend['first_hour']}시 {trend['first']:.0f}ms → "
-                f"{trend['last_hour']}시 {trend['last']:.0f}ms ({trend['ratio']}배)"
+                f"    {mark}일중 추세{fired_text}: {trend['first_hour']}시 "
+                f"{trend['first']:.0f}ms → {trend['last_hour']}시 "
+                f"{trend['last']:.0f}ms ({trend['ratio']}배 · p50)"
             )
+            # 꼬리 축은 **같은 자리에** 붙인다 — 한 줄 아래로 내려가면 중앙값만 읽고
+            # 지나가는 일이 그대로 반복된다(2026-08-25가 정확히 그 하루였다).
+            for key in ("p90", "over_1000_ratio"):
+                axis = (trend.get("axes") or {}).get(key)
+                if not axis or axis.get("ratio") is None:
+                    continue
+                axis_mark = "⚠ " if axis.get("drift") else "  "
+                if key == "over_1000_ratio":
+                    lines.append(
+                        f"    {axis_mark}  예산(1s) 초과율: {axis['first_hour']}시 "
+                        f"{axis['first']:.1%} → {axis['last_hour']}시 "
+                        f"{axis['last']:.1%} ({axis['ratio']}배)"
+                    )
+                else:
+                    lines.append(
+                        f"    {axis_mark}  p90: {axis['first_hour']}시 "
+                        f"{axis['first']:.0f}ms → {axis['last_hour']}시 "
+                        f"{axis['last']:.0f}ms ({axis['ratio']}배)"
+                    )
     # **종단 지연의 모양** (2026-08-21 F-15 → 2026-08-24 F-21). 판정은 아래 예산이 한다.
     if report.publish_grace is not None:
         parts = []
@@ -3171,6 +3316,15 @@ def format_summary(report: IntegrityReport) -> str:
             drift_text = "" if drift is None else f"/이동 {drift:.0f}ms"
             parts.append(f"{name} {stat['p50_ms']:.0f}ms{drift_text}")
         lines.append("  발행 오프셋 Horizon별(대기 포함 · 기록만): " + " · ".join(parts))
+    # **「얼마나 남았나」** (2026-08-25 F-43 · 1-9). 위 줄들이 전부 「얼마나 늦었나」인데,
+    # 2026-08-25 장중이 P1으로 올리며 물은 것은 손실까지의 거리였고 그 답은 그날
+    # 사람이 뺄셈해서 냈다. 계기가 매일 답한다.
+    headroom = (report.publish_offset or {}).get("grace_headroom")
+    if isinstance(headroom, dict) and headroom.get("worst_headroom_ms") is not None:
+        lines.append(
+            f"  유예까지 남은 여유: 최악 {headroom['worst_horizon']} "
+            f"{headroom['worst_headroom_ms']:.0f}ms"
+        )
     # **발행 예산 채점** (2026-08-24 F-21) — 대기를 걷어낸 값이라 여기서 처음으로
     # 「느린가」를 물을 수 있다. 판정이 아니라 기록이다(R18).
     if report.publish_sla is None:

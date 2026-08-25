@@ -374,6 +374,28 @@ _PUBLISH_OFFSET_AXIS_LOCAL = "local_only"
 _PUBLISH_SLA_MS = 1000.0
 
 
+#: 그 Horizon의 발행이 **자료를 실제로 버리기까지** 남은 예산 (2026-08-25 F-43).
+#:
+#: `_PUBLISH_SLA_MS`(1,000ms)와 다른 질문이다. 저쪽은 「느린가」를 묻는 채점 기준이고,
+#: 이쪽은 「넘으면 손실인가」를 묻는 **경계**다 — 2026-08-25에 1분봉 발행 오프셋 최대가
+#: 3,119.7ms였는데 그날 자료 손실은 0건이었다. 두 값이 한 축에 섞여 있으면 그 사실을
+#: 말할 수 없다: 예산 초과 25.7%와 손실 0건이 동시에 참인 이유가 바로 이 차이다.
+#:
+#: 값은 상류 정본에서 가져온다 — 여기에 숫자를 다시 적으면 두 곳이 갈라진다
+#: (`tests/ops/test_publish_offset_axis.py`가 동일성을 강제한다).
+def _grace_ms(horizon: Horizon) -> float:
+    # 함수 안에서 들여온다 — `data.bar_composer`가 ParquetArchiver를 끌고 오므로
+    # 이 모듈을 읽기만 하는 도구(UI·리포트)에 그 무게를 지우지 않는다.
+    from messiah.data.bar_composer import _MAX_CONSTITUENT_WAIT_SECONDS
+    from messiah.data.normalizer import MINUTE_CLOSE_GRACE_SECONDS
+
+    # 1분봉은 정규화기의 완성봉 유예가 경계고(늦은 틱을 그 안에서만 받아준다),
+    # 상위 Horizon은 합성기가 마지막 구성 1분봉을 기다리는 상한이 경계다.
+    if horizon is Horizon.M1:
+        return MINUTE_CLOSE_GRACE_SECONDS * 1000.0
+    return _MAX_CONSTITUENT_WAIT_SECONDS * 1000.0
+
+
 #: 같은 정체로 묶는 시간 폭 — 여러 Horizon 경계가 한 순간에 겹칠 때 (2026-08-21 F-8).
 #:
 #: 2026-08-21 실측에서 14군집 중 5군집이 2개 이상 Horizon이 함께 늦은 형태였다.
@@ -1236,15 +1258,33 @@ class FeatureEngine:
         values = sorted(offset for _moment, offset, _h, _axis in self._publish_offsets)
         stats = _percentiles(values)
         by_hour: dict[str, dict[str, float]] = {}
-        buckets: dict[int, list[float]] = {}
-        for moment, offset, _horizon, _axis in self._publish_offsets:
-            buckets.setdefault(moment.hour, []).append(offset)
-        for hour, offsets in sorted(buckets.items()):
+        buckets: dict[int, list[tuple[float, Horizon]]] = {}
+        for moment, offset, horizon, _axis in self._publish_offsets:
+            buckets.setdefault(moment.hour, []).append((offset, horizon))
+        for hour, rows in sorted(buckets.items()):
+            offsets = [offset for offset, _h in rows]
             hour_stats = _percentiles(sorted(offsets))
+            # **꼬리를 시간대별로 남긴다** (2026-08-25 F-43).
+            #
+            # 2026-08-25에 이 축의 중앙값은 09시 245.3ms → 15시 259.4ms(1.06배)로 거의
+            # 안 움직였는데, 같은 하루의 1,000ms 초과율은 1.7% → 25.7%(15.1배)였다.
+            # 중앙값만 실어 보내면 하류 감시기가 볼 수 있는 것이 앞의 1.06배뿐이고,
+            # 실제로 그날 `drift: false`가 나왔다. **꼬리는 상류가 세어야 한다** —
+            # p50/p90만 넘기면 하류에서 초과 건수를 복원할 방법이 없다.
+            over_sla = sum(1 for offset in offsets if offset > _PUBLISH_SLA_MS)
+            over_grace = sum(1 for offset, horizon in rows if offset > _grace_ms(horizon))
             by_hour[f"{hour:02d}"] = {
                 "p50": hour_stats["p50"],
                 "p90": hour_stats["p90"],
+                "p99": hour_stats["p99"],
                 "samples": hour_stats["samples"],
+                # 예산(1,000ms) 초과 — **건수와 비율을 함께** 싣는다. 비율만 두면
+                # 표본 3건짜리 15시대가 33%로 튀는 것과 60건 중 20건이 같아 보인다.
+                "over_1000": float(over_sla),
+                "over_1000_ratio": round(over_sla / len(offsets), 4),
+                # 유예(=손실 경계) 초과 — 이 값이 0이 아닌 날은 자료가 실제로 빠졌을 수
+                # 있는 날이다. 2026-08-25는 15시대 2건이었고 손실은 0건이었다.
+                "over_grace": float(over_grace),
             }
         mlog.log(
             "FeaturePublishOffset",
@@ -1265,9 +1305,51 @@ class FeatureEngine:
             # 「늦었다」의 원인이 대기인지 계산인지 한 줄에서 갈린다 — 종전엔 두 값이
             # 한 숫자에 섞여 있어서 그 질문 자체가 성립하지 않았다.
             bar_to_publish=self._bar_to_publish_stats(),
+            # **손실까지 남은 여유** (2026-08-25 F-43 · 1-9가 처음 물은 질문).
+            #
+            # 2026-08-25 장중 점검이 발행 지연을 P1으로 격상하면서 물은 것은 "몇 ms인가"가
+            # 아니라 **"얼마나 남았나"** 였고, 그 답은 그날 사람이 손으로 뺄셈해서 나왔다
+            # (5,000 − 3,119.7 = 1,880.3ms). 계기가 매일 답하게 한다 — 손으로 세는 값은
+            # 세는 사람이 없는 날 사라진다.
+            grace_headroom=self._grace_headroom(),
             **stats,
         )
         return stats
+
+    def _grace_headroom(self) -> dict[str, Any] | None:
+        """Horizon별 「유예까지 남은 여유」 + 최악 한 건 (2026-08-25 F-43).
+
+        여유는 **Horizon마다 경계가 다르므로** Horizon별로 낸다 — 1분봉 2,000ms와 상위
+        5,000ms를 한 통에 담으면 "가장 아슬아슬한 계열이 어디인가"가 접힌다. 그 위에
+        `worst`로 하루 한 줄 요약을 얹는다(사람이 하나만 본다면 그것이다).
+
+        표본이 없으면 `None`이다 — **0이 아니라 못 잼**이다(L18).
+        """
+        if not self._publish_offsets:
+            return None
+        by_horizon: dict[str, dict[str, float]] = {}
+        worst: tuple[float, str] | None = None
+        grouped: dict[Horizon, list[float]] = {}
+        for _moment, offset, horizon, _axis in self._publish_offsets:
+            grouped.setdefault(horizon, []).append(offset)
+        for horizon, offsets in sorted(grouped.items(), key=lambda kv: HORIZON_SECONDS[kv[0]]):
+            grace = _grace_ms(horizon)
+            headroom = round(grace - max(offsets), 1)
+            by_horizon[horizon.value] = {
+                "grace_ms": grace,
+                "max_offset_ms": round(max(offsets), 1),
+                "headroom_ms": headroom,
+                # 여유를 **비율로도** 낸다 — 2,000ms 경계의 500ms와 5,000ms 경계의
+                # 500ms는 같은 숫자지만 같은 위험이 아니다.
+                "headroom_ratio": round(headroom / grace, 4) if grace > 0 else None,
+            }
+            if worst is None or headroom < worst[0]:
+                worst = (headroom, horizon.value)
+        return {
+            "by_horizon": by_horizon,
+            "worst_headroom_ms": worst[0] if worst else None,
+            "worst_horizon": worst[1] if worst else None,
+        }
 
     def _bar_to_publish_stats(self) -> dict[str, Any] | None:
         """봉 도착 → 발행 경과의 세션 분포 + Horizon별 (2026-08-24 F-21).
