@@ -11770,3 +11770,902 @@ F-33 · F-45 · F-46 · F-38 · F-39 · F-40, 그리고 오늘 새로 생긴 **F
 반드시 확인한다.
 **F-32는 F-31보다 먼저 넣기로 돼 있었는데 순서가 뒤집혔다** — F-31을 먼저 되돌렸으므로
 F-32의 (ㄴ) 분기(「n거래일 잔존」)를 라이브에서 관측할 기회는 다음 유입 때까지 없다.
+
+## 2026-08-26 (장전 점검 — `messiah-premarket-check` 예약 실행) ([MW0601])
+
+리포트: `logs/dailycheck/2026-08-26_report.md` · 증거: `logs/dailycheck/evidence_20260826_pre.md`
+판정: **조건부 정상** — 자가점검 16/16 `[OK ]` · `self-check: PASS` · P0 0건 · P1 2건 · P2 3건.
+`FixVerificationRecurred` **0건** · `code_version.stale: false` · 산출물 누락 0건.
+
+### [사고] 08:20 기동이 미커밋 소스를 실었다 — 1-1 · F-48
+
+**증상**: HEAD `02855c8`(08-25 21:43:52 KST) 이후 **08:02:12~08:14:12 KST**에 `src/`·`scripts/`가
+편집됐고, 08:20:35 L1 · 08:20:43 UI · 08:25:27 G2 **세 프로세스 전부** 그 소스를 실었다. 당일 커밋 0건.
+
+**근거**: `SessionStart.source_mtime_max = "2026-08-25T23:14:09.270122+00:00"` (= 2026-08-26
+08:14:09 KST) — HEAD 커밋 시각보다 **10시간 30분 뒤**. 자가점검 `git` 줄
+`[WARN] dirty 27건 중 src/scripts 6파일 미커밋 (dev 허용)`. `status_snapshot.json`
+`worktree_dirty_files: 6` · `worktree_dirty: true`.
+
+**6파일 실체**(`git diff --ignore-all-space -- src scripts`, CRLF 잡음 88파일 제외) — 전부
+**주문체결통보(H0IFCNI0/H0IFCNI9) 수신 배선** 작업:
+
+| 파일 | 변경 | 줄 |
+|---|---|---|
+| `core/config.py` | `BrokerConfig.hts_id_ref` · `resolve_secret(*, required: bool = True)` | +20/−2 |
+| `core/logging.py` | `TAG_LEVELS`에 `OrderNotice*` 8종 | +12 |
+| `broker/kis/credentials.py` | `KISCredentials.hts_id` | +5 |
+| `broker/kis/tr_codes.py` | `order_notice_tr_id()` · `order_notice_ws_domain()` | +16 |
+| `broker/kis/order_notice.py` | **신규 미추적** 373줄 — 구독·AES-CBC 복호·22필드 파싱 | 신규 |
+| `scripts/probe_order_notice.py` | **신규 미추적** 154줄 — 실측 프로브 | 신규 |
+
+동반 `tests/broker/test_kis_order_notice.py` 9건(08:14:09 작성 · `.pyc` 08:14:12 → **실행 확인**).
+`tests/`는 `source_mtime_max`의 스캔 대상(`SOURCE_PATHS = src, scripts`)이 아니다.
+
+**원인**: PC 부팅 07:21 → 기동 트리거 08:20의 **59분 창**에서 작업했고, 08:14:12 테스트 통과 후
+**커밋까지 5분 48초**가 남았다. 작업은 완결됐고 커밋만 못 했다 — **사람의 실수가 아니라 창이 좁은 구조.**
+
+**결정**: 오늘은 코드 변경 금지(개장 7분 전 · R11 · 금지계명 3·4). **15:35 마감 직후 ~ 15:45 장후
+배치 전에 커밋**한다(F-48). 커밋은 **2개로 가른다** — ① 배선(신규 3 + `tr_codes.py`)
+② 설정·로그 규약(`config.py`·`credentials.py`·`logging.py`). `logging.py`의 `TAG_LEVELS`는
+**로그 심각도 매핑을 바꾸는 전역 변경**이라 단독 되돌림 경로가 있어야 한다.
+
+**Why**: 미커밋 소스로 돌면 `SessionStart.git_sha`는 참인데 실행 바이트코드가 그 SHA가 아니다 —
+**replay 검증(금지계명 2)의 기준선이 특정 불가**해진다. 특히 `TAG_LEVELS` 변경분은 오늘 로그의
+레벨 분포를 커밋 코드로 재계산하면 다르게 나온다. `ops/status_board.py` 195~207행 주석이 이미
+경고해 둔 상태다 — *"2026-08-19 저녁 구현이 커밋 없이 끝난 날 `stale`은 false였고 다음 날 개장이
+통째로 갔다"*. dev 모드라 P1이지만 **live였다면 금지계명 10으로 기동이 막혔어야 한다.**
+
+**How to apply**: 정시 기동 트리거를 가진 PC에서는 **기동 창 개시(08:15) 전에 `src/`·`scripts/`
+편집을 끝내고 커밋**한다. 못 끝내면 그날 로그는 재현 불가로 간주하고 리포트에 명시한다.
+
+**검증**: 커밋 후 `git status --porcelain -- src scripts` 빈 출력 → 장후 배치의
+`daily_integrity_20260826.json`에서 `record_vs_commit.verdict == "clean"`(→ N-1).
+**15:45 이후 커밋하면 `closed_with_uncommitted_source` 8거래일째가 된다**(L-11 연장).
+
+### [사고] `stale=false`가 미커밋 소스를 요약에서 가린다 — 1-2 · F-49
+
+**증상**: `code_version.summary = "코드 02855c8 — 전 프로세스 동일"` · `stale: false`.
+바로 아래 `worktree_dirty: true` · `worktree_dirty_files: 6`이 있는데 **사람이 읽는 요약 문장에는
+그 사실이 안 들어간다.**
+
+**원인**: `assess_version_drift()`(`core/version.py`)는 커밋 해시 두 개만 대조한다. 워킹트리
+상태는 `status_board.py`가 별도 필드로 붙이기만 한다. 그리고 `source_mtime_max()` 독스트링이
+스스로 적어 둔 대로 — *"`기동 시각 < 소스 최신 mtime`을 판정할 수 있다 — **판정이 아니라 기록으로
+시작한다**(dev에서 편집이 잦아 오탐이 잦을 것이므로 — R18)"* — **판정기를 일부러 안 만든 자리**다.
+2026-08-20 G-C의 그 예고가 **오늘 처음 만기됐다.**
+
+**결정**(장후 적용):
+- `core/version.py` — `VersionDrift`에 `worktree_dirty: bool | None`·`source_newer_than_head: bool | None`
+  추가. `assess_version_drift()`에 `head_commit_time`·`source_mtime`·`dirty_files` 인자
+  (**전부 기본값 `None`** — 기존 호출부 무손상). `source_mtime > head_commit_time`이면 `summary`를
+  `"… · ⚠ 미커밋 소스 6파일이 실려 있음(소스 최신 08:14 > 커밋 08-25 21:43)"`으로 확장.
+  **`stale` 자체는 건드리지 않는다** — 그 필드의 뜻("커밋 간 드리프트")은 지금도 옳다.
+- `ops/status_board.py` 193~211행 — 세 인자 전달 · `code_version`에 `source_mtime_max`·
+  `source_newer_than_head` 적재. **`None`은 미측정 유지**(0으로 위장 금지 — L18, 기존 `worktree_dirty_files` 규약).
+- `core/health.py` 자가점검 `git` 줄 — `(dev 허용)` 뒤에 `· 소스 최신 {HH:MM} > 커밋 {MM-DD HH:MM}`.
+  지금은 파일 **수**만 말하고 **언제 것인지**를 말하지 않는다.
+
+**Why**: `stale` 하나가 두 질문("커밋 간 드리프트가 있나" / "커밋과 실행 소스가 같나")에 겸용되고,
+후자에는 답할 수 없는데 전자의 답으로 후자까지 답한 것처럼 요약된다. `phases.md` D절
+*"하나의 회색이 여러 뜻을 겸하고 있으면 그것부터 분리 대상"* 의 정확한 사례. 장중 점검이
+`status_snapshot.json`을 신뢰 근거로 쓰므로(phases.md B-1), 요약이 틀리면 **장중 판정 전체가
+한 칸씩 낙관 쪽으로 밀린다.**
+
+**결정 필요(사람)**: 경고 강도 — ㉠ 요약 문자열만(**권고**) ㉡ 자가점검 `[WARN]` 승격
+㉢ live 기동 거부. **㉠ → 20거래일 관측 → ㉡.** `source_mtime_max` 독스트링이 오탐을 예고했고
+**R18**(게이트 신설은 섀도 20거래일 후 승격)의 취지가 그것이다.
+
+**검증**: 4조합 단위테스트(미커밋 유무 × 소스 최신 여부) · `pytest tests/core/test_version.py
+tests/ops/test_status_board.py` · **오늘 로그 replay로 `source_newer_than_head: true` 재현**(금지계명 2).
+`summary` 단언은 **1-18 규율대로 등호가 아니라 성질로** 쓴다.
+
+### [사고] 체결 알림 태그 8종이 등록됐으나 발신처가 없다 — 1-3 · F-50
+
+**증상**: `TAG_LEVELS`에 `OrderNoticeSubscribed`·`OrderNoticeReceived`·`OrderNoticeUndecryptable`·
+`OrderNoticeMalformed`·`OrderNoticeHandlerError`·`OrderNoticeWSDisconnected`·`OrderNoticeWSReconnected`
+등 **8종**이 주석 *"2026-08-26 배선"* 과 함께 들어왔고 기동 시 로드됐다. 그러나
+`grep -rn "order_notice" --include=*.py src/ scripts/` → **주석 3건 + 정의 파일 자신뿐.**
+`run_l1_daily.py`·`run_g2_paper_trading.py` 어디에도 임포트 없음. **실행 경로 참조 0건.**
+
+**원인**: 태그 등록(로그 규약)이 배선(호출부)보다 먼저 도착했다.
+
+**결정**(장후 · F-51 결정 후):
+- `core/logging.py` — 해당 블록에 `# 미배선(2026-08-26 기준) — 배선 시 이 줄을 지운다`. 비용 0에 오독 차단.
+- `ops/status_board.py` — `components`에 `broker.order_notice` 추가, 상태 **`NOT_WIRED`**.
+  **`UNKNOWN`을 쓰지 않는다** — `phases.md` D절이 경계한 그 회색을 또 만들면 안 된다.
+  `NOT_WIRED`는 "모른다"가 아니라 **"아직 안 붙였다"라는 확정된 사실**이다.
+- `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` — §10 「태그 규약 대 실제」 신설(G-29).
+
+**Why**: `phases.md` D절 — *"건수 0은 두 가지다 — 진짜 없었거나, 계측이 없거나."* 지금은 구분 수단이
+없고, 하필 `OrderNoticeReceived` 주석이 *"주문 없는 날은 0줄이 정상"* 이라 **미배선의 0줄이 「정상」으로
+읽히게 되어 있다.** `OrderNoticeUndecryptable`이 ERROR라 "에러 0건 = 건강"으로 집계되는데 발신처가
+없으면 그 0은 무의미하다. R6(태그 1개=심각도 1개) 자체는 지켜졌다 — 위반은 R6가 아니라 관측 가능성이다.
+
+**How to apply**: **로그 태그를 `TAG_LEVELS`에 등록하는 커밋과 그 태그를 찍는 호출부 커밋을 분리하지
+않는다.** 분리가 불가피하면 등록 쪽 주석에 「미배선」을 명시한다.
+
+**검증**: N-4 — 오늘 `OrderNotice*` 8종 **0건이 예상값**. 1건이라도 뜨면 배선 경로를 못 찾은
+것이므로 **1-3을 정정**한다.
+
+### [사고] Capability Matrix가 체결통보를 「포트만 완료」로 둔 채다 — 1-4 · F-51
+
+**증상**: `Docs/capability_matrix.md` 28행 `| WS 주문체결통보 | ✅ | — | — | 포트만 완료, 실측 안 됨 …`.
+`git diff --ignore-all-space -- Docs/capability_matrix.md` → **변경 0줄.** 373줄 모듈 + 테스트 9건 +
+프로브 스크립트가 생겼는데 정본 표는 그대로다.
+
+**기준**: SYSTEM.md §2 — *"**Capability Matrix 의무**: 브로커 기능은 {구현됨, 실측 검증됨} ×
+{모의, 실전}을 기록. **실측 검증 안 된 기능은 사용 금지**(L9·L19·L26)"*. 아울러 **금지계명 11**
+(필드 실측 없는 스키마 금지) 대기 상태 — 모듈 독스트링이 인정: *"필드 22개의 … 값의 의미
+(`cntg_yn="2"`가 체결 등)는 국내주식 체결통보(H0STCNI0) 문서 기준이라 **선물옵션 실응답으로
+재검증하기 전까지 미검증**"*.
+
+**결정**(장후 · F-48 커밋에 동승 가능):
+- 28행 비고 → `"수신 모듈 구현 완료(broker/kis/order_notice.py, 373줄, 단위테스트 9건) ·
+  실행 경로 미배선 · 22필드 전부 선물옵션 실응답 미검증(의미 근거는 국내주식 H0STCNI0 문서) ·
+  실측 절차 scripts/probe_order_notice.py"`. **「실측 검증됨」 칸은 프로브 실행 전까지 `—` 유지.**
+- 309행 *"encrypt="Y" TR 전용 복호화 키인지는 여전히 추정"* 에
+  `(2026-08-26: order_notice.py가 이 추정 위에 구현됨 — 프로브 실측 전까지 추정 유지)` 추가.
+
+**Why**: 이 표가 *"실측 검증 안 된 기능은 사용 금지"* 의 판정 근거다. 코드 주석과 정본 표가 갈라진
+채로 두면 **누가 배선할 때 "표에 ✅ 있으니 된다"로 읽는다.**
+
+**검증**: 육안 — 「실측 검증됨」 칸이 `—`로 남아 있는가.
+
+### [설계결정] 체결통보는 **실측(프로브) 후에 배선**한다 — C-1 · F-50 결정사항
+
+`scripts/probe_order_notice.py`를 **모의계좌로 1회 장후 실행**해 `OrderNoticeSubscribed`
+(구독 성공 + 복호 키 수신)가 뜨는지 먼저 본다. 실측 없이 배선하면 **금지계명 11에 정면으로 걸린다.**
+장중 실행은 R11 취지에 어긋나므로 금지.
+
+**부수 확인 필요**: `.env`에 `KIS_HTS_ID` 키는 **존재한다**(값 미확인 — 시크릿). 다만
+`resolve_secret(ref, required=False)`가 **미설정을 빈 문자열로 돌려주는** 모드이고 `credentials.py`가
+`hts_id`에 그 모드를 쓰므로 **키가 비어 있어도 기동은 통과한다.** `config.py` 주석 스스로 경고 —
+*"조용히 빈 tr_key로 구독하면 「통보가 안 온다」로 며칠을 쓴다."* 프로브가 이 값의 유효성까지 판정한다.
+
+### [관측] 국면 시드가 개장 전부터 `TREND_UP` — 1-14의 노출이 첫 사이클로 앞당겨졌다 — G-30
+
+08:25:28 `RegimeSeeded` **`TREND_UP`(확신도 0.98)**. 어제 확인된 사실은
+`META_THRESHOLD_ADJUSTMENT[TREND_UP] = 0.0`(1-14 · F-44)이고 어제 `regime_distribution`에서
+추세는 14건 중 2건(**14.3%**)이었다. **어제는 "드물게 노출되는 위험"이던 것이 오늘은 "개장과 동시에
+노출되는 위험"이다.** M-5(추세 국면만 WARNING인가)는 오늘 이른 시각에 판정될 공산이 크다.
+→ N-2로 관측 등록(시드가 09:00 첫 실사이클까지 유지되는가 / 3사이클 안에 RANGE로 바뀌면 웜업 잔상).
+
+### [판정] 전일 검증 예정(M 시리즈) 중 장전 판정분
+
+- **M-6 F-31** — `git` 줄 `src/scripts 0` **미복귀**(6파일). **그러나 F-31 대상이던
+  `scripts/git_lock_guard.py`는 실변경 목록에 없다**(CRLF 잡음뿐) → **F-31 자체는 성공. 재발 아님.**
+  6파일은 전부 오늘 아침 신규 작업(1-1). `FixVerificationRecurred` **0건**.
+- **M-7 등록부** — ✅ **해소.** `[OK ] deadlines 등록부 23건 · 기한 도달 불가 0건 · 기한 임박 0건`.
+  엿새째였던 `no-degenerate-features` 기한 경고가 커밋 `35990bd`로 소멸 → **L-12 동시 해소.**
+- **M-8 커밋 반영** — ✅ **해소.** `SessionStart.git_sha == HEAD == 02855c8` · `stale: false`.
+  **어젯밤 커밋 5건 정상 반영.** 단 「반영됐다」와 「이것만 실렸다」는 다르다 → 1-2.
+- **L-10 `.__wtest`** — ✅ **해소 · 잔재 확정.** 삭제 후 장후 배치 1회·기동 3회를 거쳤는데 **재생성 없음.**
+- **L-11 `record_vs_commit`** — 🔄 이월(장후). 08-25의 `closed_with_uncommitted_source`는
+  **정상이다** — 배치 15:46 vs 커밋 21:43. 오늘 판정은 N-1로.
+- M-1·M-2·M-3(F-43 산출물) ⏭ 장후 / M-4·M-5(F-41·F-44 섀도 1일차) ⏭ 장중.
+
+### [지속] 승격 관문 미판정 현역 번들 — 3거래일 연속 — 1-5
+
+`real-20260820-2053-30m`(미통과 관문 `sharpe`,`max_drawdown`,`negative_window_ratio`).
+08-24·08-25·08-26 자가점검 `bundle` 줄에 동일 문구. **DECISION_LOG 11526행에 이미 등재된 기존
+항목이므로 새 발견으로 세지 않는다.** 지속 일수만 갱신. 정규 경로는 성과 3종 측정(우회 플래그 부재는 의도).
+
+### [메모] 오늘 장전이 이상점으로 올리지 않은 것 — 판단 근거
+
+- `SessionEnd` 3종 부재 — 장전이라 프로세스 생존 중. 장후 판정 사항.
+- `logs/postmarket_20260826.log` 부재 — 15:45 산출물. 차례 아님.
+- `LaunchWindowRefused` ×2(06:08:38 L1 · 06:08:52 G2) — 07:21 부팅 복구 트리거가 기동 창(08:15~)
+  밖에서 깨웠고 자진 거절. **설계대로**이며 08:20:35·08:25:27 정시 기동 성공까지 확인(거절만 보고
+  끝내지 않았다 — phases.md A-1).
+- `SessionStart` L1·G2 각 2건 — 1건이 위 거절분. **중복 기동·크래시 재기동 아님.**
+- **옵션체인 폴 간격 98/102/300초의 10분 주기** — 전일(08-25) 장전과 **간격 패턴 동일**. 설계값.
+  *이것을 이상점으로 쓸 뻔했고 전일 로그 대조로 걸렀다.* `OptionChainPolled` 12건 전부 `42/42다리`(결손 0).
+- CRLF 개행 잡음 88파일 — `--ignore-all-space`로 실변경 4파일 분리. 부채이나 오늘 사안 아님.
+- `ui/app.py` 1,482줄(R5 위반) — NEXT_TODO 기등재 2회. 새 발견으로 세지 않음.
+- UI 네 토픽 `NO_DATA`(08:20:44) — 개장 전이라 설계대로. **09:05까지 `NO_DATA`면 그때 이상점**(N-3).
+- `clock offset` −0.123초(L1) · −0.124초(G2) · 실측 −0.16초(08:45:05) — 1분봉 유예 2,000ms의 8%.
+
+## 2026-08-26 (장중 점검 — `messiah-intraday-check` 예약 실행) ([MW0601])
+
+> 관측 구간 09:00:00~12:36:10 KST. **코드 변경 0건 · 커밋 0건 · 재기동 0건** (R11 / 금지계명 3·4).
+> 근거 전문: `logs/dailycheck/2026-08-26_report.md` 제2부 · 증거: `logs/dailycheck/evidence_20260826_intra.md`
+> 파이프라인 4종 전부 `OK` · 판단 사이클 8/8 완주 · 주문 0건 · `irrecoverable_loss.clean: true` · 손익 0원(dev/simulator).
+
+### [사고] 장전 점검이 저장소를 커밋 불가 상태로 만들었다 — **이틀 연속** · F-34 재발방지 3건 미적용 — 1-6 · F-53 · F-54
+
+**증상**: `.git/index.lock` 0바이트, mtime **2026-08-26 08:50:59.904410700 KST**, 12:36 기준 나이 3.8시간,
+git 프로세스 0개. 3중 조건 전부 만족 = 스테일. 장전 다이제스트 생성은 **08:50:29**(`인덱스락 없음`) —
+**30초 뒤에 생겼다.**
+
+**원인**: 2026-08-25와 **동일 기전**(DECISION_LOG 10911~). 장전 점검자의 손호출 git
+(`git diff --ignore-all-space -- src scripts`, 1-1의 6파일 표 산출)이 락을 남겼고 마운트 권한으로
+회수 실패. rc=0이라 어떤 계측에도 안 걸린다. 어제 08:50:43→08:51:14(+31초), 오늘 08:50:29→08:50:59(+30초).
+
+**재발방지 미적용 확인 (F-34 하위 3건 전수)**:
+
+| F-34 하위 | 상태 | 확인 |
+|---|---|---|
+| ① SKILL.md `--no-optional-locks` 명문화 | ❌ | `grep -c` SKILL.md 0 · references/*.md 4개 전부 0 |
+| ② `collect_evidence.py` §9 근접(±120초) 판정 | ❌ | 오늘 §9 1번은 나이만 말함. 있었으면 08:51에 알았다 |
+| ③ `self_check.py` `_check_git()` 인덱스락 3상태 | ❌ | 판정 코드 없음. 08:20 자가점검 `git` 줄에 락 언급 0 |
+
+NEXT_TODO 8085·8258행이 이미 「F-34 재발방지 3건 미해소」로 기록. **이 재발은 예고돼 있었다.**
+**수집기는 무죄** — `collect_evidence.py` 332행이 `["git","--no-optional-locks",*args]`로 전부 감쌈(08-23 P1-1).
+이 장중 세션도 손호출 전부에 `--no-optional-locks` 사용, 새 락 0건(기존 락 mtime 불변).
+
+**결정 (F-53 · F-54)**:
+- **F-53 즉시(사람·장중 가능)**: `python scripts\git_lock_guard.py --check` → rc=2면 `--reclaim`.
+  **PowerShell에서** (Git Bash는 F-47의 거짓 「판정보류」). 코드 변경·재기동이 아니므로 R11 대상 아님.
+- **F-54 장후**: F-34 하위 3건을 그대로 재발행 + `self_check`의 락 줄은 `[WARN]`으로 내되 **기동은 허용**.
+  차단은 과녁이 아니다 — 오늘 피해는 기동이 아니라 **저장**에 났다.
+
+**Why**: 1-1(미커밋 6파일)의 **유일한 해소 수단이 커밋**인데 그 커밋이 막혔다. 금지계명 10의 집행 수단이
+무력화된 상태다. 2026-08-23 문구 그대로 — *"실질 피해는 지연이 아니라 커밋 봉쇄."*
+
+**How to apply**: F-53을 **F-48보다 먼저** 둔다. F-48은 이제 선행조건을 가진 항목이다.
+`scripts/git_lock_guard.py`는 futures 정본의 바이트 동일 사본이므로 **직접 수정 금지**(DECISION_LOG 9581·9603).
+
+**검증**: 회수 후 `git status` rc=0 **그리고 `git add -n .` rc=0**(쓰기 경로는 쓰기로만 확인). 장후 증거 §9
+적신호 1번 소멸. → **N-8**.
+
+### [버그] 메타 관문이 같은 사이클에서 **이전 국면**을 썼다 — 8회 중 2회 · 섀도 1일차 오염 — 1-7 · F-55
+
+**증상**: `RegimeClassified`(발행)와 같은 사이클 `MetaGateEvaluated.regime`(소비)이 **8회 중 2회 불일치**.
+둘 다 **국면 전환 사이클**이다. 전환 3회 중 2회 실패.
+
+```
+09:00  RegimeClassified 09:00:00.705 RANGE(0.7924)  →  MetaGate 09:00:00.886 TREND_UP  (Δ0.181s) ❌
+09:30  09:30:00.485 RANGE(0.9963)                   →  09:30:00.521 RANGE   (Δ0.036s) ✅
+10:00  10:00:00.634 HIGH_VOL(0.5177) ←전환          →  10:00:00.743 HIGH_VOL(Δ0.109s) ✅
+10:30  10:30:00.810 HIGH_VOL(0.9981)                →  10:30:01.097 HIGH_VOL(Δ0.287s) ✅
+11:00  11:00:01.007 HIGH_VOL(0.9737)                →  11:00:01.224 HIGH_VOL(Δ0.217s) ✅
+11:30  11:30:00.577 HIGH_VOL(0.9988)                →  11:30:00.736 HIGH_VOL(Δ0.159s) ✅
+12:00  12:00:00.949 HIGH_VOL(0.9993)                →  12:00:01.518 HIGH_VOL(Δ0.569s) ✅
+12:30  12:30:01.625 RANGE(0.6172) ←전환             →  12:30:02.317 HIGH_VOL(Δ0.692s) ❌
+```
+
+09:00의 `TREND_UP` 출처는 **08:25:28.762 `RegimeSeeded`**(`confidence 0.981`, `delivery: "bus+direct"`).
+**시드만 direct 주입이고 이후 갱신은 버스 경유만이다.**
+
+**원인**: `strategy/futures/service.py` 123~125행 `handle_regime()`이 버스 수신 시에만 `_latest_regime`을
+갱신하고, 165~171행 임계 보정이 그 값을 읽는다. 두 핸들러 사이 **같은 사이클 순서 보장이 없다.**
+`regime_received`(08-19 F-5)는 「한 번이라도 받았나」만 답하고, **「이번 사이클 것인가」는 아무도 안 묻는다.**
+**시차로 설명 안 됨** — 성공 10:00은 0.109s, 실패 12:30은 0.692s. 단순 지연이 아니라 경합.
+정확한 기전은 **확인 필요**: ㉠ `RegimeClassified` 로깅과 `bus.publish(RegimeState)` 순서(`strategy/regime/runtime.py`)
+㉡ 이벤트 루프 태스크 스케줄 ㉢ 소비측 사이클 진입 스냅샷. **셋 다 코드 읽기만으로 판정된다 — 실행 불필요.**
+
+**영향 — 오늘 판정은 안 바뀌었다(확인함)**:
+- 09:00 `p=0.07349`. 오사용 TREND_UP adj 0.0 → shadow 0.0 → `true`. 정상 RANGE adj +0.05 → shadow 0.05 →
+  `0.07349 ≥ 0.05` → **여전히 true.**
+- 12:30 `p=0.02764`. 오사용 HIGH_VOL +0.10 → false. 정상 RANGE +0.05 → `0.02764 < 0.05` → **여전히 false.**
+- **8사이클 `passed_shadow` 값 전부 불변.**
+
+**그러나 세 가지가 훼손됐다**:
+1. **귀속 오염** — 기록상 RANGE 2 · HIGH_VOL 5 · TREND_UP 1, 실제 RANGE 3 · HIGH_VOL 5 · TREND_UP 0.
+   `threshold_adj_source` 문자열까지 함께 틀려 **사후에 로그만으로는 오염을 알 수 없다.**
+2. **오늘 유일한 WARNING이 가짜** — 09:00:00.886의 `(임계 0 — 게이트 무력)`은 `threshold_shadow == 0.0`
+   일 때만 붙는다. 정상 RANGE면 shadow 0.05 → INFO였다. **F-6(1-8) 경보가 헛울었다.**
+3. **R18 20거래일 계측 1일차** — 어제 F-44가 표를 결과에 배선한 **바로 다음 날**이다. 어제까지는 틀려도
+   아무 데도 안 쓰여 보이지 않았다.
+
+**결정 (F-55, 장후)**: `service.py`에 `_latest_regime_at`·`_latest_regime_as_of` 보관 →
+`feature_as_of`와 대조해 `regime_is_current: bool` 산출 → `MetaGateEvaluated`에
+`regime_is_current`·`regime_as_of`·`regime_age_ms` **싣기만 한다**(판정 불변 — F-41과 같은 섀도 규율, R18).
+`aggregator.py` 227행 `regime_source`에 **세 번째 값 `"received_stale"`** 추가. 새 태그 불필요(R6 준수).
+
+**Why (표본을 버리지 않는다)**: 20거래일 뒤 볼 것은 국면별 분포다. `regime_is_current: false`를 실어 두면
+**포함/제외 양쪽으로 다 계산할 수 있다.** 지금 버리면 되돌릴 수 없다. **오늘 1일차 2건은 표시 수단 없이
+지나갔으므로 위 표를 보정 근거로 남긴다.**
+
+**How to apply**: **확인 필요(기전 ㉠㉡㉢) 판정이 선행**한다. ㉢(스냅샷)이면 위 설계 대신 「사이클 진입 시
+국면을 명시적으로 요구」가 맞다. G-31(발행/소비 자동 대조)을 **F-55보다 먼저** 넣으면 F-55의 검증 도구가 된다.
+
+**검증**: ① 오늘 로그 replay — 09:00·12:30에만 `regime_is_current: false`(금지계명 2) ② 단위테스트 2케이스
+③ 익일 장중 전환 사이클에서 `regime_age_ms` 실측. → **N-9 · N-13**.
+
+### [사고] 화면 프로세스 크래시 덤프 1건 — 상태판은 계속 `UP` · 장중 대조 계측 없음 — 1-8 · F-56
+
+**증상**: `logs/ui_20260826.log` 14행 `Windows fatal exception: access violation` **1회**. 스레드 블록 10개,
+**`Current thread` 블록 0개**(= 파이썬 상태 없는 네이티브 스레드에서 폴트 — `ops/crash_dumps.py` 147~148).
+구조화 JSON은 2행뿐(08:20:43 `SessionStart`, 08:20:44 `UISnapshotFreshness`), 파일 최종 기록 **10:36:39**.
+덤프 하한은 08:20:44 이후. 같은 시각 `status_snapshot.json` 12:36:10 = `"command_center_ui": "UP"`.
+**새 `SessionStart` 없음** → 재기동 아님(금지계명 4 위반 아님).
+
+**전일 대비**: `ui_2026082{0,1,4,5}.log` 4개 전부 `Windows fatal exception` **0건**. 오늘 1건.
+
+**원인 — 두 겹**:
+1. 생존 판정이 **포트 점유 한 축뿐**이다 — `scripts/run_l1_daily.py` 790행
+   `ui_probe=lambda: is_ui_already_running(ui_port)`. 프로세스 생존은 맞히지만 내부 스레드는 못 본다.
+   `integrity_report.py` 2125~2137이 이미 같은 병을 기록(08-11 `ui: 79.8분 관측 공백` vs `UP` 15초 간격).
+2. 덤프를 읽는 `ops/crash_dumps.py`가 **장후 배치에서만** 돈다. 장중에 대조하는 코드가 없다.
+   게다가 그 모듈의 `survived`는 *"덤프 뒤 로그 활동이 이어졌는가"*인데 **Streamlit UI는 정상일 때도
+   아무것도 안 찍는다** — 같은 파일 141~146이 이미 인정한 한계. **오늘 장후에 `survived=False`가 나와도
+   아무것도 알 수 없다.** → N-10.
+
+**F1 재발 아님**: 07-29~30 polars mmap 크래시(NEXT_TODO 1015~1035)는 `_load_bars()` 스택이었고 F1 3중 방어로
+닫혔다(체크 완료). 오늘 덤프에 `Current thread` 블록이 없어 **F1 재발이라 단정할 근거가 없다.**
+`FixVerificationRecurred` 0건. **신규 발생으로 센다.**
+
+**부수 확정 — N-3 판정 불가**: `_log_snapshot_freshness_once`(`ui/app.py` 1366)는 **세션당 1회, 첫 렌더에만**
+찍는다. 오늘 그 1회는 08:20:44에 소모. **「09:05까지 NO_DATA면 이상점」이라는 장전 판정 기준은 성립하지
+않는다.** 제1부 N 시리즈 표에 정정 포인터 1줄 부착(본문 무수정).
+
+**결정 (F-56, 장후 · P2)**: `ui/app.py` 라이브 구독 스레드가 **5분 주기 `UILiveSubscriberHeartbeat`**(INFO 신규 1종,
+R6 준수) 발행. `UISnapshotFreshness`를 반복 발행하지 **않는다**(그 태그의 뜻을 흐리면 안 된다).
+`status_board`의 `command_center_ui`를 **두 축**으로: `{"port": "UP", "subscriber": "OK|STALE|UNKNOWN"}`.
+**`UNKNOWN`을 정상으로 접지 않는다**(phases.md D절). `collect_evidence.py` §2에 프로세스별
+`Windows fatal exception` 카운트 — 오늘 이 값이 §9에 있었으면 즉시 걸렸다(지금은 접힌 블록에 묻힘).
+
+**Why 급하지 않은가**: 화면은 거래 경로가 아니다. 오늘 주문 0건·손익 0원. **그러나 관측 표면이므로
+「죽었을 수 있는 것을 UP이 가린다」는 금지계명 12·R10 계열이다** — 1-2(미커밋을 stale=false가 가림),
+1-6(커밋 불가를 rc=0이 가림)과 **같은 병의 세 번째 사례**다. 오늘 하루에 세 건이 모였다는 것이 신호다.
+
+**검증**: 구독 스레드 강제 종료 시 `subscriber: STALE` 전이 · 오늘 로그에 수집기 재실행 시 §9에
+`ui: 네이티브 크래시 덤프 1건` · `pytest tests/ops/test_status_board.py`.
+
+**사람이 지금 할 수 있는 것(1분)**: 브라우저로 `http://localhost:8511`을 **새로 열면** 새 첫 렌더가
+`UISnapshotFreshness` 두 번째 줄을 남긴다 → **N-3을 사후에라도 판정할 수 있게 된다.** 관측 프로세스만
+건드리므로 R11 대상 아님.
+
+### [고도화] G-31 발행/소비 자동 대조 · G-32 지연 3축 명시
+
+- **G-31 (이번 주 · 약 50분 · 선행 없음)**: `collect_evidence.py` §11 「발행 대 소비」 — (발행태그.필드)→(소비태그.필드)
+  쌍을 등록해 같은 사이클 창(±5초) 안 불일치를 표로. 등록 3쌍: `RegimeClassified.regime`→`MetaGateEvaluated.regime`,
+  →`DecisionEmitted`(국면 실으면), `FeaturePublish.bar_confirm_kst`→`MetaGateEvaluated.feature_as_of`.
+  **관측 근거**: 오늘 1-7은 16줄을 **손으로 눈맞춤**해 찾았다. §3 집계는 두 태그를 각각 `×8`로만 셌고
+  **값이 다르다는 사실은 어디에도 안 나타났다.** 개수가 맞으면 조용한 구조다.
+  **기준선**: 불일치 8회 중 2회(25%) · 전환 사이클만 3회 중 2회(67%). 목표 20거래일 이동평균 5% 이하.
+  **위험**: 정상 시차 오탐 → 「불일치」로만 내고 「위반」으로 내지 않는다(G-29와 동일 규율).
+- **G-32 (다음 단계 · 약 40분 · 선행 M-1~M-3)**: 지연 3축을 로그가 스스로 구분하게 한다.
+  **관측 근거**: 오늘 세 값이 한 화면에서 섞였다 — 장전 자가점검 `전일 회선 p99 1026ms`(delivery_latency),
+  `publish_offset_ms`(거래소 봉마감 대비 발행, 오늘 p99 1,602ms), `bar_to_publish_ms`(봉확정 대비 발행, p99 141ms).
+  **갈라내기 전에는 「1,026 → 1,602 악화」라는 틀린 문장이 성립했다.**
+  ① 자가점검 `bar_close` 줄에 축명 병기 ② F-43 산출물 키에 축 명시 ③ `references/evidence_map.md`에 3축 대조표.
+  **기준선**: 축 표기 있는 지연 지표 1/3(33%) → 목표 3/3.
+
+### [판정] 장전 등록 관측 항목(N 시리즈) 처분
+
+- **N-1** `record_vs_commit` — ⏭ 장후 이월 · ⬆️ **위험 격상**(1-6으로 커밋 봉쇄 → `closed_with_uncommitted_source` 8거래일째 사실상 확정)
+- **N-2** 국면 시드 유지 — ✅ **해소 · 웜업 잔상 확정.** 08:25:28 `TREND_UP`(0.981) → 09:00:00.705 `RANGE`(0.7924),
+  **1사이클 만에 교체.** 장전 우려(추세 임계 0.0 상시 노출)는 **일어나지 않았다.** 단 시드값이 09:00 메타 관문 1건에 샜다 → 1-7
+- **N-3** UI 배지 — ⏭ **판정 불가(관측 수단 부재 · 전제 오류).** 결함 아님 → 1-8
+- **N-4** `OrderNotice*` — ✅ **해소.** 세 로그 전부 0건. **1-3 진단 확정, 정정 불필요**
+- **N-5** 시세 WS 재연결 · 점심 공백 — ✅ **해소(오늘 무증상).** 재연결/끊김 태그 0건 · `l1_daily` ERROR/WARNING **0행** ·
+  12:00~12:38 1분봉 결손 0. **C-3은 무증상이지 반증 아님**(끊길 계기가 없었다)
+- **N-6** 옵션체인 결손 — ✅ **해소.** `OptionChainPolled` 103건 **전부 42/42다리**(08:22:24~12:35:44)
+- **N-7** `clock offset` — ✅ **해소 · 안정.** 장중 7회(30분 주기, 표본 600), **−0.174 ~ −0.147초**, 직전 대비 변동 최대 0.019초.
+  1초 기준의 17% · 1분봉 유예 2,000ms의 8.7%. **1-9 해석에 시계는 기여하지 않는다**
+
+### [판정] 전일 M 시리즈 중 장중 판정분
+
+- **M-4** ✅ **해소.** `MetaGateEvaluated` 8건 **전건**에 `threshold_shadow`·`passed_shadow`·`regime`·`threshold_adj_source`
+  존재. **넉 달간 정의만 있던 `META_THRESHOLD_ADJUSTMENT`가 실제로 돌았다.** F-41·F-44 섀도 **1일차 완료 · 잔여 19거래일**.
+  `passed_shadow` 8건 중 **7건 false**(어제 8/8 false보다 완화) → 종일값은 N-14
+- **M-5** ⚠ **조건부 해소 — 유효 표본 0건.** WARNING 1건 / INFO 7건이고 **RANGE 2 · HIGH_VOL 5가 전부 조용했다
+  (설계 의도 확인).** 그러나 유일한 WARNING은 1-7이 잘못 실은 `TREND_UP`에서 나왔다. **오늘 추세 유효 표본 0건**
+  → 익일 이후 재관측 **N-9**
+- **M-1·M-2·M-3** ⏭ 장후 이월(유지). 장중 원본으로 선행 관측만: `publish_offset_ms` 2,000ms 초과 **4건** → `over_grace`
+  대조 재료 **N-11**
+
+### [메모] 오늘 장중이 이상점으로 올리지 않은 것 — 판단 근거
+
+- **발행 지연 2,000ms 초과 4건** — *신규 1-9로 쓰려다 전일 대조로 걸렀다.* 1분봉 동시간대(~12:38):
+  08-25 중앙 252.6 · p99 1,986.7 · 초과 3건 / **08-26 중앙 300.6 · p99 1,601.9 · 초과 3건.**
+  종일로도 08-24 초과 29건(p99 2,498) → 08-25 12건(p99 2,065) → **완화 추세 위에 있다.**
+  `bar_to_publish_ms` 47~63ms이므로 **지연은 계산이 아니라 상류(봉마감 타이머·틱 도달)**. `AggregatorLateTickDropped` 0건 ·
+  `late_bar_drops` 0건 → **유실 없음.** F-43이 이미 계측기를 만든 대상 → M-1~M-3 / N-11로 넘긴다. **새 번호 안 붙임.**
+- **`OptionChainPollRetried` 4건** — 전건 `attempts: 2`, 브로커 500, 종목 매번 다름, **결손 0**.
+  08-24 종일 4건 · 08-25 종일 8건 → **평상 범위.** INFO지만 태그·시도횟수·원문 오류를 다 싣는다 → **조용한 폴백 아님**(R10 충족). → N-12
+- **`ui` 구조화 JSON 2행뿐** — 세션당 1회 설계(`ui/app.py` 1366). **결함 아님**(다만 N-3 판정 불가의 원인 → 1-8)
+- **`SessionEnd` 3종 · `postmarket_20260826.log` · `daily_integrity_20260826.json` 부재** — **전부 15:35 이후 산출물. 차례가 아니다.**
+- **`command_center_ui.json` pid 23852 vs `SessionStart` pid 25228** — Streamlit 런처/자식 구조상 정상, 전일 동일 형태
+- **`threshold_source: "unrecorded_pre_f6"` 8건** — F-18(커밋 `16e0a87`)이 「없다」와 「없다고 적혀 있다」를 가른 값. **설계대로**
+- **CRLF 88파일 · `ui/app.py` 1,482줄(R5)** — dev_memory 기등재. 새 발견으로 안 셈
+- **`FixVerificationRecurred` 0건 · `code_version.stale` false · 장중 기대 산출물 3종 전부 존재**
+
+### [사고] 점검 세션이 **검증 명령으로** 잠금을 다시 만들었다 — 1-6 재개 · F-53-b · F-57 (15:10 후속)
+
+**증상**: 15:01:45 확인 시 `.git/index.lock` **부재** · `git_lock_guard.py --check` rc=0(사용자가 12:36~15:01
+사이 회수 완료 = F-53 성공). **15:02:02에 새 락 생성.** 만든 것은 이 점검 세션이다.
+
+```
+git --no-optional-locks status   rc=0
+git --no-optional-locks add -n . rc=0
+→ .git/index.lock  mtime 2026-08-26 15:02:02.547787100 KST  0바이트
+python3 scripts/git_lock_guard.py --reclaim --min-age 0
+→ STALE 회수 실패: [Errno 1] Operation not permitted   rc=2
+```
+
+**원인 — F-54 ④의 전제가 틀렸다.** 12:36에 *"`git --no-optional-locks add --dry-run .` rc 확인.
+`--no-optional-locks`를 반드시 동반 — 안 붙이면 검사가 락을 만든다"* 라고 적었다.
+**`--no-optional-locks`는 이름 그대로 optional 락만 억제한다** — `status`가 인덱스 갱신에 잡는 락이 그것이다.
+`add`는 **드라이런이어도 진짜 인덱스 락을 잡는다**(인덱스를 읽어 갱신 계획을 세우는 것이 명령의 본체).
+**플래그가 막을 수 있는 종류가 아니다.** 그대로 넣었으면 매일 아침 자가점검이 **락을 만드는 자동화**가
+됐을 것이다 — 어제 결정문의 *"오늘 실수의 자동화 판"* 이 다른 경로로 실현될 뻔했다.
+
+**회수 불가 확인**: 마운트에서 unlink 거부. 어제 10918행 `unable to unlink ... Operation not permitted`와
+**같은 벽.** 샌드박스에서는 지울 수 없고 **사용자 PC의 PowerShell에서만** 가능하다.
+
+**결정**:
+- **F-54 ④ 폐기.** 대체 **F-57** — `self_check.py` `_check_git()`이 쓰기를 시도하는 대신
+  `git_lock_guard.inspect()`를 **임포트해 재사용**해 (존재·크기·나이·git 프로세스 수) 4가지를 읽는다.
+  **부작용 0**(stat + 프로세스 목록만). 예외는 삼키고 `인덱스락 미측정`(0으로 위장 금지, L18).
+  `scripts/git_lock_guard.py`는 futures 정본 바이트 동일 사본이므로 **임포트만, 수정 금지**.
+- **F-53-b 즉시(사람)**: `python scripts\git_lock_guard.py --reclaim`. 15:12 이후엔 나이가 기본 임계
+  600초를 넘어 `--min-age` 불필요.
+- **검증을 `git add -n`으로 하지 않는다** — 그 검증이 방금 문제를 만들었다. **F-48 커밋을 바로 시도하고,
+  커밋 성공을 쓰기 경로 검증으로 삼는다. 커밋이 곧 검증이다.**
+
+**Why (2026-08-23 규율의 한계)**: *"읽기 통과로 쓰기를 추정하지 않는다 — 쓰기 경로는 쓰기로만 확인된다"*
+는 옳다. **그러나 이 저장소에서는 「쓰기 시도」가 부작용을 남긴다.** 그러므로 규율을 이렇게 좁힌다 —
+**쓰기 확인은 「하려던 쓰기 그 자체」(커밋)로 한다. 확인 전용 쓰기 명령을 따로 돌리지 않는다.**
+
+**미확정 — 깨끗한 시험 필요(30초, 장후)**: 15:01~15:02는 `status` → `add -n`을 연달아 돌려
+**둘 중 누가 만들었는지 100% 가르지 못했다.** 회수 직후 커밋 전에
+`reclaim → Test-Path → status → Test-Path → add -n → Test-Path` 순으로 1회.
+**예측: `status` False · `add -n` True**(12:36 세션이 `--no-optional-locks status/diff`를 수십 회 호출하는
+동안 08:50:59 락 mtime 불변). **예측이 빗나가면 F-54 ①의 전제가 무너진다** — 플래그가 이 마운트에서
+안 듣는다는 뜻이고, 그러면 **점검 중 git 손호출 자체 금지**로 F-54를 다시 쓴다. 시험 뒤 `--reclaim` 재실행.
+
+### [사고] 재발방지 3건이 하루 동안 **작업 목록에 한 번도 오르지 않은** 구조적 이유 — 1-9 · F-58 · F-59
+
+**증상**: 08-25 12:06 결정된 F-34 재발방지 3건이 08-25 12:06·12:40·15:57, 08-26 08:53·12:36
+**다섯 번 「미해소」로 기록**되고도, 그 사이 유일한 구현 세션(08-25 21:41~21:43, 커밋 4건)에서
+**후보로조차 오르지 않았다.**
+
+**근거**: `git log --name-only`로 4커밋 전수 확인 — `scripts/self_check.py` ·
+`.claude/skills/messiah-daily-check/SKILL.md` · `.../scripts/collect_evidence.py` **어느 것도 없다.**
+그 세션의 이월 목록(DECISION_LOG 11764 `[미구현] 오늘 밤 넣지 않은 것 — 남은 11건`)은
+F-36·F-35·F-37·F-32·F-33·F-45·F-46·F-38·F-39·F-40·F-47 — **F-34가 없다.**
+「안 넣은 것」 목록에조차 없다 = **넣을지 말지 판단한 적이 없다.**
+
+**원인 — 세 겹**:
+
+1. **재발방지 3건에 자기 ID가 없다.** NEXT_TODO 8081~8086:
+   `- [x] **F-34 잠금 회수 ✅ 완료**` / `- [ ] **F-34 재발방지 3건은 미해소**`.
+   **ID를 가진 줄이 `[x]`이고 `[ ]`인 줄엔 ID가 없다**(「F-34 하위」라는 서술뿐). 밤 세션 이월 목록은
+   `F-nn` ID 나열이므로 ID 없는 항목은 오를 수 없다. **산문에는 보이고 대기열에는 안 올랐다.**
+2. **등록부가 받을 수 없다.** `configs/pending_verifications.yaml` 헤더 18~21이 지표를 무결성 리포트
+   실재 필드로 한정(`native_crashes` · `faulthandler_dumps` · `ui_restarts` · `restarts` ·
+   `critical_log_lines` · `breaches` · `missing_minutes` · `longest_gap_minutes` · `tick_rows`).
+   **인덱스락 지표 0개.** `grep -niE "f-34|index.lock|optional-locks"` → **0건.** 등록 자체가 불가능하다.
+3. **밤 세션 선택 기준이 「그날 관측된 것」.** 커밋 4건은 F-43·F-41·F-44·1-18 — 전부 그날 로그에서
+   증상이 관측된 항목. **F-34는 12:05 회수로 저녁엔 증상이 사라져 있었다.**
+   증상 없는 항목은 증상 있는 항목과 경쟁하면 진다.
+
+**기준**: `pending_verifications.yaml` 헤더 6~9가 이 병을 예고했다 — *"매번 판정 기준 자체는 기록돼
+있었지만, 그걸 다음날 다시 꺼내 확인하는 일을 아무도 강제하지 않았다."* **오늘 것은 그 한 칸 앞
+단계다** — 판정 기준이 아니라 **작업 자체**가 매일 기록되며 매일 안 집혔다. 금지계명 12 계열
+(「기록돼 있음」이 「처리됨」으로 읽히는 자리).
+
+**결정**:
+- **F-58 (P1, 장후)**: `references/report_template.md` Fix 절과 `SKILL.md` §5에 규칙 1줄 —
+  *"한 사고에서 「지금 멈추게 하는 조치」와 「다시 안 나게 하는 조치」가 함께 나오면 **번호를 나눈다**.
+  즉시 조치가 완료돼도 재발방지 번호는 열려 있어야 한다."* NEXT_TODO의 기존 ID 없는 미해소 항목은
+  `grep -nE "^\s*- \[ \].*(하위|미해소)"` 로 후보를 뽑아 **사람이 확정**(자동 부여 금지 — F-20 규율,
+  틀린 번호가 권위를 얻는다).
+- **F-59 (P2, 장후, F-54·F-57·F-58 다음)**: `ops/integrity_report.py`에
+  `git_index_lock: {present, age_hours, created_near_check}` 신설(`null`=미측정 유지) →
+  `pending_verifications.yaml` 지표 목록에 `git_index_lock_present`(max 0) 추가 + F-54 등재
+  (`consecutive_days: 5` 권고 — 이틀 연속 났으므로 하루로는 우연과 구분 불가) →
+  `ops/fix_verification.py` 채점 배선. **`created_near_check`는 채점에 넣지 않는다**(진단용;
+  지표를 늘리면 통과 줄만 쌓여 재발이 묻힌다 — 등록부 헤더 15~16).
+
+**Why**: F-34 하나의 사고가 아니라 **번호 체계의 구조적 결함**이다. 한 ID가 두 종류를 겸하면 즉시 조치
+완료 시 ID가 닫히고 재발방지가 ID 없는 하위 문장이 되어 **ID 기반 절차 전부**(이월 목록·커밋 메시지
+접미·등록부·자가점검 `deadlines`)에서 동시에 사라진다. 오늘 12:36 리포트가 이 3건에 새 ID **F-54**를
+부여한 것이 사실상의 응급 처치였다 — **규칙으로 만들지 않으면 다음 항목에서 또 난다.**
+
+**How to apply**: F-58을 **F-54보다 먼저** 넣는다(규칙이 있어야 F-54가 규칙의 첫 적용례가 된다).
+F-59는 마지막 — 앞 셋이 들어가야 채점 대상이 생긴다.
+
+**검증**: 다음 사고에서 재발방지가 별도 `F-nn`으로 나오는가. **측정 지표**: 「ID 없는 미해소 항목」 수 —
+기준선 1건 이상(F-34 하위, F-54로 해소) → 목표 **0 유지**. F-59 등재 후 다음 거래일 장후에
+`재발`/`통과` 판정이 실제로 나오는지.
+
+### [확정] 인덱스락의 원인은 **명령이 아니라 실행 위치**였다 — 1-6 해소 · F-54 ① 대체 · F-60 (15:22)
+
+**결정적 관측**: 사용자가 네이티브 PowerShell에서 `--reclaim` 후 **플래그 없는 `git status`** 를 실행.
+15:19 확인 `.git/index.lock` **부재**.
+
+| 시각 | 명령 | 실행 위치 | 락 잔존 |
+|---|---|---|---|
+| 08-25 08:51:14 | `git status --porcelain` | 마운트(점검) | ✅ |
+| 08-26 08:50:59 | `git diff --ignore-all-space` | 마운트(점검) | ✅ |
+| 08-26 15:02:02 | `git --no-optional-locks add -n .` | 마운트(점검) | ✅ (샌드박스 `--reclaim`도 `Operation not permitted` 실패) |
+| 08-26 15:1x | **`git status`(플래그 없음)** | **네이티브** | ❌ |
+
+**원인 확정**: git은 자기 락을 항상 지운다. 못 지운 것은 **마운트 파일시스템의 unlink 거부**다.
+어제 10918행 `unable to unlink ... Operation not permitted` · 오늘 내 `--reclaim` 실패 — 같은 벽.
+
+**F-54 ① 폐기·대체**: `--no-optional-locks` 명문화는 **원인 처방이 아니다.** 플래그는 락을 **만드는 빈도**만
+줄이고, **남기는 원인은 마운트 권한**이다. 플래그를 다 붙여도 `add`/`commit` 계열을 한 번 쓰면 재발한다
+(15:02가 증명). → **F-60**: 점검 세션은 마운트에서 git을 실행하지 않는다. 필요한 것은 셋뿐이며
+(`HEAD` sha · 변경 목록 · 최근 커밋 제목) 셋 다 `.git/HEAD` · `.git/refs/` · `.git/logs/HEAD`
+**직접 읽기**로 얻는다. 부작용 0. **`collect_evidence.py` §1 재작성.**
+
+**「깨끗한 시험」 취소** — 오늘 사용자 실행이 답을 냈다. `add -n`을 네이티브에서 돌렸을 때의 거동은
+미확인이나 **확인 불요**(네이티브 git은 자기 락을 지운다가 확인됨).
+
+**F-54 잔여는 ②③뿐이다** (`collect_evidence.py` §9 근접 판정 · `self_check.py` 인덱스락 3상태).
+④는 F-57로, ①은 F-60으로 대체.
+
+### [정정] 「CRLF 개행 잡음 88파일」은 **관측 도구의 착시**였다 — F-61 (15:22)
+
+**증상**: 08-26 장전·장중 리포트가 두 번 *"CRLF 개행 잡음 88파일 — 부채이나 오늘 사안 아님"* 이라 적었다.
+**저장소 부채로 보고했으나 저장소에는 없다.**
+
+**근거**: 네이티브 `git status` **수정 10건 · 미추적 20건** vs 샌드박스 **수정 315건 · 미추적 21건**.
+`core.filemode=false`(파일모드 아님). 샌드박스 diff는 `pyproject.toml` 212줄 · `status_board.py` **962줄**
+등 **파일 통째 재작성** — 마운트를 건너며 줄바꿈이 번역되는 서명.
+
+**결론은 살아남았다**: `--ignore-all-space`로 뽑은 실변경 4파일
+(`credentials.py`·`tr_codes.py`·`config.py`·`logging.py`)이 네이티브 `git status`의 `src/` 수정 4건과
+**정확히 일치.** 방법이 노이즈 바닥을 오해했으나 답은 맞았다.
+
+**결정 (F-61, P2)**: 증거 다이제스트 §1이 **네이티브와 어긋날 수 있음을 스스로 경고**한다 —
+`수정 315건(⚠ 마운트 관측 · 네이티브와 다를 수 있음 · 줄바꿈 번역)`. 실변경은 **항상
+`--ignore-all-space` 기준으로 병기.** F-60이 들어가면 §1이 `.git` 직접 읽기로 바뀌므로 **F-60과 같은 커밋.**
+
+**Why**: 관측 도구의 노이즈를 대상의 성질로 적으면, 그 문장이 dev_memory에 남아 **다음 사람이 없는 부채를
+갚으려 한다.** 오늘은 결론이 맞아서 무해했으나 다음번을 보장하지 않는다.
+
+### [관측] 사용자 출력이 드러낸 미커밋 2종 — 내 점검 범위 밖이었다 — F-62 (15:22)
+
+**① 의존성 변경 미커밋**: `pyproject.toml` · `uv.lock`. 내 점검은 `src`·`scripts`만 봤다
+(`core/version.py`의 `SOURCE_PATHS = src, scripts` 때문). **오늘 세 번의 점검이 전부 놓쳤다.**
+이 둘은 **실행 환경 자체를 바꾸므로 재현성에는 `src/` 못지않다.**
+
+**결정 (F-62, P1)**: 미커밋 관측 범위를 `src`·`scripts` **+ `pyproject.toml`·`uv.lock`** 으로 넓힌다
+(`core/version.py` `SOURCE_PATHS` · `worktree_dirty_files()`).
+**⚠ `ops/record_vs_commit.py`의 `dirty`가 같은 함수를 쓰므로 판정 기준이 넓어진다** —
+**R18에 따라 섀도 필드 `dirty_env_files`로 먼저 20거래일 관측 후 승격.** 기준을 조용히 넓히면
+어제와 오늘의 verdict가 비교 불가가 된다.
+
+**② 장후 산출물 2거래일치 미커밋**: `daily_integrity_2026082{4,5}.json` · `self_eval` ·
+`vol_scorecard` · `volume_check` · `verification_scoreboard` 각 2건 · `pass_cycles/` 3건 ·
+`dailycheck/2026-08-2{4,5,6}_report.md`. 마지막 커밋된 무결성 산출물은
+**`daily_integrity_20260821.json`**(커밋 `c6bbc56`, 08-23 21:56). **오늘 것까지 3거래일치.**
+
+**그러나 N-1을 바꾸지 않는다 — 코드로 확인함.** `ops/record_vs_commit.py` 237~247:
+`if n_implementation > 0 and dirty:` 에서 `dirty = worktree_dirty_files()` = **`src`·`scripts` 미커밋 수**.
+**`logs/`는 이 판정에 안 들어간다.** → **N-1을 `clean`으로 돌리는 조건은 오직 F-48(15:45 전 `src`·`scripts`
+6파일 커밋) 하나다.** 장후 산출물은 언제 넣어도 판정 무관.
+
+### [해소] F-48 커밋 완료 — 1-1 ✅ · C-1 ✅ 판정 · 1-3 🔄 지속 (15:35)
+
+**커밋 2건** — 둘 다 **15:45 장후 배치 전**이다.
+```
+3b2f5bb  15:28:19  [MW0601] 체결통보 배선에 딸린 설정·로그 규약 변경
+                   config.py · logging.py · credentials.py  (3파일 · +35/−2)
+5a09ac0  15:30:02  [MW0601] 4개월간 TR ID만 있던 체결통보 경로를 잇고, KIS에 값이 틀렸다는 답을 받았다
+                   order_notice.py(신규 373) · probe_order_notice.py(신규 154) ·
+                   test_kis_order_notice.py(신규 330) · tr_codes.py(+17) · pyproject.toml(+6) · uv.lock(+32)
+```
+`git status --porcelain -- src scripts tests` → **미커밋 0건.** 전체 2409 passed · pyright 0 · ruff clean.
+
+- **1-1 ✅ 해소.** `worktree_dirty_files()`는 `SOURCE_PATHS=("src","scripts")`만 센다(`core/version.py` 119·126행)
+  → 오늘 `record_vs_commit`의 `dirty`가 0이 되므로 **N-1은 `clean` 예상**(7거래일 연속 `closed_with_uncommitted_source` 종료).
+  **dev_memory 두 파일은 미커밋으로 남지만 판정에 안 들어간다** — 확인함.
+- **핵심 요구는 지켜졌다** — `logging.py`가 `3b2f5bb`에 단독으로 들어가 배선 본체와 섞이지 않았다. 되돌림 경로 확보.
+
+**사용자가 지시와 다르게 한 것 3건 — 전부 타당. 그중 하나는 내 권고보다 낫다.**
+
+1. **커밋 순서를 뒤집었다(규약 먼저 · 배선 나중) — 이쪽이 옳다.** 내가 12:36에 적은 순서(①배선 ②규약)는
+   **의존 방향을 거슬렀다.** `order_notice.py`가 `logging.py`의 새 태그와 `credentials.hts_id`에 의존하므로
+   배선이 앞서면 **그 시점의 커밋이 미등록 태그 `ValueError`로 깨진 상태**가 된다.
+   → **규칙으로 승격**: *"커밋을 가를 때는 의존 방향을 따른다 — 규약·설정이 먼저, 그것을 읽는 배선이 나중.
+   각 커밋이 단독으로 체크아웃 가능해야 한다."* 「되돌림 단위」만 보고 「체크아웃 가능성」을 안 봤다.
+2. **`pyproject.toml`·`uv.lock`을 넣었다 — F-62의 실증이다.** `pycryptodome` 없이는 `order_notice.py`가
+   import부터 실패해 새 체크아웃에서 안 선다. **내 목록이 `src`·`scripts`뿐이라 놓친 것을 실무가 잡았다.**
+   F-62(관측 범위 확장)는 이제 가설이 아니라 **실측 근거를 가진 항목**이다.
+3. **첫 커밋 1회 amend** — PowerShell here-string 표기가 제목에 섞인 것을 정정. 내용 불변. 무해.
+
+### [판정] C-1 ✅ 해소 — 프로브가 실측했고 **거부가 배선의 증거**가 됐다
+
+```
+rt_cd=9  msg_cd=OPSP0017  msg1=ERROR : htsid가 잘못되었습니다
+```
+**모의 서버 구독까지 실제로 도달했다.** 도메인(계좌별 ops:31000) · approval_key · TR ID(H0IFCNI0/H0IFCNI9) ·
+필드 해석이 **전부 통과**했고 서버가 `tr_key` 자리를 htsid로 해석한 뒤 **그 값만 틀렸다**고 답했다.
+`.env`의 `@3137669`은 (`@`를 떼도) HTS 로그인 ID가 아니다.
+
+- **장전 C-1이 걱정한 그 자리다** — *"`resolve_secret(required=False)`는 미설정을 빈 문자열로 돌려주므로
+  키가 비어 있어도 기동은 통과한다 … 조용히 빈 tr_key로 구독하면 「통보가 안 온다」로 며칠을 쓴다."*
+  **구독 거부를 예외로 올린 설계가 정확히 그 며칠을 막았다.** 조용히 무시했다면 프로세스는 멀쩡히 살아
+  몇 시간을 기다렸을 것이고 증상은 「통보가 안 온다」 하나로만 보였다.
+- **남은 것**: `.env`의 `KIS_HTS_ID`를 실제 값으로 교체 후 재실측. 그 뒤 22필드 실응답 대조(금지계명 11).
+- **장중 실행이었으나 운영 무영향 — 실측 확인.** 15시대 `l1_daily`·`g2_daily` ERROR/WARNING **0행**,
+  시세 세션 재연결 0건, 15:00·15:30 판단 사이클 정상 완주. **별도 WS 세션(체결통보 도메인)이라 시세 경로와
+  분리돼 있다.** R11은 배포·학습 금지이므로 프로브 실행 자체는 위반이 아니다. 다만 다음부터는
+  **approval_key 발급이 운영 세션과 공유되는지**를 먼저 확인하고 장후로 미루는 편이 안전하다.
+
+### [지속] 1-3은 커밋으로 닫히지 않는다 — 실행 경로 임포트 여전히 **0건**
+
+커밋 후 재확인: `grep -rn "order_notice" --include=*.py scripts/ src/` → `tr_codes.py`의 두 함수 정의와
+`order_notice.py` 자신뿐. **`run_l1_daily.py`·`run_g2_paper_trading.py` 어디에서도 임포트하지 않는다.**
+오늘 세 로그의 `OrderNotice*` 태그 **여전히 0건**(N-4 유지).
+
+**즉 커밋은 1-1(미커밋)을 닫았지 1-3(발신처 없음)을 닫지 않았다.** 사용자 커밋 메시지도 같은 말을 한다 —
+*"수신한 통보를 OrderStateMachine에 연결하지 않았다. 필드 의미가 실측 전인데 상태 전이를 걸면 틀린 해석이
+주문 상태라는 되돌리기 어려운 곳에 박힌다."* **이 판단은 옳다**(금지계명 11). 1-3의 처방은 배선이 아니라
+**「0줄」의 뜻을 갈라 적는 것**(F-50)이며 그대로 유효하다.
+
+### [사고] 오늘 가장 값진 증거가 **어느 로그 파일에도 없다** — F-63
+
+`rt_cd=9 OPSP0017`은 오늘 하루 관측 중 정보량이 가장 큰 한 줄이다. 그런데
+`logs/l1_daily_*` · `g2_daily_*` · `ui_*` 어디에도 없고, **`logs/` 아래 프로브 산출물 파일도 없다.**
+남은 곳은 **사용자 터미널 스크롤백과 커밋 메시지뿐**이다. 커밋 메시지에 안 적었으면 사라졌다.
+
+**결정 (F-63, P2, 장후)**: `scripts/probe_order_notice.py`가 결과를 **`logs/probe_order_notice_<YYYYMMDD_HHMM>.json`**
+으로 남긴다 — 요청 봉투(시크릿 마스킹) · 응답 원문(`rt_cd`·`msg_cd`·`msg1`) · 수신 프레임 원문 · 판정.
+**22필드는 그대로 찍는다**(프로브는 판정하지 않는다는 기존 설계 유지).
+`collect_evidence.py` §7 산출물 점검에 이 파일 패턴 추가.
+**Why**: 실측은 재현 비용이 높다(장 시간·브로커 세션). **한 번 얻은 응답을 파일로 붙잡지 않으면
+다음 사람이 같은 실측을 다시 해야 한다.** 이것이 등록부 헤더가 말한 *"판정 기준은 기록됐지만
+다시 꺼내 확인하는 일을 아무도 강제하지 않았다"* 의 데이터판이다.
+
+### [관측] ruff 버전 드리프트가 **실제로 발생**했다 — 주석에만 있고 작업 목록엔 없었다
+
+훅의 `ruff-format`(0.4.10, 격리 venv)이 `tr_codes.py`에 빈 줄 하나를 추가해 첫 커밋 시도가 반려됐고,
+사용자가 훅 쪽을 따라 재커밋했다. **`pyproject.toml` 97~98행이 이 드리프트를 이미 적어 두었다** —
+*".venv의 ruff(0.15.x)는 1st-party로 보고 `import pytest` 뒤에 빈 줄을 넣지만, pre-commit 훅의
+ruff(0.4.10, 격리 venv)는 …"*.
+
+- **새 발견이 아니다 — 기존 등재 항목이다.** 다만 `grep`으로 확인한 결과 **`dev_memory` 어디에도 없다**
+  (코드 주석에만 존재). **1-9와 같은 형태다** — 기록돼 있으나 작업 목록에 오른 적이 없다.
+  → NEXT_TODO에 관측 항목으로 등록(**해결 강요 아님** — 훅을 정본으로 삼는 현 운용이 일관적이면 그대로 둔다).
+- **부수**: `tr_codes.py` 워킹트리 mtime이 **15:29:16**으로 갱신됐다(장중). 08:20 기동 프로세스는 포맷 **전**
+  버전을 로드했고 커밋된 것은 포맷 **후** 버전이다 — **차이는 빈 줄 1개, 의미 동일.** 오늘 로그의 재현성에
+  영향 없다. **장후 판정에서 `source_mtime_max`가 15:29로 보이면 사유는 이것이다**(사람 편집 아님).
+
+---
+
+## [MW0601] 2026-08-26 장후 점검 — 세는 눈이 둘인데 하나가 「없다」고 말했다
+
+> 예약 실행(`Messiah-Postmarket` 후속 점검, 15:58 KST). **코드 변경 0건 · 커밋 0건.** 보고서는
+> `logs/dailycheck/2026-08-26_report.md` 제3부 이하에 append 완료(하루 한 파일 원칙 준수).
+
+### [사고] 1-10 — 크래시 덤프 3건과 「네이티브 크래시 0건」이 같은 화면에 있었다
+
+- **증상**: 10:30~10:36에 `g2_paper`·`l1_daily`·`ui` **세 프로세스 전부**가
+  `Windows fatal exception: access violation` 덤프를 1건씩 남겼다. 최근 3거래일(08-21·24·25)은
+  세 로그 통틀어 **0건**. 그런데 무결성 리포트 본문은 `네이티브 크래시: 0건`을 먼저 쓰고
+  그 아래에 덤프 3건을 나열하며, `crash_forensics.findings`는 `[]`이고,
+  15:46:26 `FixVerificationPassed`가 `ui-crash-isolation: 16거래일 연속 기준 충족 (native_crashes ≤ 0)`
+  으로 **검증 완료** 도장을 찍었다.
+- **원인**: `native_crashes`는 **Windows 이벤트 로그의 프로세스 종료**를 세고,
+  `crash_forensics.dumps`는 **stderr 덤프 텍스트**를 센다. 모집단이 다르다 — 그 자체는 설계다.
+  문제는 둘이 **같은 리포트 본문에 병렬 배치**돼 「0건」이 요약처럼 읽힌다는 것,
+  그리고 `configs/pending_verifications.yaml`의 `ui-crash-isolation` 판정 축이
+  **`native_crashes` 하나뿐**이라 **덤프가 몇 건이 나오든 영구 합격**한다는 것이다.
+- **생존 실측** (덤프 앞뒤 JSON 타임스탬프로 확인):
+  ```
+  g2_daily :50   직전 10:30:01.107804 DecisionEmitted / 직후 11:00:01.229206 DecisionEmitted → 생존
+  l1_daily :295  직전 10:36:00.970100 FeaturePublish  / 직후 10:37:00.356037 FeaturePublish  → 생존
+  ui             직전 08:20:43.810670 SessionStart    / 직후 없음 · 파일 mtime 10:36:39      → survived: null
+  ```
+  세 덤프 전부 `crashing_frames: []` — 리포트가 사유를 스스로 적는다:
+  *"Current thread 블록 없음(네이티브 스레드에서 폴트)"*. **파이썬 프레임이 없는 폴트라
+  파이썬 계측으로는 「어디서」를 얻을 수 없다.** N-10은 이 근거로 ⚠조건부 해소.
+- **결정**:
+  - **F-64 `P1`** — `src/messiah/ops/integrity_report.py` 리포트 본문의 `네이티브 크래시:` 줄을
+    두 축 병기로 바꾼다: `네이티브 크래시: 프로세스 종료 0건 · stderr 덤프 3건 ⚠`.
+    `crash_forensics.findings` 생성 조건에 「덤프 ≥ 1이면 finding 1건」 추가.
+  - **F-65 `P1`** — `configs/pending_verifications.yaml`의 `ui-crash-isolation` 기준을
+    `native_crashes ≤ 0` → `native_crashes + crash_dump_count ≤ 0`. 등록부 채점기에 축 배선.
+    **⚠ 회귀: 오늘 기준 즉시 위반이 되어 「16거래일 연속」이 끊긴다 — 그것이 목적이다.**
+    `report_template.md`의 「기준을 바꿔 합격을 만들지 않는다」의 **역방향**이므로
+    변경 사유를 yaml 주석과 이 로그에 함께 남긴다(지금 이 항목이 그 기록이다).
+- **Why**: `FixVerificationRecurred`는 「고쳤다고 기록된 것의 재발」을 잡는다. 오늘 사안은 재발이 아니라
+  **계기의 사각지대 덕에 합격이 유지되는 형태**이고, 그 태그의 관할 밖이다. 재발 탐지기를 아무리 잘 만들어도
+  **판정 축이 사건을 안 보면 영원히 조용하다.** 등록부의 가치는 축의 정확성에 전적으로 의존한다.
+- **How to apply**: 새 검증 항목을 등록할 때 **「이 축이 못 보는 사건은 무엇인가」를 한 줄 적는다.**
+  `pending_verifications.yaml`에 `blind_to:` 필드를 두는 것을 F-65와 같은 커밋에서 검토.
+- **검증**: **라이브 미검증.** F-64·F-65 구현 후 익일(2026-08-27) 장후 배치에서
+  ① 리포트 본문에 두 축이 병기되는가 ② 덤프가 0건이면 `ui-crash-isolation`이 정상 합격하는가
+  ③ 덤프를 인위 주입한 replay에서 위반으로 뒤집히는가. **검증 기한: 2026-09-02(4거래일).**
+- **미확정 (C-5)**: 세 프로세스 동시 폴트의 **공통 원인을 모른다.** 서로 다른 인터프리터·다른 작업인데
+  6분 안에 겹쳤다. 후보 — 사용자 조작(화면 열기 등), Windows 시스템 이벤트,
+  공통 네이티브 확장(`pyarrow`·redis C 확장·`websockets`)의 동시 호출.
+  **사용자 기억이 로그 열 개보다 크다** — 보고서 「사용자 조치」 1번으로 질의.
+- **↩️ 1-8 정정**: 장중이 「화면 프로세스가 뻗었다」로 P1을 올렸는데 **절반만 맞았다.**
+  상태판이 화면 생사를 못 본다는 진단(F-56)은 유효하나 **사건의 크기가 화면 한 대가 아니었다.**
+
+### [사고] 1-11 — 어제 켠 계기가 첫날부터 음수를 가리켰고, 아무도 울지 않았다
+
+- **증상**: `publish_offset.grace_headroom.worst_headroom_ms = -3596.3` (`worst_horizon: "1m"`).
+  1분봉 유예 2,000ms를 최대 3,596ms 초과. 유예 초과(`over_grace`) 종일 **14건**,
+  시간대 분포 `08:1 09:1 10:1 11:0 12:1 **13:8** 14:1 15:1`.
+  그런데 `l1_daily` 종일 WARNING은 `DailyCloseBarHandedOff` 1건뿐 — **초과 경고 0건.**
+  `FeaturePublishOffset`은 종일 **1건**(15:35:05 종료 요약).
+- **계측 신설일 확인** (중요 — 「악화」가 아니라 「처음 보임」이다):
+  ```
+  20260824 by_hour 키: [p50, p90, samples]                                over_grace 없음
+  20260825 by_hour 키: [p50, p90, samples]                                over_grace 없음
+  20260826 by_hour 키: [over_1000, over_1000_ratio, over_grace, p50, p90, p99, samples]
+  20260826 grace_headroom: 첫 산출 (08-20~25 전부 None)
+  ```
+  → 어젯밤 커밋 `74b0fe4`(F-43)가 실제로 반영됐다. **M-1·M-2·M-3 전부 ✅ 해소.**
+  전일 비교 불가 — 어제까지는 재지 않았다.
+- **원인 절반은 갈렸다**:
+  - 회선 **무죄** — `delivery_latency.by_hour` 13시 `p50 0.524s · p90 0.925s`,
+    다른 시간대(0.485~0.529 / 0.915~0.933)와 **차이 없음.**
+  - 발행 함수 **무죄** — `publish_sla` `p99 172ms · max 422ms · over_sla 0/708(0.0%)`.
+  - **남은 구간(봉 확정 ~ 발행 진입)에 계측이 없다.** 13시대만 `p50 759ms`(다른 시간대 562~588),
+    `p90 2,932ms`(898~1,459). → **C-4 미확정.**
+- **F-43의 성과도 같이 기록한다**: `intraday_trend.publish_offset`에서
+  **`p50` 축은 `drift: false`(1.17배)인데 `over_1000_ratio` 축이 `drift: true`(3.1배)로 잡혔다.**
+  F-43이 겨냥한 상황(*"중앙값만 보던 눈이 꼬리 15배를 「이상 없음」이라 적었다"*)이
+  **오늘 실제로 재현됐고 이번엔 잡혔다.** 계기 신설의 첫 성공 사례.
+- **결정**:
+  - **F-66 `P1`** — `src/messiah/features/engine.py` `_grace_headroom()` 산출 직후
+    `worst_headroom_ms < 0`이면 WARNING 태그 **`PublishGraceBreached`** 1회 발신
+    (`worst_horizon` · `headroom_ms` · 시간대별 `over_grace` 동봉).
+    `src/messiah/core/logging.py`에 태그 등록 — **R6: WARNING 하나만 갖는다.**
+    **R18 대상 아님** — 게이트·차단이 아니라 경보다(판정을 바꾸지 않는다).
+  - **F-69 `P2`** — `scripts/run_l1_daily.py`의 30분 주기 루프(`ClockSkewMeasured`가 타는 자리)에
+    `HostHealthSampled` INFO 신설 — CPU·가용메모리·외부 파이썬 수. **C-4를 사후에 물을 수 있게.**
+  - **G-33 (고도화)** — 시간대 경계마다 직전 1시간 발행 오프셋 중간 요약.
+    비용 하루 7줄, 얻는 것은 **다른 로그와 같은 타임라인 위에서 보는 능력.**
+- **Why**: `engine.py:1285~1287` 주석이 이미 기준을 적어 두었다 —
+  *"유예(=손실 경계) 초과 — 이 값이 0이 아닌 날은 자료가 실제로 빠졌을 수 있는 날이다."*
+  **오늘 값은 0이 아니라 14인데 아무도 안 불렸다.** 계기를 만드는 일과 계기가 사람을 부르는 일은 다르다.
+  F-43은 전자를 했고 오늘 후자가 비어 있음이 드러났다.
+- **How to apply**: **새 계기를 만들 때 「이 값이 나쁘면 누가 언제 아는가」를 같은 커밋에서 답한다.**
+  답이 「장후에 사람이 리포트를 읽으면」이면 그것은 계기가 아니라 기록이다. 둘을 구분해 적는다.
+- **검증**: **라이브 미검증.** F-66 구현 후 replay로 인위 지연 주입 → `PublishGraceBreached` 1건 발신 확인.
+  라이브는 다음 음수 발생일. **검증 기한: 2026-09-09(10거래일 — 오늘이 첫 관측이라 재현 빈도를 모른다).**
+- **오늘 실손실 0**: `late_bar_drops: 0` · 1m 봉 410행 08:45~15:34 결손 0분 ·
+  `volume_check` 비율 1.000(아카이브 127,163 / 공식 127,179) · ticks 커버리지 100%.
+  **유예 초과가 손실로 이어지지 않았다** — 그러나 회선 p99(1.024s)가 조금만 나빴다면 실유실 구간이었다.
+
+### [확정] 1-12 — `resolve_secret()` 오용은 없다. 그물이 없다.
+
+- `grep -rn "required=False" --include=*.py src/ scripts/` → **`broker/kis/credentials.py:32` 단 하나.**
+  `ops/series_expectation.py:75`의 동명 인자는 **다른 함수·다른 의미**(계열 기대치). **C-2 오용 없음 확정.**
+- `grep -rn "resolve_secret" --include=*.py tests/` → **0건.**
+  `config.py:122`가 주석으로 위험을 적어 두었는데(*"미설정을 빈 문자열로 돌려주는 모드"*)
+  **그 계약을 지키는 테스트가 하나도 없다.**
+- **결정 F-67 `P2`** — `tests/core/test_config.py`에 3건:
+  ① `required=True`(기본) 미설정 → 예외 ② `required=False` 미설정 → 빈 문자열
+  ③ `app_key_ref`·`app_secret_ref`·`account_ref` 세 호출부가 기본 경로를 쓴다는 것을 서명으로 고정.
+- **Why**: 시크릿 해석은 replay 대상이 아니라 **단위 테스트가 유일한 그물**이다(금지계명 2의 사각).
+  `tests/broker/test_kis_order_notice.py`(9건)는 새 모듈을 덮었으나 **그 모듈이 기대는 `config.py` 계약**은
+  안 덮었다. 위험은 미래 회귀 — `required=False`를 세 자격증명에 복사하면
+  자가점검 `secrets` 줄이 `[OK ]`인 채로 빈 값이 통과하고, **dev에서는 티가 안 나고 live 첫날에 드러난다.**
+- **검증**: F-67 구현 후 `pytest tests/core/test_config.py` 통과. **기한 2026-08-31.**
+
+### [확정] 1-13 — 같은 0.6분을 두 계기가 `❌`와 `clean: true`로 갈라 말한다
+
+- `postmarket_20260826.log:78` `소급 불가 손실(오늘): 1분 ❌`
+  vs `status_snapshot.json` `{"start_lag_minutes": 0.6, "lost_items": 0, "clean": true,
+  "summary": "오늘 소급 불가 손실 없음"}` · `daily_integrity.breaches: []`
+- 실체는 정시 트리거(08:20:00)와 실기동(08:20:35) 사이 **35초**이고 그 창에는 시세 자체가 없다(수집은 08:45).
+  **상시값**: `20260820 0.3 · 21 0.5 · 24 0.6 · 25 0.8 · 26 0.6`.
+- **결정 F-68 `P2`** — `integrity_report.py`에서 올림을 없애고 소수 1자리로,
+  `❌`/`✅`는 **`lost_items > 0` 기준**으로: `소급 불가 손실(오늘): 0.6분(기동 지연 · 유실 항목 0건) ✅`.
+- **Why**: R6(태그 1개 = 심각도 1개)의 정신. 훼손된 것은 동작이 아니라 **경보의 신용**이다 —
+  기동 지연이 0초가 아닌 한 이 `❌`는 영원히 켜져 있고, **매일 뜨는 빨강은 진짜 빨강을 가린다.**
+- **검증**: F-68 구현 후 익일 리포트에서 `✅`로 뒤집히는지. **기한 2026-08-31.**
+
+### [자기판정] 15:22판 지시가 R11 경계를 스치게 했다 — 위반은 아니나 절차에 못을 박는다
+
+- **사실**: 사용자 커밋은 **15:28·15:30**, 정규장 마감은 15:35. **장중 커밋이다.**
+  그렇게 만든 것은 15:22판 사용자 조치 1번(*"⚠ 지금 (3시 45분 전) — 저장"*)이고,
+  그 이유는 `record_vs_commit`을 `clean`으로 만들려면 **15:45 배치 전** 커밋이 필요했기 때문이다.
+- **위반은 아니다 — 실측으로 확인**: ① 커밋은 파일시스템 기록이고 실행 중 프로세스에 반입되지 않았다
+  (`code_version.stale: true`가 그 증거). ② 15시대 `l1_daily`·`g2_daily` ERROR/WARNING **0행**,
+  15:00·15:30 판단 사이클 정상 완주. ③ `ruff-format` 훅이 `tr_codes.py` mtime을 15:29:16으로 갱신했으나
+  차이는 빈 줄 1개이고 08:20 기동은 포맷 전 버전을 이미 로드한 상태였다.
+- **그러나 무해의 근거가 「프로세스가 파일을 다시 안 읽는다」는 구현 성질이다.** 설계 보장이 아니다.
+- **결정 F-70 `P2`** — `references/report_template.md`와 `references/phases.md` B절에 한 줄:
+  *"장중 국면은 커밋을 요구하지 않는다. `record_vs_commit`을 `clean`으로 만들려는 이유로
+  마감 전 커밋을 지시하면 R11 경계를 스치게 된다 — **판정이 하루 늦는 편이 낫다.**"*
+- **Why**: 점검이 자기 판정 지표를 좋게 만들려고 운영에 지시를 내리는 구조는
+  1-6(점검이 저장소를 잠갔다)과 **같은 형태의 오류**다 — 관측자가 관측 대상을 건드린다.
+  1-6은 우발이었고 이것은 의도였다는 점에서 더 무겁다.
+- **검증**: 문서 반영 여부. **기한 2026-08-28.**
+
+### [해소] 하루 이월 항목 전량 처분 — 요약
+
+- **✅ 해소 3건**: 1-1(15:28·15:30 커밋 → `record_vs_commit: ok` · `dirty_files: 0`,
+  `closed_with_uncommitted_source` **8거래일 만에 종료**) · 1-6(잠금 부재 유지, **단 원인 F-60 미구현**) ·
+  C-1(프로브 실측 — `rt_cd=9 OPSP0017`, 거부가 배선의 증거).
+- **🔄 지속 6건**: 1-2(F-49 미구현) · 1-3(임포트 실행 경로 프로브 1개뿐, 태그 종일 0건) ·
+  1-4(실측이 손에 있는데 미갱신 — 근거 격상) · 1-5(**4거래일째**, 오늘 14사이클 전부를 미판정 번들이 판단) ·
+  1-7(종일 14회 중 2회 불일치 = 14.3%, **오후 6회 전부 일치** — 전환 3회 중 2회) ·
+  1-9(**이번 장후 점검에서도 마운트 git이 그대로 돌았다**).
+- **↩️ 흡수 1건**: 1-8 → 1-10.
+- **M 시리즈 8건 전량 판정**: M-1·M-2·M-3 ✅(오늘 첫 산출) · M-4 ✅(섀도 14/14, 1일차 완료) ·
+  M-5 🔄 익일(**`TREND_UP` 종일 0건 — 유효 표본 0**) · M-6 ✅사후(내일 확정) · M-7·M-8 ✅유지.
+- **N 시리즈 14건 전량 판정**: N-1 ✅ · N-2 ✅ · N-3 ⏭판정불가확정(**기준 폐기** — F-56 전에는 재등록 않음) ·
+  N-4 ✅ · N-5 ✅ · N-6 ✅ · N-7 ✅(종일 −0.17초, 이동폭 37ms) · N-8 ✅ · N-9 🔄익일 ·
+  N-10 ⚠조건부 · N-11 ✅(장중 4건 = 08~12시 합 4건, 정확히 일치) · N-12 ✅(종일 5건) ·
+  N-13 ✅(오후 전환 0회 — 표본 안 늘었다) · N-14 ✅(유효 13건 중 통과 4건 = **30.8%**,
+  `HIGH_VOL` 0/6 · `RANGE` 4/7 — **「섀도를 켜면 전량 차단인가」의 답은 아니다**).
+- **C 시리즈**: C-1 ✅ · C-2 ⚠부분(→1-12) · C-3 🔄(재연결 0건 — **무증상이지 반증이 아니다**).
+- **L 시리즈**: L-11 ✅ · L-1~L-9·L-13·L-14 ✅일괄(장후 산출물 전량 정상, findings 계열 전부 `[]`).
+
+### [기록] 종가 손익 · 절대원칙
+
+- **실현 0원 · 평가 0원 · 자본 대비 0.00% · 포지션 0계약(레그 0).** 주문 0건 · 체결 0건.
+  MDD·승률·PF·Sharpe **측정 불가**(`pnl_measurable: false` · `n_fills: null` · `wiring_stage: "주문 미발생"`).
+- 판단 14건 전부 `④ |S| < 0.2 — 우위 부족`. 최대 신호세기 **0.101**(11:00, 임계의 50.5%) · 최소 0.004(14:30).
+  **③Risk·④Sizer·⑤OrderGateway 미도달** — `주문 깔때기: 미측정(사이저 미도달)`. `order-path-live` 미착수와 한 몸.
+- 기초(참고): 종가 **1,073.84pt**(53,692틱×0.02) · 전일 1,063.44pt 대비 **+10.40pt(+0.98%)** ·
+  고 1,087.80 / 저 1,054.58 · 일중 폭 33.22pt(3.13%) · 거래량 127,163계약.
+- **`FixVerificationRecurred` 0건** · **산출물 누락 0건**(기대 7종 전부 존재, `unmeasured_kinds` 전부 `[]`) ·
+  **`code_version.stale: true`**(15:34:53 · 장중 커밋의 정상 결과, 프로세스는 15:35 종료 → 재시동 불필요).
+- 금지 15계명 **접촉 2 · 위반 0** — ⑩은 커밋으로 완전 해소, ⑫는 1-10·1-11이 정신에 걸린다.
+  R 조항 중 걸린 것 — **R6**(→1-13) · **R10**(→1-11) · **R13**(→1-10의 `survived: null` 축) ·
+  **R11 경계 접촉**(위반 아님 → F-70) · **R18 준수·1일차 완료**.
+- 불변원칙 ②(Redis Bus로만)에 `DailyCloseBarHandedOff` 1건 — **아홉 거래일 연속 상시·기존 등재분.**
+  문언에는 걸리나 WARNING으로 스스로 알리므로 **조용한 우회가 아니다.** 새 발견으로 세지 않는다.
+
+### [재시동] 하지 않는다
+
+`code_version.stale: true`이나 **프로세스는 이미 15:35에 정상 종료됐다** — 보존할 실행 상태가 없고
+실을 새 코드도 장중이 아니라 실을 자리가 없다. 지금 띄우면 기동 창(08:15~15:35) 밖이라
+`LaunchWindowRefused`로 자진 거절된다(오늘 06:08에 실제로 그렇게 동작했다).
+**내일 08:20 정시 기동이 `5a09ac0`을 싣는다.** 오늘 로그가 어느 코드의 결과인지도 명확하다 —
+l1·g2·ui 세 프로세스 `SessionStart.git_sha` 전부 `02855c8`, 장후 배치만 `5a09ac0`.
+
+## [MW0601] 점검이 매일 계획만 내고 실행 주체가 없던 자리에 18:15를 세웠다 (2026-08-26)
+
+**증상.** 장후 점검(예약 15:50)은 설계상 「보고까지만」 한다. 그 다음 단계인 구현은 사용자가
+"F-XX 구현해"라고 지시해야 시작됐고, 지시가 없는 날은 그대로 쌓였다. 2026-08-26 리포트 기준
+미착수 Fix 항목 **20건**(F-49~F-70 중 완료 3건 제외), 장후 산출물 **3거래일치 미커밋**(08-24·25·26).
+G-35가 그 자동화를 제안했으나 그 제안 자체도 사람 지시를 기다리는 자리에 있었다.
+
+**원인.** 계획(15:50)과 실행(사람) 사이에 **주체가 지정된 단계가 없었다.** 미륵이(futures)는
+2026-08-26에 같은 문제를 `mireuk-postmarket-autofix`(평일 17:23)로 이미 닫았는데, MESSIAH에는
+대응 항목이 없었다.
+
+**결정.** 예약작업 **`messiah-postmarket-autofix`** 신설 — 평일 `10 18 * * 1-5`,
+**실측 지터 +5분이라 실제 기동은 18:15**. 그날 리포트의 「Fix 작업 구현계획 — 장후」(F) ·
+「고도화 방안 — 장후」(G) · **「수익률 향상방안 — 장후」(S, 신설)** 세 절과 파일 끝
+「사용자 조치」 **최종판**을 읽어 A/B/C 등급으로 가르고, **A·B만 구현 → pytest·replay →
+커밋 → `git push origin master`** 한다. C는 `NEXT_TODO.md`에 등록만 하고 보고한다.
+
+같은 결정에 딸린 리포트 규격 변경 4건:
+
+- `references/report_template.md` — **「수익률 향상방안 — 장후(S 시리즈)」** 6칸 규격 신설
+  (관측 근거 · 변경 대상 · 기대 효과 · 회귀 위험 · 검증 · **표본 상태**).
+- `SKILL.md` §4 · §6 체크리스트 · 「실행을 요청받았을 때」 — S 시리즈 규율과 무인 실행 경로 명시.
+- `references/phases.md` C-6 신설 — 장후가 낸 F·G·S가 자동조치에 읽힐 수 있는 형태인지 자체 점검.
+- `references/schedule_prompts.md` — 장후 프롬프트에 S 시리즈 추가, 「코드 변경」 절을
+  **18:10이 이어받는다**로 개정, **「장후 자동조치」 절(프롬프트 전문 정본)** 추가.
+
+**Why.**
+
+1. **계획과 실행 사이의 지연이 하루가 아니라 무기한이었다.** 20건이 그 증거다.
+2. **자동조치가 스스로 판단하면 위험하므로, 리포트가 쓴 표식만 기계적으로 읽게 했다.**
+   그래서 규격 쪽에 「항목마다 변경 대상 파일·함수를 적어라」를 넣었다 — **없으면 C등급으로
+   자동 보류**된다. 판단을 코드가 아니라 **리포트 작성 시점**으로 옮긴 것이다.
+3. **git 쓰기를 네이티브 PowerShell로 못 박았다.** 08-24·25·26 3회 실측에서 `.git/index.lock`을
+   남긴 원인은 명령이 아니라 **실행 위치**였다(마운트가 unlink를 거부). 플래그(`--no-optional-locks`)는
+   빈도만 줄인다. 자동조치는 매일 `add`·`commit`·`push`를 하므로 이 규약 없이는 락 사고가
+   점검 세션에서 배치로 옮겨갈 뿐이다.
+4. **S 시리즈에 「표본 상태」 칸을 강제한 이유** — 오늘처럼 **주문 0건**인 날의 손익 기반 제안은
+   표본이 없다. 「부족」·「구조적 판정불가」면 자동 구현 대상에서 **기계적으로 빠진다.**
+5. **기준 변경의 방향으로 등급을 갈랐다** — 조이는 방향은 B(자동), **느슨하게 하는 방향은 무조건 C.**
+   `report_template.md`의 「기준을 바꿔 합격을 만들지 않는다」를 자동화에도 그대로 건다.
+
+**How to apply.**
+
+- 예약 정본: `.claude/skills/messiah-daily-check/references/schedule_prompts.md` 「장후 자동조치」 절.
+  등록 실체: `C:\Users\82108\.claude\scheduled-tasks\messiah-postmarket-autofix\SKILL.md`.
+  **고칠 때는 정본을 먼저 고치고 그 내용으로 `update_scheduled_task`를 부른다.**
+- 상태파일: `C:\Users\82108\.claude\messiah-autofix\state.json` — `{date, report_sha256, done_ids}`.
+  저장소 밖이라 커밋 대상이 아니다. 리포트 해시가 그대로면 그 회차는 아무것도 하지 않는다.
+- 실행 가드 7종: 리포트 존재 · **리포트 완결**(쓰는 중인 파일에 append 금지) · 중복 방지 ·
+  장중 금지(15:35·프로세스 생존) · 브랜치 `master` · 15:45 배치 완료 · 작업트리 충돌.
+- 건수 상한: F는 「권고 착수 순서」대로 리포트 추정 소요 **6시간**까지, G·S는 합쳐 **하루 3건**.
+
+**검증.** **라이브 미검증 — 검증 기한 2026-08-27 18:15(첫 회차).** 확인할 것 5가지:
+① 가드 7종이 통과/차단을 각각 로그로 말하는가 ② 등급 분류가 리포트 표식과 일치하는가
+(특히 F-65가 B, F-52·order-path 계열이 C로 갈리는가) ③ 종료 후 `.git/index.lock` 부재
+④ `git push origin master` 성공 ⑤ 리포트 끝에 `## 제6부. 장후 자동조치 구현 결과` append 여부.
+첫 회차의 대상은 오늘 리포트가 권고한 순서 — `F-58` → `F-70` → `F-60`·`F-61` → `F-64`·`F-65` → `F-66`.
