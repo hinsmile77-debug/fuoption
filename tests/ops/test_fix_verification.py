@@ -1083,3 +1083,89 @@ def test_regime_unknown_ratio_is_none_when_unmeasured():
     assert extract(_report(date(2026, 8, 12))) is None, "필드 없는 옛 리포트"
     assert extract(_report(date(2026, 8, 12), regime_distribution=None)) is None, "국면 미배선"
     assert extract(_report(date(2026, 8, 12), regime_distribution={})) is None, "빈 분포"
+
+
+# ------------------- 크래시 + 덤프 합산 지표 (2026-08-26 F-65 · 이상점 1-10)
+
+
+def test_native_crashes_or_dumps_counts_both_meters():
+    """2026-08-26 재현 — 이벤트로그 0건 · 덤프 3건.
+
+    `native_crashes` 하나로 채점하면 그날이 「무사고」다. 실제로 `ui-crash-isolation`은
+    그날까지 **16거래일 연속 충족**으로 집계됐고, 그것은 사실과 어긋난 합격이었다.
+    """
+    extract = METRIC_EXTRACTORS["native_crashes_or_dumps"]
+    day = date(2026, 8, 26)
+    dumps = {"armed": {"ui": True}, "dumps": [{}, {}, {}], "findings": []}
+
+    assert extract(_report(day)) == 0.0
+    assert extract(_report(day, crash_forensics=dumps)) == 3.0
+    assert (
+        extract(
+            _report(
+                day,
+                crash_forensics=dumps,
+                native_crashes={"available": True, "count": 2, "details": []},
+            )
+        )
+        == 5.0
+    )
+
+
+def test_native_crashes_or_dumps_is_none_when_either_meter_is_blind():
+    """한쪽만 세어 0으로 접으면 이 지표를 만든 이유가 사라진다 (L18)."""
+    extract = METRIC_EXTRACTORS["native_crashes_or_dumps"]
+    day = date(2026, 8, 26)
+
+    assert (
+        extract(_report(day, native_crashes={"available": False, "count": 0, "details": []}))
+        is None
+    ), "이벤트로그 집계 불가"
+    assert extract(_report(day, crash_forensics=None)) is None, "덤프 축 없던 옛 리포트"
+
+
+def test_tightened_metric_turns_a_silent_pass_into_a_recurrence(tmp_path: Path):
+    """**기준을 조인 결과를 코드로 고정한다.**
+
+    같은 하루(덤프 3건 · 이벤트로그 0건)를 옛 지표는 「통과」로, 새 지표는 「재발」로 읽는다.
+    이 변화가 F-65의 목적이므로, 반대 방향으로 되돌아가면 테스트가 깨져야 한다.
+    """
+    day = date(2026, 8, 5)
+    reports = {
+        date(2026, 8, 4): _report(date(2026, 8, 4)),
+        day: _report(day, crash_forensics={"armed": {"ui": True}, "dumps": [{}], "findings": []}),
+    }
+
+    old = evaluate(_registry(tmp_path, metric="native_crashes"), reports, today=date(2026, 8, 6))[0]
+    new = evaluate(
+        _registry(tmp_path, metric="native_crashes_or_dumps"), reports, today=date(2026, 8, 6)
+    )[0]
+
+    assert old.status != VerificationStatus.RECURRED
+    assert new.status == VerificationStatus.RECURRED
+
+
+def test_tightened_metric_does_not_change_verdicts_on_dumpless_days(tmp_path: Path):
+    """**판정 불변 회귀** — 덤프가 없는 날의 판정은 옛 지표와 **한 글자도 다르지 않아야** 한다.
+
+    F-65는 「덤프가 있는 날」만 갈라 보려는 변경이다. 그 밖의 날에 판정이 흔들리면
+    등록부 전체가 재해석되고, 그것은 이 변경이 요청받은 일이 아니다.
+    """
+    days = [date(2026, 8, d) for d in (4, 5, 6)]
+    reports = {d: _report(d) for d in days}
+
+    old = evaluate(_registry(tmp_path, metric="native_crashes"), reports, today=date(2026, 8, 7))[0]
+    new = evaluate(
+        _registry(tmp_path, metric="native_crashes_or_dumps"), reports, today=date(2026, 8, 7)
+    )[0]
+
+    assert new.status == old.status == VerificationStatus.VERIFIED
+    assert new.clean_days == old.clean_days
+    assert new.needs_attention == old.needs_attention
+
+
+def test_shipping_registry_uses_the_tightened_metric():
+    """정본 등록부가 실제로 조인 지표를 쓰는지 — 설정과 코드가 갈라지지 않게 붙잡는다."""
+    items = {item.id: item for item in load_registry()}
+
+    assert items["ui-crash-isolation"].metric == "native_crashes_or_dumps"

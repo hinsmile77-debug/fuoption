@@ -194,6 +194,30 @@ def _native_crashes(report: dict[str, Any]) -> float | None:
     return float(crashes.get("count", 0))
 
 
+def _native_crashes_or_dumps(report: dict[str, Any]) -> float | None:
+    """[MW0601 2026-08-26 F-65] 이벤트로그 크래시 **+** faulthandler 덤프 — 둘의 합.
+
+    `native_crashes` 하나로 채점하면 **화면 프로세스가 stderr 에 덤프를 남기고도 살아남은
+    날**이 「무사고」로 집계된다. 2026-08-26에 덤프 3건이 났는데 `ui-crash-isolation`은
+    그날까지 16거래일 연속 합격이었다 — **사실과 어긋난 합격**이다.
+
+    ⚠ **이 지표는 기준을 조인다.** 오늘 기준으로 즉시 위반이 되어 연속 기록이 끊긴다.
+    그것이 이 변경의 목적이다(`references/report_template.md` 「기준을 바꿔 합격을 만들지
+    않는다」의 **역방향** — 합격을 만드는 완화가 아니라, 합격을 거두는 강화다).
+
+    집계 불가(`available=False`)는 여기서도 **판정 불가**다 — 한쪽만 세서 0으로 접으면
+    이 지표를 만든 이유가 사라진다(L18).
+    """
+    base = _native_crashes(report)
+    if base is None:
+        return None
+    dumps = (report.get("crash_forensics") or {}).get("dumps")
+    # `crash_forensics` 축이 없던 옛 리포트(2026-08-03 이전)는 덤프를 못 센 것이지 0이 아니다.
+    if dumps is None:
+        return None
+    return base + float(len(dumps))
+
+
 def _native_crashes_measurable(report: dict[str, Any]) -> float | None:
     """크래시를 셀 수 있었는가 — 1.0(쟀다) / 0.0(못 쟀다) / None(원래 못 세는 플랫폼).
 
@@ -323,6 +347,9 @@ def _refused_starts_leaked(report: dict[str, Any]) -> float | None:
 METRIC_EXTRACTORS: dict[str, Callable[[dict[str, Any]], float | None]] = {
     "native_crashes": _native_crashes,
     "faulthandler_dumps": lambda r: float(len((r.get("crash_forensics") or {}).get("dumps", []))),
+    # 위 둘의 합 (2026-08-26 F-65) — 「프로세스가 죽었나」와 「파이썬 아래층이 흔들렸나」를
+    # 한 축으로 채점한다. 격리 성공(살아남음)이 곧 원인 소멸은 아니기 때문이다.
+    "native_crashes_or_dumps": _native_crashes_or_dumps,
     "ui_restarts": lambda r: float(r.get("ui_restarts", 0)),
     "restarts": lambda r: float(r.get("restarts", 0)),
     "critical_log_lines": lambda r: float((r.get("log_level_counts") or {}).get("CRITICAL", 0)),
