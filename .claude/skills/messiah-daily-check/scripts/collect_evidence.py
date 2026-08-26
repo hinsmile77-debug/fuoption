@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -316,8 +317,17 @@ def truncate(s, n):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+# [MW0601 2026-08-26 F-60] 수집기가 실행해도 되는 git 하위명령 화이트리스트.
+#
+# 원인은 명령이 아니라 **실행 위치**다 — 마운트 파일시스템에서 git 이 자기 락을 회수하지
+# 못한다(`unable to unlink ... Operation not permitted`, rc=0). 그래서 「쓰기로 보이는 것」이
+# 아니라 **인덱스에 손대는 계열 전부**를 막는다. `add` 는 `-n`(dry-run) 이어도 락을 만든다 —
+# 2026-08-26 15:02 사고가 그것이었다.
+_GIT_READONLY_SUBCOMMANDS = frozenset({"status", "diff", "log", "rev-parse", "show", "cat-file"})
+
+
 def run_git(root: Path, args, timeout=25):
-    """[MW0601 483차 후속3 / P1-1·P1-2] 읽기 전용 git 호출.
+    """[MW0601 483차 후속3 / P1-1·P1-2 · 2026-08-26 F-60] 읽기 전용 git 호출.
 
     P1-1 `--no-optional-locks`: `git status` 는 읽기처럼 보이지만 **인덱스를 다시 쓴다**
       (stat 캐시 갱신) — 즉 `.git/index.lock` 을 잡는다. 이 옵션이면 인덱스를 아예
@@ -326,7 +336,23 @@ def run_git(root: Path, args, timeout=25):
     P1-2 타임아웃: `subprocess.run` 은 `TimeoutExpired` 시 자식을 죽여준다(futures 쪽
       수집기는 `Popen.communicate` 라 고아가 남는 결함이 있었고 483차에 고쳤다).
       여기서는 **사유를 반환 문자열에 남기는 것**만 보강한다 — 계측 4원칙 ④.
+
+    F-60 두 겹 보강 (2026-08-26):
+      ① **화이트리스트** — 목록 밖 하위명령은 실행하지 않고 거절 문자열을 돌려준다.
+         플래그를 믿지 않는다. 락을 만드는 계열이 이 함수로 새어 들어오는 길을 닫는다.
+      ② **자경** — 호출 전후로 `.git/index.lock` 존재를 비교해, **이 호출이 락을 만들었으면**
+         반환 문자열 끝에 그 사실을 붙인다. 수집기가 원인일 때 수집기가 먼저 말하게 한다.
+         2026-08-24·25·26 사흘 연속으로 「누가 만들었는가」를 사후에 추정해야 했다.
     """
+    sub = next((a for a in args if not a.startswith("-")), "")
+    if sub not in _GIT_READONLY_SUBCOMMANDS:
+        return (
+            f"(git 거절 — F-60 화이트리스트 밖 하위명령 `{sub or '?'}`) "
+            f"점검 세션은 인덱스에 닿는 git 을 실행하지 않는다. "
+            f"필요하면 `.git` 파일을 직접 읽어라."
+        )
+    lock = root / ".git" / "index.lock"
+    had_lock = lock.exists()
     try:
         p = subprocess.run(
             ["git", "--no-optional-locks", *args],
@@ -337,15 +363,120 @@ def run_git(root: Path, args, timeout=25):
             encoding="utf-8",
             errors="replace",
         )
-        return (
+        out = (
             p.stdout.strip()
             if p.returncode == 0
             else f"(git 실패 rc={p.returncode}) {p.stderr.strip()[:300]}"
         )
     except subprocess.TimeoutExpired:
-        return f"(git 타임아웃 {timeout}s — subprocess.run 이 자식을 종료함) git {' '.join(args)}"
+        out = f"(git 타임아웃 {timeout}s — subprocess.run 이 자식을 종료함) git {' '.join(args)}"
     except Exception as e:  # noqa: BLE001
-        return f"(git 실행 불가) {e}"
+        out = f"(git 실행 불가) {e}"
+    try:
+        if not had_lock and lock.exists():
+            out += (
+                f"\n(⚠ F-60 자경: 이 호출 `git {' '.join(args)}` 이 .git/index.lock 을 만들었다 —"
+                " 화이트리스트를 좁혀야 한다)"
+            )
+    except OSError:
+        pass
+    return out
+
+
+def git_head_facts(root: Path) -> dict:
+    """[MW0601 2026-08-26 F-60] HEAD sha·브랜치를 **`.git` 파일 직접 읽기**로 얻는다.
+
+    git 을 안 띄우므로 부작용 0 — 마운트에서도 락이 생길 수 없다. 못 읽으면 `None`
+    (미측정)으로 돌려준다. **추정치를 채우지 않는다**(계측 4원칙 ②).
+    """
+    out = {"branch": None, "sha": None, "short": None, "note": ""}
+    try:
+        gitdir = root / ".git"
+        if gitdir.is_file():  # worktree/submodule — `gitdir: <경로>` 한 줄
+            ptr = gitdir.read_text(encoding="utf-8", errors="replace").strip()
+            gitdir = Path(ptr.split(":", 1)[1].strip()) if ptr.startswith("gitdir:") else gitdir
+        head = (gitdir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        if head.startswith("ref:"):
+            ref = head.split(":", 1)[1].strip()
+            out["branch"] = ref.rsplit("/", 1)[-1]
+            loose = gitdir / Path(ref)
+            if loose.exists():
+                out["sha"] = loose.read_text(encoding="utf-8", errors="replace").strip()
+            else:  # 느슨한 ref 가 없으면 packed-refs 에 있다
+                packed = gitdir / "packed-refs"
+                if packed.exists():
+                    for ln in packed.read_text(encoding="utf-8", errors="replace").splitlines():
+                        if ln.startswith("#") or ln.startswith("^") or " " not in ln:
+                            continue
+                        sha, name = ln.split(" ", 1)
+                        if name.strip() == ref:
+                            out["sha"] = sha.strip()
+                            break
+        else:  # detached HEAD — 파일에 sha 가 직접 들어 있다
+            out["branch"] = "(detached)"
+            out["sha"] = head
+        if not out["sha"]:
+            out["note"] = "HEAD ref 를 못 찾음 — **미측정**"
+        else:
+            out["short"] = out["sha"][:7]
+    except Exception as e:  # noqa: BLE001
+        out["note"] = f".git 직접 읽기 실패 — **미측정**: {e}"
+    return out
+
+
+# reflog 한 줄: `<old> <new> <name> <email> <ts> <tz>\t<action>: <subject>`
+_REFLOG_RE = re.compile(r"^([0-9a-f]{40}) ([0-9a-f]{40}) .*?> (\d+) ([+-]\d{4})\t(.*)$")
+
+
+def git_reflog_commits(root: Path, limit: int = 200) -> list[dict]:
+    """[MW0601 2026-08-26 F-60] 최근 커밋 제목을 `.git/logs/HEAD` 에서 읽는다.
+
+    `git log` 를 안 띄우고도 「최근 커밋 제목」과 「당일 커밋」 둘 다 나온다.
+
+    ⚠ **한계를 알고 쓴다** — 이것은 커밋 그래프가 아니라 **HEAD 이동 기록**이다.
+      ① 다른 PC에서 만들어 pull 로 들어온 커밋은 `pull`/`merge` 항목으로만 남는다.
+      ② `amend` 는 옛 sha 와 새 sha 가 **둘 다** 나온다(둘 다 실재했으므로 지우지 않는다).
+      ③ reflog 만료(기본 90일) 밖은 안 보인다.
+      그래서 다이제스트에 **출처를 명시**한다 — 「git log 와 다를 수 있다」를 사람이 알아야 한다.
+    """
+    rows: list[dict] = []
+    try:
+        gitdir = root / ".git"
+        if gitdir.is_file():
+            ptr = gitdir.read_text(encoding="utf-8", errors="replace").strip()
+            gitdir = Path(ptr.split(":", 1)[1].strip()) if ptr.startswith("gitdir:") else gitdir
+        p = gitdir / "logs" / "HEAD"
+        if not p.exists():
+            return rows
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+        for ln in reversed(lines):
+            m = _REFLOG_RE.match(ln.strip())
+            if not m:
+                continue
+            _old, new, ts, tz, action = m.groups()
+            if not action.startswith("commit"):
+                continue
+            sign = 1 if tz[0] == "+" else -1
+            off = timezone(sign * timedelta(hours=int(tz[1:3]), minutes=int(tz[3:5])))
+            subject = action.split(":", 1)[1].strip() if ":" in action else action
+            rows.append(
+                {
+                    "sha": new[:7],
+                    "at": datetime.fromtimestamp(int(ts), off),
+                    "subject": subject,
+                    "amend": "amend" in action,
+                }
+            )
+    except Exception:  # noqa: BLE001
+        return rows
+    seen: set[str] = set()
+    uniq = []
+    for r in rows:  # 최신부터 — 같은 sha 가 두 번 나오면 첫 번째만 남긴다
+        if r["sha"] in seen:
+            continue
+        seen.add(r["sha"])
+        uniq.append(r)
+    return uniq
 
 
 def git_index_lock(root: Path) -> dict:
@@ -741,8 +872,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     # ---- 1. 코드 상태 ----
     A("## 1. 코드·커밋 상태")
     A("")
-    head = run_git(root, ["rev-parse", "--short", "HEAD"])
-    branch = run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    # [MW0601 2026-08-26 F-60] HEAD sha·브랜치는 **git 을 안 띄우고** `.git` 파일에서 읽는다.
+    # 2026-08-24·25·26 사흘 연속으로 점검 세션의 git 호출이 마운트에서 락을 남겼다.
+    _hf = git_head_facts(root)
+    head = _hf["short"] or f"**미측정**({_hf['note']})"
+    branch = _hf["branch"] or "**미측정**"
     status = run_git(root, ["status", "--porcelain", "--untracked-files=all"])
     dirty = [ln for ln in status.splitlines() if ln.strip()]
 
@@ -779,12 +913,27 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         lock_txt = (
             f" · 🔴 **인덱스락 잔존** {lk['size']}바이트 · {_age_h:.1f}시간 · " f"{_proc}{_tail}"
         )
+    # [MW0601 2026-08-26 F-61] **마운트 관측임을 스스로 경고한다.**
+    #
+    # 2026-08-26 15:22 정정 ④ — 「CRLF 88파일」은 실재하는 변경이 아니라 관측 도구의 착시였다.
+    # 이 수집기가 Git Bash/MSYS 마운트에서 돌면 git 이 줄바꿈을 번역해 **네이티브에서 센 값과
+    # 다른 수**를 낸다. 값을 고칠 수는 없으므로 **값 옆에 출처를 적는다** — 숫자만 남으면
+    # 다음 사람이 그 숫자를 그대로 인용한다(179건이 4거래일간 이월된 것이 그 예다).
+    _mounted = bool(os.environ.get("MSYSTEM")) or "bash" in os.environ.get("SHELL", "").lower()
+    _mount_note = (
+        " (⚠ 마운트 관측 · 네이티브와 다를 수 있음 · 줄바꿈 번역)"
+        if _mounted
+        else " (네이티브 관측)"
+    )
     A(
         f"- HEAD `{head}` · 브랜치 `{branch}` · 작업트리 미커밋 {len(dirty)}건(untracked 포함)"
+        + _mount_note
         + lock_txt
     )
     A(
         f"- `src/`+`scripts/` 실제 변경 **{real_files}파일**"
+        " — 기준은 항상 `--ignore-all-space`"
+        + _mount_note
         + (f" · 개행 잡음 {noise}파일(CRLF — 부채 아님)" if noise else " · 개행 잡음 없음")
     )
     if dirty:
@@ -793,12 +942,18 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if len(dirty) > 40:
             A(f"… 외 {len(dirty) - 40}건")
         A("```")
-    nxt = (day + timedelta(days=1)).strftime("%Y-%m-%d")
-    todays = run_git(
-        root, ["log", "--oneline", "--no-decorate", f"--since={D} 00:00", f"--until={nxt} 00:00"]
+    # [MW0601 2026-08-26 F-60] 커밋 목록도 `.git/logs/HEAD` 직접 읽기로 얻는다 — git 미실행.
+    _commits = git_reflog_commits(root)
+    _today_rows = [r for r in _commits if r["at"].astimezone(KST).date() == day]
+    todays = "\n".join(
+        f"{r['sha']} {r['at'].astimezone(KST).strftime('%H:%M')} {r['subject']}"
+        + (" (amend)" if r["amend"] else "")
+        for r in _today_rows
     )
     A("")
-    A(f"**당일({D}) 커밋**")
+    A(
+        f"**당일({D}) 커밋** — 출처 `.git/logs/HEAD`(reflog · git 미실행). pull 로 들어온 커밋은 안 보인다"
+    )
     A("```")
     if todays.strip():
         A(todays)
@@ -811,9 +966,16 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         )
     A("```")
     A("")
-    A("**직전 커밋 10건**")
+    A("**직전 커밋 10건** — 출처 `.git/logs/HEAD`(reflog · git 미실행)")
     A("```")
-    A(run_git(root, ["log", "--oneline", "--no-decorate", "-10"]))
+    A(
+        "\n".join(
+            f"{r['sha']} {r['at'].astimezone(KST).strftime('%m-%d %H:%M')} {r['subject']}"
+            + (" (amend)" if r["amend"] else "")
+            for r in _commits[:10]
+        )
+        or "(reflog 없음 — **미측정**)"
+    )
     A("```")
     A("")
 
