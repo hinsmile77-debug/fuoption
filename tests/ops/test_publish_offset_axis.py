@@ -718,3 +718,101 @@ def test_the_live_entrypoint_declares_itself() -> None:
 
     source = Path("scripts/run_l1_daily.py").read_text(encoding="utf-8")
     assert 'mode="live"' in source
+
+
+# --------- 유예 여유가 음수면 운다 (2026-08-26 F-66 · 이상점 1-11)
+#
+# 2026-08-26이 `grace_headroom` 계기의 첫날이었고 첫 값이 곧바로 음수였다 — 1분봉 최악
+# −3,596ms · 유예 초과 14건. 그런데 그날 경고는 **0건**이다. `PublishGraceExceeded`는
+# 2026-08-24 F-21 이후 **예산**(대기 제외)을 재므로 유예를 넘긴 회차가 그 축에 안 걸린다.
+
+
+def _run_session(monkeypatch, delay_ms: float, *, count: int = 3):
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 8, 26, 13, 0, tzinfo=KST)]
+    engine = _engine(now)
+    for minute in range(count):
+        bar_open = datetime(2026, 8, 26, 13, minute, tzinfo=KST)
+        vector = _vector(Horizon.M1, bar_open)
+        now[0] = vector.valid_until + timedelta(milliseconds=delay_ms)
+        engine._record_publish_offset(vector)
+    stats = engine.log_publish_offsets()
+    return engine, records, stats
+
+
+def test_negative_grace_headroom_raises_a_warning(monkeypatch) -> None:
+    """1분봉 유예 2,000ms를 넘겨 발행한 세션 — 여유가 음수다."""
+    _engine_, records, _stats = _run_session(monkeypatch, 5596.3)
+
+    breached = [r for r in records if r["tag"] == "PublishGraceBreached"]
+    assert len(breached) == 1, "세션당 한 줄이다 — 회차마다 울면 아무도 안 본다"
+    assert breached[0]["worst_horizon"] == "1m"
+    assert breached[0]["headroom_ms"] < 0
+    # 「몇 시에 몰렸나」가 원인 추적의 첫 질문이므로 시간대 분포를 동봉한다.
+    assert breached[0]["over_grace_by_hour"] == {"13": 3.0}
+
+
+def test_positive_grace_headroom_stays_silent(monkeypatch) -> None:
+    """여유가 남은 날에 울면 매일 뜨는 경고가 되어 진짜 음수인 날을 가린다."""
+    _engine_, records, _stats = _run_session(monkeypatch, 880.0)
+
+    assert not [r for r in records if r["tag"] == "PublishGraceBreached"]
+
+
+def test_grace_warning_does_not_change_the_offset_summary(monkeypatch) -> None:
+    """**판정 불변** — 경보를 붙였다고 발행도 통계도 달라지지 않는다.
+
+    이것은 게이트가 아니라 경보다(R18 대상 아님). 같은 입력에서 `FeaturePublishOffset`이
+    내는 값이 경보 유무와 무관하게 같아야 한다.
+    """
+    _e1, loud, stats_loud = _run_session(monkeypatch, 5596.3)
+    _e2, quiet, stats_quiet = _run_session(monkeypatch, 880.0)
+
+    for records, stats in ((loud, stats_loud), (quiet, stats_quiet)):
+        offsets = [r for r in records if r["tag"] == "FeaturePublishOffset"]
+        assert len(offsets) == 1
+        assert offsets[0]["measured"] is True
+        assert stats is not None and stats["samples"] == 3
+    # 경보가 붙은 쪽에서도 요약은 **먼저** 나간다 — 순서가 바뀌면 요약이 유실될 수 있다.
+    tags = [r["tag"] for r in loud]
+    assert tags.index("FeaturePublishOffset") < tags.index("PublishGraceBreached")
+
+
+def test_grace_breach_tag_has_exactly_one_severity() -> None:
+    """R6 — 태그 1개 = 심각도 1개. 등록 안 된 태그는 로거가 거절한다."""
+    import logging as _logging
+
+    from messiah.core.logging import TAG_LEVELS
+
+    assert TAG_LEVELS["PublishGraceBreached"] == _logging.WARNING
+
+
+def test_replay_does_not_ride_the_grace_alert_axis(monkeypatch) -> None:
+    """옛 하루를 재생할 때마다 이미 아는 사실로 울면 경보의 값이 떨어진다 (2026-08-24 F-28).
+
+    요약 `FeaturePublishOffset`은 **기록**이므로 리플레이에서도 그대로 나간다 — 사라지는
+    것은 경보뿐이고, 사실은 하나도 안 사라진다.
+    """
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 8, 26, 13, 0, tzinfo=KST)]
+    engine = _engine(now, mode="replay")
+    for minute in range(3):
+        bar_open = datetime(2026, 8, 26, 13, minute, tzinfo=KST)
+        vector = _vector(Horizon.M1, bar_open)
+        now[0] = vector.valid_until + timedelta(milliseconds=5596.3)
+        engine._record_publish_offset(vector)
+    assert engine.log_publish_offsets() is not None
+
+    tags = [r["tag"] for r in records]
+    assert "FeaturePublishOffset" in tags
+    assert "PublishGraceBreached" not in tags

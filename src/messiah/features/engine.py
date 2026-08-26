@@ -1314,7 +1314,52 @@ class FeatureEngine:
             grace_headroom=self._grace_headroom(),
             **stats,
         )
+        self._warn_if_grace_breached(by_hour)
         return stats
+
+    def _warn_if_grace_breached(self, by_hour: dict[str, dict[str, float]]) -> None:
+        """[MW0601 2026-08-26 F-66] 유예 여유가 **음수면 운다.**
+
+        2026-08-26이 이 계기의 첫날이었고, 첫 값이 곧바로 음수였다 — 1분봉 최악
+        −3,596ms · 유예 초과 14건. 그런데 그날 경고는 **0건**이었다. `FeaturePublishOffset`
+        은 INFO 한 줄이고, 그 줄 안의 `grace_headroom` 을 사람이 열어 봐야만 부호가 보인다.
+        「자료가 빠질 수 있는 경계를 이미 넘었다」는 사실이 INFO 안에 접혀 있으면 안 된다
+        (R10 · 금지계명 12 — 조용한 폴백 금지의 정신).
+
+        ⚠ **이것은 게이트도 차단도 아니다.** 판정을 바꾸지 않고 사람을 부를 뿐이라
+        R18(게이트 신설은 섀도 20거래일 후 승격) 대상이 아니다. 발행은 그대로 나간다.
+
+        하루 한 번(마감 절차)만 부르므로 **세션당 최대 1줄**이다.
+
+        **리플레이는 이 축을 타지 않는다** (2026-08-24 F-28과 같은 규율) — 옛 하루를 다시
+        재생할 때마다 이미 아는 사실로 경보가 뜨면 경보의 값이 떨어진다. 요약
+        `FeaturePublishOffset`은 기록이므로 리플레이에서도 그대로 나간다.
+        """
+        if not self._live:
+            return
+        headroom = self._grace_headroom()
+        if not headroom:
+            return
+        worst_ms = headroom.get("worst_headroom_ms")
+        if worst_ms is None or worst_ms >= 0:
+            return
+        # 시간대별 유예 초과 분포 — 「몇 시에 몰렸나」가 원인 추적의 첫 질문이다.
+        over_by_hour = {
+            hour: stat["over_grace"]
+            for hour, stat in sorted(by_hour.items())
+            if stat.get("over_grace")
+        }
+        mlog.log(
+            "PublishGraceBreached",
+            f"유예까지 남은 여유가 음수 — 최악 {headroom['worst_horizon']} "
+            f"{worst_ms:.0f}ms · 유예 초과 {sum(over_by_hour.values()):.0f}건. "
+            f"완성봉 경계를 넘겨 발행한 회차가 있다(자료 유실 경계)",
+            symbol=self._symbol,
+            worst_horizon=headroom["worst_horizon"],
+            headroom_ms=worst_ms,
+            by_horizon=headroom["by_horizon"],
+            over_grace_by_hour=over_by_hour,
+        )
 
     def _grace_headroom(self) -> dict[str, Any] | None:
         """Horizon별 「유예까지 남은 여유」 + 최악 한 건 (2026-08-25 F-43).

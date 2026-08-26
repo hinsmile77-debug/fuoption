@@ -295,7 +295,10 @@ def test_the_grace_breach_is_counted_against_each_horizon_own_boundary(monkeypat
         engine._record_publish_offset(vector)
 
     assert engine.log_publish_offsets() is not None
-    published = records[-1]
+    # **태그로 고른다** (2026-08-26 F-66). 종전엔 `records[-1]`이었는데, 유예 여유가 음수인
+    # 세션에서는 요약 뒤에 `PublishGraceBreached` 한 줄이 더 붙으므로 마지막이 요약이 아니다.
+    # 위치가 아니라 성질로 단언한다(1-18 규율).
+    published = next(r for r in records if r["tag"] == "FeaturePublishOffset")
     assert published["by_hour"]["10"]["over_grace"] == 1.0  # 1분봉 한 건만
 
 
