@@ -139,6 +139,23 @@ WS_TR_FUTURES_CONTRACT = "H0IFCNT0"  # 지수선물 실시간체결가 — "모�
 # 선물옵션 실시간체결통보 (계좌별 주문체결 알림 — 모의/실전 TR_ID·도메인 모두 분리)
 WS_TR_ORDER_NOTICE = {"real": "H0IFCNI0", "vps": "H0IFCNI9"}
 
+
+def order_notice_tr_id(is_mock: bool) -> str:
+    """체결통보 TR ID — 시세와 달리 모의/실전이 갈린다."""
+    return WS_TR_ORDER_NOTICE["vps" if is_mock else "real"]
+
+
+def order_notice_ws_domain(is_mock: bool) -> str:
+    """체결통보 WS 도메인 — 계좌별 알림이라 `MARKET_DATA_WS_DOMAIN`을 쓰면 안 된다.
+
+    이 파일 상단 주석이 2026-07-21부터 설명해온 분기를 함수로 만든 것이다. 함수로 만든
+    이유는 상수 두 개를 그대로 두면 호출측이 `MARKET_DATA_WS_DOMAIN`(= REAL_WS_DOMAIN)을
+    습관적으로 집어와도 **모의계좌에서 조용히 틀린 도메인에 붙기** 때문이다 — 시세 구독은
+    실제로 그렇게 해야 맞아서, 잘못 복사해도 코드가 자연스러워 보인다.
+    """
+    return VPS_WS_DOMAIN if is_mock else REAL_WS_DOMAIN
+
+
 # Cross-asset stress 피처 — VIX 기간구조·USDCNH는 해외선물옵션 도메인(CME/CBOE/HKEx 상장 선물)으로
 # 얻는다. 2026-07-10 모의투자 앱키로 실측: VX(CBOE)·CNH(HKEx)는 계좌 무관 즉시 조회 성공(HTTP 200)
 # 했지만, ZN(CME/CBOT, US10Y 대용)은 "EGW00552: CBOT SUB거래소 신청 계좌가 아닙니다"로 거부됨 —

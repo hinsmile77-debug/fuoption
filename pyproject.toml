@@ -20,6 +20,12 @@ dependencies = [
     # (data/archiver.py 실측, 2026-07-22) — 로컬 datetime 생성 자체(core/timeutil.py)는 고정
     # offset이라 tzdata가 필요 없지만, polars의 왕복 읽기에는 필요하다.
     "tzdata>=2026.1; sys_platform == 'win32'",
+    # KIS 주문체결통보(H0IFCNI0/H0IFCNI9)의 실시간 본문은 **AES-CBC로 암호화되어 온다** —
+    # 시세(H0IFCNT0 등, encrypt="N")와 달리 복호 없이는 한 글자도 못 읽는다. 파이썬 표준
+    # 라이브러리에 블록암호가 없어 외부 의존성이 불가피하고, KIS 공식 샘플(kis_auth.py)이
+    # 쓰는 것과 같은 pycryptodome을 그대로 쓴다 — 같은 라이브러리를 써야 공식 샘플의
+    # 복호 코드와 우리 코드가 어긋났을 때 "라이브러리 차이"라는 변명이 성립하지 않는다.
+    "pycryptodome>=3.20",
 ]
 
 [project.optional-dependencies]
