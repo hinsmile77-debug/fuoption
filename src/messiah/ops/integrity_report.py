@@ -2998,6 +2998,63 @@ def _infer_log_dir(log_paths: Mapping[str, Sequence[Path]]) -> Path:
     return DEFAULT_LOG_DIR
 
 
+def _paired_axes(report: IntegrityReport) -> list[str]:
+    """[MW0601 2026-08-26 G-32] **같은 사실을 세는 계기가 둘 이상인 축을 짝지어 낸다.**
+
+    2026-08-26에 `native_crashes`(0)와 `crash_forensics.dumps`(3)가 같은 화면에서 반대로
+    말했다. 크래시만의 문제가 아니다 — 소급 불가 손실도(분 단위 값 vs 유실 항목 수),
+    발행 오프셋도(예산 초과 0/708 vs 유예 초과 14/708) 같은 형태였다.
+
+    **불일치 자체를 한 줄로 만든다.** 사람이 두 줄을 찾아 비교하지 않아도 되게 한다.
+    판정하지 않는다 — `breaches`에 넣지 않고 **기록만** 한다(R18 정신). 여기서 하는 일은
+    이미 리포트 안에 있는 값 둘을 나란히 세우는 것뿐이고, 새 계측을 만들지 않는다.
+    """
+    lines: list[str] = []
+
+    # ① 크래시 — 즉사(이벤트로그) vs stderr 흔적(faulthandler)
+    crashes = report.native_crashes
+    dump_n = len(report.crash_forensics.dumps)
+    if crashes.available:
+        mark = " ⚠ 불일치" if (dump_n > 0) != (crashes.count > 0) else ""
+        lines.append(f"    크래시: 프로세스 종료 {crashes.count}건 / stderr 덤프 {dump_n}건{mark}")
+    elif dump_n:
+        lines.append(f"    크래시: 프로세스 종료 **미측정** / stderr 덤프 {dump_n}건 ⚠ 한쪽만 잼")
+
+    # ② 발행 — 「예산(대기 제외)」과 「유예(대기 포함)」는 **다른 질문에 답한다**
+    #    (SYSTEM.md 불변원칙 3: 세 값을 섞으면 어느 것도 못 지킨다).
+    sla = report.publish_sla
+    by_hour = (report.publish_offset or {}).get("by_hour") or {}
+    over_grace = sum(
+        float(stat.get("over_grace") or 0.0)
+        for stat in by_hour.values()
+        if isinstance(stat, Mapping)
+    )
+    if sla:
+        samples = float(sla.get("samples") or 0.0)
+        over_sla = float(sla.get("over_sla") or 0.0)
+        mark = " ⚠ 다른 축" if (over_grace > 0) != (over_sla > 0) else ""
+        lines.append(
+            f"    발행: 예산 초과 {over_sla:.0f}/{samples:.0f}건 / "
+            f"유예 초과 {over_grace:.0f}건{mark}"
+        )
+
+    # ③ 소급 불가 손실 — 「몇 분치가 비었나」와 「장중에 실제로 무엇을 잃었나」는 다른 값이다.
+    #    2026-08-26: 0.6분이 `❌`로 찍혔는데 그 0.6분은 **기동 지연**이고 장중 유실은 0분이었다.
+    #    매일 뜨는 `❌`가 진짜 `❌`를 가린다.
+    loss = report.irrecoverable_loss_minutes
+    if loss is not None:
+        parts = report.irrecoverable_loss_breakdown or {}
+        mid = parts.get("mid_session_gap_minutes")
+        mid_text = "**미측정**" if mid is None else f"{float(mid):.1f}분"
+        mark = " ⚠ 다른 축" if (loss > 0 and mid is not None and float(mid) == 0.0) else ""
+        lines.append(
+            f"    소급 불가 손실: 합산 {loss:.1f}분 / 장중 유실 {mid_text}"
+            f"(기동 지연 {float(parts.get('start_lag_minutes') or 0.0):.1f}분){mark}"
+        )
+
+    return ["  짝 축(같은 사실 · 다른 계기 · 기록만):", *lines] if lines else []
+
+
 def format_summary(report: IntegrityReport) -> str:
     """사람이 장 마감 후 30초 안에 훑을 수 있는 요약 — 상세는 JSON에 있다."""
     lines = [f"=== 일일 무결성 리포트 {report.date} ({report.symbol}) ==="]
@@ -3045,7 +3102,15 @@ def format_summary(report: IntegrityReport) -> str:
 
     crashes = report.native_crashes
     if crashes.available:
-        lines.append(f"  네이티브 크래시: {crashes.count}건")
+        # [MW0601 2026-08-26 F-64] **두 계기를 한 줄에 병기한다.**
+        # 종전엔 `네이티브 크래시: 0건` 한 줄이었고, 덤프 3건은 아래 별도 줄에 있었다.
+        # 두 줄을 비교해야만 알 수 있는 사실은 **아무도 비교하지 않는다** — 2026-08-26에
+        # 그 화면이 「크래시 0건」으로 읽혔다. 0건이라는 말은 덤프 수를 옆에 달고 나온다.
+        _dump_n = len(report.crash_forensics.dumps)
+        _mark = " ⚠ 두 계기 불일치" if (_dump_n > 0) != (crashes.count > 0) else ""
+        lines.append(
+            f"  네이티브 크래시: 프로세스 종료 {crashes.count}건 · stderr 덤프 {_dump_n}건{_mark}"
+        )
     elif not crashes.supported:
         lines.append("  네이티브 크래시: 집계 불가(Windows 전용)")
     else:
@@ -3344,6 +3409,8 @@ def format_summary(report: IntegrityReport) -> str:
             f"초과 {sla['over_sla']:.0f}/{sla['samples']:.0f}건({ratio_text})"
             + (f" — Horizon별 최대 {worst}" if worst else "")
         )
+    # [MW0601 2026-08-26 G-32] 같은 사실을 세는 계기가 둘인 축을 **여기서 한 번에** 짝지어 낸다.
+    lines.extend(_paired_axes(report))
     if report.session_git_shas:
         lines.append(f"  수집 커밋: {', '.join(report.session_git_shas)}")
     # **어긋남이 없는 날도 한 줄 남긴다** (2026-08-20 G-2) — 측정된 0과 미검사를 가른다.

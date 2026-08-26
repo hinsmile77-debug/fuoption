@@ -80,7 +80,12 @@ def test_crash_with_no_dump_is_reported_as_unexplainable(tmp_path: Path):
 
 
 def test_armed_session_with_a_dump_has_no_unexplainable_finding(tmp_path: Path):
-    """무장된 세션에서 크래시가 나면 덤프가 남는다 — 그건 사고지만 **설명 가능한** 사고다."""
+    """무장된 세션에서 크래시가 나면 덤프가 남는다 — 그건 사고지만 **설명 가능한** 사고다.
+
+    ⚠ 2026-08-26 F-64로 단언을 **성질 기준으로** 고쳤다. 종전엔 `findings == []`를 요구했고,
+    그 등호가 「덤프가 있으면 말한다」를 넣을 자리를 막고 있었다. 여기서 확인할 성질은
+    「원인 규명 불가로 잡히지 않는다」이지 「아무 말도 안 한다」가 아니다(1-18 규율).
+    """
     (tmp_path / "ui_20260803.log").write_text(_REAL_DUMP, encoding="utf-8")
 
     forensics = collect_crash_forensics(
@@ -89,7 +94,58 @@ def test_armed_session_with_a_dump_has_no_unexplainable_finding(tmp_path: Path):
 
     assert forensics.armed == {"ui": True}
     assert len(forensics.dumps) == 1
-    assert forensics.findings == []
+    assert not any("원인 규명 불가" in f for f in forensics.findings)
+    assert not any("무장 마커 없음" in f for f in forensics.findings)
+
+
+# ------------------------------------------- 덤프가 있으면 말한다 (2026-08-26 F-64 · 1-10)
+
+
+def test_dump_present_always_yields_a_finding_even_when_eventlog_says_zero(tmp_path: Path):
+    """2026-08-26 재현 — 덤프 3건 · 이벤트로그 0건 · `survived` 판정 불가.
+
+    그날 `findings`는 **비어 있었다.** 조건 셋이 전부 「덤프가 없다」거나 「덤프 뒤 재기동이
+    있다」를 물었기 때문이다. 그 결과 같은 화면의 `네이티브 크래시: 0건`만 사람 눈에 남았고,
+    등록부의 `ui-crash-isolation`은 16거래일 연속 합격으로 적혔다.
+    """
+    for name in ("ui_20260803.log", "l1_daily_20260803.log", "g2_daily_20260803.log"):
+        (tmp_path / name).write_text(_REAL_DUMP, encoding="utf-8")
+
+    forensics = collect_crash_forensics(
+        _DAY, log_dir=tmp_path, native_crash_count=0, native_crashes_available=True
+    )
+
+    assert len(forensics.dumps) == 3
+    joined = " | ".join(forensics.findings)
+    assert "faulthandler 덤프 3건" in joined
+    # 프로세스별 내역이 있어야 「어디가 흔들렸나」를 바로 묻는다.
+    assert "ui 1건" in joined
+    # 두 계기가 서로 다른 것을 센다는 사실이 그 줄 안에 있어야 한다.
+    assert "서로 다른 것을 센다" in joined
+
+
+def test_dump_finding_reports_uncountable_eventlog_as_unmeasured(tmp_path: Path):
+    """이벤트로그를 못 센 날은 「0건」이 아니라 「미측정」으로 적는다(L18)."""
+    (tmp_path / "ui_20260803.log").write_text(_REAL_DUMP, encoding="utf-8")
+
+    forensics = collect_crash_forensics(
+        _DAY, log_dir=tmp_path, native_crash_count=0, native_crashes_available=False
+    )
+
+    assert any("미측정건" in f for f in forensics.findings)
+
+
+def test_no_dump_no_dump_finding(tmp_path: Path):
+    """덤프가 0건인 날에는 이 finding 이 뜨지 않는다 — 매일 뜨는 경고는 경고가 아니다."""
+    (tmp_path / "ui_20260803.log").write_text(
+        "[crash_forensics] armed tag=ui target=stderr\n", encoding="utf-8"
+    )
+
+    forensics = collect_crash_forensics(
+        _DAY, log_dir=tmp_path, native_crash_count=0, native_crashes_available=True
+    )
+
+    assert not any("faulthandler 덤프 1건" in f for f in forensics.findings)
 
 
 def test_unarmed_session_is_flagged_even_without_any_crash(tmp_path: Path):

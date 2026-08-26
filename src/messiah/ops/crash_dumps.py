@@ -30,6 +30,7 @@ Windows 이벤트로그를 뒤지고(ID 1000/1001), WER `Report.wer` 원본을 �
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -293,6 +294,24 @@ def collect_crash_forensics(
                 f"{process} 로그에 crash_forensics 무장 마커 없음 — "
                 f"그 세션은 네이티브 크래시가 나도 증거를 안 남긴다"
             )
+
+    # [MW0601 2026-08-26 F-64] **덤프가 1건이라도 있으면 finding 1건.**
+    #
+    # 종전 조건 셋은 전부 「덤프가 없다」거나 「덤프 뒤 재기동이 있다」를 물었다. 그래서
+    # 2026-08-26에 덤프 3건(`survived: null` — 판정 불가)이 났는데 `findings: []`였고, 같은
+    # 화면의 `네이티브 크래시: 0건`만 사람 눈에 남았다. 등록부의 `ui-crash-isolation`은
+    # 그날까지 **16거래일 연속 합격**으로 적혔다 — 사실과 어긋난 합격이다.
+    # 이 finding 은 breaches 에 들어가지 않는다(판정 무변경). **말하게 하는 것**이 목적이다.
+    if dumps:
+        by_process = ", ".join(
+            f"{name} {count}건" for name, count in sorted(Counter(d.process for d in dumps).items())
+        )
+        findings.append(
+            f"faulthandler 덤프 {len(dumps)}건({by_process}) — 프로세스가 파이썬 아래층에서 "
+            f"흔들렸다. 이벤트로그 네이티브 크래시는 "
+            f"{native_crash_count if native_crashes_available else '미측정'}건이며 "
+            f"**두 계기는 서로 다른 것을 센다**(즉사 vs stderr 흔적). 「크래시 0건」으로 읽지 말 것"
+        )
 
     if native_crashes_available and native_crash_count > 0 and not dumps:
         # 2026-07-29~08-03을 다섯 번 반복하게 만든 바로 그 상태.

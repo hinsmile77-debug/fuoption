@@ -1862,3 +1862,128 @@ def test_todays_own_provisional_report_is_not_a_finding(tmp_path: Path):
     )
 
     assert _stale_provisional_findings(_DAY, tmp_path) == []
+
+
+# ---------- 두 계기 병기 · 짝 축 (2026-08-26 F-64 · G-32 · 이상점 1-10·1-11·1-13)
+
+
+def _with_axes(report, **overrides):
+    """이미 만든 리포트에 축 값만 갈아끼운다 — 픽스처가 아니라 **표기**를 검증하는 자리다."""
+    from dataclasses import replace
+
+    return replace(report, **overrides)
+
+
+def _clean_report(tmp_path: Path):
+    _write_bars(tmp_path / "bars", _FULL_SESSION)
+    log = tmp_path / "l1.log"
+    _write_log(log, [{"ts": "2026-07-29T08:35:10+09:00", "level": "INFO", "tag": "SessionStart"}])
+    return _report(tmp_path, logs={"l1_daily": [log]})
+
+
+def test_zero_native_crashes_never_stands_alone(tmp_path: Path):
+    """2026-08-26 재현 — `네이티브 크래시: 0건` 한 줄이 덤프 3건과 같은 화면에 있었다.
+
+    두 줄을 비교해야만 알 수 있는 사실은 아무도 비교하지 않는다. 0건은 **덤프 수를 옆에
+    달고** 나온다.
+    """
+    from messiah.ops.crash_dumps import CrashForensics, FaulthandlerDump
+
+    base = _clean_report(tmp_path)
+    dumps = [
+        FaulthandlerDump(process=name, kind="access violation", thread_count=10)
+        for name in ("ui", "l1_daily", "g2_paper")
+    ]
+    report = _with_axes(
+        base, crash_forensics=CrashForensics(armed={"ui": True}, dumps=dumps, findings=[])
+    )
+
+    summary = format_summary(report)
+
+    assert "네이티브 크래시: 프로세스 종료 0건 · stderr 덤프 3건" in summary
+    assert "두 계기 불일치" in summary
+
+
+def test_matching_meters_do_not_get_a_mismatch_mark(tmp_path: Path):
+    """둘 다 0인 정상일에 ⚠가 붙으면 매일 뜨는 경고가 되어 아무 뜻도 없어진다."""
+    summary = format_summary(_clean_report(tmp_path))
+
+    assert "네이티브 크래시: 프로세스 종료 0건 · stderr 덤프 0건" in summary
+    assert "두 계기 불일치" not in summary
+
+
+def test_paired_axes_block_pairs_publish_budget_and_grace(tmp_path: Path):
+    """G-32 — 예산 초과 0건과 유예 초과 14건이 같은 화면에서 반대 인상을 준 날의 재현.
+
+    둘은 **다른 질문에 답한다**(SYSTEM.md 불변원칙 3). 그 사실이 한 줄에 있어야 한다.
+    """
+    base = _clean_report(tmp_path)
+    report = _with_axes(
+        base,
+        publish_sla={
+            "sla_ms": 1000.0,
+            "p50_ms": 63.0,
+            "p90_ms": 93.0,
+            "max_ms": 422.0,
+            "samples": 708.0,
+            "over_sla": 0.0,
+            "over_sla_ratio": 0.0,
+            "horizons": {},
+        },
+        publish_offset={
+            "by_hour": {
+                "13": {"over_grace": 8.0},
+                "15": {"over_grace": 6.0},
+            }
+        },
+    )
+
+    summary = format_summary(report)
+
+    assert "짝 축(같은 사실 · 다른 계기 · 기록만)" in summary
+    assert "발행: 예산 초과 0/708건 / 유예 초과 14건 ⚠ 다른 축" in summary
+
+
+def test_paired_axes_splits_loss_minutes_from_mid_session_loss(tmp_path: Path):
+    """1-13 재현 — 0.6분이 `❌`로 찍혔지만 그 0.6분은 **기동 지연**이고 장중 유실은 0이었다.
+
+    매일 뜨는 `❌`가 진짜 `❌`를 가린다. 두 축을 갈라 적는다.
+    """
+    base = _clean_report(tmp_path)
+    report = _with_axes(
+        base,
+        irrecoverable_loss_minutes=0.6,
+        irrecoverable_loss_breakdown={
+            "start_lag_minutes": 0.6,
+            "mid_session_gap_minutes": 0.0,
+        },
+    )
+
+    summary = format_summary(report)
+
+    assert "소급 불가 손실: 합산 0.6분 / 장중 유실 0.0분(기동 지연 0.6분) ⚠ 다른 축" in summary
+
+
+def test_paired_axes_are_records_not_verdicts(tmp_path: Path):
+    """**판정 불변** — 짝 축은 `breaches`에 한 건도 넣지 않는다.
+
+    불일치를 말하는 것과 그것을 위반으로 세는 것은 다른 결정이고, 후자는 사람 몫이다(R18).
+    """
+    from messiah.ops.crash_dumps import CrashForensics, FaulthandlerDump
+
+    base = _clean_report(tmp_path)
+    assert base.breaches == []
+
+    report = _with_axes(
+        base,
+        crash_forensics=CrashForensics(
+            armed={"ui": True},
+            dumps=[FaulthandlerDump(process="ui", kind="access violation", thread_count=10)],
+            findings=["faulthandler 덤프 1건(ui 1건) — ..."],
+        ),
+        irrecoverable_loss_minutes=0.6,
+        irrecoverable_loss_breakdown={"start_lag_minutes": 0.6, "mid_session_gap_minutes": 0.0},
+    )
+
+    assert report.breaches == []
+    assert "짝 축" in format_summary(report)
