@@ -467,6 +467,18 @@ TAG_LEVELS: dict[str, int] = {
     "HostHealthDegraded": logging.WARNING,
     # 변동성 축 일일 채점 (2026-08-05 고도화 4, `models/vol_scorecard.py`).
     "VolAxisScorecard": logging.INFO,
+    # ---- 주문체결통보 (`broker/kis/order_notice.py`, 2026-08-26 배선) ----------------
+    # 2026-07-21부터 TR ID만 정의돼 있고 배선이 없던 경로다 — 체결 확인이 잔고 폴링뿐이었다.
+    "OrderNoticeSubscribed": logging.INFO,  # 구독 성공 + 복호 키 수신 (세션당 1줄)
+    "OrderNoticeReceived": logging.INFO,  # 통보 1건 — 주문 없는 날은 0줄이 정상
+    # 복호/파싱 실패. ERROR인 이유: 이 상태에서도 **연결은 멀쩡해 보이고 로그는 조용하다.**
+    # 통보가 오는데 한 건도 못 읽는 것과 통보가 안 오는 것이 구분되지 않으면, "체결 알림이
+    # 되는 줄 알았다"로 실거래에 들어간다. 프레임 하나를 버려도 루프는 계속 돈다(L22).
+    "OrderNoticeUndecryptable": logging.ERROR,
+    "OrderNoticeMalformed": logging.ERROR,  # 파이프 프레임 형식 불일치 — 프로토콜 변경 신호
+    "OrderNoticeHandlerError": logging.ERROR,  # L22: 핸들러 예외가 통보 수신을 끊지 않게
+    "OrderNoticeWSDisconnected": logging.WARNING,  # 백오프 후 재연결 시도
+    "OrderNoticeWSReconnected": logging.INFO,  # 끊긴 뒤 재연결 성공
 }
 
 _logger = logging.getLogger("messiah")

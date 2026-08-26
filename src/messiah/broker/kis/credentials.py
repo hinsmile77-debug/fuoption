@@ -16,6 +16,10 @@ class KISCredentials:
     app_secret: str
     account_no: str = ""
     account_product_code: str = "01"
+    # HTS 로그인 ID — 주문체결통보 WS 구독의 tr_key로만 쓰인다(`order_notice.py`).
+    # 빈 문자열이 정상 상태일 수 있다: 시세 수집만 하는 인스턴스는 이 값이 필요 없다
+    # (`core/config.BrokerConfig.hts_id_ref` 주석 참고).
+    hts_id: str = ""
     is_mock: bool = True
 
     @classmethod
@@ -25,5 +29,6 @@ class KISCredentials:
             app_secret=resolve_secret(cfg.app_secret_ref),
             account_no=resolve_secret(cfg.account_ref),
             account_product_code=cfg.account_product_code,
+            hts_id=resolve_secret(cfg.hts_id_ref, required=False),
             is_mock=cfg.is_paper,
         )

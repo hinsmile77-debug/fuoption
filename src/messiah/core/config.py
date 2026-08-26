@@ -25,6 +25,13 @@ class BrokerConfig(BaseModel):
     account_ref: str = "env:KIS_ACCOUNT"  # 실제 값은 .env에서
     app_key_ref: str = "env:KIS_APP_KEY"
     app_secret_ref: str = "env:KIS_APP_SECRET"
+    # 주문체결통보(H0IFCNI0/H0IFCNI9) 구독의 tr_key. 계좌번호가 아니라 **HTS 로그인 ID**다
+    # (KIS 공식 샘플 fuopt_ccnl_notice.py: `tr_key (str): [필수] 코드 (ex. dttest11)`).
+    # 다른 세 참조와 달리 **없어도 기동은 된다** — 시세 수집·주문 제출·잔고 조회는 이 값을
+    # 쓰지 않기 때문이다. 미설정 상태로 체결통보를 구독하려 할 때만 그 자리에서 깨진다
+    # (`broker/kis/order_notice.py`). 시세 수집만 돌리는 PC까지 이 값 때문에 기동 실패하는
+    # 것은 과잉이고, 반대로 조용히 빈 tr_key로 구독하면 "통보가 안 온다"로 며칠을 쓴다.
+    hts_id_ref: str = "env:KIS_HTS_ID"
     account_product_code: str = "01"  # KIS 계좌상품코드(ACNT_PRDT_CD) — 시크릿 아님, 평문 고정값
     is_paper: bool = True
 
@@ -109,12 +116,21 @@ class InstanceConfig(BaseModel):
         return v
 
 
-def resolve_secret(ref: str) -> str:
-    """'env:KEY' 참조를 .env/환경변수에서 해석. 실제 시크릿은 로그·설정에 남기지 않는다."""
+def resolve_secret(ref: str, *, required: bool = True) -> str:
+    """'env:KEY' 참조를 .env/환경변수에서 해석. 실제 시크릿은 로그·설정에 남기지 않는다.
+
+    `required=False`는 **미설정을 빈 문자열로 돌려주는** 모드다. 기본값이 아닌 이유는
+    분명하다 — 앱키·계좌번호가 없는데 조용히 빈 값으로 진행하면 인증 실패가 엉뚱한
+    자리에서 터진다. 다만 일부 시크릿(예: `hts_id_ref`)은 **특정 기능에서만** 필요해서,
+    없다는 이유로 기동 전체를 막으면 그 기능을 안 쓰는 인스턴스가 못 뜬다. 그런 값은
+    "쓰는 자리에서 깨지게" 하는 편이 맞고, 그 판단은 호출측이 한다.
+    """
     if ref.startswith("env:"):
         key = ref[4:]
         val = os.environ.get(key)
         if not val:
+            if not required:
+                return ""
             raise RuntimeError(f"환경변수 {key} 미설정 — .env 확인 (시크릿은 git 금지)")
         return val
     return ref
