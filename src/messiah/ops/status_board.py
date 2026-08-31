@@ -59,6 +59,8 @@ from messiah.core.state_cache import CacheSubscriber, StateCache
 from messiah.core.timeutil import now_kst, now_utc
 from messiah.core.version import (
     PROCESS_GIT_SHA,
+    UNKNOWN_SHA,
+    VersionDrift,
     assess_version_drift,
     head_git_sha,
     worktree_dirty_files,
@@ -192,23 +194,9 @@ class StatusBoard:
 
         snapshot: dict[str, Any] = {
             "generated_at_kst": now_kst().isoformat(),
-            "code_version": {
-                "process_git_sha": PROCESS_GIT_SHA,
-                "head_git_sha": head_git_sha(),
-                "stale": drift.stale,
-                "summary": drift.summary,
-                # **커밋과 실린 코드가 같다고 말하는 계기가 커밋을 안 봤다** (2026-08-20 F-2).
-                #
-                # 위 `stale`은 두 SHA만 대조한다. 그런데 이 저장소는 워킹트리를 직접
-                # 임포트하므로, 미커밋 변경이 있으면 두 SHA가 같아도 프로세스는 그 미커밋
-                # 코드로 돈다. 2026-08-19 저녁 구현이 커밋 없이 끝난 날 `stale`은 false였고
-                # (그 자체로는 옳다) 다음 날 개장이 통째로 갔다.
-                #
-                # `None`은 **미측정**이다(git 없음/조회 실패) — 0으로 적으면 "깨끗하다"가
-                # 되어 L18을 어긴다.
-                "worktree_dirty_files": dirty_files,
-                "worktree_dirty": None if dirty_files is None else dirty_files > 0,
-            },
+            "code_version": code_version_axis(
+                drift=drift, dirty_files=dirty_files, head_sha=head_git_sha()
+            ),
             "components": components,
             "circuit_breaker": circuit_breaker,
             # **오늘 이미 잃은 것** (2026-08-10 B-2, `ops/loss_ledger.py`). 위 컴포넌트 넷은
@@ -402,6 +390,73 @@ def load_snapshot(path: Path = DEFAULT_SNAPSHOT_PATH) -> dict[str, Any] | None:
         return None
 
 
+def code_version_axis(
+    *,
+    drift: VersionDrift,
+    dirty_files: int | None,
+    head_sha: str,
+) -> dict[str, Any]:
+    """「지금 무엇이 도는가」 한 축 — **커밋이 아니라 저장소 상태와 대조한다** (2026-08-31 F-76).
+
+    ## `stale`의 뜻이 바뀌었다
+
+    2026-08-20 F-2가 `worktree_dirty_files`를 옆자리에 실었지만 **`stale` 자체는 여전히
+    두 SHA만 봤다.** 2026-08-31에 미커밋 소스 5파일이 닷새째 돌고 있는 아침, 이 축은
+    `stale: false` · `"코드 5755804 — 전 프로세스 동일"`을 냈다 — 두 SHA만 보면 **참**이고,
+    실제로 도는 바이트를 물으면 **거짓**인 문장이다. 화면과 장중 점검이 이 두 값을 그대로
+    읽으므로 여기서 사실이 갈렸다.
+
+    이제 `stale`은 **「커밋과 다르다」가 아니라 「저장소 상태와 다르다」**를 뜻하며,
+    어느 축이 어긋났는지는 `stale_reason`이 나눠 답한다:
+
+    - ``"sha_mismatch"`` — 프로세스가 적재한 커밋이 HEAD와 다르다(옛 뜻)
+    - ``"worktree_dirty"`` — 커밋은 같은데 워킹트리에 미커밋 소스가 있다
+    - ``"both"`` — 둘 다
+    - ``None`` — 어긋남 없음, **또는 판정 근거가 없음**(아래)
+
+    `dirty_files`가 `None`이면 **미측정**이다(git 없음·조회 실패). 미측정을 0으로 접으면
+    "깨끗하다"가 되어 L18을 어기므로, `stale`을 참으로도 거짓으로도 **끌어올리지 않고**
+    SHA 축의 판정만 남긴다 — 대신 요약이 「미커밋 미측정」이라고 말한다.
+
+    ⚠ **이것은 게이트가 아니다.** 발행·주문·기동을 막지 않고 표시만 바꾼다(R18 비해당).
+    """
+    dirty = None if dirty_files is None else dirty_files > 0
+    sha_stale = drift.stale
+    stale = bool(sha_stale or dirty)
+    if sha_stale and dirty:
+        reason = "both"
+    elif sha_stale:
+        reason = "sha_mismatch"
+    elif dirty:
+        reason = "worktree_dirty"
+    else:
+        reason = None
+
+    summary = drift.summary
+    if dirty_files is None:
+        summary += " · 미커밋 미측정"
+    elif dirty_files > 0:
+        if sha_stale or not head_sha or head_sha == UNKNOWN_SHA:
+            # SHA 축이 이미 할 말이 있으면 그 문장을 지우지 않고 **뒤에 잇는다** —
+            # 두 어긋남은 원인이 다르므로 하나가 다른 하나를 덮으면 안 된다.
+            summary += f" · 미커밋 {dirty_files}파일 — 저장소와 다름"
+        else:
+            summary = f"코드 {head_sha} + 미커밋 {dirty_files}파일 — 저장소와 다름"
+
+    return {
+        "process_git_sha": PROCESS_GIT_SHA,
+        "head_git_sha": head_sha,
+        "stale": stale,
+        "stale_reason": reason,
+        "summary": summary,
+        # SHA 축 단독 판정은 **버리지 않는다** — 옛 뜻으로 이 값을 읽던 쪽(검증 항목·
+        # 리포트)이 「의미가 언제 바뀌었나」를 사후에 가를 수 있어야 한다.
+        "sha_stale": sha_stale,
+        "worktree_dirty_files": dirty_files,
+        "worktree_dirty": dirty,
+    }
+
+
 def format_snapshot(snapshot: dict[str, Any] | None) -> str:
     """터미널 출력 — 화면이 없을 때 사람이 보는 마지막 수단이라 한 눈에 읽혀야 한다."""
     if snapshot is None:
@@ -418,8 +473,12 @@ def format_snapshot(snapshot: dict[str, Any] | None) -> str:
         # 미커밋 건수를 **같은 줄에** 붙인다 (2026-08-20 F-2). 별도 줄로 빼면 "코드 버전"을
         # 읽은 사람이 그 아래를 안 볼 수 있다 — 두 값은 같은 질문("지금 무엇이 도는가")의
         # 두 얼굴이다.
+        # 2026-08-31 F-76 이후 `summary`가 이 사실을 이미 담는다 — 담지 않은 스냅샷
+        # (옛 파일·손으로 만든 것)만 여기서 보충한다. **두 번 적으면 한 번도 안 읽는다.**
         dirty = version.get("worktree_dirty_files")
-        if dirty is None:
+        if "미커밋" in summary:
+            pass
+        elif dirty is None:
             summary += " · 미커밋 미측정"
         elif dirty > 0:
             summary += f" · ⚠ 미커밋 {dirty}파일(src/scripts)"

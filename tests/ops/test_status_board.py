@@ -242,3 +242,68 @@ def test_terminal_output_survives_a_snapshot_without_the_version_block():
     text = format_snapshot({"generated_at_kst": "2026-08-03T15:00:00+09:00", "components": {}})
 
     assert "MESSIAH 상태판" in text
+
+
+# --------- 「저장소 상태와 다르다」로 뜻을 넓힌다 (2026-08-31 F-76 · 이상점 1-2)
+#
+# 미커밋 소스 5파일이 닷새째 돌던 아침, 이 축은 `stale: false` · "전 프로세스 동일"을 냈다.
+# 두 SHA만 보면 참이고 실제로 도는 바이트를 물으면 거짓인 문장이다.
+
+
+def _axis(*, sha_stale: bool, dirty_files):
+    from messiah.core.version import VersionDrift
+    from messiah.ops.status_board import code_version_axis
+
+    drift = (
+        VersionDrift(True, "코드 불일치 — HEAD 5755804 / 화면 bb60f19")
+        if sha_stale
+        else VersionDrift(False, "코드 5755804 — 전 프로세스 동일")
+    )
+    return code_version_axis(drift=drift, dirty_files=dirty_files, head_sha="5755804")
+
+
+def test_a_clean_worktree_on_the_committed_sha_is_not_stale():
+    axis = _axis(sha_stale=False, dirty_files=0)
+    assert axis["stale"] is False
+    assert axis["stale_reason"] is None
+    assert "미커밋" not in axis["summary"], "0건이면 조용해야 한다 — 매일 울면 아무도 안 읽는다"
+
+
+def test_uncommitted_source_is_stale_even_when_the_sha_matches():
+    """2026-08-31 아침의 실제 상태 — 이 한 줄이 그날 거짓을 말했다."""
+    axis = _axis(sha_stale=False, dirty_files=5)
+    assert axis["stale"] is True
+    assert axis["stale_reason"] == "worktree_dirty"
+    assert axis["summary"] == "코드 5755804 + 미커밋 5파일 — 저장소와 다름"
+    # SHA 축 단독 판정은 버리지 않는다 — 옛 뜻으로 읽던 쪽이 사후에 가를 수 있어야 한다.
+    assert axis["sha_stale"] is False
+
+
+def test_both_axes_drifting_are_named_separately():
+    axis = _axis(sha_stale=True, dirty_files=5)
+    assert axis["stale"] is True
+    assert axis["stale_reason"] == "both"
+    # SHA 쪽 문장을 **덮지 않는다** — 두 어긋남은 원인이 다르다.
+    assert "코드 불일치" in axis["summary"]
+    assert "미커밋 5파일" in axis["summary"]
+
+
+def test_unmeasured_dirt_is_not_folded_into_clean_or_dirty():
+    """미측정을 0으로도 1로도 접지 않는다 (L18) — SHA 축의 판정만 남는다."""
+    axis = _axis(sha_stale=False, dirty_files=None)
+    assert axis["stale"] is False
+    assert axis["stale_reason"] is None
+    assert axis["worktree_dirty"] is None
+    assert "미커밋 미측정" in axis["summary"]
+
+    dirty_and_mismatched = _axis(sha_stale=True, dirty_files=None)
+    assert dirty_and_mismatched["stale"] is True
+    assert dirty_and_mismatched["stale_reason"] == "sha_mismatch"
+
+
+def test_the_terminal_line_says_it_once_not_twice():
+    """요약이 이미 담은 사실을 렌더러가 또 붙이면 사람은 한 번도 안 읽는다."""
+    from messiah.ops.status_board import format_snapshot
+
+    line = format_snapshot({"code_version": _axis(sha_stale=False, dirty_files=5)})
+    assert line.count("미커밋") == 1
