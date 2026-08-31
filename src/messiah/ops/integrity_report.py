@@ -1091,6 +1091,18 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     meta_gate_passes = 0
     meta_gate_threshold: float | None = None
     meta_gate_digests: list[str] = []
+    # 국면 연동 섀도 임계가 **실제로 무엇을 거르는가** (2026-08-31 S-2).
+    #
+    # 섀도 임계는 국면 연동인데(`RANGE +0.05` · `HIGH_VOL +0.10`), 그 축의 종일 집계가
+    # 어디에도 없었다. 2026-08-31 장중은 「섀도가 6/8=75%에서 false」를 **로그를 손으로
+    # 세어** 냈고, 장후는 15:30 회차 한 줄밖에 확인하지 못했다. 승격(R18) 판단은
+    # 20거래일 분포로 내리는데 그 분포를 매일 손으로 세면 20일을 못 간다.
+    #
+    # `None`(미측정)과 0을 가른다 — `passed_shadow` 는 2026-08-25 F-41 이후의 필드라
+    # 그 이전 로그에는 아예 없다(L18).
+    meta_gate_shadow_seen = 0
+    meta_gate_shadow_passes = 0
+    meta_gate_shadow_blocked_by_regime: dict[str, int] = {}
     # 사이저 깔때기 재료 (2026-08-24 F-23).
     risk_rejects = 0
     sizer_zero_qty = 0
@@ -1243,6 +1255,20 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 digest = record.get("meta_features_digest")
                 if isinstance(digest, str) and digest:
                     meta_gate_digests.append(digest)
+                # 섀도 축 (2026-08-31 S-2). **판정에 쓰이지 않는 값**이라 실판정
+                # (`passed`)과 절대 섞지 않는다 — 섞으면 R18의 20거래일 관측이 무의미해진다.
+                shadow = record.get("passed_shadow")
+                if isinstance(shadow, bool):
+                    meta_gate_shadow_seen += 1
+                    if shadow:
+                        meta_gate_shadow_passes += 1
+                    else:
+                        # 차단은 **국면별로** 센다 — 「무엇을 거르나」의 답이 거기 있다.
+                        regime_at = record.get("regime")
+                        key = regime_at if isinstance(regime_at, str) and regime_at else "미상"
+                        meta_gate_shadow_blocked_by_regime[key] = (
+                            meta_gate_shadow_blocked_by_regime.get(key, 0) + 1
+                        )
         elif tag == "RegimeClassified":
             # 국면 **분포** (2026-08-12 F-2). 건수가 아니라 내역을 센다 — 2026-08-12엔
             # `DecisionEmitted: 14`만 남아 "14건 나왔다"는 알았지만 **그 14건이 전부 같은
@@ -1372,6 +1398,26 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 # 지문 자체가 없는 날(계측 이전)은 `None`이지 `False`가 아니다(L18).
                 "input_frozen_run": (
                     constant_run_length(meta_gate_digests) if meta_gate_digests else None
+                ),
+                # --- 섀도 축 종일 집계 (2026-08-31 S-2) ---
+                #
+                # **직접적 수익 효과가 아니라 계측 선행이다.** 국면별 섀도 차단률을
+                # 알아야 「국면 연동 임계가 실제로 무엇을 거르는가」를 말할 수 있고,
+                # 그것 없이 임계를 만지는 것은 근거 없는 손잡이 돌리기다.
+                #
+                # 실판정(`passes`)과 나란히 두되 이름으로 갈라 둔다 — 이 값은 어떤
+                # 차단에도 쓰이지 않는다(R18 섀도 20거래일).
+                "shadow_measured": meta_gate_shadow_seen or None,
+                "shadow_passes": (meta_gate_shadow_passes if meta_gate_shadow_seen else None),
+                "shadow_blocks": (
+                    meta_gate_shadow_seen - meta_gate_shadow_passes
+                    if meta_gate_shadow_seen
+                    else None
+                ),
+                "blocked_by_regime": (
+                    dict(sorted(meta_gate_shadow_blocked_by_regime.items()))
+                    if meta_gate_shadow_seen
+                    else None
                 ),
             }
             if meta_gate_probs
