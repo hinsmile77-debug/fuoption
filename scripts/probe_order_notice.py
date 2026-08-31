@@ -55,6 +55,7 @@ from messiah.broker.kis.order_notice import (  # noqa: E402
 )
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
+from messiah.core.console import ensure_utf8_console  # noqa: E402
 from messiah.core.messages import OrderKind, OrderRequest, Side  # noqa: E402
 
 _SEPARATOR = "=" * 78
@@ -134,6 +135,7 @@ async def _probe(submit_symbol: str | None, qty: int) -> None:
 
 
 def main() -> None:
+    ensure_utf8_console()  # 판정보다 출력이 먼저 죽는 것을 막는다 (1-13)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--submit",

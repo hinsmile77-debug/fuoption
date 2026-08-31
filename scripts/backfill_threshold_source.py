@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import yaml  # noqa: E402
 
+from messiah.core.console import ensure_utf8_console  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.models.registry import (  # noqa: E402
@@ -132,6 +133,7 @@ def apply_plan(bundle_dir: Path, plan: dict) -> None:
 
 
 def main() -> int:
+    ensure_utf8_console()  # 판정보다 출력이 먼저 죽는 것을 막는다 (1-13)
     parser = argparse.ArgumentParser(description="현역 번들의 메타 임계 출처 사후 기입(F-18)")
     parser.add_argument("--apply", action="store_true", help="실제로 쓴다(기본은 보여만 준다)")
     parser.add_argument("--registry", default=str(_REGISTRY_DB))

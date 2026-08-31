@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from messiah.core.console import ensure_utf8_console  # noqa: E402
 from messiah.ops.fix_verification import load_registry  # noqa: E402
 
 #: 요약문에서 고침 코드를 뽑는 패턴 — `P0-1b` · `F-5` · `A-3` · `고도화 2` 형태.
@@ -59,6 +60,7 @@ def _git_log(since: str, until: str) -> list[tuple[str, str]]:
 
 
 def main() -> int:
+    ensure_utf8_console()  # 판정보다 출력이 먼저 죽는 것을 막는다 (1-13)
     parser = argparse.ArgumentParser(description="fix_committed 후보 제안(F-20)")
     parser.add_argument("--id", help="이 항목 하나만")
     args = parser.parse_args()

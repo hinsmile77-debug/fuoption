@@ -63,6 +63,31 @@ import subprocess
 import sys
 import time
 
+
+def _ensure_utf8_console():
+    """표준 출력·오류를 UTF-8 로 재구성한다. **판정보다 출력이 먼저 죽는 것을 막는다.**
+
+    2026-08-31 16:0x — 한글 Windows 파워셸(cp949)에서 이 스크립트가
+    `UnicodeEncodeError: 'cp949' codec can't encode character '\\u2014'` 로 죽었다.
+    죽은 자리가 `main()` 의 `print(_fmt(info))` 였다 - **판정은 이미 끝난 뒤**이고
+    결과를 말하는 단계였다. 그 결과 종료 코드가 판정값(0/2/3)이 아니라 예외값 1 로
+    나가서, 이 rc 로 분기하려던 상위 절차(F-78)의 분기가 정의되지 않게 된다.
+
+    `errors="replace"` 를 두는 이유: 재구성이 어떤 이유로든 부분적으로만 먹는
+    환경에서도 **판정 결과는 나와야 한다.** 글자가 깨지는 것은 답이 없는 것보다 낫다.
+
+    `hasattr` 가드: `reconfigure()` 는 Python 3.7+ 이고, 파이프로 감싸인 스트림은
+    이 메서드가 없을 수 있다. 없으면 조용히 넘어가고 아래 ASCII 방어에 맡긴다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # 재구성 실패가 이 도구의 본업(락 판정)을 막아서는 안 된다.
+            pass
+
+
 #: 3중 조건 (2)의 기본 임계(초).
 DEFAULT_MIN_AGE_SEC = 600
 
@@ -114,7 +139,7 @@ def inspect(repo, min_age_sec=DEFAULT_MIN_AGE_SEC, git_procs=None):
     info["is_repo"] = True
     lock = os.path.join(gitdir, "index.lock")
     if not os.path.exists(lock):
-        info["verdict"] = "정상 — 락 없음"
+        info["verdict"] = "정상 - 락 없음"
         return info
     info["present"] = True
     try:
@@ -129,7 +154,7 @@ def inspect(repo, min_age_sec=DEFAULT_MIN_AGE_SEC, git_procs=None):
 
     fails = []
     if info["size"] != 0:
-        fails.append("크기 %s바이트(0 아님 — 인덱스 쓰기가 진행됐다)" % info["size"])
+        fails.append("크기 %s바이트(0 아님 - 인덱스 쓰기가 진행됐다)" % info["size"])
     if info["age_sec"] <= min_age_sec:
         fails.append(
             "나이 %.0f초 <= 임계 %d초(아직 실행 중일 수 있다)" % (info["age_sec"], min_age_sec)
@@ -141,11 +166,11 @@ def inspect(repo, min_age_sec=DEFAULT_MIN_AGE_SEC, git_procs=None):
 
     if fails:
         info["stale"] = False
-        info["verdict"] = "판정보류 — " + " / ".join(fails)
+        info["verdict"] = "판정보류 - " + " / ".join(fails)
     else:
         info["stale"] = True
         info["verdict"] = (
-            "스테일 확정 — 0바이트 · %.1f시간 · git 프로세스 0개 "
+            "스테일 확정 - 0바이트 · %.1f시간 · git 프로세스 0개 "
             "-> 이 저장소는 커밋 불가 상태다" % (info["age_sec"] / 3600.0)
         )
     return info
@@ -164,14 +189,14 @@ def reclaim(repo, min_age_sec=DEFAULT_MIN_AGE_SEC, git_procs=None):
     try:
         st = os.stat(lock)  # 경합 방어: 판정 이후 바뀌지 않았는지 재확인
         if st.st_size != 0:
-            info["verdict"] = "회수 취소 — 판정 직후 크기가 %s바이트로 변했다" % st.st_size
+            info["verdict"] = "회수 취소 - 판정 직후 크기가 %s바이트로 변했다" % st.st_size
             info["stale"] = False
             return False, info
         os.remove(lock)
     except Exception as e:
         info["verdict"] = "회수 실패: %s" % e
         return False, info
-    info["verdict"] = "회수 완료 — " + info["verdict"]
+    info["verdict"] = "회수 완료 - " + info["verdict"]
     return True, info
 
 
@@ -199,6 +224,7 @@ def _fmt(info):
 
 
 def main(argv=None):
+    _ensure_utf8_console()  # 판정보다 출력이 먼저 죽는 것을 막는다 (1-13)
     ap = argparse.ArgumentParser(description="`.git/index.lock` 스테일 판정·회수 (3중 조건)")
     ap.add_argument(
         "--repo",
@@ -253,7 +279,7 @@ def main(argv=None):
         if n_hold:
             print("")
             print(
-                "⚠ 판정보류가 있다 — **지우지 말 것**. 실행 중인 git 일 수 있다. "
+                "[!] 판정보류가 있다 - **지우지 말 것**. 실행 중인 git 일 수 있다. "
                 "몇 분 뒤 재판정하라."
             )
 
