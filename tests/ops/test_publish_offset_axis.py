@@ -816,3 +816,70 @@ def test_replay_does_not_ride_the_grace_alert_axis(monkeypatch) -> None:
     tags = [r["tag"] for r in records]
     assert "FeaturePublishOffset" in tags
     assert "PublishGraceBreached" not in tags
+
+
+# --------- 번진 범위를 목록으로 남긴다 (2026-08-31 F-80 · 이상점 1-10)
+#
+# 2026-08-31에 처음으로 1m 밖(3m)이 음수로 넘어갔다. 최악은 여전히 1m이라 요약 한 줄은
+# 전날과 같은 모양이었고, 「한 계열의 사건」이 「두 계열의 사건」이 된 것을 아무도 못 봤다.
+
+
+def _run_two_horizon_session(monkeypatch, delays_ms: dict):
+    """Horizon마다 다른 지연으로 한 세션을 돌린다 — 어떤 계열이 넘겼는지가 관심사다."""
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 8, 31, 13, 0, tzinfo=KST)]
+    engine = _engine(now, horizons=[Horizon.M1, Horizon.M3])
+    for horizon, delay_ms in delays_ms.items():
+        for minute in range(3):
+            bar_open = datetime(2026, 8, 31, 13, minute * 3, tzinfo=KST)
+            vector = _vector(horizon, bar_open)
+            now[0] = vector.valid_until + timedelta(milliseconds=delay_ms)
+            engine._record_publish_offset(vector)
+    engine.log_publish_offsets()
+    return records
+
+
+def test_every_breached_horizon_is_listed_not_just_the_worst(monkeypatch) -> None:
+    """1m −2,926ms · 3m −160ms인 날 — 목록에 **둘 다** 있어야 한다."""
+    records = _run_two_horizon_session(monkeypatch, {Horizon.M1: 4926.0, Horizon.M3: 5160.0})
+
+    breached = [r for r in records if r["tag"] == "PublishGraceBreached"]
+    assert len(breached) == 1
+    assert sorted(breached[0]["breached_horizons"]) == ["1m", "3m"]
+    # 사람이 첫 줄만 읽어도 몇 종류인지 알아야 한다 — 페이로드를 열게 만들면 안 된다.
+    assert "음수 Horizon 2개" in breached[0]["msg"]
+    # 최악 한 건은 **그대로 남는다** — 이 값을 읽는 쪽(무결성 채점)이 있다.
+    assert breached[0]["worst_horizon"] == "1m"
+
+
+def test_only_the_breaching_horizon_is_listed(monkeypatch) -> None:
+    """3m이 여유 안에 있으면 목록에 안 들어간다 — 목록이 「전 Horizon」이 되면 뜻이 없다."""
+    records = _run_two_horizon_session(monkeypatch, {Horizon.M1: 4926.0, Horizon.M3: 1200.0})
+
+    breached = [r for r in records if r["tag"] == "PublishGraceBreached"]
+    assert breached[0]["breached_horizons"] == ["1m"]
+    assert "음수 Horizon 1개" in breached[0]["msg"]
+
+
+def test_breached_horizons_does_not_change_the_verdict(monkeypatch) -> None:
+    """**판정 불변** — 목록을 붙였다고 우는 조건도 요약 통계도 달라지지 않는다.
+
+    우는 조건은 여전히 `worst_headroom_ms < 0` 하나이며, 여유가 남은 날은 조용하다.
+    """
+    quiet = _run_two_horizon_session(monkeypatch, {Horizon.M1: 880.0, Horizon.M3: 1200.0})
+    assert not [r for r in quiet if r["tag"] == "PublishGraceBreached"]
+    summary = [r for r in quiet if r["tag"] == "FeaturePublishOffset"]
+    assert len(summary) == 1 and summary[0]["measured"] is True
+    # 기존 필드가 하나도 사라지지 않았는지 — 읽는 쪽이 있는 값들이다.
+    loud = [
+        r
+        for r in _run_two_horizon_session(monkeypatch, {Horizon.M1: 4926.0, Horizon.M3: 5160.0})
+        if r["tag"] == "PublishGraceBreached"
+    ]
+    for key in ("worst_horizon", "headroom_ms", "by_horizon", "over_grace_by_hour"):
+        assert key in loud[0], key

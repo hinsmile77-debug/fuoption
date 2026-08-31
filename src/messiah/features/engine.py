@@ -1349,15 +1349,24 @@ class FeatureEngine:
             for hour, stat in sorted(by_hour.items())
             if stat.get("over_grace")
         }
+        # **몇 종류로 번졌나** (2026-08-31 F-80). 최악 한 건만 적으면 1m 하나가 넘긴 날과
+        # 1m·3m 둘이 넘긴 날이 같은 문장으로 나온다 — 번지는 것을 늦게 안다.
+        breached = headroom.get("breached_horizons") or [headroom["worst_horizon"]]
+        by_h = headroom["by_horizon"]
+        spread = " · ".join(
+            f"{name} {by_h[name]['headroom_ms']:.0f}ms" for name in breached if name in by_h
+        )
         mlog.log(
             "PublishGraceBreached",
-            f"유예까지 남은 여유가 음수 — 최악 {headroom['worst_horizon']} "
-            f"{worst_ms:.0f}ms · 유예 초과 {sum(over_by_hour.values()):.0f}건. "
+            f"유예까지 남은 여유가 음수 — 음수 Horizon {len(breached)}개({spread}) · "
+            f"최악 {headroom['worst_horizon']} {worst_ms:.0f}ms · "
+            f"유예 초과 {sum(over_by_hour.values()):.0f}건. "
             f"완성봉 경계를 넘겨 발행한 회차가 있다(자료 유실 경계)",
             symbol=self._symbol,
             worst_horizon=headroom["worst_horizon"],
             headroom_ms=worst_ms,
-            by_horizon=headroom["by_horizon"],
+            breached_horizons=breached,
+            by_horizon=by_h,
             over_grace_by_hour=over_by_hour,
         )
 
@@ -1394,6 +1403,17 @@ class FeatureEngine:
             "by_horizon": by_horizon,
             "worst_headroom_ms": worst[0] if worst else None,
             "worst_horizon": worst[1] if worst else None,
+            # **번진 범위** (2026-08-31 F-80 · 이상점 1-10).
+            #
+            # `worst_*` 두 줄은 **가장 나쁜 하나**만 답한다. 2026-08-31에 처음으로 1m 밖
+            # (3m −160ms)이 음수로 넘어갔는데, 최악이 여전히 1m(−2,926ms)이라 요약 줄은
+            # 전날과 **같은 모양**이었다 — 「한 계열의 사건」이 「두 계열의 사건」이 된 것을
+            # 요약이 말하지 못했다. 몇 종류로 번졌는가는 **얼마나 나쁜가와 다른 질문**이다.
+            #
+            # 위 `by_horizon`에 값이 이미 다 들어 있으므로 집계는 늘지 않는다 — 목록 하나다.
+            "breached_horizons": [
+                name for name, stat in by_horizon.items() if stat["headroom_ms"] < 0
+            ],
         }
 
     def _bar_to_publish_stats(self) -> dict[str, Any] | None:
