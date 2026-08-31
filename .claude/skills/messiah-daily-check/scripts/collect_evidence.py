@@ -323,7 +323,23 @@ def truncate(s, n):
 # 못한다(`unable to unlink ... Operation not permitted`, rc=0). 그래서 「쓰기로 보이는 것」이
 # 아니라 **인덱스에 손대는 계열 전부**를 막는다. `add` 는 `-n`(dry-run) 이어도 락을 만든다 —
 # 2026-08-26 15:02 사고가 그것이었다.
-_GIT_READONLY_SUBCOMMANDS = frozenset({"status", "diff", "log", "rev-parse", "show", "cat-file"})
+#
+# 2026-08-31 F-78 — `ls-files` 추가. **화이트리스트를 넓히는 방향이라 F-60의 취지와
+# 반대로 보인다.** 그래서 짝을 지어 넣는다: 넓히는 대신 **호출마다 락 부재를 단언하고,
+# 이 호출이 락을 만들었으면 즉시 회수하고 적신호로 올린다**(아래 `run_git`). 단언 없이
+# 넓히기만 하면 이 변경은 F-60의 후퇴다.
+#
+# 왜 넓히나 — F-60은 **수집기의** git 을 묶었을 뿐, 점검 세션이 리포트 근거를 만들려고
+# 직접 실행하는 git(`ls-files --others`, `diff --stat`)은 그 밖에 있었다. 두 경로가 있는데
+# 하나만 막았고, 그 사실이 「F-60 통과」라는 한 줄에 가려졌다(2026-08-31 이상점 1-8).
+# **세션이 git 을 부를 이유 자체를 없애는 것**이 이 항목의 요지이며, 그러려면 세션이
+# 필요로 하던 출력을 수집기가 먼저 내야 한다.
+_GIT_READONLY_SUBCOMMANDS = frozenset(
+    {"status", "diff", "log", "rev-parse", "show", "cat-file", "ls-files"}
+)
+
+#: 이 실행 중 `run_git` 이 스스로 만든 락 사건 — §9가 읽는다 (2026-08-31 F-78).
+GIT_SELF_LOCK_EVENTS: list[str] = []
 
 
 def run_git(root: Path, args, timeout=25):
@@ -372,15 +388,44 @@ def run_git(root: Path, args, timeout=25):
         out = f"(git 타임아웃 {timeout}s — subprocess.run 이 자식을 종료함) git {' '.join(args)}"
     except Exception as e:  # noqa: BLE001
         out = f"(git 실행 불가) {e}"
+    # F-78 자경 강화 (2026-08-31): 발견에서 그치지 않고 **즉시 회수**한다.
+    #
+    # 종전에는 반환 문자열에 한 줄 붙이는 것이 전부였다 — 그 줄은 다이제스트 §1 본문
+    # 안쪽에 묻히고, 락은 그대로 남아 그날 밤 커밋을 통째로 막았다(08-24 3시간 21분,
+    # 08-25·08-26·08-31 재발). 만든 쪽이 치우는 것이 가장 싸고 가장 확실하다.
     try:
         if not had_lock and lock.exists():
-            out += (
-                f"\n(⚠ F-60 자경: 이 호출 `git {' '.join(args)}` 이 .git/index.lock 을 만들었다 —"
-                " 화이트리스트를 좁혀야 한다)"
-            )
+            note = f"이 호출 `git {' '.join(args)}` 이 .git/index.lock 을 만들었다"
+            reclaimed = _reclaim_own_lock(root)
+            GIT_SELF_LOCK_EVENTS.append(f"{note} — {reclaimed}")
+            out += f"\n(⚠ F-78 자경: {note} — {reclaimed})"
     except OSError:
         pass
     return out
+
+
+def _reclaim_own_lock(root: Path) -> str:
+    """방금 **내가** 만든 락을 되돌린다 (2026-08-31 F-78).
+
+    ⚠ 판정 정본은 여전히 `scripts/git_lock_guard.py` 하나다 — 여기서 3중 조건을 다시
+    적지 않는다(`git_index_lock` 과 같은 규율). 다만 이 자리에는 정본이 못 가진 사실이
+    하나 있다: **직전 호출 전에는 락이 없었다.** 그래서 나이 임계를 기다리지 않고
+    지울 수 있는 유일한 경우이며, 그 근거를 문자열에 남긴다.
+    """
+    lock = root / ".git" / "index.lock"
+    try:
+        size = lock.stat().st_size
+    except OSError as e:
+        return f"회수 실패(stat) — {e}"
+    if size != 0:
+        # 0바이트가 아니면 인덱스 쓰기가 실제로 진행된 것이다 — 우리 호출은 읽기
+        # 전용이므로 이 경우는 **다른 프로세스**일 수 있다. 손대지 않는다.
+        return f"회수 보류 — {size}바이트(0 아님 · 다른 프로세스일 수 있다). 사람이 판정할 것"
+    try:
+        lock.unlink()
+        return "즉시 회수 완료(0바이트 · 호출 직전엔 없었음)"
+    except OSError as e:
+        return f"회수 실패(unlink) — {e}. `python scripts/git_lock_guard.py --reclaim`"
 
 
 def git_head_facts(root: Path) -> dict:
@@ -477,6 +522,45 @@ def git_reflog_commits(root: Path, limit: int = 200) -> list[dict]:
         seen.add(r["sha"])
         uniq.append(r)
     return uniq
+
+
+#: 점검 4국면의 **실측 기동 시각** (분) — 근거는
+#: `.claude/skills/messiah-daily-check/references/schedule_prompts.md`.
+#: cron 등록은 08:45·12:30·15:50·18:10이고 지터가 고정값으로 얹혀 아래가 실제 기동이다.
+_CHECK_KICK_MINUTES = ((8, 50), (12, 35), (15, 57), (18, 15))
+
+#: 창 반폭(분) — 수집은 기동 직후 수 초 안에 끝나므로 ±5분이면 넉넉하다.
+_CHECK_WINDOW_HALF_MIN = 5
+
+
+def lock_blame(lk: dict, now) -> str:
+    """락이 **언제** 생겼는지, 그 시각이 점검 실행 창 안인지 (2026-08-31 F-78).
+
+    2026-08-31 아침의 두 시각이 이 판정의 회귀 픽스처다 — 수집기 실행 08:51:10,
+    락 생성 08:51:49. **39초 간격**이었는데도 그날 리포트는 「누가 만들었는가」를
+    사후에 추정해야 했다. 나흘 연속으로 같은 추정을 반복했다.
+
+    ⚠ **범인을 단정하지 않는다.** 창 안이라는 것은 정황이지 증거가 아니다 —
+    같은 시각에 사람이 커밋했을 수도 있다. 그래서 문장은 「가능성이 높다」로 끝나고,
+    창 밖이면 **그 사실도 적는다**(「점검이 아닌 무언가」가 곧 다음 질문이다).
+    """
+    age = lk.get("age_sec")
+    if age is None:
+        return " · 생성 시각 **미측정**"
+    born = now - timedelta(seconds=age)
+    stamp = born.strftime("%H:%M:%S")
+    for hh, mm in _CHECK_KICK_MINUTES:
+        kick = born.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if abs((born - kick).total_seconds()) <= _CHECK_WINDOW_HALF_MIN * 60:
+            return (
+                f" · 🔴 생성 {stamp} — **점검 실행 창({hh:02d}:{mm:02d} ±"
+                f"{_CHECK_WINDOW_HALF_MIN}분) 안**이다. 점검 자신이 만들었을 가능성이 높다"
+                " (F-78 · 세션은 git 을 직접 실행하지 않는다)"
+            )
+    return (
+        f" · 생성 {stamp} — 점검 실행 창 밖이다. **점검이 아닌 무언가**가 만들었다"
+        " (사람의 커밋·IDE·다른 세션)"
+    )
 
 
 def git_index_lock(root: Path) -> dict:
@@ -942,6 +1026,38 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         if len(dirty) > 40:
             A(f"… 외 {len(dirty) - 40}건")
         A("```")
+
+    # [MW0601 2026-08-31 F-78] **리포트가 인용할 형태를 수집기가 직접 낸다.**
+    #
+    # 2026-08-24·25·26·31 나흘간 점검 세션이 `git diff --ignore-all-space --stat` 과
+    # `git ls-files --others` 를 **자기 손으로** 돌렸고, 그 호출이 마운트에서 락을 남겼다.
+    # F-60은 수집기의 git 만 묶었으므로 이 경로는 화이트리스트 밖이었다 — 두 경로가
+    # 있는데 하나만 막았고, 그 사실이 「F-60 통과」 한 줄에 가려졌다.
+    #
+    # 규칙(SKILL.md §1)은 「세션은 git 을 직접 실행하지 않는다」이지만, **금지만으로는
+    # 안 된다** — 세션이 필요로 하던 출력이 여기 없으면 규칙은 다시 깨진다. 그래서
+    # 금지와 대체물을 같은 날 넣는다.
+    stat_txt = run_git(
+        root, ["diff", "--ignore-all-space", "--stat", "HEAD", "--", "src", "scripts"]
+    )
+    untracked = run_git(root, ["ls-files", "--others", "--exclude-standard"])
+    A("")
+    A(
+        "**변경 규모(`src/`+`scripts/` · `--ignore-all-space`)** — 리포트는 이 표를 인용한다."
+        " **점검 세션은 git 을 직접 실행하지 않는다**(SKILL.md §1 · F-78)." + _mount_note
+    )
+    A("```")
+    L.extend((stat_txt or "(변경 없음)").splitlines()[:40])
+    A("```")
+    _unt = [ln for ln in (untracked or "").splitlines() if ln.strip()]
+    A("")
+    A(f"**추적 안 되는 파일 {len(_unt)}건** — 출처 `git ls-files --others --exclude-standard`.")
+    if _unt:
+        A("```")
+        L.extend(_unt[:40])
+        if len(_unt) > 40:
+            A(f"… 외 {len(_unt) - 40}건")
+        A("```")
     # [MW0601 2026-08-26 F-60] 커밋 목록도 `.git/logs/HEAD` 직접 읽기로 얻는다 — git 미실행.
     _commits = git_reflog_commits(root)
     _today_rows = [r for r in _commits if r["at"].astimezone(KST).date() == day]
@@ -1252,14 +1368,18 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             f"`.git/index.lock` **스테일 잔존** (0바이트 · {(lk['age_sec'] or 0) / 3600.0:.1f}시간 ·"
             " git 프로세스 0개) — 이 저장소는 **커밋 불가** 상태다. `git status` 는 rc=0 으로 조용히"
             " 통과하므로 다른 어떤 계측에도 안 걸린다. `python scripts/git_lock_guard.py --check`"
-            " 로 3중 조건 확인 후 `--reclaim`"
+            " 로 3중 조건 확인 후 `--reclaim`" + lock_blame(lk, now)
         )
     elif lk["present"]:
         flags.append(
             f"`.git/index.lock` 존재 ({lk['size']}바이트 · {(lk['age_sec'] or 0) / 60.0:.1f}분 ·"
             f" git 프로세스 {lk['git_procs'] if lk['git_procs'] is not None else '미측정'}) —"
             " 실행 중인 git 일 수 있으니 **지우지 말 것**. 몇 분 뒤에도 남아 있으면 재판정"
+            + lock_blame(lk, now)
         )
+    # 이번 실행이 스스로 만든 락은 **범인이 확정된 사건**이다 — 추정할 것이 없다.
+    for ev in GIT_SELF_LOCK_EVENTS:
+        flags.append(f"🔴 **이 수집 실행이 `.git/index.lock` 을 만들었다** — {ev}")
     snap = root / "logs" / "status_snapshot.json"
     if snap.exists():
         try:
