@@ -597,6 +597,42 @@ def check_pending_deadlines(*, today: date | None = None) -> CheckResult:
     return CheckResult("deadlines", True, " · ".join(parts))
 
 
+def _index_lock_note() -> str:
+    """`.git/index.lock` 4사실을 한 토막으로 (2026-08-31 F-78 · NEXT_TODO 8747).
+
+    ⚠ **판정 정본은 `scripts/git_lock_guard.py` 하나다** — 3중 조건을 여기 다시 적지
+    않고 `inspect()` 를 그대로 부른다. 그 파일은 futures 정본의 바이트 동일 사본이므로
+    **임포트만 하고 고치지 않는다**(DECISION_LOG 9581 · 9603 · 12194).
+
+    ## 왜 자가점검에 실어야 하나
+
+    스테일 락에서 `git status` 는 **rc=0 · stderr 무출력**이다. 죽는 것은 `add`/`commit`
+    뿐이라, 아침 자가점검은 저장소가 커밋 불가 상태여도 조용히 통과했다. 2026-08-31에
+    08:51:49의 0바이트 락이 **7시간 6분** 방치됐고, 그날 밤 예정된 여덟 항목이 전부
+    막혔다 — 그 사실을 처음 말한 것이 15:58 장후 리포트였다.
+
+    못 재면 **미측정**이라고 말한다(L18) — 0으로 접으면 「깨끗하다」가 된다.
+    """
+    try:
+        import git_lock_guard as _glg
+
+        info = _glg.inspect(str(Path(__file__).resolve().parents[1]))
+    except Exception as exc:  # noqa: BLE001 — 자가점검은 모든 실패를 **말한다**
+        return f"; 인덱스락 **미측정**({type(exc).__name__})"
+    if not info.get("present"):
+        return "; 인덱스락 없음"
+    age_min = (info.get("age_sec") or 0) / 60.0
+    procs = info.get("git_procs")
+    proc_txt = f"git 프로세스 {procs}개" if procs is not None else "git 프로세스 **미측정**"
+    head = "[WARN] 🔴 인덱스락 **스테일**" if info.get("stale") else "[WARN] 인덱스락 존재"
+    tail = (
+        " → **커밋 불가 상태**. `python scripts/git_lock_guard.py --reclaim`"
+        if info.get("stale")
+        else " (판정 보류 — 3중 조건 미충족 · 실행 중인 git 일 수 있다)"
+    )
+    return f"; {head} {info.get('size')}바이트 · {age_min:.0f}분 · {proc_txt}{tail}"
+
+
 def check_git_state(mode: str) -> CheckResult:
     """계명 10: 커밋 안 된 수정을 실전에 반입하지 않는다 (live/paper에서만 강제).
 
@@ -639,11 +675,14 @@ def check_git_state(mode: str) -> CheckResult:
         detail = reason[0] if reason else f"exit {completed.returncode}"
         return CheckResult("git", mode == "dev", f"git status 거부: {detail} (dev에서만 허용)")
 
+    lock_note = _index_lock_note()
     dirty = (completed.stdout or "").strip()
     if dirty and mode in ("live", "paper"):
-        return CheckResult("git", False, f"미커밋 변경 {len(dirty.splitlines())}건 — 계명 10")
+        return CheckResult(
+            "git", False, f"미커밋 변경 {len(dirty.splitlines())}건 — 계명 10{lock_note}"
+        )
     if not dirty:
-        return CheckResult("git", True, "clean")
+        return CheckResult("git", True, f"clean{lock_note}")
     # **개수를 말하게 한다** (2026-08-20 F-2). 종전 문구는 `dirty(dev 허용)` 한 마디였다 —
     # 1파일이든 40파일이든 같은 줄이라, 2026-08-19 저녁 구현분이 통째로 미커밋인 아침에도
     # 화면은 평소와 똑같이 보였다. 그날 개장이 옛 코드로 갔다.
@@ -653,14 +692,16 @@ def check_git_state(mode: str) -> CheckResult:
     source_dirty = worktree_dirty_files()
     total = len(dirty.splitlines())
     if source_dirty is None:
-        return CheckResult("git", True, f"dirty {total}건 · src/scripts 미측정 ({mode} 허용)")
+        return CheckResult(
+            "git", True, f"dirty {total}건 · src/scripts 미측정 ({mode} 허용){lock_note}"
+        )
     if source_dirty == 0:
-        return CheckResult("git", True, f"dirty {total}건 · src/scripts 0 ({mode} 허용)")
+        return CheckResult("git", True, f"dirty {total}건 · src/scripts 0 ({mode} 허용){lock_note}")
     return CheckResult(
         "git",
         True,
         f"[WARN] dirty {total}건 중 **src/scripts {source_dirty}파일 미커밋** — "
-        f"어제 완료로 적은 항목이 안 실렸을 수 있다 ({mode} 허용)",
+        f"어제 완료로 적은 항목이 안 실렸을 수 있다 ({mode} 허용){lock_note}",
     )
 
 
@@ -822,6 +863,69 @@ def run_all(config_dir: str = "configs", skip_redis: bool = False) -> list[Check
     return results
 
 
+#: 본문 안에서 「이 줄은 조용하지 않다」고 말하는 토큰 (2026-08-31 F-72).
+_WARN_TOKENS = ("[WARN]", "[WARN ", "[ERROR]", "[ERR ")
+
+
+def severity(result: CheckResult) -> str:
+    """줄머리에 찍을 심각도 — **반환 상태와 본문 중 더 나쁜 쪽**을 쓴다 (2026-08-31 F-72).
+
+    ## 왜 두 곳을 보나 (2026-08-31 이상점 1-3 실측)
+
+    `check_git_state`는 미커밋 소스가 있어도 dev에서는 기동을 막지 않으므로 `ok=True`를
+    돌려주고, 대신 본문 첫 토막에 `[WARN]`을 넣어 사람을 부른다. 그런데 줄머리는
+    `ok`만 봤다 — 그래서 실제로 찍힌 줄이 이랬다::
+
+        [OK ] git        [WARN] dirty 12건 중 **src/scripts 5파일 미커밋** — ...
+
+    사람의 눈도 기계의 집계도 **줄머리에서 멈춘다.** 그날 증거 다이제스트는 이 아침을
+    `비-OK 0행`으로 적었고, 미커밋 5파일이 **나흘간** 그 한 글자 뒤에 숨었다.
+    「합격」 도장이 그 안의 경고를 덮은 것이다(금지계명 12 — 조용한 폴백 금지의 정신).
+
+    ⚠ **판정은 바뀌지 않는다.** `ok`는 그대로이고 기동 허용/거부도 그대로다 —
+    바뀌는 것은 **표시**뿐이다(R18 비해당). dev의 dirty는 설계상 허용이므로 이것을
+    FAIL로 올리면 기동을 못 하게 만든다.
+    """
+    if not result.ok:
+        return "FAIL"
+    if any(token in result.detail for token in _WARN_TOKENS):
+        return "WARN"
+    return "OK "
+
+
+def render(results: list[CheckResult]) -> list[str]:
+    """자가점검 출력 전문 — 마지막 줄이 요약이다.
+
+    승격된 줄은 본문 **머리의** 중복 토큰을 뗀다(`[WARN] git [WARN] dirty …`가 되면
+    같은 말을 두 번 하는 것이고, 두 번 하면 한 번도 안 읽힌다). 본문 **중간의** 토큰은
+    그대로 둔다 — 거기서는 위치가 곧 뜻이다(`…; [WARN] 유예 번들 2건`).
+    """
+    lines: list[str] = []
+    warned: list[str] = []
+    for r in results:
+        sev = severity(r)
+        detail = r.detail
+        if sev == "WARN":
+            warned.append(r.name)
+            for token in _WARN_TOKENS:
+                if detail.startswith(token):
+                    detail = detail[len(token) :].lstrip()
+                    break
+        lines.append(f"[{sev}] {r.name:<10} {detail}")
+
+    if not all(r.ok for r in results):
+        verdict = "FAIL — 기동 거부 (Ver 1.1 §7.3)"
+    elif warned:
+        # **합격에 조건이 붙었음을 합격 줄 자신이 말한다** (F-72②). 위 목록을 안 읽고
+        # 마지막 줄만 보는 사람과 기계가 있고, 오늘까지 그들에게 이 아침은 무결이었다.
+        verdict = f"PASS — 기동 허용 (경고 {len(warned)}건: {', '.join(warned)})"
+    else:
+        verdict = "PASS — 기동 허용"
+    lines.append("")
+    lines.append(f"self-check: {verdict}")
+    return lines
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="MESSIAH self-check")
     ap.add_argument("--configs", default="configs")
@@ -829,11 +933,9 @@ def main() -> int:
     args = ap.parse_args()
 
     results = run_all(args.configs, args.skip_redis)
-    all_ok = all(r.ok for r in results)
-    for r in results:
-        print(f"[{'OK ' if r.ok else 'FAIL'}] {r.name:<10} {r.detail}")
-    print(f"\nself-check: {'PASS — 기동 허용' if all_ok else 'FAIL — 기동 거부 (Ver 1.1 §7.3)'}")
-    return 0 if all_ok else 1
+    for line in render(results):
+        print(line)
+    return 0 if all(r.ok for r in results) else 1
 
 
 if __name__ == "__main__":

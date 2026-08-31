@@ -315,7 +315,10 @@ def test_clean_tree_passes(monkeypatch) -> None:
     result = sc.check_git_state("live")
 
     assert result.ok is True
-    assert result.detail == "clean"
+    # 2026-08-31 F-78 — 인덱스락 4사실이 뒤에 붙는다(스테일 락에서 `git status`는 rc=0이라
+    # 이 줄이 유일한 창구다). 이 환경엔 락이 없으므로 "없음"이 이어 붙는다.
+    assert result.detail.startswith("clean")
+    assert "인덱스락" in result.detail
 
 
 # -------------------------------------- 완성봉 유예 ↔ 회선 실측 (2026-08-18 G-0818P-2)
