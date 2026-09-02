@@ -27,10 +27,19 @@ from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.models.label_geometry import (  # noqa: E402
     LabelGeometry,
     check_horizon_ladder,
+    regime_reachability,
     time_barrier_minutes,
 )
 from messiah.models.labeling import BARRIER_PARAMS, label_and_weight  # noqa: E402
 from messiah.risk.cost_model import CostModel  # noqa: E402
+
+# **두 정의를 마주 놓는 자리** — 레이블(위)과 판단 게이트·국면가중(아래)은 서로 다른 절에서
+# 정해졌고, S의 정의상 곱해진다. 모듈이 직접 import하지 않고 여기서 잇는 이유는
+# `label_geometry.DEFAULT_SCORE_GATE` 주석 참고.
+from messiah.strategy.decision.meta_decision import (  # noqa: E402
+    SCORE_THRESHOLD_BY_REGIME,
+)
+from messiah.strategy.futures.aggregator import REGIME_WEIGHTS  # noqa: E402
 
 _SYMBOL = "K200MFC"
 
@@ -73,17 +82,43 @@ def main() -> int:
 
     cost_model = CostModel()
     unhealthy = 0
+    geometries = []
     for name in args.horizons.split(","):
         horizon = Horizon(name.strip())
         bars = aggregate_to_horizon(m1_bars, horizon)
         cost_ticks = cost_model.estimate_round_trip_from_bars(bars, qty=1).total_ticks
         labels = label_and_weight(bars, cost_ticks=cost_ticks)
         geom = LabelGeometry.build(labels, cost_ticks=cost_ticks, score_gate=args.gate)
+        geometries.append(geom)
         print("\n" + "=" * 88)
         for line in geom.format_lines():
             print(line)
         if not geom.is_healthy:
             unhealthy += 1
+
+    # 국면가중을 곱한 실효 천장 (2026-09-02) — 위 판정은 가중치 1을 가정한 것이라 국면별로
+    # 두 방향으로 동시에 틀릴 수 있다(`RegimeReachability` docstring).
+    print("\n" + "=" * 88)
+    print("국면별 실효 천장 (레이블 천장 × REGIME_WEIGHTS)")
+    print("=" * 88)
+    closed = []
+    for card in regime_reachability(geometries, REGIME_WEIGHTS, score_gate=args.gate):
+        gate = SCORE_THRESHOLD_BY_REGIME.get(card.regime)
+        if gate is not None and gate != args.gate:
+            print(
+                f"  ※ {card.regime.value}의 판단 엔진 게이트는 {gate:g}다 "
+                f"(여기선 {args.gate:g}로 쟀다)"
+            )
+        for line in card.format_lines():
+            print(line)
+        if card.is_closed:
+            closed.append(card.regime.value)
+    if closed:
+        print(
+            f"\n{len(closed)}개 국면이 **산술적으로 닫혀 있다**: {', '.join(closed)}. "
+            "모델 성능과 무관하게 그 국면에서는 판단이 안 나간다 — 의도한 것이면 "
+            "`SCORE_THRESHOLD_BY_REGIME`에 그렇게 적고, 아니면 배리어 폭이나 국면가중을 고칠 것."
+        )
 
     print("\n" + "=" * 88)
     if unhealthy:

@@ -29,6 +29,18 @@
 무너졌다. 즉 "모델에 우위가 없어서 거래가 안 된다"로 보이던 증상의 상당 부분은 **레이블
 flat 비율과 게이트 상수가 서로를 모른 채 정해진 결합 결함**이다.
 
+### 그 천장에 국면가중이 한 번 더 곱해진다 (2026-09-02에 추가)
+
+위 항등식은 **가중치 1**을 가정한 것이다. 실제 S는 `aggregator.REGIME_WEIGHTS`가 곱해진
+가중합이고, 라이브에서 기여 전문가는 30m 하나뿐이라 실효 천장은 `w(국면,30m) × (1−flat)`다:
+
+    추세 1.5 × 0.236 = 0.355   고변동 0.8 × 0.236 = 0.190   횡보 0.4 × 0.236 = 0.095
+
+게이트 0.20에 대해 추세는 열려 있고 **횡보·고변동은 닫혀 있다.** 즉 "30m은 여유 1.18배라
+사실상 도달 불가"라던 종전 판정은 국면을 안 봐서 추세엔 비관적, 횡보엔 낙관적으로 **동시에
+두 방향으로 틀려 있었다.** `RegimeReachability`가 이 절을 담당한다. 2026-08-21~09-02 라이브
+123 사이클이 정확히 이 모양이다 — 게이트 통과 6건 전부 추세, 횡보 60건·고변동 34건 0건.
+
 ### 다만 천장을 올리는 것만으로는 안 된다 (같은 날 함께 측정)
 
 flat을 33%로 되돌린 레이블(width_atr_mult 0.9)은 천장이 0.67로 올라갔지만 게이트 통과율은
@@ -62,7 +74,7 @@ import statistics
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from messiah.core.messages import HORIZON_SECONDS, Horizon
+from messiah.core.messages import HORIZON_SECONDS, Horizon, Regime
 from messiah.models.labeling import BarrierParams, TripleBarrierLabel
 
 # `strategy/decision/meta_decision.py`의 우위 게이트(|S| < 이 값이면 NO_TRADE)와 같은 값.
@@ -241,6 +253,167 @@ class LabelGeometry:
             cost_ticks=cost_ticks,
             score_gate=score_gate,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeReachability:
+    """**국면가중까지 곱한** |S| 천장 — 그 국면에서 게이트에 닿을 여지가 있는가.
+
+    ## 왜 `LabelGeometry.score_ceiling`만으로는 절반이었나 (2026-09-02)
+
+    `score_ceiling`은 `1 − flat_share`다. 그건 **가중치 1을 가정한** 천장이다. 그런데 판단
+    엔진이 보는 S는 가중합이다(`aggregator.compute()`):
+
+        S = Σ_h w(국면,h) × (P_h(+1) − P_h(−1)) × meta_h × (1 − u_h) × f_h
+
+    라이브에서 기여 전문가는 사실상 30m 하나뿐이라(`n_experts=1`, 2026-08-21~09-02 전
+    사이클) 실제 천장은 `w(국면, 30m) × (1 − flat_share)`다. 30m flat 76.4%면
+
+        추세 1.5 × 0.236 = 0.355   고변동 0.8 × 0.236 = 0.190   횡보 0.4 × 0.236 = 0.095
+
+    이고 게이트는 0.20이다 — **횡보·고변동은 모델 성능과 무관하게 닫혀 있다.** 종전 진단은
+    가중치를 안 봤으므로 30m을 "천장 0.236 대 게이트 0.20, 여유 1.18배"라고만 말했다.
+    그 문장은 추세 국면에 대해서는 지나치게 비관적이고(실제 0.355 = 1.78배, 도달 가능),
+    횡보에 대해서는 지나치게 낙관적이다(실제 0.095 = 0.48배, 절반도 못 닿는다). **하나의
+    숫자가 두 방향으로 동시에 틀렸다.**
+
+    ## 두 천장을 함께 낸다
+
+    - `solo` — 그 Horizon 하나만 기여할 때(= 지금의 라이브 실태).
+    - `combined` — 가중치표의 전 Horizon이 동시에 기여할 때의 합(= 설계상 최대).
+
+    둘을 함께 두는 이유는 "지금 닫혀 있다"와 "구조적으로 닫혀 있다"가 다른 사건이기
+    때문이다. 전자는 번들을 더 띄우면 열리고, 후자는 폭이나 가중치를 바꿔야 열린다.
+    """
+
+    regime: Regime
+    score_gate: float
+    solo: dict[Horizon, float]  # Horizon별 w × (1 − flat_share)
+    combined: float  # Σ_h w_h × (1 − flat_share_h)
+
+    @property
+    def best_solo(self) -> float:
+        return max(self.solo.values(), default=0.0)
+
+    @property
+    def best_solo_horizon(self) -> Horizon | None:
+        if not self.solo:
+            return None
+        return max(self.solo.items(), key=lambda item: item[1])[0]
+
+    @property
+    def solo_ratio(self) -> float:
+        return self.best_solo / self.score_gate if self.score_gate > 0 else float("inf")
+
+    @property
+    def combined_ratio(self) -> float:
+        return self.combined / self.score_gate if self.score_gate > 0 else float("inf")
+
+    @property
+    def gate_is_reachable_solo(self) -> bool:
+        """전문가 한 종만 살아 있을 때 — **지금의 실태**."""
+        return self.solo_ratio >= MIN_CEILING_RATIO
+
+    @property
+    def gate_is_reachable_combined(self) -> bool:
+        return self.combined_ratio >= MIN_CEILING_RATIO
+
+    @property
+    def is_closed(self) -> bool:
+        """천장이 게이트에 **아예 못 닿는다** — 여유 부족이 아니라 산술적 불가."""
+        return self.best_solo < self.score_gate
+
+    @property
+    def verdict(self) -> str:
+        horizon = self.best_solo_horizon
+        where = f" ({horizon.value} 단독)" if horizon else ""
+        if self.is_closed:
+            return (
+                f"**닫힘** — 실효 천장{where} {self.best_solo:.3f} < 게이트 "
+                f"{self.score_gate:.2f}. 이 국면에서는 모델이 무엇을 예측하든 판단이 안 나간다"
+                + (
+                    f" (전 Horizon이 동시에 기여하면 {self.combined:.3f}까지 오르지만, 지금 "
+                    "live 번들은 한 종뿐이다)"
+                    if self.gate_is_reachable_combined
+                    else ""
+                )
+            )
+        if not self.gate_is_reachable_solo:
+            return (
+                f"여유 부족 — 실효 천장{where} {self.best_solo:.3f} / 게이트 "
+                f"{self.score_gate:.2f} ({self.solo_ratio:.2f}배 < {MIN_CEILING_RATIO}). "
+                "분포의 꼭짓점만 게이트에 닿는다"
+            )
+        return (
+            f"도달 여지 있음 — 실효 천장{where} {self.best_solo:.3f} / 게이트 "
+            f"{self.score_gate:.2f} ({self.solo_ratio:.2f}배)"
+        )
+
+    def format_lines(self) -> list[str]:
+        solo = " · ".join(f"{h.value} {v:.3f}" for h, v in sorted(self.solo.items(), key=_h_key))
+        return [
+            f"[{self.regime.value}] 실효 천장 단독 {self.best_solo:.3f} "
+            f"/ 전 Horizon 합 {self.combined:.3f} (게이트 {self.score_gate:.2f})",
+            f"  Horizon별: {solo}" if solo else "  Horizon별: 가중치표에 항목 없음",
+            f"  판정: {self.verdict}",
+        ]
+
+
+def _h_key(item: tuple[Horizon, float]) -> int:
+    return HORIZON_SECONDS[item[0]]
+
+
+def regime_reachability(
+    geometries: Sequence[LabelGeometry],
+    weights: Mapping[Regime, Mapping[Horizon, float]],
+    *,
+    score_gate: float = DEFAULT_SCORE_GATE,
+) -> list[RegimeReachability]:
+    """국면별 실효 천장 — `LabelGeometry`(레이블이 정한 천장) × 국면가중표.
+
+    입력: `geometries`는 Horizon별 `LabelGeometry`(같은 Horizon이 둘이면 뒤엣것이 이긴다),
+         `weights`는 `strategy/futures/aggregator.REGIME_WEIGHTS`를 그대로 넘긴다.
+         **여기서 import하지 않는 이유는 `DEFAULT_SCORE_GATE` 주석과 같다** — 이 모듈은 두
+         정의가 어긋난 것을 잡는 도구라, 한쪽을 직접 끌어다 쓰면 어긋남이 안 보인다. 대신
+         호출부(`scripts/run_label_geometry.py`)가 둘을 마주 놓고, 배선은
+         `tests/models/test_label_geometry.py`가 검사한다.
+    실패 조건: 없다. 레이블이 0건인 Horizon은 천장 0으로 들어가고 판정이 "닫힘"이 된다
+         (조용히 건너뛰면 그 Horizon이 건강한 것처럼 보인다).
+    """
+    ceiling_by_horizon = {g.horizon: g.score_ceiling for g in geometries}
+    cards: list[RegimeReachability] = []
+    for regime, table in weights.items():
+        solo = {
+            horizon: weight * ceiling_by_horizon[horizon]
+            for horizon, weight in table.items()
+            if horizon in ceiling_by_horizon
+        }
+        cards.append(
+            RegimeReachability(
+                regime=regime,
+                score_gate=score_gate,
+                solo=solo,
+                combined=sum(solo.values()),
+            )
+        )
+    return cards
+
+
+def summarise_regime_reachability(cards: Sequence[RegimeReachability]) -> dict[str, object]:
+    """화면·리포트가 읽을 요약 — `models/vol_scorecard.summarise()`와 같은 자리."""
+    return {
+        card.regime.value: {
+            "score_gate": card.score_gate,
+            "ceiling_solo": round(card.best_solo, 4),
+            "ceiling_combined": round(card.combined, 4),
+            "best_horizon": card.best_solo_horizon.value if card.best_solo_horizon else None,
+            "ratio_solo": round(card.solo_ratio, 3),
+            "closed": card.is_closed,
+            "reachable_solo": card.gate_is_reachable_solo,
+            "verdict": card.verdict,
+        }
+        for card in cards
+    }
 
 
 @dataclass(frozen=True, slots=True)

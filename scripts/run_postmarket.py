@@ -279,7 +279,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
         # 종료 시퀀스에만 있었는데, 그 시퀀스는 프로세스가 15:35까지 살아야 돈다 — 2026-08-07엔
         # 13:41에 죽어 1분봉이 조각 디렉터리로 남았다. 장후 절차는 프로세스가 죽어도 돈다.
         Step(
-            "1/6 장중 조각 통합",
+            "1/7 장중 조각 통합",
             [
                 _python(),
                 str(_SCRIPTS / "run_compact.py"),
@@ -292,7 +292,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
             one_means_finding=False,
         ),
         Step(
-            "2/6 상위 Horizon 재합성",
+            "2/7 상위 Horizon 재합성",
             [
                 _python(),
                 str(_SCRIPTS / "run_recompose.py"),
@@ -311,7 +311,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
     if not args.skip_rest:
         planned.append(
             Step(
-                "3/6 공식 분봉 대비 거래량 대조",
+                "3/7 공식 분봉 대비 거래량 대조",
                 [
                     _python(),
                     str(_SCRIPTS / "verify_archive_volume.py"),
@@ -325,7 +325,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
         )
     planned.append(
         Step(
-            "4/6 변동성 축 채점",
+            "4/7 변동성 축 채점",
             [
                 _python(),
                 str(_SCRIPTS / "run_vol_scorecard.py"),
@@ -339,6 +339,26 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
             one_means_finding=True,
         )
     )
+    # **국면별 방향 채점** (2026-09-02) — 화면 ⑤가 읽는 산출물을 만든다. 안 돌면 화면이
+    # 「미측정」이라 적고, 그 침묵이 곧 이 단계가 빠졌다는 증거가 된다.
+    #
+    # 변동성 축 채점 **바로 뒤**에 두는 이유: 둘 다 "매일 다시 묻는 계측"이고 실패해도
+    # 뒤 단계를 막지 않는다. 리포트 재생성보다는 앞이어야 나중에 리포트가 이 산출물을
+    # 읽도록 확장할 때 순서를 다시 안 만진다.
+    planned.append(
+        Step(
+            "5/7 국면별 방향 채점",
+            [
+                _python(),
+                str(_SCRIPTS / "run_regime_direction_scorecard.py"),
+                "--date",
+                stamp,
+                "--symbol",
+                symbol,
+            ],
+            one_means_finding=True,  # 1 = 동전과 유의하게 다른 국면이 있다(발견이지 실패가 아니다)
+        )
+    )
     # **롤 겹침 확보** (2026-08-14 G-1) — 다음 거래일이 롤이면 들어오는 월물의 오늘치를
     # 받아 basis 측정용 겹침을 만든다. 4주에 한 번만 실제로 일하고 나머지 날은 즉시 종료한다.
     #
@@ -347,7 +367,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
     if not args.skip_rest:
         planned.append(
             Step(
-                "5/6 롤 겹침 확보(만기일에만)",
+                "6/7 롤 겹침 확보(만기일에만)",
                 [
                     _python(),
                     str(_SCRIPTS / "run_roll_overlap.py"),
@@ -364,7 +384,7 @@ def _steps(args: argparse.Namespace, day: date, symbol: str) -> list[Step]:
     # 반드시 마지막 — 앞 단계들의 산출물을 읽어 `unmeasured`를 비운다.
     planned.append(
         Step(
-            "6/6 무결성 리포트 재생성",
+            "7/7 무결성 리포트 재생성",
             [
                 _python(),
                 str(_SCRIPTS / "daily_integrity_report.py"),

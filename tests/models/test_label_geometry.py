@@ -2,16 +2,19 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from messiah.core.messages import Horizon
+from messiah.core.messages import Horizon, Regime
 from messiah.core.timeutil import KST
 from messiah.models.label_geometry import (
     DEFAULT_SCORE_GATE,
     LabelGeometry,
     check_horizon_ladder,
+    regime_reachability,
+    summarise_regime_reachability,
     time_barrier_minutes,
 )
 from messiah.models.labeling import BARRIER_PARAMS, BarrierParams, TripleBarrierLabel
 from messiah.strategy.decision.meta_decision import SCORE_THRESHOLD
+from messiah.strategy.futures.aggregator import REGIME_WEIGHTS
 
 _START = datetime(2026, 8, 4, 9, 0, tzinfo=KST)
 
@@ -170,3 +173,63 @@ def test_empty_labels_refuse_to_look_healthy():
 
     assert geom.n == 0
     assert geom.verdict == "레이블 0건 — 판정 불가"
+
+
+# --------------------------------------------------------------- 국면가중 실효 천장
+
+
+def _geometry_with_flat(flat_share: float, *, n: int = 1000) -> LabelGeometry:
+    flat = round(n * flat_share)
+    rest = n - flat
+    return LabelGeometry.build(_labels(rest // 2, flat, rest - rest // 2), cost_ticks=1.6)
+
+
+def test_regime_weight_moves_the_ceiling_both_ways():
+    """**하나의 천장이 두 방향으로 동시에 틀려 있었다** (2026-09-02).
+
+    30m flat 76.4%면 가중치 1 기준 천장은 0.236이고 종전 판정은 "게이트 0.20에 여유 1.18배,
+    사실상 도달 불가"였다. 그런데 실제 S에는 국면가중이 곱해진다 — 추세(×1.5)에서는 0.354로
+    **열려 있고**, 횡보(×0.4)에서는 0.094로 **게이트에 닿지도 못한다.**
+    """
+    geometry = _geometry_with_flat(0.764)
+    cards = {
+        card.regime: card
+        for card in regime_reachability([geometry], REGIME_WEIGHTS, score_gate=0.20)
+    }
+
+    trend = cards[Regime.TREND_UP]
+    assert trend.best_solo == pytest.approx(1.5 * geometry.score_ceiling, abs=1e-9)
+    assert trend.is_closed is False
+    assert trend.gate_is_reachable_solo is True  # 1.77배 >= MIN_CEILING_RATIO
+
+    range_regime = cards[Regime.RANGE]
+    assert range_regime.best_solo == pytest.approx(0.4 * geometry.score_ceiling, abs=1e-9)
+    assert range_regime.is_closed is True
+    assert "닫힘" in range_regime.verdict
+
+    high_vol = cards[Regime.HIGH_VOL]
+    assert high_vol.is_closed is True  # 0.188 < 0.20 — 라이브 실측이 이 모양이었다
+
+
+def test_a_horizon_the_weight_table_does_not_know_is_left_out():
+    """가중치표에 없는 Horizon은 천장에 안 들어간다 — 조용히 1을 곱하지 않는다."""
+    geometry = _geometry_with_flat(0.5)
+    weights = {Regime.RANGE: {Horizon.M1: 1.2}}
+
+    (card,) = regime_reachability([geometry], weights)
+
+    assert card.solo == {}  # 30m 기하만 줬는데 표는 1m만 안다
+    assert card.best_solo == 0.0
+    assert card.is_closed is True
+
+
+def test_the_summary_carries_what_the_screen_needs():
+    """화면 ⑤가 읽는 칸 — 없으면 화면이 "게이트 도달성"을 못 그린다."""
+    summary = summarise_regime_reachability(
+        regime_reachability([_geometry_with_flat(0.764)], REGIME_WEIGHTS)
+    )
+
+    assert summary["HIGH_VOL"]["closed"] is True
+    assert summary["TREND_UP"]["closed"] is False
+    for payload in summary.values():
+        assert {"score_gate", "ceiling_solo", "closed", "verdict"} <= set(payload)

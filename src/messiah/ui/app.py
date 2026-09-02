@@ -1569,6 +1569,168 @@ def render_bottom_zone(source) -> None:
         st.caption(line)
 
 
+# ---------------------------------------------------------------- ⑤ 국면 실태
+
+#: 국면 채점 산출물이 놓이는 자리 — 쓰는 쪽(`scripts/run_regime_direction_scorecard.py`)과
+#: 같은 규칙. 상대경로인 이유는 `_SELF_EVAL_DIR` 주석과 같다.
+_REGIME_BOARD_DIR = Path("logs")
+
+#: 며칠 전 산출물까지 거슬러 볼 것인가. 이 채점은 **장후에** 돌므로 장중 화면이 보는 것은
+#: 늘 어제 것이다 — 오늘 파일만 찾으면 거래일 내내 "미측정"이라 적힌다. 다만 얼마나 오래된
+#: 것인지는 화면에 그대로 적는다(오래된 값을 최신인 척 보여주지 않는다, L18).
+_REGIME_BOARD_LOOKBACK_DAYS = 7
+
+#: 국면 이름 → 화면 표기. 영문 enum 값을 그대로 쓰면 옆의 한글과 눈이 갈린다.
+_REGIME_LABELS = {
+    "TREND_UP": "상승추세",
+    "TREND_DOWN": "하락추세",
+    "RANGE": "횡보",
+    "HIGH_VOL": "고변동",
+    "EVENT": "이벤트",
+    "UNKNOWN": "미판정",
+}
+
+
+class _RegimeBoardCache:
+    """`logs/regime_direction_<날짜>.json` 한 파일의 파싱 결과 — `_SelfEvalCache`와 같은 판단
+    (LIVE는 5초마다 다시 그리는데 이 파일은 하루 한 번 쓰인다)."""
+
+    def __init__(self) -> None:
+        self._entry: tuple[str, tuple[int, int], list[str]] | None = None
+        self._lock = threading.Lock()
+
+    def lines(self, path: Path) -> list[str]:
+        with self._lock:
+            try:
+                stat = path.stat()
+            except OSError:
+                self._entry = None
+                return []
+            signature = (stat.st_mtime_ns, stat.st_size)
+            cached = self._entry
+            if cached is not None and cached[0] == str(path) and cached[1] == signature:
+                return list(cached[2])
+            lines = _read_regime_board(path)
+            self._entry = (str(path), signature, lines)
+            return list(lines)
+
+
+_REGIME_BOARD_CACHE = _RegimeBoardCache()
+
+
+def _latest_regime_board_path(today: date) -> Path | None:
+    for back in range(_REGIME_BOARD_LOOKBACK_DAYS + 1):
+        day = today - timedelta(days=back)
+        path = _REGIME_BOARD_DIR / f"regime_direction_{day.strftime('%Y%m%d')}.json"
+        if path.exists():
+            return path
+    return None
+
+
+def _regime_board_row(name: str, direction: dict, reachability: dict) -> str:
+    """국면 한 줄 — **게이트 도달성과 방향 적중률을 한 줄에 붙인다.**
+
+    둘을 따로 보여주면 사람이 둘을 이어 읽지 않는다. 2026-09-02에 드러난 사실이 정확히 그
+    이음매에 있다: 고변동 국면은 방향 적중률이 26%인데 손실이 안 났고, 그 이유는 판단력이
+    아니라 **그 국면의 실효 천장(0.188)이 게이트(0.20)에 산술적으로 못 닿기 때문**이었다.
+    한 줄에 붙여야 "지금 안전한 이유가 우연"이라는 것이 보인다.
+    """
+    label = _REGIME_LABELS.get(name, name)
+    parts = [label]
+
+    gate = reachability.get(name) if isinstance(reachability, dict) else None
+    if isinstance(gate, dict):
+        ceiling, threshold = gate.get("ceiling_solo"), gate.get("score_gate")
+        if gate.get("closed"):
+            parts.append(f"게이트 **닫힘**(천장 {ceiling:.3f} < {threshold:g})")
+        elif gate.get("reachable_solo") is False:
+            parts.append(f"게이트 여유부족(천장 {ceiling:.3f} / {threshold:g})")
+        else:
+            parts.append(f"게이트 열림(천장 {ceiling:.3f} / {threshold:g})")
+
+    if isinstance(direction, dict) and direction.get("n"):
+        n, hit = direction["n"], direction.get("hit_rate", 0.0)
+        net = direction.get("net_ticks", 0.0)
+        parts.append(f"방향 {hit:.0%} ({direction.get('n_hit', 0)}/{n})")
+        parts.append(f"반사실 {net:+,.0f}틱")
+        parts.append(f"통과 {direction.get('n_gate_passed', 0)}건")
+        if direction.get("flagged"):
+            parts.append("⚠ 동전과 유의하게 다름")
+        elif direction.get("status") != "측정":
+            parts.append("표본 부족")
+    else:
+        parts.append("사이클 없음")
+    return " · ".join(parts)
+
+
+def _read_regime_board(path: Path) -> list[str]:
+    """파일 하나를 사람이 읽는 줄들로 — 못 읽으면 **사유를 한 줄로**(`_read_self_eval`과 같다)."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        return [f"국면 실태: {path.name}을 못 읽었다 — JSON이 깨졌다({exc.__class__.__name__})"]
+    except OSError as exc:
+        return [f"국면 실태: {path.name}을 못 읽었다 — {exc.__class__.__name__}"]
+    if not isinstance(payload, dict):
+        return [f"국면 실태: {path.name}의 형식이 예상과 다르다 — 최상위가 객체가 아니다"]
+
+    direction = payload.get("direction") or {}
+    reachability = payload.get("reachability") or {}
+    regimes = direction.get("regimes") or {}
+    if not isinstance(regimes, dict):
+        return [f"국면 실태: {path.name}에 읽을 칸이 없다 — 옛 스키마이거나 빈 산출물이다"]
+
+    days = direction.get("trading_days", 0)
+    need = direction.get("min_trading_days", 20)
+    header = (
+        f"국면 실태 ({payload.get('date', '?')} 기준 · {days}거래일 창 · "
+        f"판단 {direction.get('n_scored', 0)}건)"
+    )
+    if not direction.get("meets_shadow_window"):
+        header += f" — 섀도 계측 {need}거래일까지 {max(0, need - days)}일 남음(승격 판단 전)"
+    lines = [header]
+
+    # **천장은 닫혔는데 적중률이 나쁜 국면부터** — 순서가 곧 읽는 순서다.
+    order = sorted(
+        set(regimes) | {k for k in reachability if isinstance(reachability, dict)},
+        key=lambda name: regimes.get(name, {}).get("net_ticks", 0.0),
+    )
+    for name in order:
+        lines.append(_regime_board_row(name, regimes.get(name, {}), reachability))
+
+    sources = direction.get("regime_sources") or {}
+    if isinstance(sources, dict) and sources.get("joined"):
+        lines.append(
+            f"※ 국면 {sources['joined']}건은 옛 로그에서 이어 붙인 값이다"
+            f"(판단이 스스로 말한 것 {sources.get('self', 0)}건) — 2026-09-02 이전 로그"
+        )
+    if not reachability:
+        lines.append("※ 실효 천장 미계산 — `--no-reachability`로 돌렸거나 연속 시계열이 없다")
+    return lines
+
+
+def _regime_board_lines(today: date) -> list[str]:
+    """화면 ⑤. 산출 전이면 **그 사실과 돌리는 법**을 말한다(빈칸으로 두지 않는다)."""
+    path = _latest_regime_board_path(today)
+    if path is None:
+        return [
+            "국면 실태: 미측정 — `python scripts/run_regime_direction_scorecard.py`를 "
+            f"장후에 돌리면 최근 {_REGIME_BOARD_LOOKBACK_DAYS}일 안의 산출물을 여기 띄운다"
+        ]
+    return _REGIME_BOARD_CACHE.lines(path)
+
+
+def render_regime_board() -> None:
+    st.subheader("⑤ 국면 실태 — 게이트 도달성 · 방향 적중률")
+    lines = _regime_board_lines(now_kst().date())
+    st.caption(lines[0])
+    for line in lines[1:]:
+        if "⚠" in line:
+            st.warning(line)
+        else:
+            st.caption(line)
+
+
 # ---------------------------------------------------------------- 진입점
 
 # LIVE 모드 자동 새로고침 주기(초) — 2026-07-29 추가. 이전엔 자동 재실행 트리거가 전혀
@@ -1684,6 +1846,8 @@ def _render_dashboard_body(
         render_position_risk_panel(source)
     st.divider()
     render_bottom_zone(source)
+    st.divider()
+    render_regime_board()
 
 
 def main() -> None:
