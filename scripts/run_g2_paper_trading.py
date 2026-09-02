@@ -128,9 +128,18 @@ from messiah.ops import session_guard  # noqa: E402
 from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor  # noqa: E402
 from messiah.simulator.engine import LiveSimBrokerFeed  # noqa: E402
 from messiah.strategy.futures.service import FuturesAIService  # noqa: E402
+from messiah.strategy.options.chain_smile import ChainSmileProvider  # noqa: E402
+from messiah.strategy.options.service import OptionsAIService  # noqa: E402
 from messiah.strategy.pipeline import TradingPipeline  # noqa: E402
 from messiah.strategy.regime.runtime import RegimeRuntime  # noqa: E402
 from messiah.strategy.regime.service import RegimeAI  # noqa: E402
+
+# 옵션 체인의 기초자산·시리즈 — `data/option_chain_poller.py`의 기본값과 같은 값이어야 한다
+# (그쪽이 발행하는 토픽 이름을 여기서 구독한다). 위클리 두 시리즈는 아직 안 붙인다:
+# 만기 당일 t<=0으로 스마일이 서지 않는 날이 시리즈당 주 1회씩 있고, 정규 월물 하나로
+# 먼저 20거래일을 관측한 뒤 늘리는 것이 R18 순서다.
+_OPTION_UNDERLYING = "KOSPI200"
+_OPTION_SERIES = "regular"
 
 REGULAR_SESSION_STOP = (DEFAULT_SESSION.close_time.hour, DEFAULT_SESSION.close_time.minute)
 HARD_SHUTDOWN_DEADLINE = (15, 40)
@@ -456,6 +465,40 @@ def _load_shadow_manager(registry: ModelRegistry, symbol: str, bus: MessageBus) 
     return manager
 
 
+def _load_options_service(
+    symbol: str, bus: MessageBus
+) -> tuple[ChainSmileProvider, OptionsAIService]:
+    """Options AI 결선 (2026-09-02) — `raw.option_chain.*` → 스마일 → `intel.options`.
+
+    ## 왜 지금 붙일 수 있게 됐나
+
+    `OptionsAIService`는 2026-07-28에 이미 완성돼 있었고(자체 테스트 739건 통과) 막힌 곳은
+    **한 지점, `smile_provider`** 뿐이었다 — 원시 옵션 시세의 필드 의미가 실측으로 확정되지
+    않아 실데이터로 `SmileFit`을 만들 수 없었다(그 서비스 docstring "알려진 갭"). 2026-09-02에
+    수집분 20거래일로 그 매핑을 확정했고(`strategy/options/chain_smile.py` §1) 이제 그 자리에
+    실데이터 구현체가 들어간다.
+
+    ## 이것은 주문 경로가 아니다
+
+    `MetaDecisionEngine`에는 여전히 규칙 ⑥⑦(옵션 우선·상관 노출)이 없고 `Side.OPTION`을 낼
+    경로 자체가 없다(그 모듈 docstring — "선택이 아니라 부재"). 옵션 주문 경로도 없다. 그래서
+    이 결선이 바꾸는 것은 **화면 ①의 「옵션 후보」 칸이 실제 후보를 말하기 시작한다**는 것
+    하나뿐이다 — 판단도 주문도 종전 그대로다. 후보가 실제로 쓸 만한지는 R18대로 관측이
+    쌓인 뒤 사람이 판단한다.
+
+    데이터 원천은 `run_l1_daily.py`가 같은 버스에 이미 발행 중인 `raw.option_chain.KOSPI200`
+    이다 — 이 프로세스는 순수 구독자라 REST 유량을 새로 쓰지 않는다(이 스크립트의 규율).
+    """
+    provider = ChainSmileProvider(_OPTION_UNDERLYING, bus, series=_OPTION_SERIES)
+    service = OptionsAIService(symbol, _OPTION_UNDERLYING, provider, bus)
+    print(
+        f"Options AI 결선: {_OPTION_UNDERLYING}/{_OPTION_SERIES} 체인 구독 → intel.options "
+        f"(주문 경로 없음 — 화면 표시 전용)",
+        flush=True,
+    )
+    return provider, service
+
+
 async def _run_regular_session(
     futures_service: FuturesAIService,
     pipeline: TradingPipeline,
@@ -463,6 +506,7 @@ async def _run_regular_session(
     shadow_manager: ShadowManager,
     bus: MessageBus,
     regime_runtime: RegimeRuntime | None = None,
+    options: tuple[ChainSmileProvider, OptionsAIService] | None = None,
 ) -> None:
     """이 스크립트의 데이터 소스는 `run_l1_daily.py`가 같은 버스에 이미 발행 중인 `bar.*`/
     `feat.*`뿐이다 — 여기엔 자체 TickCollector가 없다(모듈 docstring 참고, WS 이중 연결
@@ -484,6 +528,9 @@ async def _run_regular_session(
         # 국면 발행 (2026-08-11 ④-c). 저장된 RegimeAI가 없으면 이 자리는 비고, 그 사실은
         # `_load_regime_runtime()`이 기동 로그에 이미 말했다 — 여기서 다시 말하지 않는다.
         *([regime_runtime.run_forever()] if regime_runtime is not None else []),
+        # Options AI (2026-09-02). 둘 다 순수 구독자다 — 스마일 제공자는 `raw.option_chain.*`를,
+        # 서비스는 `intel.futures`/`bar.5m`를 듣는다.
+        *([options[0].run_forever(), options[1].run_forever()] if options is not None else []),
         HealthReporter(bus, "g2.pipeline").run_forever(),
     )
 
@@ -728,6 +775,7 @@ async def main(cfg: InstanceConfig) -> None:
         meta_features_provider=lambda: futures_service.latest_meta_features,
     )
     sim_feed = LiveSimBrokerFeed(symbol, broker, gateway, bus)
+    options = _load_options_service(symbol, bus)
 
     now = now_kst()
     session_stop = _today_at(now, *REGULAR_SESSION_STOP)
@@ -741,7 +789,13 @@ async def main(cfg: InstanceConfig) -> None:
         try:
             await asyncio.wait_for(
                 _run_regular_session(
-                    futures_service, pipeline, sim_feed, shadow_manager, bus, regime_runtime
+                    futures_service,
+                    pipeline,
+                    sim_feed,
+                    shadow_manager,
+                    bus,
+                    regime_runtime,
+                    options=options,
                 ),
                 timeout=remaining,
             )

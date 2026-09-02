@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from datetime import date
 from pathlib import Path
@@ -167,3 +168,48 @@ def test_empty_collection_reports_no_demand():
 
     assert empty.requests_per_second == 0.0
     assert empty.backoff_headroom == float("inf")
+
+
+# ------------------------------------------------------------ Options AI 결선 (2026-09-02)
+
+
+def test_g2_subscribes_the_topic_the_poller_publishes():
+    """**토픽 이름이 갈리면 아무 일도 안 일어난다 — 조용히.**
+
+    발행은 `run_l1_daily.py`(옵션체인 폴러) 프로세스가, 구독은 `run_g2_paper_trading.py`
+    (Options AI) 프로세스가 한다. 두 프로세스가 서로를 import하지 않으므로 기초자산 이름이
+    어긋나도 예외가 안 난다 — 체인이 영원히 안 오고 화면엔 `NO_OPTION`만 뜬다. 그 형태의
+    사고가 이 저장소에 이미 있었다(`intel.regime` 미발행, 2026-08-11 ④-c).
+    """
+    import run_g2_paper_trading as g2  # noqa: PLC0415 — scripts는 sys.path 조작 후에만 import 가능
+
+    from messiah.data.option_chain_poller import OptionChainPoller as _Poller
+
+    poller_default = inspect.signature(_Poller.__init__).parameters["underlying"].default
+
+    assert g2._OPTION_UNDERLYING == poller_default
+    assert g2._OPTION_SERIES in set(universe.OPTION_SERIES_BY_TOKEN.values())
+
+
+def test_g2_actually_constructs_the_options_service():
+    """구현됨 ≠ 결선됨 — 서비스가 있는 것과 이 스크립트가 그것을 세우는 것은 다른 사실이다."""
+    import run_g2_paper_trading as g2  # noqa: PLC0415
+
+    from messiah.strategy.options.chain_smile import ChainSmileProvider
+    from messiah.strategy.options.service import OptionsAIService
+
+    provider, service = g2._load_options_service("A05609", bus=None)
+
+    assert isinstance(provider, ChainSmileProvider)
+    assert isinstance(service, OptionsAIService)
+
+
+def test_g2_runs_both_options_tasks_in_the_session():
+    """세워 두고 `gather()`에 안 넣으면 결선이 아니다 — 소스에서 그 두 줄을 확인한다."""
+    source = (
+        Path(__file__).resolve().parent.parent / "scripts" / "run_g2_paper_trading.py"
+    ).read_text(encoding="utf-8")
+    body = source.split("async def _run_regular_session")[1].split("\ndef ")[0]
+
+    assert "options[0].run_forever()" in body
+    assert "options[1].run_forever()" in body
