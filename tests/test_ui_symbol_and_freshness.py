@@ -287,3 +287,67 @@ def test_regime_state_cadence_is_the_driving_horizon() -> None:
     threshold, cadence = derived_stale_after(state, fallback=15.0)
     assert cadence == 1800
     assert threshold == 2700
+
+
+# ------------------------------- F-4 잔여분: `decision.intent` (2026-08-27)
+#
+# 2026-08-14 F-4는 신선도 임계를 상수에서 주기 유도로 바꾸면서 `FuturesView`·`RegimeState`·
+# `OptionsView` **셋에만** `cadence_seconds`를 달았다. `decision.intent`는 그 목록에 없었고
+# `ui/app._STALE_AFTER`에도 키가 없어 `DEFAULT_STALE_AFTER_SECONDS`(30초)가 정본이었다.
+#
+# 실제 발행은 30분 격자다 — 2026-08-27 Redis 스트림 실측(`xrevrange decision.intent`):
+# 09:00:01·09:30:00·10:00:00·10:30:00·11:00:01·11:30:00·12:00:00, **간격 30.0분 고정**.
+# 임계 30초 / 주기 1,800초면 거래일의 **98.3%가 STALE**이고, 그 앰버의 뜻("그 프로세스가
+# 죽었거나 멈췄다")은 그 시간 내내 틀린 말이었다. `_STALE_AFTER` 주석이 이미 적어 뒀다 —
+# *"한 곳에서만 피한 것은 설계가 아니라 우연이다."*
+#
+# 픽스처를 짓지 않는다. F-A′가 정확히 픽스처 때문에 엿새를 놓쳤으므로, 여기서는
+# `MetaDecisionEngine.decide()`가 **생산 형상 뷰를 먹고 실제로 낸 메시지**를 그대로 잰다.
+
+
+def _production_intent():
+    from messiah.strategy.decision.meta_decision import MetaDecisionEngine
+
+    return MetaDecisionEngine().decide(_production_view(n_experts=1), kill_active=False)
+
+
+def test_decision_intent_carries_the_driving_cadence() -> None:
+    """판단은 `FuturesView` 도착에만 나간다(`pipeline.handle_futures_view`가 유일한 호출부)
+    — 그러므로 뷰의 주기가 곧 판단의 주기다. 추측한 상수가 아니다."""
+    intent = _production_intent()
+    assert intent.cadence_seconds == 1800
+
+
+def test_no_trade_intent_carries_the_cadence_too() -> None:
+    """발행의 대부분이 NO_TRADE 경로다 — 이쪽만 빠지면 화면은 종일 앰버 그대로다."""
+    from messiah.strategy.decision.meta_decision import MetaDecisionEngine
+
+    view = _production_view(n_experts=0)  # ①′ n_experts=0 → NO_TRADE
+    intent = MetaDecisionEngine().decide(view, kill_active=False)
+    assert intent.side.value == "NO_TRADE"
+    assert intent.cadence_seconds == 1800
+
+
+def test_decision_intent_badge_is_not_amber_between_normal_publications() -> None:
+    """실측 재현 — 12:00:00 발행을 159초 뒤에 본 화면이 STALE 앰버였다(2026-08-27 스크린샷).
+
+    하한은 화면이 **실제로 쓰는 값**에서 가져온다. `_STALE_AFTER`에 키를 넣는 것으로
+    때우면 이 테스트가 그 우회를 통과시켜 버린다 — 재는 자리를 배선과 같게 둔다.
+    """
+    from messiah.ui.app import _STALE_AFTER
+    from messiah.ui.data_source import DEFAULT_STALE_AFTER_SECONDS
+
+    intent = _production_intent()
+    floor = _STALE_AFTER.get("DecisionIntent", DEFAULT_STALE_AFTER_SECONDS)
+    threshold, cadence = derived_stale_after(intent, fallback=floor)
+
+    assert cadence == 1800
+    assert threshold == 2700  # 1800 × 1.5
+    just_published = compute_badge(DataSourceMode.LIVE, 159.0, stale_after_seconds=threshold)
+    late_in_cycle = compute_badge(DataSourceMode.LIVE, 1799.0, stale_after_seconds=threshold)
+    missed_one = compute_badge(DataSourceMode.LIVE, 3600.0, stale_after_seconds=threshold)
+
+    assert just_published.value == "LIVE"
+    assert late_in_cycle.value == "LIVE"
+    # 늦춘 대가로 진짜 정지를 놓치면 안 된다 — 1회 결손(2주기)은 그대로 걸린다.
+    assert missed_one.value == "STALE"

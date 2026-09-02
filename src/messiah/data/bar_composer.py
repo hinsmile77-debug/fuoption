@@ -129,6 +129,7 @@ from messiah.core.messages import HORIZON_SECONDS, BarClosed, BarSession, Health
 from messiah.core.scheduler import FixedTickScheduler
 from messiah.core.timeutil import KST, UTC, ensure_aware, now_kst
 from messiah.data.archiver import ParquetArchiver
+from messiah.data.close_grace import MAX_CONSTITUENT_WAIT_SECONDS
 
 # Horizon.M1로부터 합성하는 상위 Horizon과 그 길이(초, core/messages.py HORIZON_SECONDS 재사용).
 # M1 자신은 합성 대상이 아니다(원본).
@@ -175,13 +176,10 @@ _MAX_FLUSH_DEFER_SECONDS = 30.0
 
 # 겹④ — 그 버킷의 마지막 1분봉이 도착하기를 기다리는 상한.
 #
-# 2026-08-05 실측 1분봉 발행 지연: 중앙값 0.655초 · p75 0.966초 · p90 1.62초 · 최대 7.96초
-# (모듈 docstring "스큐를 고쳤더니 드러난 것"). 5초면 그날 표본의 p99 위쪽을 덮는다.
-#
-# 상한을 이 크기로 둬도 안전한 이유: 가장 짧은 합성 Horizon이 3분(180초)이라 5초는 그 2.8%다.
-# 그리고 대기의 최악은 "합성봉이 몇 초 늦게 나간다"인 반면, 안 기다린 최악은 **조용한 데이터
-# 손상**이다 — 2026-08-05에 실제로 상위 봉의 3~17%가 그렇게 사라졌다. 비대칭이 명확하다.
-_MAX_CONSTITUENT_WAIT_SECONDS = 5.0
+# 값과 그 근거는 `data/close_grace.py`로 **옮겼다** (2026-09-01 F-82). 이 모듈은
+# `ParquetArchiver`(polars)를 끌고 오므로 화면 프로세스가 여기서 유예를 읽을 수 없었다 —
+# 정책만 가벼운 자리로 내보내고 값은 그대로 도로 읽는다(단일 소스는 그대로다).
+_MAX_CONSTITUENT_WAIT_SECONDS = MAX_CONSTITUENT_WAIT_SECONDS
 
 # 대기 폴링 간격 — `wait_for_bar()`의 기본값과 같은 값·같은 근거(횟수로 세어 테스트가 실제
 # 시계를 안 타게 한다).

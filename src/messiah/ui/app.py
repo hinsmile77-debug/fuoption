@@ -40,7 +40,8 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 
 # 무거운 임포트보다 **먼저** 네이티브 크래시 덤프를 무장한다(2026-08-03). 이 프로세스는
@@ -98,10 +99,16 @@ from messiah.core.version import (
     uptime_text,
 )
 from messiah.data import bar_paths
-from messiah.ops.status_board import DEAD_AFTER_MULTIPLE, load_snapshot
+from messiah.data.close_grace import close_grace_ms
+from messiah.ops.status_board import (
+    DEAD_AFTER_MULTIPLE,
+    code_version_axis,
+    load_snapshot,
+)
 from messiah.ui.bar_reader import BarExportError, read_day_series
 from messiah.ui.bar_series import BarSeries
 from messiah.ui.data_source import (
+    DEFAULT_STALE_AFTER_SECONDS,
     DataSourceMode,
     FreshnessBadge,
     LiveDataSource,
@@ -825,6 +832,23 @@ def _absence_reason(source, key: str) -> str | None:
     return _ABSENCE_REASON.get(key, "미배선 또는 끊김 — 관측 창 동안 수신 없음")
 
 
+def _off_session_caption(snapshot, *, now: datetime) -> str | None:
+    """세션 밖의 오래된 값은 **초 단위로 세지 않는다** (2026-09-01 F-85).
+
+    `죽음(1036분 침묵)`을 `62160초 전 수신`으로 바꿔 적는 것은 문구만 순화한 것이지 사람
+    에게 도움이 되지 않는다. 세션 밖이라면 알아야 할 것은 경과가 아니라 **언제 것인가**다.
+    세션 안이거나 값이 아직 신선하면 아무것도 바꾸지 않는다(None).
+    """
+    if snapshot.in_session is not False:
+        return None
+    age = snapshot.age_seconds
+    if age is None or age <= DEFAULT_STALE_AFTER_SECONDS:
+        return None
+    seen_at = now - timedelta(seconds=age)
+    phase = "장 개시 전" if now.time() < DEFAULT_SESSION.first_tick_time else "장 마감 후"
+    return f"{phase} — 최근 수신은 {seen_at.strftime('%m-%d %H:%M')}"
+
+
 def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
     color = _BADGE_COLOR[snapshot.badge]
     st.markdown(
@@ -844,7 +868,8 @@ def _badge_caption(label: str, snapshot, *, reason: str | None = None) -> None:
             # 주기의 3배를 넘었다 — "느려졌다"가 아니라 "확인하라"다.
             st.caption(f"**죽음**({snapshot.age_seconds / 60:.0f}분 침묵){note} · 프로세스 확인")
         else:
-            st.caption(f"{snapshot.age_seconds:.0f}초 전 수신{note}")
+            off_session = _off_session_caption(snapshot, now=now_kst())
+            st.caption(off_session or f"{snapshot.age_seconds:.0f}초 전 수신{note}")
 
 
 # ---------------------------------------------------------------- Kill Switch
@@ -1018,6 +1043,45 @@ def _component_versions(source) -> dict[str, str]:
     return versions
 
 
+# `stale_reason` → 사람이 **할 수 있는 일** (2026-09-01 F-83).
+#
+# 어긋남의 종류마다 처방이 다르다. 하나로 뭉뚱그리면 미커밋 때문에 뜬 앰버를 보고 재기동을
+# 반복하게 된다 — 그러면 안 고쳐지고, 고쳐지지 않는 경보는 곧 무시된다.
+_RESTART_CAPTION = "재기동해야 최신 코드가 적재된다 — 지금 화면의 판정은 옛 규칙의 결과다"
+
+
+def _version_stale_caption(reason: str | None, dirty_files: int | None) -> str | None:
+    """어긋남의 종류에 맞는 처방 한 줄 — 어긋남이 없으면 None (2026-09-01 F-83)."""
+    if reason is None:
+        return None
+    dirty = f"저장 안 된 소스 {dirty_files}파일이 섞여 돈다 — 재기동해도 커밋 전엔 안 바뀐다"
+    if reason == "sha_mismatch":
+        return _RESTART_CAPTION
+    if reason == "worktree_dirty":
+        return dirty
+    if reason == "both":
+        return f"{_RESTART_CAPTION} · {dirty}"
+    return None
+
+
+def _worktree_dirty_files() -> int | None:
+    """미커밋 소스 파일 수 — 못 읽으면 None (2026-09-01 F-83).
+
+    **화면은 git을 직접 부르지 않는다**(2026-08-31 F-78). 이 값은 수집 프로세스가
+    `logs/status_snapshot.json`에 이미 적어 둔 것을 그대로 읽는다. 파일이 없거나 필드가
+    없으면 `None` — 「0파일」과 「못 쟀다」는 다른 사실이고, 후자를 전자로 접으면 화면이
+    "깨끗하다"고 거짓말한다(L18).
+    """
+    snapshot = load_snapshot()
+    if not isinstance(snapshot, dict):
+        return None
+    version = snapshot.get("code_version")
+    if not isinstance(version, dict):
+        return None
+    dirty = version.get("worktree_dirty_files")
+    return dirty if isinstance(dirty, int) else None
+
+
 def _render_version_strip(source) -> None:
     """ "고친 코드가 지금 돌고 있는가" (2026-08-05 3차, P0-1).
 
@@ -1027,20 +1091,40 @@ def _render_version_strip(source) -> None:
 
     어긋남을 **초록으로 칠하지 않는다** — 앰버는 `_BADGE_COLOR[STALE]`과 같은 값·같은 뜻
     ("이 화면이 지금 사실을 말하고 있는지 의심하라")이다.
+
+    ## 화면과 상태판이 **같은 분에 반대말을 했다** (2026-09-01 F-83 · F-76 잔여)
+
+    2026-08-31 F-76이 `ops.status_board.code_version_axis()`의 `stale`을 「커밋과 다르다」
+    에서 「저장소 상태와 다르다」로 넓혔다 — 미커밋 소스가 돌고 있으면 그것도 어긋남이다.
+    그런데 **화면은 그 함수를 안 탔다.** 두 SHA만 보는 `assess_version_drift()`를 직접
+    읽었으므로, 08:47:52 `status_snapshot`이 `stale: true · 미커밋 5파일`이라 적은 그
+    시각에 화면은 회색으로 "전 프로세스 동일"이라 적었다. 값이 아니라 **문장이 갈렸다.**
+
+    처방도 갈라 준다. 종전 캡션 `재기동해야 최신 코드가 적재된다`는 `sha_mismatch`에만
+    맞는 말이다 — 미커밋 때문에 어긋난 것이라면 **재기동해도 안 바뀐다.** 틀린 처방을
+    지우는 것이 이 항목의 절반이다.
+
+    미커밋 건수는 **화면이 git을 부르지 않고** `status_snapshot.json`에서 읽는다
+    (2026-08-31 F-78 규율 — 점검·화면 프로세스가 저장소에 쓰기 락을 만들지 않는다).
+    못 읽으면 `None`을 넘기고, 그때 축은 「미커밋 미측정」이라고 말한다(0으로 접지 않는다).
     """
+    head_sha = head_git_sha()
     drift = assess_version_drift(
         process_sha=PROCESS_GIT_SHA,
-        head_sha=head_git_sha(),
+        head_sha=head_sha,
         component_shas=_component_versions(source),
     )
-    color = "#FFB020" if drift.stale else "#8A8F98"
+    dirty_files = _worktree_dirty_files()
+    axis = code_version_axis(drift=drift, dirty_files=dirty_files, head_sha=head_sha)
+    color = "#FFB020" if axis["stale"] else "#8A8F98"
     uptime = uptime_text(PROCESS_STARTED_AT)
     st.markdown(
-        f"<span style='color:{color}'>● {drift.summary} · 화면 기동 후 {uptime}</span>",
+        f"<span style='color:{color}'>● {axis['summary']} · 화면 기동 후 {uptime}</span>",
         unsafe_allow_html=True,
     )
-    if drift.stale:
-        st.caption("재기동해야 최신 코드가 적재된다 — 지금 화면의 판정은 옛 규칙의 결과다")
+    caption = _version_stale_caption(axis["stale_reason"], dirty_files)
+    if caption:
+        st.caption(caption)
 
 
 def _render_irrecoverable_loss_strip() -> None:
@@ -1118,13 +1202,41 @@ def render_top_bar(source, symbol: str, redis_url: str | None = None) -> None:
     st.divider()
 
 
+def _decision_staleness_warning(snapshot, *, now: datetime) -> str | None:
+    """이 판단이 **지금 시장의 판단이 아닐 때** 그 사실을 한 문장으로 (2026-09-01 F-84).
+
+    배지는 패널 밖 다른 줄에 있고, 값은 좌상단 첫 칸에 크게 있다. 2026-09-01 아침 화면은
+    전일 15:29의 `LONG`을 그 큰 칸에 그대로 그렸다 — 배지와 값이 **같은 시선 안에** 없으면
+    사람은 값만 읽는다. 신선할 때는 아무 말도 하지 않는다(매번 뜨는 문구는 배경이 된다).
+    """
+    if snapshot.badge not in (FreshnessBadge.STALE,) and not snapshot.dead:
+        return None
+    age = snapshot.age_seconds
+    if age is None:
+        return None
+    seen_at = now - timedelta(seconds=age)
+    return (
+        f"이 판단은 {age / 60:.0f}분 전({seen_at.strftime('%m-%d %H:%M')}) 것이다 — "
+        "지금 시장의 판단이 아니다"
+    )
+
+
 def render_ai_decision_panel(source) -> None:
     st.subheader("① AI Decision")
     intent_snap = source.snapshot("DecisionIntent")
     if isinstance(intent_snap.message, DecisionIntent):
         intent = intent_snap.message
-        st.metric("의도", intent.side.value, f"확신도 {intent.confidence:.0%}")
-        st.caption(f"불확실성 {intent.uncertainty:.2f}")
+        # **신선도 경고가 값보다 위에 온다** (2026-09-01 F-84) — 아래 큰 칸을 읽기 전에
+        # "이건 지금 값이 아니다"가 눈에 들어와야 순서가 맞는다.
+        warning = _decision_staleness_warning(intent_snap, now=now_kst())
+        if warning:
+            st.warning(warning)
+        # **델타 칸에 변화량이 아닌 값을 넣지 않는다** (2026-09-01 F-84). 종전엔 확신도를
+        # `st.metric`의 세 번째 인자로 넘겼는데, 그 자리는 Streamlit이 **증감**으로 읽어
+        # 초록 상승 화살표를 붙인다 — 확신도 62%가 "62% 올랐다"로 보였다. 값은 캡션으로
+        # 내리고 화살표를 없앤다.
+        st.metric("의도", intent.side.value)
+        st.caption(f"확신도 {intent.confidence:.0%} · 불확실성 {intent.uncertainty:.2f}")
         st.text(intent.rationale)
     else:
         st.info(_absence_reason(source, "DecisionIntent") or "decision.intent 데이터 없음")
@@ -1152,12 +1264,31 @@ def render_ai_decision_panel(source) -> None:
         st.info(_absence_reason(source, "OptionsView") or "intel.options 데이터 없음")
 
 
+def _first_bar_expected_at(first_tick: dtime, horizon: str | None) -> dtime | None:
+    """그 Horizon의 **첫 봉이 있어야 하는 시각** — 못 정하면 None (2026-09-01 F-82).
+
+    `first_tick`은 「틱이 들어오기 시작하는 시각」이고, 첫 봉은 그로부터 한 Horizon이
+    닫히고 유예까지 지나야 나온다. 알 수 없는 Horizon 문자열에 추정치를 지어내지 않는다 —
+    None을 돌려주면 호출부가 옛 임계(첫 틱)를 그대로 쓴다(L18: 모르는 것은 모른다고 한다).
+    """
+    if not horizon:
+        return None
+    try:
+        bar = Horizon(horizon)
+    except ValueError:
+        return None
+    seconds = HORIZON_SECONDS[bar] + close_grace_ms(bar) / 1000.0
+    base = datetime.combine(date.min, first_tick)
+    return (base + timedelta(seconds=seconds)).time()
+
+
 def _live_date_notice(
     chosen: date,
     *,
     now: datetime,
     calendar: EventCalendar | None = None,
     symbol: str = "",
+    horizon: str | None = None,
 ) -> tuple[str, str]:
     """LIVE 차트 위에 붙일 날짜 문구 — 반환은 (severity, 문구).
 
@@ -1181,6 +1312,28 @@ def _live_date_notice(
     달력을 못 읽으면(파일 부재·미등록 연도) 휴장 판정만 포기하고 시각 판정은 그대로
     한다 — 부가 정보 하나 때문에 화면 전체가 죽는 것이 훨씬 나쁘다
     (`EventCalendar.thursday_weekly_listing_resumes()`가 예외를 삼키는 것과 같은 판단).
+
+    ## 그런데 **첫 틱은 첫 봉이 아니다** (2026-09-01 F-82)
+
+    F-3이 세운 임계는 `first_tick_time`(08:45)이었다. 틱이 들어오는 시각과 그 틱들로 만든
+    **봉이 디스크에 내려앉는 시각**은 다르다 — 2026-09-01 실측으로 1m 08:46 · 3m 08:48 ·
+    5m 08:50이었다. 그래서 08:45~08:50 사이에는 화면이 매 거래일 **확정적으로** 적색
+    `🛑 봉이 없다`를 띄웠고, 그 5분은 아무 사고도 아니었다. 매일 뜨는 경보는 경보가 아니라
+    배경이고, 사람은 그것을 무시하는 법을 배운다 — F-3이 막으려던 바로 그 병이 임계 하나
+    때문에 되살아나 있었다.
+
+    임계를 **그 Horizon의 첫 봉 완성 시각**으로 옮긴다:
+
+        첫 봉 예정 = 첫 틱(08:45) + Horizon 길이 + 완성봉 유예
+
+    유예는 새 숫자를 적지 않고 `data/close_grace.close_grace_ms()` 정본에서 가져온다
+    (1분봉 2,000ms · 상위 5,000ms). `horizon`을 안 주면 **판정을 넓히지 않는다** —
+    옛 임계(첫 틱) 그대로다.
+
+    ⚠ **이 변경은 진짜 적재 정지의 발견을 최대 5분 늦춘다.** 의도된 교환이고, 그 5분은
+    `l1.collector` 배지와 `irrecoverable_loss` 스트립이 이미 독립적으로 감시한다 — 두 축이
+    이 문구보다 빠르므로 실질 손실이 없다. 첫 봉 예정 시각이 지나도 없으면 문구는 F-3이
+    쓴 `alert` **그대로**다(월물 롤 / 수집기 두 후보 유지 — 2026-08-14 F-3을 훼손하지 않는다).
     """
     today = now.date()
     if chosen == today:
@@ -1199,6 +1352,12 @@ def _live_date_notice(
     if now.time() < first_tick:
         return "expected", (
             f"ℹ 장 개시 전({first_tick.strftime('%H:%M')} 첫 틱 예정) — 전일 {tail}"
+        )
+
+    first_bar = _first_bar_expected_at(first_tick, horizon)
+    if first_bar is not None and now.time() < first_bar:
+        return "expected", (
+            f"ℹ 오늘 첫 {horizon}봉은 {first_bar.strftime('%H:%M')} 예정 — 그때까지 전일 {tail}"
         )
 
     # **원인 후보를 하나로 단정하지 않는다** (2026-08-14 F-3). 종전 문구는 "수집기를 먼저
@@ -1231,7 +1390,11 @@ def render_market_view(
     else:
         chosen = available[-1]
         severity, notice = _live_date_notice(
-            chosen, now=now_kst(), calendar=_event_calendar_or_none(), symbol=symbol
+            chosen,
+            now=now_kst(),
+            calendar=_event_calendar_or_none(),
+            symbol=symbol,
+            horizon=horizon,
         )
         _NOTICE_RENDERER[severity](notice)
 
@@ -1309,6 +1472,89 @@ def _event_calendar_lines(today: date, calendar: EventCalendar | None) -> list[s
     return lines
 
 
+#: 자기평가 산출물이 놓이는 자리 — 쓰는 쪽(`ops/self_eval.py`)과 같은 규칙이다.
+#: 절대경로를 적지 않는다(R4): 프로세스의 작업 디렉터리가 저장소 루트라는 것이 전제이고,
+#: 그 전제는 `ops/status_board.DEFAULT_SNAPSHOT_PATH`가 이미 같은 꼴로 쓰고 있다.
+_SELF_EVAL_DIR = Path("logs")
+
+#: 화면에 낼 세 줄이 읽는 필드 — (라벨, 키). 옛 스키마엔 없는 키가 있을 수 있으므로
+#: **있는 것만** 낸다(없는 칸을 0이나 빈칸으로 지어내지 않는다, L18).
+_SELF_EVAL_FIELDS = (
+    ("배선 단계", "wiring_stage"),
+    ("수익률 표본", "n_return_samples"),
+    ("손익 측정 가능", "pnl_measurable"),
+)
+
+
+class _SelfEvalCache:
+    """`logs/self_eval_<날짜>.json` 한 파일의 파싱 결과 — 지문이 같으면 다시 안 읽는다.
+
+    LIVE 화면은 5초마다 다시 그린다(`_LIVE_REFRESH_SECONDS`). 그 주기로 파일을 열면
+    렌더 경로에 매번 I/O가 붙는데, 이 파일은 하루 한 번(15:34) 쓰인다 — 지문(수정시각·
+    크기)이 같으면 읽을 것이 없다. `_BarFileCache`와 같은 판단이다.
+    """
+
+    def __init__(self) -> None:
+        self._entry: tuple[str, tuple[int, int], list[str]] | None = None
+        self._lock = threading.Lock()
+
+    def lines(self, path: Path) -> list[str]:
+        with self._lock:
+            try:
+                stat = path.stat()
+            except OSError:
+                self._entry = None
+                return []
+            signature = (stat.st_mtime_ns, stat.st_size)
+            cached = self._entry
+            if cached is not None and cached[0] == str(path) and cached[1] == signature:
+                return list(cached[2])
+            lines = _read_self_eval(path)
+            self._entry = (str(path), signature, lines)
+            return list(lines)
+
+
+_SELF_EVAL_CACHE = _SelfEvalCache()
+
+
+def _read_self_eval(path: Path) -> list[str]:
+    """파일 하나를 세 줄로 — 못 읽으면 **사유를 한 줄로** 낸다 (2026-09-01 F-86)."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        return [f"Self-Eval: {path.name}을 못 읽었다 — JSON이 깨졌다({exc.__class__.__name__})"]
+    except OSError as exc:  # 권한·잠금 등 — 조용히 빈칸으로 두지 않는다
+        return [f"Self-Eval: {path.name}을 못 읽었다 — {exc.__class__.__name__}"]
+    if not isinstance(payload, dict):
+        return [f"Self-Eval: {path.name}의 형식이 예상과 다르다 — 최상위가 객체가 아니다"]
+
+    parts = [f"{label} {payload[key]}" for label, key in _SELF_EVAL_FIELDS if key in payload]
+    if not parts:
+        return [f"Self-Eval: {path.name}에 읽을 칸이 없다 — 옛 스키마이거나 빈 산출물이다"]
+    return [f"Self-Eval: {' · '.join(parts)}"]
+
+
+def _self_eval_lines(today: date) -> list[str]:
+    """화면 ④의 Self-Eval 미니보드 (2026-09-01 F-86 · 2026-08-11 F-5 잔여 줄).
+
+    ## 코드는 맞고 **문장만 틀려 있었다**
+
+    이 자리엔 `Self-Evaluation 미니보드: Phase 5 미구현 — 자리만`이 **조건 없이** 찍혔다.
+    그런데 자기평가는 매 거래일 15:34에 실제로 돌아 `logs/self_eval_<날짜>.json`을 남긴다
+    (2026-09-01에도 1.1KB가 쌓였다). 화면이 자기 시스템에 대해 사실이 아닌 말을 하고 있었고,
+    그건 F-5가 **바로 위 줄**에서 고친 것과 똑같은 형태다(같은 함수, 같은 병).
+
+    산출 전이면 그 사실을 말한다 — 빈칸으로 두면 "오늘 자기평가가 없다"로 읽히는데,
+    그건 이 함수가 답할 수 없는 상태에서 답한 척하는 것이다(`_event_calendar_lines()`의
+    달력 부재 처리와 같은 판단).
+    """
+    path = _SELF_EVAL_DIR / f"self_eval_{today.isoformat()}.json"
+    lines = _SELF_EVAL_CACHE.lines(path)
+    if lines:
+        return lines
+    return [f"Self-Eval: 오늘({today.isoformat()}) 자기평가 산출 전 — 15:34 예정"]
+
+
 def render_bottom_zone(source) -> None:
     st.subheader("④ 실행 로그 · 이벤트 캘린더 · Self-Eval")
     fill_snap = source.snapshot("Fill")
@@ -1319,7 +1565,8 @@ def render_bottom_zone(source) -> None:
         st.caption(_absence_reason(source, "Fill") or "exec.fill 데이터 없음")
     for line in _event_calendar_lines(now_kst().date(), _event_calendar_or_none()):
         st.caption(line)
-    st.caption("Self-Evaluation 미니보드: Phase 5 미구현 — 자리만")
+    for line in _self_eval_lines(now_kst().date()):
+        st.caption(line)
 
 
 # ---------------------------------------------------------------- 진입점

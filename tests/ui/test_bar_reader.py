@@ -84,6 +84,49 @@ def test_ui_process_never_loads_polars():
     assert result.stdout.strip().endswith("False False")
 
 
+def test_ui_process_never_loads_polars_after_a_real_render():
+    """**임포트만 재는 것으로는 부족했다** (2026-08-27).
+
+    위 테스트는 `import messiah.ui.app`까지만 본다. 그런데 polars는 임포트가 아니라
+    **렌더**에서 들어왔다 — `main()`의 사실상 첫 줄이 사이드바의 Redis URL 기본값을 묻고,
+    그게 설정 검증기를 타고 계산기 모듈 전체를 끌어왔다:
+
+        app.main() → _default_redis_url() → config.load_instance()
+          → InstanceConfig 검증기 `_registered_feature_set_only`
+          → features/spec → fl_core → data/investor_flow_history → import polars
+
+    그래서 위 테스트는 **통과하는 채로** 계약이 깨져 있었고, 2026-08-27 실측에서 운영 UI
+    프로세스에 `_polars_runtime.pyd`가 실제로 로드돼 있었다. 계약이 "UI 프로세스에"라고
+    말하는데 측정은 "임포트 그래프에"만 하고 있었던 것이다 — 고친 유도식이 엿새 동안 0회
+    쓰였던 F-A′와 같은 형태다(재는 자리가 계약과 다르면 초록불은 아무것도 보증하지 않는다).
+
+    그래서 **스크립트를 실제로 한 번 돌린 뒤에** `sys.modules`를 본다.
+    """
+    probe = (
+        "import importlib.util, sys;"
+        "origin = importlib.util.find_spec('messiah.ui.app').origin;"
+        "from streamlit.testing.v1 import AppTest;"
+        "AppTest.from_file(origin, default_timeout=180).run();"
+        "roots = {'polars', '_polars_runtime', '_polars_runtime_32', '_polars_runtime_64'};"
+        "hit = sorted(k for k in sys.modules if k.split('.')[0] in roots);"
+        "print('POLARS_AFTER_RENDER', hit)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+        check=True,
+    )
+
+    assert "POLARS_AFTER_RENDER []" in result.stdout, (
+        "렌더 한 번에 polars가 UI 프로세스로 올라왔다 — 자식 프로세스 격리"
+        f"(`ui/bar_reader.py`)가 무의미해진다.\n{result.stdout[-2000:]}"
+    )
+
+
 # ---------------------------------------------------------------- ② 실제 자식 왕복
 
 

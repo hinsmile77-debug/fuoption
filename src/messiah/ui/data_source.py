@@ -20,11 +20,14 @@ L18, Ver 2.0 §9 W32~34).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Protocol
+from typing import Callable, Protocol
 
+from messiah.core.event_calendar import DEFAULT_SESSION, SessionHours
 from messiah.core.messages import BusMessage
 from messiah.core.state_cache import StateCache
+from messiah.core.timeutil import now_kst
 
 DEFAULT_STALE_AFTER_SECONDS = 30.0
 
@@ -49,13 +52,32 @@ class TopicSnapshot:
     # 메시지가 스스로 말한 발행 주기(초) — 유도 못 했으면 None (2026-08-14 G-4).
     # 화면이 배지 옆에 "주기 30분"을 적을 수 있어야 사람이 숫자를 역산하지 않는다.
     cadence_seconds: float | None = None
+    # 이 스냅샷을 뜬 순간이 **세션 안이었나** — 판정 근거가 없으면 None (2026-09-01 F-85).
+    # `None`은 「세션 밖이 아니다」가 아니라 「모른다」다: 그때는 옛 판정을 그대로 쓴다.
+    in_session: bool | None = None
 
     @property
     def dead(self) -> bool:
         """**느려진 것과 죽은 것은 처방이 다르다** (2026-08-14 G-4).
 
         주기를 유도하지 못했으면 판정하지 않는다 — 모르는 것을 "죽었다"로 부르지 않는다.
+
+        ## 세션 밖의 침묵은 사고가 아니다 (2026-09-01 F-85)
+
+        판단은 30분 격자로만 나가고 그 격자는 **장중에만 돈다.** 그래서 아침 08:20 화면은
+        전일 마지막 판단을 보고 `죽음(1036분 침묵) · 프로세스 확인`이라 적었다 — 그 시각
+        G2는 멀쩡히 살아 있었다. 매 거래일 08:20~09:00 40분간 확정적으로 뜨는 문구였고,
+        「프로세스를 확인하라」는 처방은 그 40분 내내 틀린 말이었다.
+
+        ⚠ **세션 안의 침묵 판정은 한 톨도 바뀌지 않는다.** 이 갈래는 진짜 사고 탐지
+        경로이고, 진짜 사고를 「대기」로 덮으면 원래 결함보다 나쁘다(2026-08-21 F-11 ㉠와
+        같은 규율). 바뀌는 것은 **세션 밖(개장 전·마감 후)** 하나뿐이다.
+
+        휴장일은 아직 이 축에 없다 — 여기서 `EventCalendar`를 읽지 않는다(그러면 화면
+        데이터 계층이 파일 I/O를 지게 된다). 휴장일 08:45~15:35에는 종전대로 판정한다.
         """
+        if self.in_session is False:
+            return False
         if self.cadence_seconds is None or self.age_seconds is None:
             return False
         return self.age_seconds > self.cadence_seconds * _CADENCE_DEAD_MULTIPLE
@@ -199,10 +221,16 @@ class LiveDataSource:
         *,
         stale_after_seconds: dict[str, float] | None = None,
         default_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        session: SessionHours = DEFAULT_SESSION,
+        now_fn: Callable[[], datetime] = now_kst,
     ) -> None:
         self._cache = cache
         self._stale_after = stale_after_seconds or {}
         self._default_stale_after = default_stale_after_seconds
+        # `now_fn`은 테스트 주입점이다 (2026-09-01 F-85). 실제 시계를 타면 08:20 갈래를
+        # 검증할 방법이 그 시각에 테스트를 돌리는 것밖에 없다.
+        self._session = session
+        self._now_fn = now_fn
 
     def snapshot(self, key: str) -> TopicSnapshot:
         message = self._cache.get(key)
@@ -210,7 +238,25 @@ class LiveDataSource:
         floor = self._stale_after.get(key, self._default_stale_after)
         threshold, cadence = derived_stale_after(message, floor)
         badge = compute_badge(self.mode, age, stale_after_seconds=threshold)
-        return TopicSnapshot(message=message, badge=badge, age_seconds=age, cadence_seconds=cadence)
+        return TopicSnapshot(
+            message=message,
+            badge=badge,
+            age_seconds=age,
+            cadence_seconds=cadence,
+            in_session=self._in_session(),
+        )
+
+    def _in_session(self) -> bool | None:
+        """지금이 **봉·판단이 흐르는 구간**인가 — 못 재면 None (2026-09-01 F-85).
+
+        경계는 `SessionHours` 정본을 쓴다. 시작은 `open_time`(09:00)이 아니라
+        `first_tick_time`(08:45)이다 — 그 15분에도 틱은 들어오고 봉은 쌓인다.
+        """
+        try:
+            moment = self._now_fn().time()
+        except Exception:  # noqa: BLE001 — 시계를 못 읽었다고 화면 전체가 죽으면 안 된다
+            return None
+        return self._session.first_tick_time <= moment <= self._session.close_time
 
     def listening_seconds(self) -> float | None:
         return self._cache.listening_seconds()

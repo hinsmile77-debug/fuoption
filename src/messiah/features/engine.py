@@ -30,12 +30,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from messiah.core import logging as mlog
@@ -49,6 +51,7 @@ from messiah.core.messages import (
     Horizon,
 )
 from messiah.core.timeutil import KST, now_kst
+from messiah.data.close_grace import close_grace_ms
 from messiah.features import px_core
 from messiah.features import spec as feature_spec
 
@@ -384,16 +387,10 @@ _PUBLISH_SLA_MS = 1000.0
 #: 값은 상류 정본에서 가져온다 — 여기에 숫자를 다시 적으면 두 곳이 갈라진다
 #: (`tests/ops/test_publish_offset_axis.py`가 동일성을 강제한다).
 def _grace_ms(horizon: Horizon) -> float:
-    # 함수 안에서 들여온다 — `data.bar_composer`가 ParquetArchiver를 끌고 오므로
-    # 이 모듈을 읽기만 하는 도구(UI·리포트)에 그 무게를 지우지 않는다.
-    from messiah.data.bar_composer import _MAX_CONSTITUENT_WAIT_SECONDS
-    from messiah.data.normalizer import MINUTE_CLOSE_GRACE_SECONDS
-
-    # 1분봉은 정규화기의 완성봉 유예가 경계고(늦은 틱을 그 안에서만 받아준다),
-    # 상위 Horizon은 합성기가 마지막 구성 1분봉을 기다리는 상한이 경계다.
-    if horizon is Horizon.M1:
-        return MINUTE_CLOSE_GRACE_SECONDS * 1000.0
-    return _MAX_CONSTITUENT_WAIT_SECONDS * 1000.0
+    # 정책은 `data/close_grace.py`가 갖는다 (2026-09-01 F-82) — 화면도 같은 값을 써야
+    # 하는데 이 모듈은 화면이 들일 수 없는 무게다. 이름은 남긴다: 이 파일의 호출부와
+    # `tests/ops/test_intraday_tail_axis.py`가 「엔진이 쓰는 경계」를 이 이름으로 묻는다.
+    return close_grace_ms(horizon)
 
 
 #: 같은 정체로 묶는 시간 폭 — 여러 Horizon 경계가 한 순간에 겹칠 때 (2026-08-21 F-8).
@@ -1317,6 +1314,79 @@ class FeatureEngine:
         self._warn_if_grace_breached(by_hour)
         return stats
 
+    #: 전일 무결성 리포트가 놓이는 자리 — `ops/integrity_report.DEFAULT_LOG_DIR`과 같은 값,
+    #: 같은 규칙(상대경로, R4)이다. 그 모듈을 들여오지 않는 이유는 방향이다: 리포트가 이
+    #: 모듈의 로그를 읽지, 이 모듈이 리포트 코드에 기대면 안 된다.
+    _INTEGRITY_LOG_DIR = Path("logs")
+
+    #: 전일 대비 몇 %를 넘으면 「급변」이라 부를 것인가 (2026-09-01 F-87).
+    #:
+    #: 0.5(=50%)는 2026-08-27~09-01 4거래일 실측에서 나온 값이다. 08-27→08-28은 0.5%,
+    #: 08-28→08-31은 7.9%로 잔물결이고, 08-31→09-01은 **130%**로 홀로 튄다 — 그 사이
+    #: 어디에 선을 그어도 같은 하루만 걸린다. 낮게 잡으면 매일 울고, 매일 울면 배경이 된다.
+    _HEADROOM_SURGE_RATIO = 0.5
+
+    @classmethod
+    def _previous_worst_headroom(
+        cls, today: date, log_dir: Path | None = None
+    ) -> tuple[float, date] | None:
+        """직전 거래일의 1일 최악 여유(ms)와 그 날짜 — 못 찾으면 None (2026-09-01 F-87).
+
+        달력으로 "어제"를 계산하지 않는다 — 월요일의 어제는 일요일이고 그날엔 리포트가
+        없다. **파일이 있는 가장 가까운 과거 날**을 직전 거래일로 본다. 휴장일·기동
+        실패일이 자동으로 건너뛰어진다.
+        """
+        directory = cls._INTEGRITY_LOG_DIR if log_dir is None else log_dir
+        stamp = today.strftime("%Y%m%d")
+        try:
+            candidates = sorted(directory.glob("daily_integrity_*.json"))
+        except OSError:
+            return None
+        for path in reversed(candidates):
+            day_text = path.stem.removeprefix("daily_integrity_")
+            if not (len(day_text) == 8 and day_text.isdigit() and day_text < stamp):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                worst = payload["publish_offset"]["grace_headroom"]["worst_headroom_ms"]
+                previous = datetime.strptime(day_text, "%Y%m%d").date()  # noqa: DTZ007
+            except (OSError, ValueError, TypeError, KeyError):
+                continue  # 그날 리포트가 깨졌거나 옛 스키마다 — 더 과거로 간다
+            if isinstance(worst, (int, float)):
+                return float(worst), previous
+        return None
+
+    @classmethod
+    def _headroom_delta(cls, worst_ms: float, today: date) -> tuple[str, dict[str, Any]]:
+        """전일 대비 증감 한 조각 — (문구, 구조화 필드) (2026-09-01 F-87).
+
+        전일 값이 없으면 **0이 아니라 「못 잼」**이다(L18) — `headroom_delta_ms: None`과
+        「전일 비교 불가」 문구를 함께 낸다. 0으로 접으면 「전날과 똑같았다」가 되어
+        도입 첫날마다 거짓말을 한다.
+        """
+        previous = cls._previous_worst_headroom(today)
+        if previous is None:
+            return "전일 비교 불가(직전 거래일 리포트 없음)", {
+                "headroom_delta_ms": None,
+                "previous_headroom_ms": None,
+                "previous_day": None,
+                "headroom_surge": None,
+            }
+        previous_ms, previous_day = previous
+        delta = round(worst_ms - previous_ms, 1)
+        # 「나빠졌나」는 **부호가 아니라 절대값**이 답한다 — 여유는 음수 쪽이 나쁘므로
+        # 델타가 음수면 악화다. 급변 판정은 방향을 묻지 않고 폭만 본다.
+        surge = abs(previous_ms) > 0 and abs(delta) > abs(previous_ms) * cls._HEADROOM_SURGE_RATIO
+        text = f"전일({previous_day.isoformat()}) 대비 {delta:+.0f}ms"
+        if surge:
+            text += " ⚠ 급변"
+        return text, {
+            "headroom_delta_ms": delta,
+            "previous_headroom_ms": previous_ms,
+            "previous_day": previous_day.isoformat(),
+            "headroom_surge": surge,
+        }
+
     def _warn_if_grace_breached(self, by_hour: dict[str, dict[str, float]]) -> None:
         """[MW0601 2026-08-26 F-66] 유예 여유가 **음수면 운다.**
 
@@ -1356,10 +1426,16 @@ class FeatureEngine:
         spread = " · ".join(
             f"{name} {by_h[name]['headroom_ms']:.0f}ms" for name in breached if name in by_h
         )
+        # **어제보다 나빠졌나** (2026-09-01 F-87 · 이상점 1-7 · F-80 잔여②).
+        #
+        # 2026-09-01의 −6,730.9ms는 직전 3거래일 평균(−2,778.8ms)의 2.4배였다. 그런데 그
+        # 사실을 아는 유일한 방법이 **사람이 과거 로그를 손으로 grep하는 것**이었다 —
+        # 한 줄짜리 경보는 그날의 값만 말하고, 추세는 세는 사람이 없는 날 사라진다.
+        delta_text, delta_fields = self._headroom_delta(worst_ms, now_kst().date())
         mlog.log(
             "PublishGraceBreached",
             f"유예까지 남은 여유가 음수 — 음수 Horizon {len(breached)}개({spread}) · "
-            f"최악 {headroom['worst_horizon']} {worst_ms:.0f}ms · "
+            f"최악 {headroom['worst_horizon']} {worst_ms:.0f}ms({delta_text}) · "
             f"유예 초과 {sum(over_by_hour.values()):.0f}건. "
             f"완성봉 경계를 넘겨 발행한 회차가 있다(자료 유실 경계)",
             symbol=self._symbol,
@@ -1368,6 +1444,7 @@ class FeatureEngine:
             breached_horizons=breached,
             by_horizon=by_h,
             over_grace_by_hour=over_by_hour,
+            **delta_fields,
         )
 
     def _grace_headroom(self) -> dict[str, Any] | None:
