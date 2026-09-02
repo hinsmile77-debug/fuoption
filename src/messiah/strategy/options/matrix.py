@@ -141,6 +141,24 @@ class CandidateSpec:
     dte_high: int | None  # None = 상한 없음(순수 매수 구조, Ver 1.3 §4.2 "DTE 20 이상")
 
 
+# 매트릭스가 배정할 수 있는 구조 전체 — `matrix_coverage.py`가 "이 중 평가기가 실제로 만들 수
+# 있는 것은 무엇인가"를 물을 때 쓴다. `_MATRIX`에서 유도하므로 표를 고치면 자동으로 따라온다.
+ALL_STRUCTURES: tuple[str, ...] = tuple(
+    dict.fromkeys(structure for cell in _MATRIX.values() for structure in cell)
+)
+
+
+def matrix_cells() -> dict[tuple[Direction, IVState], tuple[str, ...]]:
+    """셀→구조 표의 읽기 전용 사본 (진단 도구용) — 원본을 넘기면 소비측이 고칠 수 있다."""
+    return {cell: tuple(structures) for cell, structures in _MATRIX.items()}
+
+
+def spec_for(structure: str, config: OptionsConfig = OptionsConfig()) -> CandidateSpec:
+    """구조 하나의 생성 파라미터 — 셀 조회를 거치지 않는 진입점(진단 도구가 "이 구조를
+    평가기가 만들 수 있나"를 물으려면 셀과 무관하게 spec을 지어야 한다)."""
+    return _build_spec(structure, config)
+
+
 def candidate_specs(
     score: float, iv_rank: float | None, config: OptionsConfig = OptionsConfig()
 ) -> list[CandidateSpec]:

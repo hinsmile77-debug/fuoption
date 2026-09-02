@@ -47,10 +47,12 @@ from messiah.core.messages import (
 from messiah.strategy.options.config import OptionsConfig
 from messiah.strategy.options.evaluator import (
     EvaluatorConfig,
+    buildable_structures,
     evaluate_candidate,
     rank_candidates,
 )
 from messiah.strategy.options.matrix import candidate_specs
+from messiah.strategy.options.matrix_coverage import unbuildable_reason
 from messiah.strategy.options.safety import evaluate_candidate_safety
 from messiah.strategy.options.surface import SmileFit
 from messiah.strategy.options.vol_metrics import IVHistory
@@ -83,6 +85,9 @@ class OptionsAIService:
         self._r = r
         self._event_calendar = event_calendar
         self._top_n = top_n
+        # 평가기가 만들 수 있는 구조 — 기동 시 한 번 코드에 물어본다(2026-09-02).
+        # 매 사이클 다시 계산할 값이 아니고, 설정이 바뀌면 서비스가 새로 서므로 안전하다.
+        self._buildable_structures = buildable_structures(options_config)
         self._latest_score: float = 0.0
         self._has_futures_view = False
         # 마지막 `FuturesView`가 말한 구동 주기 (2026-08-20 F-A′). 이 뷰는 `FuturesView` 도착과
@@ -131,6 +136,7 @@ class OptionsAIService:
         )
 
         candidates = []
+        unbuildable: list[str] = []
         for spec in specs:
             rationale = {
                 "structure": spec.structure,
@@ -146,6 +152,21 @@ class OptionsAIService:
                 rationale=rationale,
             )
             if candidate is None:
+                # **여기서 조용히 넘어가면 사유가 뒤에서 거짓말이 된다** (2026-09-02).
+                # 평가 실패는 두 가지가 섞여 있다: ㉠ 평가기가 그 구조 자체를 못 만든다
+                # (매트릭스 셀과 평가기 불일치 — `matrix_coverage.py`), ㉡ 스마일이 목표
+                # 델타에 안 닿아 행사가를 못 찾았다. ㉠은 코드 결함, ㉡은 그날 시장이다.
+                unbuildable.append(spec.structure)
+                mlog.log(
+                    "OptionsCandidateUnbuildable",
+                    f"{spec.structure} 다리를 만들지 못했다 — 구조 미지원이거나 "
+                    f"스마일이 목표 델타에 닿지 않는다",
+                    symbol=self._symbol,
+                    structure=spec.structure,
+                    supported=spec.structure in self._buildable_structures,
+                    iv_rank=iv_rank,
+                    score=self._latest_score,
+                )
                 continue
             verdict = evaluate_candidate_safety(
                 candidate,
@@ -164,7 +185,18 @@ class OptionsAIService:
             candidates.append(candidate)
 
         if not candidates:
-            await self._publish_no_option("생성된 후보가 전부 안전규칙에서 기각됨")
+            # 사유를 갈라 말한다 — "안전규칙이 걸렀다"와 "만들지도 못했다"는 고칠 곳이 다르다.
+            structural = unbuildable_reason(
+                [spec.structure for spec in specs], self._buildable_structures
+            )
+            await self._publish_no_option(
+                structural
+                or (
+                    "생성된 후보가 전부 안전규칙에서 기각됨"
+                    if not unbuildable
+                    else f"후보 생성 실패({', '.join(unbuildable)}) 또는 안전규칙 기각"
+                )
+            )
             return
 
         ranked = rank_candidates(candidates, top_n=self._top_n)

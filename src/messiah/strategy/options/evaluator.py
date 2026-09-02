@@ -43,6 +43,7 @@ from decimal import Decimal
 
 from messiah.core.messages import GreeksProfile, StrategyCandidate, StrategyLeg
 from messiah.strategy.options import matrix
+from messiah.strategy.options.config import OptionsConfig
 from messiah.strategy.options.matrix import CandidateSpec
 from messiah.strategy.options.surface import (
     SmileFit,
@@ -103,6 +104,26 @@ def _leg_templates(spec: CandidateSpec) -> list[tuple[str, bool, float]]:
             ("C", False, long_d),
         ]
     return []  # CALENDAR 등 미지원 구조 — matrix.py 모듈 docstring의 알려진 갭
+
+
+def buildable_structures(config: OptionsConfig = OptionsConfig()) -> frozenset[str]:
+    """`_leg_templates()`가 **실제로** 다리를 만들어 내는 구조들 — 목록을 손으로 적지 않고
+    코드에 물어본다 (2026-09-02 신설).
+
+    손으로 적은 목록은 갈라진다. 실제로 갈라져 있었다: 매트릭스는 (중립·저IV) 셀에
+    `CALENDAR`를 배정하는데 `_leg_templates()`는 그 구조의 템플릿을 갖고 있지 않아 항상
+    빈 목록을 돌려준다(그 함수 마지막 줄의 주석이 "미지원 구조"라고 이미 적고 있었다).
+    그래서 그 셀에 걸린 사이클은 **후보가 하나도 안 나온 채 조용히 지나갔다** — 20거래일
+    아카이브 재생에서 191 사이클 중 142건(74%)이 그 형태였다.
+
+    이 함수는 그 사실을 **코드에서 유도**한다: 구조마다 spec을 지어 템플릿이 비는지 본다.
+    `matrix_coverage.py`가 이걸 매트릭스 어휘와 맞대어 판정한다.
+    """
+    return frozenset(
+        structure
+        for structure in matrix.ALL_STRUCTURES
+        if _leg_templates(matrix.spec_for(structure, config))
+    )
 
 
 def build_legs(spec: CandidateSpec, smile: SmileFit, *, r: float) -> list[StrategyLeg] | None:

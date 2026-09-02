@@ -234,6 +234,18 @@ TAG_LEVELS: dict[str, int] = {
     "OptionChainArchiveRestoreFailed": logging.WARNING,
     "OptionChainArchiveShrinkRefused": logging.WARNING,
     "OptionsCandidateRejected": logging.INFO,  # 안전규칙 기각 — 정상 동작(§6 하드룰 의도대로 작동)
+    # Options AI 결선 계열 (2026-09-02). **셋 다 등록을 빠뜨린 채 커밋됐다가 다음 날 잡혔다** —
+    # `mlog.log()`는 미등록 태그에 ValueError를 던지므로(R6), `ChainSmileProvider.run_forever()`가
+    # 기동 첫 줄에서 죽고 그 예외가 `_run_regular_session()`의 gather를 타고 올라가 **G2 세션
+    # 전체를 내렸을** 것이다. 태그를 쓰는 코드 경로에 테스트가 없으면 등록 누락은 조용하다 —
+    # 그래서 `tests/test_log_tags_registered.py`가 이제 소스 전체를 훑는다.
+    "OptionSmileProviderStarted": logging.INFO,  # 체인 구독 시작 — 기동 1회
+    # 잔차 초과는 **판정하지 않고 센다**(R18). 2026-08-05~09-02 아카이브 재생에서 6%였다 —
+    # WARNING으로 올릴지는 라이브 20거래일 분포를 본 뒤에 정한다(늑대소년 방지).
+    "OptionSmileResidualHigh": logging.INFO,
+    # 후보 생성 실패 — 구조 미지원(코드 결함)과 델타 미도달(그날 시장)이 섞여 있어 필드
+    # `supported`로 가른다. 지금 75% 사이클에서 뜨므로 WARNING은 잡음이 된다.
+    "OptionsCandidateUnbuildable": logging.INFO,
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired

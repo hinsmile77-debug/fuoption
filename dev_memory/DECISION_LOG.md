@@ -14396,3 +14396,67 @@ IV비가 1.00에서 5% 넘게 벌어지면 종료코드 1과 함께 "시간 규�
 만기 당일 t≤0 — 정상), 점 중앙 17개, RMS 잔차 중앙 0.0212, `is_reliable` 94%,
 ATM IV가 KIS ATM IV의 **1.0011배**. `tests/strategy/options/test_chain_smile.py` 14건 ·
 `tests/test_option_chain_wiring.py` +3건(토픽 이름 일치·결선 여부·gather 등록) 신설.
+
+### [MW0601] 2026-09-02 17:30 — 0순위 실행: 매트릭스 셀의 75%가 만들 수 없는 구조에 배정돼 있었다
+
+**증상.** 어제 결선한 Options AI에 아카이브 20거래일을 태워 보니 후보가 **191 사이클 중
+6개(3%)** 에서만 나왔다. 사유를 갈라 보니 압도적 1위가 **"평가기가 CALENDAR를 못 만든다"**
+였다.
+
+**원인 — 두 사실이 각자 문서화돼 있었고, 그 곱은 아무 데도 없었다.**
+
+    matrix._MATRIX[(NEUTRAL, LOW)] = [CALENDAR]          ← 셀 배정
+    evaluator._leg_templates()      → []  # CALENDAR 등 미지원 구조   ← 그 함수 마지막 줄
+
+둘 다 주석에 적혀 있었다. 그런데 **"그 셀에 실제로 몇 %가 걸리나"** 를 아무도 재지 않았다.
+정확한 30분 격자 조인으로 재측정: **144/191 = 75.4%.** `label_geometry.py`가 잡는 결함
+(레이블 정의와 판단 게이트가 서로 모른 채 정해져 어긋난 것)과 **같은 형태**가 옵션 쪽에 있었다.
+
+**게다가 서비스가 그 사이클에 대해 거짓말을 하고 있었다** — 안전규칙까지 가지도 못했는데
+`no_option_reason`이 "생성된 후보가 전부 안전규칙에서 기각됨"이라고 나갔다. 사유가 틀리면
+사람이 엉뚱한 데를 고친다.
+
+**결정.** 진단 도구를 만들고 사유를 고치되, **매트릭스는 안 고친다.**
+- `strategy/options/matrix_coverage.py` 신설 — 매트릭스 어휘 × 평가기 지원 여부를 맞대어
+  「구멍 난 셀」을 세고, (score, IV Rank) 표본을 주면 그 구멍에 걸린 비율까지 낸다.
+- `evaluator.buildable_structures()` — 목록을 **손으로 적지 않고 `_leg_templates()`에 물어본다.**
+  적으면 갈라진다(이번 결함이 정확히 그 형태였다).
+- 서비스의 `no_option_reason`이 「매트릭스 셀과 평가기 불일치」와 「안전규칙 기각」을 가른다.
+- 메우는 방법 셋(㉠ CALENDAR 구현 ㉡ 그 셀에 다른 구조 배정 ㉢ 관망으로 확정)은 **위험 성향을
+  바꾸는 결정이라 사람 몫**이다(`label_geometry`가 flat 비율을 "고쳐야 할 값"으로 판정하지
+  않는 것과 같은 규율).
+
+**부수 관측.** 20거래일 동안 **UP 계열 세 셀의 관측이 0회**였다 — 그 구간 방향이 중립·하락뿐.
+표본이 한 방향에 쏠려 있다는 사실 자체가 옵션 성적 판단의 전제다.
+
+**Why.** 주문 경로를 먼저 지었다면 97%의 사이클에서 쓰이지 않는 것을 지었을 것이다. 값을
+재기 전에 짓지 않는다 — 이 저장소가 반복해서 배운 것.
+
+**How to apply.** `python scripts/run_options_matrix_coverage.py`로 언제든 다시 답한다.
+구멍이 있으면 종료코드 1.
+
+---
+
+### [MW0601] 2026-09-02 17:30 — ⚠ 어제 결선이 다음 거래일 G2 세션을 통째로 내릴 뻔했다
+
+**증상.** 오늘 매트릭스 진단 테스트를 짜다가 `ValueError: 미등록 태그
+'OptionsCandidateUnbuildable'`이 났고, 확인해 보니 **어제 커밋한 `chain_smile.py`의 태그 둘
+(`OptionSmileProviderStarted`·`OptionSmileResidualHigh`)도 등록이 빠져 있었다.**
+
+**심각도.** `mlog.log()`는 미등록 태그에 `ValueError`를 던진다(R6). 그런데
+`ChainSmileProvider.run_forever()`는 **기동 첫 줄에서** 그 태그를 쓴다:
+
+    _run_regular_session() → asyncio.gather(..., provider.run_forever(), ...)
+      → mlog.log("OptionSmileProviderStarted") → ValueError → gather 전파 → 정규 세션 중단
+
+즉 **다음 거래일 09:00에 G2가 기동하자마자 죽었을 것이다.** 어제 pytest 2,580건이 전부
+통과했는데도 남아 있었다 — **그 로그 줄을 실행하는 테스트가 하나도 없었기 때문이다.**
+
+**Why.** 단위 테스트는 "불린 코드"만 본다. 안 불린 코드의 태그 등록 여부는 정적으로 훑어야
+한다. 어제 내가 만든 결함이고, 어제의 검증(2,580건 통과)은 이 형태를 볼 수 없었다.
+
+**How to apply.** `tests/test_log_tags_registered.py` 신설 — `src/` 전체에서
+`mlog.log("리터럴")` 호출을 정규식으로 뽑아 전부 `TAG_LEVELS`에 있는지 검사한다(스캔 107종).
+변수로 넘기는 호출은 못 잡지만 지금 그런 호출은 없고, 생기면 그 자체가 리뷰 대상이다.
+
+**검증.** 태그 3종 등록 + 회귀 테스트 2건. 전 소스 스캔에서 다른 미등록 태그는 없었다.
