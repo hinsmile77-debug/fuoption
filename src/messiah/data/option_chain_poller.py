@@ -73,6 +73,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Awaitable, Callable, Sequence
 
 from messiah.broker.kis import tr_codes
@@ -117,6 +118,19 @@ REST라 그 제약이 없다.
 넉 달간 안 보였다**. ±10이면 42다리로 하한 대비 7배 여유다.
 """
 
+STALE_SPOT_SECONDS = 60.0
+"""ATM 기준가가 이보다 오래되면 **경보한다 — 다만 발행은 막지 않는다** (2026-09-02 F-73).
+
+60초인 이유: 정상 폴링 격자가 300초/600초라 1분봉 유예(2,000ms)를 기준으로 잡으면 **상시
+참**이 되어 아무것도 안 가른다. 60초 = 1분봉 하나 분량이고, `LastPriceTracker`가 미니선물
+근월물 틱으로 초 단위 갱신되므로 정상 장중에는 절대 안 걸린다. 실제로 이 값이 겨누는 것은
+장전 08:22~08:45 구간의 **전 거래일 종가 시드**(나이 17시간)다 — 08-28 23분·11사이클·462다리,
+08-31 22분·10사이클·420다리가 기준가 +3.12% 과대인 창에서 나갔고 로그가 조용했다.
+
+**차단이 아니라 계측이다**(R18 비해당) — 이 값으로 발행을 막으면 그 순간 장전 옵션이
+통째로 비고, 옵션 스냅샷은 소급 조회 경로가 없다. 훗날 이 값으로 무언가를 막게 되면
+그때는 섀도 20거래일 대상이다."""
+
 
 class OptionChainPoller:
     """옵션 시리즈 **하나**의 ATM±N 체인을 주기 폴링한다.
@@ -139,6 +153,8 @@ class OptionChainPoller:
         retry_delay_seconds: float = RETRY_DELAY_SECONDS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         listed: Callable[[], bool] | None = None,
+        reference_price_as_of: Callable[[], datetime | None] | None = None,
+        stale_spot_seconds: float = STALE_SPOT_SECONDS,
     ) -> None:
         """
         입력: `series`는 `core/universe.OPTION_SERIES_BY_TOKEN`의 값 하나
@@ -158,6 +174,12 @@ class OptionChainPoller:
         행사가 간격 2.5pt 대비 기준창이 한 칸 밀리는 정도라 ±10에서는 무해하다. (역설적이게도
         `get_quote` 응답의 `output3`이 KOSPI200 현물을 실어 나르므로, 한 사이클 돈 뒤에는 더
         정확한 기준가를 쓸 수 있다 — 다만 그 전환은 실제 응답이 쌓인 뒤의 별도 판단이다.)
+
+        `reference_price_as_of`는 **그 기준가가 참이었던 시각**을 주는 무인자 콜러블이다
+        (2026-09-02 F-73). `reference_price`와 짝이어야 하므로 같은 제공자에서 나와야
+        한다(`LastPriceTracker.price_point_as_of()`). **안 주면 나이를 재지 않는다** —
+        `spot_age_seconds=None`으로 발행하고 스테일 경보도 안 한다. 모르는 것을 0초로
+        적으면 그날 전부가 거짓 통과가 된다(L18).
         """
         if strike_window < 1:
             raise ValueError("strike_window는 1 이상이어야 한다 — 0이면 GEX가 성립하지 않는다")
@@ -174,6 +196,14 @@ class OptionChainPoller:
         self._retry_delay_seconds = retry_delay_seconds
         self._sleep = sleep
         self._listed = listed
+        self._reference_price_as_of = reference_price_as_of
+        self._stale_spot_seconds = float(stale_spot_seconds)
+        # 스테일 구간을 **에피소드로 접는다** (F-73⑤ 경보 피로 대책). 사이클마다 울면
+        # 장전 22분이 10~11줄이고, 그건 `OptionChainPollEmpty`가 2026-08-07에 22번 울고
+        # DEBUG로 강등된 그 길이다. 시작에 한 번 · 해소에 한 번만 운다.
+        self._stale_spot_since: datetime | None = None
+        self._stale_spot_cycles = 0
+        self._stale_spot_max_age = 0.0
         # 빈 체인이 연속으로 몇 사이클째인가 (2026-08-07 P0-2). 사이클마다 울면 22줄이
         # 되고 그건 아무도 안 읽는다 — `_MISSING_STREAK_ALERT`에서 딱 한 번 크게 운다.
         self._empty_streak = 0
@@ -240,12 +270,15 @@ class OptionChainPoller:
                 nearest=chain[0].month_label,
             )
 
+        spot_as_of, spot_age = self._spot_freshness()
+        self._note_spot_freshness(spot_as_of, spot_age)
+
         window = select_atm_window(chain, spot, self._strike_window)
         published = 0
         failures: dict[str, str] = {}
         for leg in window:
             try:
-                cause = await self._poll_one(leg)
+                cause = await self._poll_one(leg, spot_as_of=spot_as_of, spot_age=spot_age)
             except Exception as exc:  # noqa: BLE001
                 # L22 — 다리 하나의 예상 밖 실패가 남은 41다리를 막으면 안 된다.
                 mlog.log(
@@ -278,6 +311,10 @@ class OptionChainPoller:
             legs=len(window),
             published=published,
             spot=spot,
+            # 기준가의 나이를 사이클 요약에도 병기한다 (F-73②) — 스냅샷 페이로드는
+            # Parquet에만 남고, 하루를 되짚을 때 사람이 먼저 여는 것은 로그다.
+            spot_as_of=spot_as_of.isoformat() if spot_as_of is not None else None,
+            spot_age_seconds=(round(spot_age, 1) if spot_age is not None else None),
             nearest=chain[0].month_label,
         )
 
@@ -340,7 +377,70 @@ class OptionChainPoller:
                 cycles=self._empty_streak,
             )
 
-    async def _poll_one(self, leg: OptionLeg) -> str | None:
+    def _spot_freshness(self) -> tuple[datetime | None, float | None]:
+        """ATM 기준가의 `(as_of, 나이초)` — 잴 수 없으면 `(None, None)` (F-73).
+
+        제공자가 없거나 시각을 모르면 **나이를 만들지 않는다.** 여기서 `now - None`을
+        피하려고 0을 넣으면 그 순간 "기준가는 항상 신선했다"가 기록에 남는다.
+        """
+        if self._reference_price_as_of is None:
+            return None, None
+        as_of = self._reference_price_as_of()
+        if as_of is None:
+            return None, None
+        if as_of.tzinfo is None:  # R3 — naive는 받지 않는다(비교 자체가 예외다)
+            return None, None
+        return as_of, (now_kst() - as_of).total_seconds()
+
+    def _note_spot_freshness(self, as_of: datetime | None, age: float | None) -> None:
+        """스테일 구간의 **시작과 해소만** 남긴다 (F-73⑤).
+
+        사이클마다 울지 않는 이유는 `_stale_spot_since` 선언 옆 주석에 있다. 해소를 INFO로
+        따로 태그하는 이유는 R6("태그 1개 = 심각도 1개") — 같은 태그로 시작과 끝을 다 쓰면
+        그 태그의 심각도가 상황마다 달라진다.
+        """
+        if age is None:
+            return  # 못 잰 사이클은 판정에 넣지 않는다 — 열린 에피소드도 그대로 둔다
+        if age > self._stale_spot_seconds:
+            self._stale_spot_cycles += 1
+            self._stale_spot_max_age = max(self._stale_spot_max_age, age)
+            if self._stale_spot_since is None:
+                self._stale_spot_since = as_of
+                mlog.log(
+                    "OptionChainStaleSpot",
+                    f"ATM 기준가가 {age:.0f}초 전 값이다 "
+                    f"(임계 {self._stale_spot_seconds:.0f}초) — 발행은 계속하되 "
+                    "이 창의 행사가는 그 시각 기준이다",
+                    underlying=self._underlying,
+                    series=self._series,
+                    spot_as_of=as_of.isoformat() if as_of is not None else None,
+                    spot_age_seconds=round(age, 1),
+                    threshold_seconds=self._stale_spot_seconds,
+                )
+            return
+        if self._stale_spot_since is not None:
+            mlog.log(
+                "OptionChainStaleSpotResolved",
+                f"ATM 기준가 신선도 회복 — {self._stale_spot_cycles}사이클 "
+                f"(최악 {self._stale_spot_max_age:.0f}초)",
+                underlying=self._underlying,
+                series=self._series,
+                first_spot_as_of=self._stale_spot_since.isoformat(),
+                resolved_at_kst=now_kst().isoformat(),
+                cycles=self._stale_spot_cycles,
+                max_age_seconds=round(self._stale_spot_max_age, 1),
+            )
+            self._stale_spot_since = None
+            self._stale_spot_cycles = 0
+            self._stale_spot_max_age = 0.0
+
+    async def _poll_one(
+        self,
+        leg: OptionLeg,
+        *,
+        spot_as_of: datetime | None = None,
+        spot_age: float | None = None,
+    ) -> str | None:
         """다리 1개를 조회해 발행한다 — **성공이면 None, 실패면 그 사유**.
 
         반환값이 생긴 이유(2026-08-14 F-6): 사이클 요약(`OptionChainPolled`)이 "몇 다리를
@@ -363,6 +463,8 @@ class OptionChainPoller:
             expiry=leg.month_label,
             symbol=leg.symbol,
             raw=raw,
+            spot_as_of=spot_as_of,
+            spot_age_seconds=(round(spot_age, 1) if spot_age is not None else None),
         )
         try:
             await self._bus.publish(f"{TOPIC_RAW}.option_chain.{self._underlying}", snapshot)

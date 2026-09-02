@@ -279,6 +279,15 @@ class OptionQuoteSnapshot(BusMessage):
     symbol: str
     source: str = "kis"
     raw: dict[str, object] = Field(default_factory=dict)
+    # ATM 창을 정한 **기준가의 나이** (2026-09-02 F-73). 이 스냅샷이 어느 행사가 창에서
+    # 나왔는지는 `strike`가 말하지만, 그 창을 정한 기준가가 **언제 것인지**는 종전까지
+    # 아무 데도 없었다. 08-28·08-31에 08:22~08:45 구간 내내 전 거래일 종가 시드로 ATM을
+    # 잡아 420~462다리가 +3.12% 어긋난 창에서 발행됐고, 리포트도 로그도 조용했다.
+    #
+    # **둘 다 `None`은 "모른다"이지 "신선하다"가 아니다**(L18) — 기준가 제공자가 시각을
+    # 안 주는 배선(테스트·구버전)에서는 나이를 못 재고, 그때 0으로 적으면 거짓 통과다.
+    spot_as_of: datetime | None = None
+    spot_age_seconds: float | None = None
     # 거래소 체결시각(ts_exchange)은 없음 — InvestorFlowSnapshot과 동일 이유(모듈 docstring):
     # raw의 실제 시각 필드를 확정 파싱할 근거가 없어 상속받은 BusMessage.ts_utc(폴링 수행
     # 시각, wall clock)만 신뢰한다.

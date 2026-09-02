@@ -138,11 +138,18 @@ async def test_option_chain_shortfall_rings_too(monkeypatch):
             self._listed = None
             self._empty_streak = 0
             self._not_listed_announced = False
+            # F-73 기준가 신선도 — 이 테스트가 보는 자리(결손 집계)와 무관하므로 "안 잰다"
+            # 상태 그대로 둔다. 제공자가 없으면 나이가 `None`이고 스테일 판정도 없다.
+            self._reference_price_as_of = None
+            self._stale_spot_seconds = ocp.STALE_SPOT_SECONDS
+            self._stale_spot_since = None
+            self._stale_spot_cycles = 0
+            self._stale_spot_max_age = 0.0
 
         def _reference_price(self):
             return 350.0
 
-        async def _poll_one(self, leg):
+        async def _poll_one(self, leg, **_freshness):
             return None if leg.symbol != "S1" else "retry_exhausted"
 
     poller = _Poller()

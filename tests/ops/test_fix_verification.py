@@ -25,6 +25,8 @@ from messiah.ops.fix_verification import (
     run,
     scoreboard,
     scoreboard_line,
+    undeclared_fix_state,
+    undeclared_fix_state_overdue,
 )
 
 _REGISTERED = date(2026, 8, 3)
@@ -1169,3 +1171,69 @@ def test_shipping_registry_uses_the_tightened_metric():
     items = {item.id: item for item in load_registry()}
 
     assert items["ui-crash-isolation"].metric == "native_crashes_or_dumps"
+
+
+# --------------------- 등록 시점에 `fix_committed`를 적게 한다 (2026-09-02 G-49)
+#
+# 오늘 장후 배치가 처음으로 "등록부 21개 항목이 `fix_committed` 미기입"을 안내했다. 오늘은
+# 23건 전부 검증 완료로 읽혀 오판이 없었지만, 항목이 늘수록 사람이 매번 커밋 이력을 손으로
+# 대조해야 한다(오늘 1-1/F-88 건에만 약 10분).
+#
+# **21건을 소급해 채우지는 않는다.** `scripts/suggest_fix_commits.py`를 돌려 보면 항목마다
+# 후보가 6~7개씩 나오고 그중 어느 것인지는 사람만 안다 — 2026-08-20 G-H가 "급하게 채운 값은
+# 틀린 값"이라 적어 둔 그대로다. 대신 **앞을 막는다**: 오늘 이후 등록분은 등록하는 그 자리에서
+# 적는다. 그 시점에는 어느 커밋이 그것을 고쳤는지가 유일하게 분명하다.
+
+
+def test_the_shipping_registry_declares_fix_state_for_everything_registered_from_today():
+    """정본 등록부가 규칙을 지키는가 — CI가 이 규칙의 집행자다.
+
+    적재 시점에 예외를 던지지 않는 이유: 등록부 오타 하나가 장후 배치를 통째로 세운다.
+    이 축은 그럴 만큼 급하지 않다.
+    """
+    assert undeclared_fix_state_overdue(load_registry()) == []
+
+
+def test_a_new_entry_without_fix_committed_is_flagged(tmp_path):
+    from messiah.ops.fix_verification import FIX_STATE_REQUIRED_FROM
+
+    items = load_registry(_registry_file(tmp_path, registered=FIX_STATE_REQUIRED_FROM))
+
+    assert undeclared_fix_state(items) == ["late-comer"]
+    assert undeclared_fix_state_overdue(items) == ["late-comer"]
+
+
+def test_an_explicit_null_counts_as_declared(tmp_path):
+    """채울 값이 없는 계측 항목의 탈출구 — **키의 존재가 곧 선언이다.**"""
+    from messiah.ops.fix_verification import FIX_STATE_REQUIRED_FROM
+
+    items = load_registry(
+        _registry_file(tmp_path, registered=FIX_STATE_REQUIRED_FROM, fix_committed="null")
+    )
+
+    assert items[0].fix_state_declared is True
+    assert items[0].fix_committed is None
+    assert undeclared_fix_state_overdue(items) == []
+
+
+def test_the_legacy_backlog_is_not_retroactively_flagged(tmp_path):
+    """기존 21건은 규칙 위반이 아니라 **이월 작업**이다 — 둘을 한 숫자로 접지 않는다."""
+    items = load_registry(_registry_file(tmp_path, registered=date(2026, 8, 3)))
+
+    assert undeclared_fix_state(items) == ["late-comer"]
+    assert undeclared_fix_state_overdue(items) == []
+
+
+def _registry_file(tmp_path, *, registered, fix_committed=None):
+    line = f"    fix_committed: {fix_committed}\n" if fix_committed else ""
+    path = tmp_path / "late_comer.yaml"
+    path.write_text(
+        "verifications:\n"
+        "  - id: late-comer\n"
+        '    summary: "늦게 등록된 항목"\n'
+        f"    registered: {registered.isoformat()}\n"
+        "    metric: native_crashes\n"
+        "    max: 0\n" + line,
+        encoding="utf-8",
+    )
+    return path

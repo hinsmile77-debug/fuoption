@@ -327,6 +327,16 @@ class IntegrityReport:
     series_coverage: list[dict[str, Any]]
     # 위 커버리지에서 나온 판정 문장 — `horizon_findings`와 같은 성격(정의 위반 목록)이다.
     series_findings: list[str]
+    # **ATM 기준가가 몇 사이클이나 오래된 값이었나** (2026-09-02 F-73).
+    #
+    # `series_coverage`가 "옵션이 쌓였는가"를 재는 자리라면 이쪽은 **"쌓인 것이 맞는 창에서
+    # 나왔는가"**를 잰다. 08-28·08-31 관측에서 이 둘이 갈렸다 — 커버리지는 100%였고
+    # 실제로는 23분·22분 동안 전 거래일 종가로 정한 창(+3.12% 어긋남)에서 462·420다리가
+    # 나갔다. 어느 축도 그것을 잡지 못했다(K-5 판정: 무결성 리포트는 이 구간을 안 잡는다).
+    #
+    # `None`은 "그런 구간이 없었다"가 **아니라** "이 계측 이전 로그다"일 수 있다 — F-73 이전
+    # 날짜를 소급 산출하면 태그가 아예 없어 `None`이 된다(L18과 같은 규율).
+    option_chain_stale_spot: dict[str, Any] | None
     # **관측 공백과 그 원인** (2026-08-06 P1-1·P1-2, `ops/observation_gaps.py`).
     #
     # `restarts`가 **횟수**를 세는 자리라면 이쪽은 **시간과 원인**을 센다. 2026-08-06에
@@ -1109,6 +1119,11 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     orders_submitted = 0
     shortfall_ratios: list[float] = []
     sizer_streak: dict[str, Any] | None = None
+    # ATM 기준가 스테일 구간 (2026-09-02 F-73). **에피소드 단위**로 모은다 — 폴러가 로그를
+    # 그 단위로 접기 때문이고(경보 피로), 사람이 알고 싶은 것도 "몇 줄 울었나"가 아니라
+    # "몇 분 동안 어긋난 창에서 발행했나"다.
+    stale_spot_episodes: list[dict[str, Any]] = []
+    stale_spot_open: dict[str, dict[str, Any]] = {}
 
     # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
     # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
@@ -1308,6 +1323,28 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
             ratio = record.get("nan_ratio")
             if isinstance(ratio, (int, float)):
                 nan_by_horizon.setdefault(horizon, []).append(float(ratio))
+        elif tag == "OptionChainStaleSpot":
+            # 에피소드 **시작**. 시리즈별로 따로 연다 — 세 폴러가 서로 다른 격자로 돌아
+            # 한쪽이 스테일인 동안 다른 쪽은 신선할 수 있다.
+            series = str(record.get("series") or "?")
+            stale_spot_open[series] = {
+                "series": series,
+                "first_spot_as_of": record.get("spot_as_of"),
+                "first_age_seconds": record.get("spot_age_seconds"),
+                "threshold_seconds": record.get("threshold_seconds"),
+            }
+        elif tag == "OptionChainStaleSpotResolved":
+            series = str(record.get("series") or "?")
+            episode = stale_spot_open.pop(series, {"series": series})
+            episode.update(
+                {
+                    "resolved_at_kst": record.get("resolved_at_kst"),
+                    "cycles": record.get("cycles"),
+                    "max_age_seconds": record.get("max_age_seconds"),
+                    "resolved": True,
+                }
+            )
+            stale_spot_episodes.append(episode)
         elif tag.startswith("CircuitBreaker"):
             cb_events[tag] = cb_events.get(tag, 0) + 1
 
@@ -1320,6 +1357,36 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         }
         for horizon, values in sorted(nan_by_horizon.items())
     }
+    # 세션 끝까지 안 풀린 에피소드는 **사이클 수를 모른다** (F-73) — 해소 로그가 그 값을
+    # 실어 나르는데 그게 안 나왔기 때문이다. 0으로 접지 않고 따로 센다: "22분 어긋났다"와
+    # "언제 회복했는지 모른다"는 다른 사실이고, 후자는 그 자체로 조치 대상이다.
+    for leftover in stale_spot_open.values():
+        stale_spot_episodes.append({**leftover, "resolved": False})
+    stale_spot: dict[str, Any] | None = None
+    if stale_spot_episodes:
+        resolved = [e for e in stale_spot_episodes if e.get("resolved")]
+        cycles = sum(int(e.get("cycles") or 0) for e in resolved)
+        ages = [
+            float(e[key])
+            for e in stale_spot_episodes
+            for key in ("max_age_seconds", "first_age_seconds")
+            if isinstance(e.get(key), (int, float))
+        ]
+        by_series: dict[str, int] = {}
+        for episode in resolved:
+            name = str(episode.get("series") or "?")
+            by_series[name] = by_series.get(name, 0) + int(episode.get("cycles") or 0)
+        stale_spot = {
+            "episodes": len(stale_spot_episodes),
+            "resolved_episodes": len(resolved),
+            "unresolved_episodes": len(stale_spot_episodes) - len(resolved),
+            # 이름은 F-73 계획서의 검증 문장(`stale_spot_cycles > 0`)을 그대로 쓴다.
+            "stale_spot_cycles": cycles,
+            "max_age_seconds": round(max(ages), 1) if ages else None,
+            "cycles_by_series": dict(sorted(by_series.items())),
+            "episodes_detail": stale_spot_episodes,
+        }
+
     # 기동 창 가드가 되돌려보낸 기동을 뺀다 (2026-08-07 P0-4).
     #
     # 짝짓기는 **시각 일치**로 한다 — 가드 판정은 `SessionStart` 직후(같은 초 또는 몇 초 뒤)
@@ -1332,6 +1399,7 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     return {
         "level_counts": level_counts,
         "tag_counts": tag_counts,
+        "option_chain_stale_spot": stale_spot,
         "no_contribution_reasons": no_contribution_reasons,
         "no_contribution_cycles": no_contribution_cycles,
         "regime_unseeded_cycles": regime_unseeded_cycles,
@@ -2989,6 +3057,7 @@ def build_report(
         tick_rows=tick_rows,
         series_coverage=[item.to_dict() for item in coverages],
         series_findings=series_findings,
+        option_chain_stale_spot=logs["option_chain_stale_spot"],
         series_contract=series_contract,
         collection_start_lag_minutes=start_lag,
         task_exit_codes=task_exits.to_dict(),
@@ -3713,15 +3782,28 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
     # **`fix_committed`를 아직 안 적은 항목** (2026-08-20 G-H). 막지는 않되 매일 센다 —
     # 조용히 두면 영원히 안 채워지고, 그러면 「기전 미상」 축이 하루짜리 장식이 된다.
     try:
-        undeclared = fv.undeclared_fix_state(fv.load_registry())
+        registry = fv.load_registry()
+        undeclared = fv.undeclared_fix_state(registry)
+        overdue_declaration = fv.undeclared_fix_state_overdue(registry)
     except Exception:  # noqa: BLE001 — 장후 절차를 막지 않는다
         undeclared = []
+        overdue_declaration = []
     if undeclared:
         print(
             f"  ℹ 등록부 {len(undeclared)}개 항목이 `fix_committed` 미기입 — "
             "「고쳤는데 안 듣는다」와 「아직 안 고쳤다」를 가르려면 채워야 한다: "
             + ", ".join(undeclared[:5])
             + (" …" if len(undeclared) > 5 else ""),
+            flush=True,
+        )
+    # **이월분과 규칙 위반을 한 숫자로 접지 않는다** (2026-09-02 G-49). 위 21건은 사람이
+    # 하나씩 되짚어야 하는 이월 작업이고, 아래는 `FIX_STATE_REQUIRED_FROM` 이후 등록인데도
+    # 안 적은 것 — 등록하는 그 자리에서 적었어야 하는 값이다. 섞으면 새 위반이 21건에 묻힌다.
+    if overdue_declaration:
+        print(
+            f"  ⚠ 그중 {len(overdue_declaration)}건은 "
+            f"{fv.FIX_STATE_REQUIRED_FROM.isoformat()} 이후 등록분이라 **규칙 위반**이다"
+            "(등록 시점에 적었어야 한다): " + ", ".join(overdue_declaration),
             flush=True,
         )
 

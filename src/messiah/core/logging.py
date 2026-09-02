@@ -227,6 +227,18 @@ TAG_LEVELS: dict[str, int] = {
     # 기준가 없어 사이클 스킵 — 전량 폴링 폴백을 **일부러 안 하는** 정상 동작이지만(전량은
     # 1,356다리 = 22.6분), 조용하면 "옵션이 안 모인다"의 원인을 못 찾으므로 WARNING으로 남긴다.
     "OptionChainSkipped": logging.WARNING,
+    # ATM 기준가가 임계(60초)보다 오래된 채로 창을 정했다 (2026-09-02 F-73). **발행을 막지
+    # 않는다** — 막으면 장전 옵션이 통째로 비고 소급 조회 경로가 없다. WARNING인 이유는
+    # 08-28·08-31에 각각 23분·22분 동안 전 거래일 종가로 462·420다리가 나갔는데 로그가
+    # 완전히 조용했기 때문이다. **에피소드당 1건**으로 접혀 있어(폴러 `_note_spot_freshness`)
+    # 하루 몇 줄을 넘지 않는다 — `OptionChainPollEmpty`가 22번 울고 강등된 전례를 안 밟는다.
+    "OptionChainStaleSpot": logging.WARNING,
+    # 위 구간의 **해소**. 시작과 끝을 한 태그로 쓰면 그 태그의 심각도가 상황마다 달라진다(R6).
+    "OptionChainStaleSpotResolved": logging.INFO,
+    # 시리즈별 폴링 격자를 **왜** 그렇게 정했는가 (2026-09-02 F-74). 기동당 시리즈 1건.
+    # 08-26~08-31 나흘간 "어느 시리즈가 5분인가"가 날마다 달랐는데 그것이 코드 분기인지
+    # 설정 드리프트인지를 로그로 가를 수 없었다 — `reason`이 그 질문에 답하는 필드다.
+    "OptionChainScheduleResolved": logging.INFO,
     "OptionChainArchiveError": logging.WARNING,  # 적재 실패 — 수집 루프는 계속(L22)
     # 재기동 복원 (2026-08-06 P0-1) — `InvestorFlowArchive*`와 같은 결함·같은 처방.
     # 2026-08-06 실측: 재부팅 후 재기동으로 08:40~10:00의 9사이클 × 42다리가 지워졌다.

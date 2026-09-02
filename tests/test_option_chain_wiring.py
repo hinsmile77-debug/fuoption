@@ -213,3 +213,47 @@ def test_g2_runs_both_options_tasks_in_the_session():
 
     assert "options[0].run_forever()" in body
     assert "options[1].run_forever()" in body
+
+
+# ------------------------------------- 주기 결정의 **사유** (2026-09-02 F-74)
+#
+# 08-26~08-31 나흘 관측에서 어느 시리즈가 5분이었는지가 날마다 달랐다(수 regular /
+# 목 weekly_thu / 금 regular / 월 weekly_mon). 값은 로그에 있었지만 **그것이 이 코드의
+# 요일 분기인지 어딘가의 설정 드리프트인지**를 가를 근거가 없었다(C-1). 그 답이 `reason`이다.
+
+
+def test_the_fast_series_says_why_it_is_fast():
+    assert rl1._option_chain_fast_series(_MONDAY) == ("weekly_mon", "expiry_weekday:weekly_mon")
+    assert rl1._option_chain_fast_series(_THURSDAY) == ("weekly_thu", "expiry_weekday:weekly_thu")
+
+
+def test_an_ordinary_day_says_that_no_weekly_expires_today():
+    """「그냥 regular가 빠르다」가 아니라 **왜** 그런지를 적는다 — 사유 없는 계측은 반쪽이다."""
+    series, reason = rl1._option_chain_fast_series(_TUESDAY)
+
+    assert series == "regular"
+    assert reason == "no_weekly_expiry_today:regular_is_fast"
+
+
+def test_the_reason_and_the_plan_never_disagree():
+    """사유가 가리키는 시리즈가 실제로 5분 격자를 받은 그 시리즈여야 한다.
+
+    둘이 갈라지면 로그가 거짓말을 하는 것이고, 그건 계측이 없는 것보다 나쁘다.
+    """
+    for day in (_TUESDAY, _MONDAY, _THURSDAY):
+        fast, _reason = rl1._option_chain_fast_series(day)
+        fast_in_plan = [s for s, period, _phase in rl1._option_chain_plan(day) if period == 300.0]
+
+        assert fast_in_plan == [fast], day
+
+
+def test_the_schedule_decision_is_logged_with_its_reason():
+    """폴러가 만들어진 자리에서 시리즈당 1건 — 기동 로그만 보고 격자를 복원할 수 있어야 한다."""
+    source = (Path(__file__).resolve().parent.parent / "scripts" / "run_l1_daily.py").read_text(
+        encoding="utf-8"
+    )
+    body = source.split("def _build_rest_collection")[1].split("\ndef ")[0]
+
+    assert '"OptionChainScheduleResolved"' in body
+    for field in ("interval_seconds=", "phase_offset_seconds=", "reason=reason"):
+        assert field in body, field

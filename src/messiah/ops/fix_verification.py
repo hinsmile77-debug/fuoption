@@ -910,6 +910,37 @@ def undeclared_fix_state(items: Sequence[PendingVerification]) -> list[str]:
     return [item.id for item in items if not item.fix_state_declared]
 
 
+FIX_STATE_REQUIRED_FROM = date(2026, 9, 2)
+"""이 날짜 **이후에 등록된** 항목부터는 `fix_committed`를 반드시 적는다 (2026-09-02 G-49).
+
+바로 위 `undeclared_fix_state()`가 기록한 2026-08-20 G-H의 판단 — "20여 항목을 한꺼번에
+강제하면 그 자체가 큰 변경이고 **급하게 채운 값은 틀린 값이다**" — 은 그대로 유효하다.
+실제로 `scripts/suggest_fix_commits.py`를 오늘 돌려 보면 미기입 21건 중 대부분이 후보를
+6~7개씩 내놓고, 그중 어느 것인지는 사람만 안다.
+
+그래서 **소급하지 않고 앞을 막는다.** 기존 21건은 사람이 하나씩 채우는 이월 작업으로 남고,
+오늘 이후 새로 등록되는 항목은 등록하는 그 자리에서 적게 한다 — 그 시점에는 어느 커밋이
+그것을 고쳤는지가 유일하게 분명하다. 채울 값이 없는 계측 항목은 `fix_committed: null`을
+명시한다(키의 존재가 곧 선언이다).
+
+강제 지점은 **테스트**다(`tests/ops/test_fix_verification.py`). 적재 시점에 예외를 던지면
+등록부 오타 하나가 장후 배치를 통째로 세우는데, 이 축은 그럴 만큼 급하지 않다.
+"""
+
+
+def undeclared_fix_state_overdue(items: Sequence[PendingVerification]) -> list[str]:
+    """`FIX_STATE_REQUIRED_FROM` 이후 등록인데도 미기입인 항목 — **채워야 하는** 목록.
+
+    `undeclared_fix_state()`가 "아직 안 채운 전부"라면 이쪽은 "규칙을 어긴 것"이다. 둘을
+    한 숫자로 접으면 21건에 묻혀 새 위반이 안 보인다.
+    """
+    return [
+        item.id
+        for item in items
+        if not item.fix_state_declared and item.registered >= FIX_STATE_REQUIRED_FROM
+    ]
+
+
 def _reject_shared_metrics(items: Sequence[PendingVerification]) -> None:
     """한 지표를 둘 이상이 나눠 쓰면 거부한다 (2026-08-19 F-4).
 

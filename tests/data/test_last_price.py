@@ -127,3 +127,54 @@ async def test_subscribes_to_the_symbols_tick_topic():
     await _tracker().run_forever(FakeBus())
 
     assert seen == [["md.tick.A05608"]]
+
+
+# ---------------------------------------------- 기준가의 나이 (2026-09-02 F-73)
+
+
+def test_as_of_travels_with_the_price_it_belongs_to():
+    """값과 시각이 갈라지면 나이가 다른 순간을 가리킨다 — 한 메서드가 둘을 같이 낸다."""
+    tracker = _tracker()
+    seen_at = _NOW - timedelta(seconds=30)
+
+    tracker.update(50100, seen_at=seen_at)
+
+    assert tracker.price_point_as_of(now=_NOW) == (pytest.approx(1002.0), seen_at)
+    # `price_points()`는 같은 선택 규칙의 첫 원소여야 한다(둘로 갈라 두지 않는다).
+    assert tracker.price_points(now=_NOW) == tracker.price_point_as_of(now=_NOW)[0]
+
+
+def test_a_preopen_seed_carries_the_moment_it_was_true():
+    """08:22~08:45의 그 값이 전 거래일 15:34봉이었다는 사실이 나이로 드러나야 한다.
+
+    08-28·08-31에 이 나이를 아무도 재지 않아 462·420다리가 조용히 나갔다.
+    """
+    tracker = _tracker()
+    bar_at = _NOW - timedelta(hours=17)
+
+    tracker.seed_preopen(50100, as_of=bar_at)
+
+    price, as_of = tracker.price_point_as_of(now=_NOW)
+    assert price == pytest.approx(1002.0)
+    assert as_of == bar_at
+    assert (_NOW - as_of).total_seconds() == pytest.approx(17 * 3600)
+
+
+def test_a_seed_without_a_time_reports_unknown_not_now():
+    """시각을 안 주면 `None` — 「모른다」이지 「지금」이 아니다(L18)."""
+    tracker = _tracker()
+
+    tracker.seed_preopen(50100)
+
+    assert tracker.price_point_as_of(now=_NOW) == (pytest.approx(1002.0), None)
+
+
+def test_naive_seed_time_is_refused():
+    """R3 — naive datetime을 받아 두면 그것과의 뺄셈이 나중에 터진다."""
+    with pytest.raises(ValueError):
+        _tracker().seed_preopen(50100, as_of=datetime(2026, 9, 1, 15, 34))  # noqa: DTZ001
+
+
+def test_no_price_means_no_time():
+    """값이 없으면 시각도 없다 — 사이클 스킵과 「오래된 값으로 발행」은 다른 사건이다."""
+    assert _tracker().price_point_as_of(now=_NOW) == (None, None)

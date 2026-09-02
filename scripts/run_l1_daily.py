@@ -208,6 +208,21 @@ _OPTION_PHASE_SECONDS = {"regular": 0.0, "weekly_mon": 100.0, "weekly_thu": 200.
 _OPTION_EXPIRY_WEEKDAY = {"weekly_mon": 0, "weekly_thu": 3}  # Mon=0 … Thu=3
 
 
+def _option_chain_fast_series(today: date) -> tuple[str, str]:
+    """오늘 5분 격자를 받는 시리즈와 **그 사유** (2026-09-02 F-74).
+
+    `_option_chain_plan()`에서 떼어낸 이유: 08-26~08-31 나흘 관측에서 어느 시리즈가 5분이었는지가
+    날마다 달랐는데(수 regular / 목 weekly_thu / 금 regular / 월 weekly_mon), **그것이 이 코드의
+    요일 분기인지 어딘가의 설정 드리프트인지를 로그만 보고는 가를 수 없었다**(C-1 미확정 항목).
+    값만 찍으면 그 질문에 여전히 답을 못 한다 — 사유가 없으면 이 계측은 반쪽이다. 계획 함수의
+    반환 모양(3튜플)은 그것을 읽는 소비처가 여럿이라 건드리지 않고, 사유만 따로 낸다.
+    """
+    expiring = [s for s, wd in _OPTION_EXPIRY_WEEKDAY.items() if today.weekday() == wd]
+    if expiring:
+        return expiring[0], f"expiry_weekday:{expiring[0]}"
+    return "regular", "no_weekly_expiry_today:regular_is_fast"
+
+
 def _option_chain_plan(today: date) -> list[tuple[str, float, float]]:
     """(시리즈, 주기초, 위상초) 목록. 만기일이면 그 위클리와 먼쓰리의 주기를 맞바꾼다.
 
@@ -216,8 +231,7 @@ def _option_chain_plan(today: date) -> list[tuple[str, float, float]]:
     알 수 있다(그건 계획을 세운 뒤다). 요일은 휴장일에 어긋날 수 있지만 그런 날은
     `EventCalendar.is_trading_day()`가 이 스크립트를 아예 조기 종료시킨다.
     """
-    expiring = [s for s, wd in _OPTION_EXPIRY_WEEKDAY.items() if today.weekday() == wd]
-    fast = expiring[0] if expiring else "regular"
+    fast, _reason = _option_chain_fast_series(today)
     return [
         (
             series,
@@ -583,7 +597,10 @@ def _seed_preopen_reference_price(
         return
 
     bar = recent[-1]
-    tracker.seed_preopen(bar.c_ticks)
+    # `bar_open_kst`(봉 종가 시각이 아니라 **시작** 시각)를 나이의 기준으로 쓴다 (F-73) —
+    # 실제보다 최대 1분 오래된 것으로 세는 셈이고, 그 방향은 안전한 쪽이다(스테일을 덜
+    # 놓친다). 봉 종료 시각을 여기서 재구성하려면 Horizon 길이를 이 함수가 알아야 한다.
+    tracker.seed_preopen(bar.c_ticks, as_of=bar.bar_open_kst)
     print(
         f"장전 기준가 시드 — {bar.symbol} {bar.bar_open_kst:%Y-%m-%d %H:%M} 종가 "
         f"{tracker.price_points():.2f}pt (첫 실틱이 오면 무시된다)",
@@ -641,6 +658,9 @@ def _build_rest_collection(
                     bus,
                     series=series,
                     reference_price=lambda: tracker.price_points(),
+                    # 값과 그 나이는 **같은 제공자**에서 나와야 한다 (F-73) — 둘이 갈리면
+                    # 기준가와 그 시각이 서로 다른 순간을 가리킨다.
+                    reference_price_as_of=lambda: tracker.price_point_as_of()[1],
                     strike_window=_OPTION_STRIKE_WINDOW,
                     # 기본 인자로 묶어 늦은 바인딩을 막는다 — 안 그러면 세 폴러가 전부
                     # 마지막 `series`의 계약을 본다(전형적인 클로저 함정).
@@ -657,6 +677,22 @@ def _build_rest_collection(
             )
             for series, period, phase in plan
         )
+        # **주기 결정을 그 자리에서 남긴다** (2026-09-02 F-74). 폴러가 실제로 만들어진
+        # 뒤라야 "이 격자로 돌 예정"이 참이다 — 위 `try`가 중간에 깨지면 계획만 있고
+        # 폴러는 없다. 시리즈당 1건 · 기동당 1회이므로 로그 부피는 하루 3줄이다.
+        fast_series, fast_reason = _option_chain_fast_series(session_day)
+        for series, period, phase in plan:
+            reason = fast_reason if series == fast_series else "not_fast_series"
+            mlog.log(
+                "OptionChainScheduleResolved",
+                f"{series} — {period:.0f}초 격자 · 위상 {phase:.0f}초 ({reason})",
+                series=series,
+                interval_seconds=period,
+                phase_offset_seconds=phase,
+                reason=reason,
+                session_weekday=session_day.weekday(),
+                session_day=session_day.isoformat(),
+            )
         chain_archiver = OptionChainArchiver(_OPTION_CHAIN_DIR)
     except Exception as exc:  # noqa: BLE001 — 부가 수집 실패가 봉 수집을 막으면 안 됨
         print(f"[run_l1_daily] REST 폴링 결선 실패(봉 수집은 계속): {exc}", flush=True)

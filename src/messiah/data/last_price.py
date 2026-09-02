@@ -70,6 +70,7 @@ class LastPriceTracker:
         self._price_ticks: int | None = None
         self._seen_at: datetime | None = None
         self._seed_ticks: int | None = None
+        self._seed_at: datetime | None = None
 
     @property
     def symbol(self) -> str:
@@ -80,14 +81,22 @@ class LastPriceTracker:
         """이 세션에서 실제 체결틱을 한 번이라도 받았는가 — 장전 시드의 유효 조건."""
         return self._seen_at is not None
 
-    def seed_preopen(self, price_ticks: int) -> None:
+    def seed_preopen(self, price_ticks: int, *, as_of: datetime | None = None) -> None:
         """첫 실틱 이전에만 쓰일 기준가(전일 종가 등)를 넣는다.
 
         **첫 틱이 오면 영구히 무시된다** — 장중 WS 단절 시 신선도 규칙을 우회하지 않게
         하기 위해서다(모듈 docstring "장전 시드"). 이 메서드는 `_seen_at`을 건드리지 않으므로
         시드만 있는 상태는 `has_seen_tick=False` 그대로다.
+
+        `as_of`는 **그 값이 참이었던 시각**이다 (2026-09-02 F-73) — 시드는 전 거래일
+        15:34봉 종가일 수 있고, 그때 이 값의 나이는 17시간이다. 종전에는 그 나이를 아무도
+        재지 않아 08:22~08:45 구간에서 하루 전 기준가로 420~462다리가 발행됐다(08-28·08-31
+        실측, 기준가 +3.12% 과대). 안 주면 `None` — **모르는 것을 0초로 적지 않는다**(L18).
         """
+        if as_of is not None and as_of.tzinfo is None:
+            raise ValueError("as_of는 tz-aware여야 한다 — naive datetime 금지 (R3)")
         self._seed_ticks = int(price_ticks)
+        self._seed_at = as_of
 
     def update(self, price_ticks: int, *, seen_at: datetime | None = None) -> None:
         self._price_ticks = int(price_ticks)
@@ -99,14 +108,29 @@ class LastPriceTracker:
              돌려준다. 틱을 받은 뒤라면 시드는 무시하고, `max_age_seconds`를 넘겨 오래된
              값은 None — 호출자(`OptionChainPoller`)가 그 사이클을 건너뛴다.
         """
+        return self.price_point_as_of(now=now)[0]
+
+    def price_point_as_of(
+        self, *, now: datetime | None = None
+    ) -> tuple[float | None, datetime | None]:
+        """`price_points()`와 **같은 값**에 그 값이 참이었던 시각을 붙여 돌려준다 (F-73).
+
+        반환: `(기준가, as_of)`. 값이 없으면 `(None, None)`. `as_of`가 `None`인 것은
+             "시각을 모른다"이지 "지금"이 아니다 — 소비측(`OptionChainPoller`)은 그때
+             나이를 `None`으로 실어 보내고 스테일 판정을 하지 않는다.
+
+        **선택 규칙은 `price_points()`와 한 글자도 다르지 않다** — 이 메서드가 정본이고
+        `price_points()`가 그 첫 원소를 꺼내는 얇은 껍데기다. 둘로 갈라 두면 언젠가
+        기준가와 그 나이가 서로 다른 값을 가리킨다.
+        """
         if self._price_ticks is None or self._seen_at is None:
             # 아직 실틱 전 — 시드가 있으면 그것으로 ATM을 잡는다(장전 08:35~08:45).
             if self._seed_ticks is None:
-                return None
-            return float(self._tick_size * self._seed_ticks)
+                return None, None
+            return float(self._tick_size * self._seed_ticks), self._seed_at
         if (now or now_kst()) - self._seen_at > self._max_age:
-            return None
-        return float(self._tick_size * self._price_ticks)
+            return None, None
+        return float(self._tick_size * self._price_ticks), self._seen_at
 
     async def handle_tick(self, tick: Tick) -> None:
         if isinstance(tick, Tick) and tick.symbol == self._symbol:
