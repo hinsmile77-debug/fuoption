@@ -201,9 +201,17 @@ def evaluate_candidate(
     entry_cost_points: Decimal = Decimal("0"),
     config: EvaluatorConfig = EvaluatorConfig(),
     rationale: dict[str, object] | None = None,
+    legs: list[StrategyLeg] | None = None,
 ) -> StrategyCandidate | None:
-    """실패 조건: `build_legs()`가 None이면 이 함수도 None(후보 자체가 성립 안 함)."""
-    legs = build_legs(spec, smile, r=r)
+    """실패 조건: `build_legs()`가 None이면 이 함수도 None(후보 자체가 성립 안 함).
+
+    `legs`를 넘기면 **그 다리 그대로** 평가한다(2026-09-02 4a-1). 주문 경로가 목표 델타로
+    만든 연속 행사가를 **상장 격자로 스냅**한 뒤 재평가해야 하기 때문이다 — 스냅 전 값으로
+    NetER·그릭스를 말하면 **존재하지 않는 계약**의 성적을 주장하는 것이 된다
+    (`strategy/options/leg_resolution.py`).
+    """
+    if legs is None:
+        legs = build_legs(spec, smile, r=r)
     if legs is None:
         return None
 

@@ -10309,3 +10309,34 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
       `unresolved_episodes > 0`이면 그 시리즈가 종일 스테일이었다는 뜻 — 별건으로 판다
 - [ ] **V-3** 기동 로그에 `OptionChainScheduleResolved` **3줄**(시리즈당 1). 목요일(09-03)이면
       `reason: expiry_weekday:weekly_thu`가 나와야 요일 가설이 실전에서 닫힌다
+
+### [MW0601] 2026-09-02 19:00 — 주문 경로 4a 착수 결과
+
+**결함 셋과 근거는 `DECISION_LOG.md` 같은 날짜 항목.**
+
+- [x] **4a-1 행사가 스냅 + 종목코드 + 재평가** `strategy/options/leg_resolution.py` 신설.
+      `evaluate_candidate(legs=...)` 인자 추가(스냅된 다리로 재평가). **가드 2종**:
+      스냅 거리 > 격자×1.5 거부 · 다리 중복 거부 — 둘 다 실측이 요구했다.
+- [x] **4a-2 호가단위 실측 확정** `contract_spec.py` — 실거래가 2,484개에서 역산
+      (<10.00 = 0.01, >=10.00 = 0.05). **실계좌 호출 없이 해결.**
+- [x] **4a-2 승수는 차단** `OPTION_POINT_VALUE_KRW = None` — 마스터파일(9필드)·시세·잔고 어디에도
+      없다. 원화 환산 시도는 `OptionContractSpecUnknown` 예외.
+- [x] **4a-3 주문 생성** `option_order.build_option_order()` — 단일 다리 매수만, 나머지 거부.
+      어댑터에 심볼별 틱 해석기(`tick_size_for`) 추가 — 주입 없으면 선물 경로 그대로.
+- [x] **4a-4 검증 스크립트** `scripts/probe_option_order.py` — 기본 dry-run, `--submit`만 제출.
+
+**이월 · 사람 몫**
+
+- [ ] **🆕 4a-4 실행 `사람` · 장중** `python scripts/probe_option_order.py --submit --qty 1`.
+      **판정 기준**: ⑴ `ok=True`와 주문번호 ⑵ 체결 후 포지션 1계약 ⑶ 예수금 변화로 역산한
+      승수. 거부되면 `msg1`을 그대로 기록하고 호가단위·종목코드부터 다시 볼 것.
+      **거래일 장중에만 유효**(장 밖 제출은 거부된다).
+- [ ] **🆕 4a-2 잔여: 승수 확정 후 반영** 역산값이 나오면
+      `contract_spec.OPTION_POINT_VALUE_KRW`에 적고, `risk_engine.option_point_value_krw`가
+      선물 값을 쓰던 것도 함께 고칠 것(그 자리 주석이 "미실측"이라 자백해 뒀다).
+- [ ] **⚠️ 4b 계획 정정 — `OrderRequest` 확장보다 앞에 데이터 문제가 있다.**
+      날개 행사가가 **폴링 창(ATM±10) 밖**이라 시세가 아예 없다. 재생에서 다중 다리 후보 8건이
+      전부 그 사유로 거부됐다. `option_chain_poller`의 `strike_window` 확대(REST 예산 재계산)가
+      **4b-1보다 먼저**다. 창을 넓히면 스마일 외삽 문제도 함께 줄어든다.
+- [ ] **4a는 어떤 자동 경로에도 안 붙어 있다** — `MetaDecisionEngine` ⑥⑦ 부재로 `Side.OPTION`이
+      나올 길이 없고, `build_option_order()`의 유일한 호출부는 검증 스크립트다. 자동 배선은 4c.

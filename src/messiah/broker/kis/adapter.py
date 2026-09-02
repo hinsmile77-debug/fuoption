@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from typing import Callable
 
 from messiah.broker.base import BrokerAccount, BrokerAdapter, BrokerPosition, SubmitResult
 from messiah.broker.kis import symbol_master
@@ -52,6 +53,7 @@ class KISBrokerAdapter(BrokerAdapter):
         rest_client: KISRestClient | None = None,
         master_cache_dir: Path = _DEFAULT_MASTER_CACHE_DIR,
         master: symbol_master.IndexDerivativesMaster | None = None,
+        tick_size_for: Callable[[str], Decimal] | None = None,
     ) -> None:
         """
         입력: KIS 인증정보, 종목 1틱의 실제 가격 크기(Decimal — 예: K200 미니선물 0.02).
@@ -63,9 +65,17 @@ class KISBrokerAdapter(BrokerAdapter):
              테스트에서 종목코드 마스터파일을 미리 주입해 네트워크 다운로드를 건너뛰기 위한 것 —
              생략 시 probe_front_month() 최초 호출 때 다운로드한다(모듈 docstring: 하루 1회 호출
              용도, 이 어댑터는 인스턴스 수명 동안 한 번만 받아 캐싱).
+
+             `tick_size_for`는 **심볼별 틱 크기 해석기**다 (2026-09-02, 주문 경로 4a-3).
+             선물은 상품 하나에 틱 하나라 생성자 상수로 충분했는데, **옵션은 가격대마다
+             호가단위가 다르다**(<10.00은 0.01, >=10.00은 0.05 — 2026-08-05~09-02 실거래가
+             2,484개 실측, `strategy/options/contract_spec.py`). 그래서 `limit_price_ticks`의
+             단위를 심볼이 정하게 한다. 생략하면 종전대로 `tick_size` 상수를 쓴다 —
+             **기존 선물 경로의 동작은 한 톨도 안 바뀐다.**
         """
         self._creds = creds
         self._tick_size = tick_size
+        self._tick_size_for = tick_size_for
         self._token_daemon = token_daemon or TokenDaemon(creds)
         self._rest = rest_client or KISRestClient(creds, self._token_daemon)
         self._master_cache_dir = master_cache_dir
@@ -99,7 +109,7 @@ class KISBrokerAdapter(BrokerAdapter):
         if req.limit_price_ticks is None:
             order_dvsn_cd, price = "02", Decimal(0)
         else:
-            order_dvsn_cd, price = "01", self._ticks_to_price(req.limit_price_ticks)
+            order_dvsn_cd, price = "01", self._ticks_to_price(req.limit_price_ticks, req.symbol)
 
         response = await asyncio.to_thread(
             self._rest.submit_order,
@@ -140,11 +150,14 @@ class KISBrokerAdapter(BrokerAdapter):
                 continue
             signed_qty = -qty if row.get("sll_buy_dvsn_name") in ("SLL", "매도") else qty
             avg_price = Decimal(row.get("ccld_avg_unpr1") or "0")
+            symbol = row.get("shtn_pdno", "")
             positions.append(
                 BrokerPosition(
-                    symbol=row.get("shtn_pdno", ""),
+                    symbol=symbol,
                     qty=signed_qty,
-                    avg_price_ticks=self._price_to_ticks(avg_price),
+                    # 틱 단위는 **그 심볼의 것**이다 — 옵션 포지션이 섞이면 선물 틱으로
+                    # 환산한 평단가는 5배 틀린다(2026-09-02 4a-3).
+                    avg_price_ticks=self._price_to_ticks(avg_price, symbol),
                 )
             )
         return positions
@@ -192,10 +205,17 @@ class KISBrokerAdapter(BrokerAdapter):
         return code
 
     # ------------------------------------------------------------------ 틱 <-> 실가격
-    def _ticks_to_price(self, ticks: int) -> Decimal:
-        return Decimal(ticks) * self._tick_size
+    def _unit_for(self, symbol: str) -> Decimal:
+        """그 심볼의 `limit_price_ticks` 단위 — 해석기가 없으면 생성자 상수(선물 경로)."""
+        if self._tick_size_for is None:
+            return self._tick_size
+        return self._tick_size_for(symbol)
 
-    def _price_to_ticks(self, price: Decimal) -> int:
-        if self._tick_size == 0:
+    def _ticks_to_price(self, ticks: int, symbol: str) -> Decimal:
+        return Decimal(ticks) * self._unit_for(symbol)
+
+    def _price_to_ticks(self, price: Decimal, symbol: str) -> int:
+        unit = self._unit_for(symbol)
+        if unit == 0:
             return 0
-        return int((price / self._tick_size).to_integral_value(rounding=ROUND_HALF_UP))
+        return int((price / unit).to_integral_value(rounding=ROUND_HALF_UP))
