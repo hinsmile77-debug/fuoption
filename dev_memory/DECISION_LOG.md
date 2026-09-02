@@ -14519,3 +14519,100 @@ Ver 1.3 §3.1은 IV Rank를 **"최근 252일 내 위치"**로 정의하는데, `
 **검증.** 시드+㉢ 적용 재생 191사이클: 후보 발생 8건(4%), 구조 IRON_CONDOR 6 · BEAR_PUT_SPREAD 2
 · LONG_PUT 1, 무후보 사유 178건이 전부 「관망/이력부족」(거짓 사유 0건).
 `tests/strategy/options/test_iv_seed.py` 6건 · `test_matrix_coverage.py` 8건(재작성) 신설.
+
+---
+
+## [MW0601] 2026-09-02 장후 자동조치 — 기준가의 나이를 재고, 격자 결정의 사유를 남긴다 (F-73 · F-74 · G-49)
+
+**커밋** `afe6d7b` (13파일 · +737/−12) · **검증** pytest 2,624건 전부 통과(신규 20건) ·
+ruff clean · `run_replay.py --symbol A05609 --start 2026-08-31 --end 2026-09-02` 완주(2,142건).
+
+### F-73 — ATM 기준가의 나이를 발행에 실어 보낸다
+
+**증상.** 08-28 23분(11사이클 · 462다리) · 08-31 22분(10사이클 · 420다리) 동안 옵션 체인
+ATM 창이 **전 거래일 종가 시드**로 정해졌다(기준가 +3.12% 과대, 1069.44→1037.10). 로그도
+무결성 리포트도 완전히 조용했고 `series_coverage`는 그날 100%였다.
+
+**원인.** `LastPriceTracker.price_points()`가 **값만** 돌려주고 시각을 안 준다. 실틱 경로에는
+`max_age_seconds=180`이라는 신선도 상한이 있지만 **장전 시드 경로에는 그 상한이 없다**(그래야
+08:35~08:45에 사이클을 안 건너뛴다 — 2026-08-05 결정). 그 면제가 08:45 이후에도 그대로
+살아 있었고, 아무도 그 나이를 재지 않았다. K-5 판정(08-31)이 "무결성 리포트는 이 구간을 잡지
+않는다"로 이미 확정한 공백이다.
+
+**결정.** 값과 시각을 **한 메서드가 함께** 낸다(`price_point_as_of()`, `price_points()`는 그
+첫 원소를 꺼내는 껍데기). 폴러가 그 나이를 `OptionQuoteSnapshot.spot_as_of`/`spot_age_seconds`
+와 `OptionChainPolled` 요약에 싣고, 60초 초과 시 `OptionChainStaleSpot`(WARNING) ·
+회복 시 `OptionChainStaleSpotResolved`(INFO). 무결성 리포트가 `option_chain_stale_spot`으로
+집계한다.
+
+**Why — 세 가지를 일부러 안 했다.**
+1. **발행을 막지 않는다.** 막으면 장전 옵션이 통째로 비고 옵션 스냅샷은 소급 조회 경로가
+   없다. R18 비해당(계측만) — 훗날 이 값으로 차단하면 그때가 섀도 20거래일 대상이다.
+2. **사이클마다 울지 않는다.** 에피소드당 시작 1건 · 해소 1건. `OptionChainPollEmpty`가
+   2026-08-07에 22번 울고 DEBUG로 강등된 전례를 안 밟는다.
+3. **모르는 나이를 0초로 접지 않는다.** 제공자가 없거나 naive datetime이면 `None`으로 남기고
+   스테일 판정도 안 한다(L18). 리포트의 미해소 에피소드도 사이클 0으로 접지 않고 따로 센다 —
+   「22분 어긋났다」와 「언제 회복했는지 모른다」는 다른 사실이다.
+
+**How to apply.** 시드에 시각을 넣을 때 `bar_open_kst`(봉 **시작** 시각)를 쓴다 — 실제보다
+최대 1분 오래된 것으로 세는 셈이고 그 방향이 안전하다(스테일을 덜 놓친다). 임계 60초의 근거:
+정상 폴링 격자가 300/600초라 1분봉 유예 2,000ms는 상시 참이 되어 아무것도 안 가른다.
+
+**검증.** `tests/data/test_option_chain_spot_freshness.py` 6건(그중 **「판정 불변」** 1건 —
+스테일이든 아니든 발행 결과가 완전히 동일한지 대조) · `tests/data/test_last_price.py` 5건 ·
+`tests/ops/test_stale_spot_axis.py` 5건.
+
+### F-74 — 폴링 격자 결정을 **사유와 함께** 남긴다
+
+**증상.** 08-26~08-31 나흘간 5분 격자를 받는 시리즈가 날마다 달랐다(수 regular / 목
+weekly_thu / 금 regular / 월 weekly_mon). 위상은 나흘 고정이라 R9 위반은 아니었으나,
+**코드 분기인지 설정 드리프트인지**를 로그로 가릴 수 없었다(C-1).
+
+**원인·판정.** 실코드 확인 결과 `scripts/run_l1_daily.py:_option_chain_plan()`의
+`_OPTION_EXPIRY_WEEKDAY` 요일 분기가 정본이다 — **코드 분기가 맞다.** C-1 판정 완료.
+따라서 `configs/instance.yaml` 정본화는 **불필요**해졌고 로깅만으로 끝난다.
+
+**결정.** `_option_chain_fast_series(today) -> (series, reason)`를 분리하고, 폴러가 실제로
+만들어진 뒤 시리즈당 1건 `OptionChainScheduleResolved`(INFO). 계획 함수의 반환 모양(3튜플)은
+소비처가 여럿이라 건드리지 않았다.
+
+**Why.** `reason`이 없으면 값만 찍히고 원래 질문("왜 오늘은 저것이 5분인가")에 여전히 못
+답한다 — 사유 없는 계측은 반쪽이다. 로그가 사유와 계획을 따로 말하면 언젠가 둘이 갈라지므로,
+**둘이 절대 어긋나지 않는지**를 테스트가 붙잡는다.
+
+**검증.** `tests/test_option_chain_wiring.py` 4건 신설(계획 함수 소비처 12건 무변경 통과).
+
+### G-49 — 등록부 미기입: 소급하지 않고 **앞을 막는다**
+
+**증상.** 오늘 장후 배치가 처음으로 `ℹ 등록부 21개 항목이 fix_committed 미기입`을 안내했다.
+
+**결정 — 제안의 절반은 일부러 안 했다.** 제안은 "이미 커밋된 21건은 대응 sha를 역으로 채워
+넣는다"였다. `scripts/suggest_fix_commits.py`(F-20)를 실제로 돌려 보니 항목마다 후보가
+6~7개씩 나오고 그 도구 자신이 "확정은 사람이 한다"고 선언한다. 2026-08-20 G-H가
+`undeclared_fix_state()` docstring에 이미 같은 판단을 남겨 뒀다 — **"급하게 채운 값은 틀린
+값이다."** 틀린 sha는 미착수(WARNING)를 재발(ERROR)로 뒤집는 **거짓 기록**이다.
+
+대신 `FIX_STATE_REQUIRED_FROM = 2026-09-02` 이후 등록분에만 `fix_committed`를 강제하고,
+`undeclared_fix_state_overdue()`가 그 위반을 기존 21건과 **섞지 않고** 따로 센다.
+
+**Why — 강제 지점을 적재가 아니라 테스트로 둔 이유.** 적재 시점에 예외를 던지면 등록부 오타
+하나가 장후 배치를 통째로 세운다. 이 축은 그럴 만큼 급하지 않다. 이 저장소는 계약을
+`tests/test_log_tags_registered.py`류의 정적 검사로 집행하는 관례가 이미 있다.
+
+**How to apply.** 채울 값이 없는 계측 항목은 `fix_committed: null`을 명시한다 —
+**키의 존재가 곧 선언**이고, 로더가 `"fix_committed" in entry`로 그것을 읽는다.
+
+**검증.** `tests/ops/test_fix_verification.py` 4건 신설(정본 등록부가 규칙을 지키는지 ·
+신규 등록 미기입 검출 · 명시적 null 인정 · **기존 21건을 소급 위반으로 찍지 않는지**).
+
+### 부수 관측 — 이 세션이 만지지 않은 것
+
+실행 중(18:15~18:40) `src/messiah/strategy/options/evaluator.py`에 미커밋 변경이 생기고
+`src/messiah/strategy/options/contract_spec.py`가 미추적으로 나타났다(`leg_resolution.py`
+참조 · 목표 델타를 상장 격자로 스냅하는 작업으로 보인다). **사람이 편집 중인 파일은 건드리지도
+스테이징하지도 않았다**(실행 가드 7). 사용자 조치로 이월했다.
+
+### 커밋을 셋으로 안 나눈 이유
+
+세 항목이 `integrity_report.py`·`logging.py`·`run_l1_daily.py`를 함께 건드려, 파일 단위로
+가르면 중간 커밋의 테스트가 깨진다. 의존 방향이 하나뿐이라 분할의 실익이 없다.

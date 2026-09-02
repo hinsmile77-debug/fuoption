@@ -10267,3 +10267,45 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
       재계산) ⑵ 랭크 영속화 후 60거래일+ ⑶ RV/IV>1 구간 관측 ⑷ R18 섀도 20거래일.
 - [ ] **후보율 3~4% 고정을 알고 주문 경로를 시작할지** — 4a 착수 판단의 입력(계획은 그대로
       유효하고, 빈도가 낮아도 "체결 검증 자체가 목적"이면 진행 가능).
+
+## 2026-09-02 장후 자동조치 ([MW0601] · 커밋 `afe6d7b`)
+
+### ✅ 완료
+
+- [x] **F-73** ATM 기준가 신선도를 발행·로그·무결성 리포트에 싣는다 (약 3시간).
+      임계 60초 · 에피소드당 1건 · **발행 차단 없음**(R18 비해당) · 「판정 불변」 테스트 포함
+- [x] **F-74** `OptionChainScheduleResolved`(INFO)에 `reason` 병기 (약 40분).
+      **C-1 판정 완료 — 요일 분기는 코드에 있다**(`_option_chain_plan`). `instance.yaml`
+      정본화는 **불필요**로 확정, 이 줄로 C-1을 닫는다
+- [x] **G-49 절반** `FIX_STATE_REQUIRED_FROM`(2026-09-02) 이후 등록분에 `fix_committed` 강제
+      + 위반을 기존 21건과 분리 집계
+
+### 🔴 사람 몫으로 남음
+
+- [ ] **⚠ 편집 중인 파일 저장 (5분) — 오늘 밤.** `src/messiah/strategy/options/evaluator.py`
+      미커밋 + `src/messiah/strategy/options/contract_spec.py` 미추적(18:15~18:40 사이 생김).
+      자동조치가 **일부러 안 건드렸다**(실행 가드 7). **안 하면** F-75와 똑같이 며칠 밀린다
+      (그건 엿새 걸렸다). 반입 시 `contract_spec.py`를 **먼저** `git add` — 아니면 깨진 HEAD
+- [ ] **G-49 나머지 — 등록부 21건 `fix_committed` 소급 채움 `사람 결정`.**
+      `.venv\Scripts\python.exe scripts\suggest_fix_commits.py`가 후보를 뽑아 준다(항목당 6~7개).
+      **자동 채움 금지** — 2026-08-20 G-H "급하게 채운 값은 틀린 값". 항목당 2~3분, 한 건씩.
+      **더 늘지는 않는다**(위 강제 규칙). 채울 값이 없는 계측 항목은 `fix_committed: null` 명시
+
+### 🔄 이월 (오늘 손대지 않음)
+
+- [ ] **F-56** 화면 생사 장중 판정(하트비트) — 약 60분. 배정 시간을 F-73·F-74가 채웠다
+- [ ] **F-79 · F-77 · F-71** 변경 없음(F-77·F-71은 판정 대기)
+- [ ] **S-1 · S-3** 표본/사람 결정 대기 — 오늘 리포트가 S 신규 "해당 없음"으로 명시
+- [ ] **미커밋 산출물 2건** `logs/dailycheck/2026-08-27_report.md` ·
+      `2026-09-01_report.md`가 미추적으로 남아 있다. 자동조치는 **당일분만** 커밋하는 규칙이라
+      건드리지 않았다. 다음 점검이 함께 반입할지 판단할 것
+
+### 🔍 다음 거래일 관측 (F-73·F-74 첫 실전 검증)
+
+- [ ] **V-1** 내일 08:20~08:50 `l1_daily` 로그에 `OptionChainStaleSpot` **1건**(시작) →
+      08:45 전후 `OptionChainStaleSpotResolved` 1건(해소, `cycles` 10 전후).
+      **2건 이상 울면 접기 로직 결함** · 0건이면 배선 결함 또는 시드 부재
+- [ ] **V-2** `logs/daily_integrity_20260903.json`에 `option_chain_stale_spot.stale_spot_cycles > 0`.
+      `unresolved_episodes > 0`이면 그 시리즈가 종일 스테일이었다는 뜻 — 별건으로 판다
+- [ ] **V-3** 기동 로그에 `OptionChainScheduleResolved` **3줄**(시리즈당 1). 목요일(09-03)이면
+      `reason: expiry_weekday:weekly_thu`가 나와야 요일 가설이 실전에서 닫힌다
