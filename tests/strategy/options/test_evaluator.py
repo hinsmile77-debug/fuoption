@@ -102,8 +102,13 @@ def test_build_legs_iron_condor_four_legs_correctly_ordered():
 
 
 def test_build_legs_returns_none_for_calendar():
-    specs = candidate_specs(0.0, 10.0, _CFG)  # NEUTRAL/LOW → CALENDAR
-    spec = next(s for s in specs if s.structure == matrix.CALENDAR)
+    """CALENDAR는 여전히 만들 수 없다 — **셀 배정과 무관하게** 그 사실을 못박는다.
+
+    2026-09-02 O-4로 (중립·저IV) 셀이 빈 칸이 돼 `candidate_specs()`로는 이 spec을 더 이상
+    얻을 수 없다. 그렇다고 이 검사를 지우면 "CALENDAR를 다시 열었는데 평가기는 그대로"인
+    상태를 아무도 못 잡는다 — 그래서 셀을 거치지 않는 `matrix.spec_for()`로 직접 짓는다.
+    """
+    spec = matrix.spec_for(matrix.CALENDAR, _CFG)
     assert build_legs(spec, _smile(), r=_R) is None
 
 

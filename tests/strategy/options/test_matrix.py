@@ -64,8 +64,15 @@ def test_matrix_cell_up_high_uses_spread_not_naked_short():
     assert _structures(0.5, 90.0) == [BULL_PUT_SPREAD]
 
 
-def test_matrix_cell_neutral_low():
-    assert _structures(0.0, 10.0) == [CALENDAR]
+def test_matrix_cell_neutral_low_is_watch_not_calendar():
+    """**㉢ 관망 확정** (2026-09-02 O-4). 원문 §4.1의 이 칸은 "Calendar, 관망" 병기이고
+    그중 관망을 골랐다 — 사양 이탈이 아니다. 근거(RV/IV≈0.8 · 스트래들 +3일 0승 7패 ·
+    차월 체인 미수집)와 다시 여는 조건 넷은 `matrix._MATRIX` 그 자리 주석에 있다.
+
+    `CALENDAR` 상수 자체는 남는다 — `hedging._DIRECTION_NEUTRAL_STRUCTURES`가 참조하고,
+    다시 열 때 이름이 바뀌면 그 참조가 조용히 끊긴다."""
+    assert _structures(0.0, 10.0) == []
+    assert CALENDAR == "CALENDAR"
 
 
 def test_matrix_cell_neutral_mid_is_empty_no_edge():

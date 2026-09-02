@@ -89,7 +89,34 @@ _MATRIX: dict[tuple[Direction, IVState], list[str]] = {
     (Direction.UP, IVState.LOW): [LONG_CALL, BULL_CALL_SPREAD],
     (Direction.UP, IVState.MID): [BULL_CALL_SPREAD],
     (Direction.UP, IVState.HIGH): [BULL_PUT_SPREAD],
-    (Direction.NEUTRAL, IVState.LOW): [CALENDAR],
+    # **관망.** 원문 §4.1의 이 칸은 "Calendar, **관망**" 두 가지를 병기한다 — 관망을 고른
+    # 것이라 사양 이탈이 아니다(2026-09-02 O-4, `matrix_coverage.py`가 이 셀을 「비었음」으로
+    # 잡아낸 뒤의 결정).
+    #
+    # ## 왜 Calendar가 아니라 관망인가 — 세 가지를 재고 골랐다
+    #
+    # ㉠ **"저IV"인데 볼이 싸지 않았다.** 저IV로 판정된 144사이클의 절대 ATM IV는 중앙
+    #    54.9%(42.5~79.0%)였고, 이후 5거래일 실현변동성은 오버나이트 갭 포함 중앙 44.4%다 —
+    #    RV/IV ≈ 0.8로 내재가 실현보다 **일관되게 비쌌다.** 랭크가 낮은 것과 볼이 싼 것은
+    #    다른 사건이고, 이 표본에서 둘은 같지 않았다.
+    # ㉡ **롱 볼 반사실이 참패했다.** 저IV 판정일마다 ATM 스트래들을 아카이브 실가격으로
+    #    사서 평가하면 +1일 중앙 −10.4%(승률 17%) · +3일 −18.2%(**0승 7패**) · +5일 −30.6%.
+    #    ㉠과 방향이 정확히 정합한다(IV>RV면 롱 볼은 세타로 녹는다).
+    # ㉢ **Calendar는 데이터 전제부터 없다.** 폴러가 근월만 수집해 차월 체인이 아카이브에
+    #    아예 없고(20거래일 중 만기가 둘인 날은 롤 경계 3일뿐), `CandidateSpec`은 단일 dte라
+    #    스펙 확장이 선행돼야 하며, 근월 만기 시점의 차월 잔존가치 평가는 항 구조 모델 신설이다.
+    #
+    # ## 다시 여는 조건 (넷 다 채워야 한다)
+    #
+    #   ⑴ 차월 체인 수집(폴러 확장 + REST 예산 재계산)
+    #   ⑵ IV Rank 이력 영속화 후 60거래일 이상 — 지금 시드는 19거래일이라 "252일 내 위치"의
+    #      근사다(`strategy/options/iv_seed.py`)
+    #   ⑶ RV/IV가 1을 넘는 구간을 실제로 관측
+    #   ⑷ R18 섀도 계측 20거래일
+    #
+    # **빈 셀이라 사유가 정직해진다** — 종전엔 이 셀이 「안전규칙에서 기각됨」이라는 거짓
+    # 사유를 냈고, 이제 「매트릭스 셀 후보 없음(관망)」으로 나간다.
+    (Direction.NEUTRAL, IVState.LOW): [],
     (Direction.NEUTRAL, IVState.MID): [],  # 관망 — 우위 없음(Ver 1.3 §4 "논리" 항)
     (Direction.NEUTRAL, IVState.HIGH): [IRON_CONDOR],
     (Direction.DOWN, IVState.LOW): [LONG_PUT, BEAR_PUT_SPREAD],

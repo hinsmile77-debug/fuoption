@@ -240,6 +240,10 @@ TAG_LEVELS: dict[str, int] = {
     # 전체를 내렸을** 것이다. 태그를 쓰는 코드 경로에 테스트가 없으면 등록 누락은 조용하다 —
     # 그래서 `tests/test_log_tags_registered.py`가 이제 소스 전체를 훑는다.
     "OptionSmileProviderStarted": logging.INFO,  # 체인 구독 시작 — 기동 1회
+    # IV Rank 이력 시드 (2026-09-02). 몇 거래일을 복원했는지가 매 기동 남아야 한다 —
+    # 0건이면 랭크 판정이 그날 아침 대비로 돌아가고, 그게 종전의 결함이었다.
+    "IVHistorySeeded": logging.INFO,
+    "IVHistorySeedDayFailed": logging.WARNING,  # 한 날의 아카이브가 깨졌다 — 나머지는 시드된다
     # 잔차 초과는 **판정하지 않고 센다**(R18). 2026-08-05~09-02 아카이브 재생에서 6%였다 —
     # WARNING으로 올릴지는 라이브 20거래일 분포를 본 뒤에 정한다(늑대소년 방지).
     "OptionSmileResidualHigh": logging.INFO,

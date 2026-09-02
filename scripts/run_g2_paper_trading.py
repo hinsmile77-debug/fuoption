@@ -129,6 +129,7 @@ from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor  # noqa: 
 from messiah.simulator.engine import LiveSimBrokerFeed  # noqa: E402
 from messiah.strategy.futures.service import FuturesAIService  # noqa: E402
 from messiah.strategy.options.chain_smile import ChainSmileProvider  # noqa: E402
+from messiah.strategy.options.iv_seed import seed_iv_history  # noqa: E402
 from messiah.strategy.options.service import OptionsAIService  # noqa: E402
 from messiah.strategy.pipeline import TradingPipeline  # noqa: E402
 from messiah.strategy.regime.runtime import RegimeRuntime  # noqa: E402
@@ -140,6 +141,8 @@ from messiah.strategy.regime.service import RegimeAI  # noqa: E402
 # 먼저 20거래일을 관측한 뒤 늘리는 것이 R18 순서다.
 _OPTION_UNDERLYING = "KOSPI200"
 _OPTION_SERIES = "regular"
+# IV Rank 이력 시드가 읽는 아카이브 — `data/option_chain_archiver`가 쓰는 자리와 같다.
+_OPTION_CHAIN_DIR = Path("data") / "option_chain"
 
 REGULAR_SESSION_STOP = (DEFAULT_SESSION.close_time.hour, DEFAULT_SESSION.close_time.minute)
 HARD_SHUTDOWN_DEADLINE = (15, 40)
@@ -490,10 +493,17 @@ def _load_options_service(
     이다 — 이 프로세스는 순수 구독자라 REST 유량을 새로 쓰지 않는다(이 스크립트의 규율).
     """
     provider = ChainSmileProvider(_OPTION_UNDERLYING, bus, series=_OPTION_SERIES)
-    service = OptionsAIService(symbol, _OPTION_UNDERLYING, provider, bus)
+    # **IV Rank 이력을 아카이브에서 복원한 뒤 주입한다** (2026-09-02 O-4).
+    #
+    # 안 하면 랭크가 "252일 내 위치"(Ver 1.3 §3.1)가 아니라 **그날 아침 대비**가 된다 —
+    # 이 프로세스는 매 거래일 재기동하고 `IVHistory`는 프로세스 메모리이기 때문이다.
+    # 20거래일 재생 실측으로 그 차이가 셀 분포를 뒤집는 것을 확인했다(중립·고IV 2%→23%,
+    # `strategy/options/iv_seed.py` docstring의 표). 시드가 0건이어도 서비스는 선다.
+    iv_history = seed_iv_history(_OPTION_CHAIN_DIR, series=_OPTION_SERIES, today=now_kst().date())
+    service = OptionsAIService(symbol, _OPTION_UNDERLYING, provider, bus, iv_history=iv_history)
     print(
         f"Options AI 결선: {_OPTION_UNDERLYING}/{_OPTION_SERIES} 체인 구독 → intel.options "
-        f"(주문 경로 없음 — 화면 표시 전용)",
+        f"(IV Rank 이력 {len(iv_history)}거래일 시드 · 주문 경로 없음 — 화면 표시 전용)",
         flush=True,
     )
     return provider, service
