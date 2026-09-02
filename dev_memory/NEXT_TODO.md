@@ -10209,3 +10209,32 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
 
 **하지 말 것**: 4c를 먼저 하지 않는다(증거금·강제청산·만기 셋을 한꺼번에 요구한다).
 4c-1 없이 4b 이상 가지 않는다(그리스 없는 R7/R8은 통과만 한다).
+
+### [MW0601] 2026-09-02 18:10 — F-75 반입 완료 (9거래일 대기 해소)
+
+- [x] **F-75① `sets.py` 선반입** — `git add` 후 `git status --porcelain -- src`의 `??` 0행 확인.
+      `git commit -am`이었으면 추적 4파일만 담겨 **깨진 HEAD**(spec.py:45가 없는 모듈 임포트 →
+      spec→engine→run_l1_daily 전 경로 ImportError)가 됐다. 계획이 지목한 위험 그대로였다.
+- [x] **F-75② 회귀** features 17건 · core/universe/strategy 363건 · `run_replay.py`
+      2026-08-28 재생 714건 정상. 호출부 전수 확인(`engine.py:570`은 재수출로 동작).
+      **F-75 회귀 위험 해소**: `spec.registered_names`를 몽키패치하는 테스트는 없다.
+- [x] **F-75③ `tests/features/test_sets.py` 신설 5건** — (a) 이름 4개 문자열 고정,
+      (b) 깨끗한 인터프리터에서 `sets` 임포트 시 polars 부재 **+ 설정 검증 실행 후에도 부재**.
+      (b)에 검증기 경로까지 넣은 이유: `sets.py`가 가벼워도 `config.py`가 `spec`을 계속
+      임포트하면 아무것도 안 바뀐다 — 2026-08-27 실측이 정확히 그 형태였다.
+- [x] **F-75④ 커밋 메시지에 "R11 위반 사후 정리" 명기** — 계획은 "나흘 지연"이었고 실제로는
+      **엿새(6거래일)** 였다. 그 차이도 메시지에 적었다.
+- [x] **부수 정정** `config.py:65` 주석이 "해석은 features/spec.py의 FEATURE_SETS"라고
+      적고 있었는데 이 변경으로 사실과 어긋나 정정(이름 정본 = `sets.py`).
+
+- [ ] **F-75⑤ 남은 확인(다음 기동 때)** `status_snapshot.json`의 `worktree_dirty_files`와
+      다음 `SessionStart.source_mtime_max`가 커밋 시각 이후인지 — 이건 프로세스가 다시 떠야
+      관측된다. **F-75 자체는 여기서 종결**하고 이 한 줄만 다음 장전 점검으로 넘긴다.
+
+- [ ] **🆕 G-50 `사람 결정`** 오늘 커밋 6fdbb9d가 `meta_decision.py`를 담으면서
+      `DecisionIntent(cadence_seconds=...)`를 넣었는데 그 필드를 선언하는 `messages.py`는
+      F-75 쪽에 있었다 — **파일 소유자 기준으로 커밋을 가르면 파일 간 의존이 끊긴다.**
+      pydantic 기본이 `extra=ignore`라 예외는 안 났지만, 그 사이 HEAD를 체크아웃했다면
+      `decision.intent`의 주기가 조용히 사라져 화면 임계가 30초로 떨어졌다(98.3% STALE).
+      커밋 분할 시 **스테이징 상태에서 임포트·필드 참조가 닫히는지** 확인하는 절차를 둘지
+      결정할 것(pre-commit 훅 후보 — 다만 `git stash` 기반 검사는 비싸다).

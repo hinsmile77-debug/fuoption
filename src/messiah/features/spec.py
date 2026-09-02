@@ -42,7 +42,7 @@ from types import ModuleType
 from typing import Callable, Iterable, Sequence
 
 from messiah.core import logging as mlog
-from messiah.features import ev_core, fl_core, px_core, vl_core
+from messiah.features import ev_core, fl_core, px_core, sets, vl_core
 
 # 계산기 모듈이 노출하는 레지스트리 속성 이름 — 카테고리마다 같은 규약을 쓴다.
 _WINDOWED_ATTR = "WINDOWED_FEATURES"
@@ -117,18 +117,13 @@ BASE_CATEGORIES: tuple[str, ...] = ("PX", "VL")
 
 # feature_set 이름 → 활성 카테고리. **이름은 한 번 정하면 바꾸지 않는다** — 저장된 모델
 # 번들이 이 문자열로 자기 입력 모양을 주장하고 있고, 의미를 바꾸면 그 주장이 거짓이 된다.
-FEATURE_SETS: dict[str, tuple[str, ...]] = {
-    # 현행 프로덕션(121개). PX 82 + VL 39 — 전부 완성봉 OHLCV 파생.
-    "v2026.07": ("PX", "VL"),
-    # FL 결선판(130개). `flow` 사이드카(`data/investor_flow_history.FlowHistory`) 필수.
-    "v2026.08-fl": ("PX", "VL", "FL"),
-    # EV 결선판(137개, F1). `calendar` 사이드카(`core/event_calendar.EventCalendar`) 필수.
-    # **이력 전체에 소급 계산되는 유일한 카테고리**라 지금 있는 163거래일로 바로 A/B가 된다.
-    "v2026.08-ev": ("PX", "VL", "EV"),
-    # 둘 다. FL 사이드카가 일별 KOSPI 현물 수급뿐이라(파생 장중은 2026-08-05부터 누적) 지금은
-    # 실익이 작지만, 조합을 이름으로 못 부르면 A/B 자체를 못 돌린다.
-    "v2026.08-fl-ev": ("PX", "VL", "FL", "EV"),
-}
+#
+# 정본은 `features/sets.py`에 있다 (2026-08-27). 값은 문자열뿐이라 계산기를 몰라도 되는데,
+# 이 파일은 계산기를 임포트하므로 여기 두면 **이름 하나 확인하러 온 프로세스에 polars가
+# 딸려 온다** — Command Center UI가 정확히 그랬다(그 모듈 docstring에 유입 경로 전체).
+# 여기서는 재수출만 한다: `feature_spec.FEATURE_SETS`를 쓰던 호출부는 그대로 둔다.
+FEATURE_SETS = sets.FEATURE_SETS
+registered_names = sets.registered_names
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,10 +204,6 @@ def resolve(feature_set: str) -> FeatureSpec:
         categories=list(BASE_CATEGORIES),
     )
     return FeatureSpec(feature_set, BASE_CATEGORIES, registered=False)
-
-
-def registered_names() -> tuple[str, ...]:
-    return tuple(sorted(FEATURE_SETS))
 
 
 def _base_name(name: str) -> str:

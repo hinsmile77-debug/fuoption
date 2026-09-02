@@ -458,6 +458,24 @@ class DecisionIntent(BusMessage):
     model_version: str = ""
     latency_trace: dict[str, float] = Field(default_factory=dict)  # 구간별 누적 ms
     rationale: str = ""  # NO_TRADE 사유 포함 — 침묵이 아니라 판단 (Ver 2.0 §3.2)
+    # 이 판단이 **몇 초마다 갱신되는가** (2026-08-27 — F-4가 이 토픽만 비켜갔다).
+    #
+    # 2026-08-14 F-4는 신선도 임계를 상수에서 구동 주기 유도로 바꾸면서 `FuturesView`·
+    # `RegimeState`·`OptionsView` 셋에만 `cadence_seconds`를 달았다. `decision.intent`는
+    # 그 목록에 없었고, 그래서 `ui/app._STALE_AFTER`에도 키가 없어 `DEFAULT_STALE_AFTER_
+    # SECONDS`(30초)로 떨어졌다. 실제 발행은 30분 격자다 — 2026-08-27 Redis 스트림 실측:
+    # 09:00:01·09:30:00·10:00:00·10:30:00·11:00:01·11:30:00·12:00:00, 간격 30.0분 고정.
+    # 임계 30초 / 주기 1,800초면 **거래일의 98.3%가 STALE**이고, 그 앰버의 뜻("그 프로세스가
+    # 죽었거나 멈췄다", `ui/app._render_health_strip`)은 그 시간 내내 틀린 말이었다.
+    # `_STALE_AFTER` 주석이 이 결말을 이미 적어 뒀다 — *"한 곳에서만 피한 것은 설계가
+    # 아니라 우연이다."* 세 개를 고치고 네 번째를 안 고친 것이 정확히 그 문장이다.
+    #
+    # 값은 추측하지 않는다. 이 판단은 `FuturesView` 도착에만 나가므로
+    # (`strategy/pipeline.handle_futures_view`가 `decision_engine.decide()`의 유일한 호출부)
+    # 갱신 간격은 **그 뷰의 주기 그대로**다 — `strategy/decision/meta_decision.py`가 옮겨 싣는다.
+    # 뷰가 주기를 모르면(옛 메시지) None이 그대로 흘러 하한 30초로 떨어진다. 모르는 것을
+    # 30분이라 적어 진짜 정지를 30분간 초록으로 덮지 않는다(L18).
+    cadence_seconds: float | None = None
 
 
 # ---------------------------------------------------------------- L4 Capital

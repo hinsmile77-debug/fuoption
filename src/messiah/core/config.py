@@ -62,7 +62,8 @@ class InstanceConfig(BaseModel):
     model_bundle: str = "none"  # 릴리스 번들 ID (예: messiah-2026.08)
     redis_url: str = "redis://localhost:6379/0"
     # FeatureVector.feature_set (Ver 1.4 §5.2). 이 이름 하나가 벡터 모양 하나를 정한다 —
-    # 해석은 `features/spec.py`의 `FEATURE_SETS`. 검증기를 붙인 이유는 `universe`와 같다:
+    # 이름 목록의 정본은 `features/sets.py`의 `FEATURE_SETS`이고(아래 검증기가 보는 곳),
+    # 그 카테고리 키의 해석은 `features/spec.py`가 한다. 검증기를 붙인 이유는 `universe`와 같다:
     # 오타(`v2026.08-f1`)가 조용히 기저 벡터(PX+VL)로 떨어지면 "FL을 켰는데 왜 그대로지"로
     # 몇 주를 쓴다. 기동 시점에 깨지는 편이 낫다.
     feature_set: str = "v2026.07"
@@ -103,14 +104,20 @@ class InstanceConfig(BaseModel):
     @field_validator("feature_set")
     @classmethod
     def _registered_feature_set_only(cls, v: str) -> str:
-        # 지연 임포트 — `features/spec.py`는 계산기 모듈(→ polars)을 끌어오는데, 설정 모듈은
-        # UI·스크립트가 가볍게 임포트하는 자리라 그 비용을 모듈 로드 시점에 지우지 않는다.
-        from messiah.features import spec as feature_spec
+        # **`spec`이 아니라 `sets`를 본다** (2026-08-27). 종전엔 `features/spec`을 지연
+        # 임포트하며 *"계산기 모듈(→ polars)을 끌어오니 모듈 로드 시점에 그 비용을 지우지
+        # 않는다"*고 적어 뒀는데, **지연 임포트는 시점만 미룰 뿐 여부를 바꾸지 않는다.**
+        # 이 검증기는 `load_instance()`가 부를 때마다 돈다 — Command Center UI는 Redis URL
+        # 하나 읽으려고 첫 렌더 1초 안에 그것을 부르고, 그 한 줄로 polars 네이티브 런타임이
+        # UI 프로세스에 올라왔다(`features/sets.py` docstring에 유입 경로 전체와 그 대가).
+        #
+        # 필요한 것은 **등록된 이름 목록**뿐이고 그건 문자열 dict다. 계산기를 알 이유가 없다.
+        from messiah.features import sets as feature_sets
 
-        if v not in feature_spec.FEATURE_SETS:
-            known = ", ".join(feature_spec.registered_names())
+        if v not in feature_sets.FEATURE_SETS:
+            known = ", ".join(feature_sets.registered_names())
             raise ValueError(
-                f"미등록 feature_set '{v}' — features/spec.py의 FEATURE_SETS에 등록된 이름만 "
+                f"미등록 feature_set '{v}' — features/sets.py의 FEATURE_SETS에 등록된 이름만 "
                 f"쓸 수 있다(현재: {known})"
             )
         return v
