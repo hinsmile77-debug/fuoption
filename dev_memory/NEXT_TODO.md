@@ -10391,12 +10391,13 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
 
 ## 2026-09-03 장후 자동조치 ([MW0601] · 커밋 없음 — 3-1로 봉쇄)
 
-- [ ] **🆕 3-1 (P1) `사람 결정` — `.git/index.lock` 회수 + F-89 정식 커밋.** 개발 PC에서
-      `python scripts/git_lock_guard.py --reclaim` 실행 후 `chain_smile.py`·
-      `run_g2_paper_trading.py`·`core/logging.py`·`probe_option_order.py`(수정 4) +
-      `core/supervise.py`·`tests/test_core_supervise.py`(신설 2) 6개 파일만 커밋
-      (`[MW0601]` 접두). 09-02 16:04에도 같은 원인(점검 세션의 git 직접 호출)으로 스테일
-      락이 생겼던 사고의 재발 — 이번엔 실제로 F-89 커밋을 하루 이상 막았다.
+- [x] **3-1 종료 (2026-09-04)** `git_lock_guard.py --reclaim`으로 0바이트 락(09-03 12:41
+      생성 · 19.8시간) 회수 후 반입 완료. `c84db2d` 코드 6파일 + `test_chain_smile.py` +
+      dev_memory 2파일(같은 파일의 연속 append라 장후 기록과 분리하지 않았다) ·
+      `1192a33` 08-27~09-03 산출물 33파일 · `a636a97` 대시보드 프롬프트 초안.
+      반입 전 pytest 2,659건 재확인. F-89-c도 이것으로 함께 닫힌다.
+      09-02 16:04에도 같은 원인(점검 세션의 git 직접 호출)으로 스테일 락이 생겼던 사고의
+      재발이었고, 이번엔 실제로 F-89 커밋을 하루 이상 막았다 — 재발방지는 G-54가 진다.
 - [ ] **🆕 G-54** 점검 세션이 `collect_evidence.py`를 거치지 않고 `git status`/`diff`/`log`를
       직접 실행하면 스테일 인덱스 락을 만들 수 있다(09-02, 09-03 2회 재현 — F-78이 문서로만
       있고 강제되지 않음). SKILL.md 절차 안에 `git_lock_guard.py --check`를 사전 가드로
