@@ -1,0 +1,148 @@
+{
+  "as_of_kst": "2026-08-24T11:00:00.942988+09:00",
+  "symbol": "A05609",
+  "outcome": "zero_qty",
+  "view": {
+    "schema_version": 1,
+    "msg_id": "d59b8341790d4a47916ee8f7c4821fe6",
+    "ts_utc": "2026-08-24T11:00:00+09:00",
+    "instance_id": "messiah-dev-01",
+    "symbol": "A05609",
+    "score": -0.24181456194721407,
+    "agg_p_up": 0.05814788226848528,
+    "agg_p_down": 0.22074659009332376,
+    "uncertainty": 0.008542502450421928,
+    "dispersion": 0.0,
+    "regime": "TREND_UP",
+    "n_experts": 1,
+    "model_versions": [
+      "real-20260820-2053-30m"
+    ],
+    "top_features": [
+      [
+        "30m:ev_close_remain",
+        1584.4761474947543
+      ],
+      [
+        "30m:px_macd_h_60",
+        558.9402882015983
+      ],
+      [
+        "30m:ev_tod_cos",
+        438.95419856317795
+      ],
+      [
+        "30m:vl_rv_20",
+        425.5106410281585
+      ],
+      [
+        "30m:ev_open_elapsed",
+        413.3079067345559
+      ]
+    ],
+    "valid_until": "2026-08-24T11:00:00+09:00",
+    "cadence_seconds": 1800.0
+  },
+  "intent": {
+    "schema_version": 1,
+    "msg_id": "95b0ce51a1ce4cab89fe19ad572f999c",
+    "ts_utc": "2026-08-24T02:00:00.945984Z",
+    "instance_id": "unset",
+    "symbol": "A05609",
+    "side": "SHORT",
+    "confidence": 0.22074659009332376,
+    "uncertainty": 0.008542502450421928,
+    "horizon": null,
+    "option_strategy": null,
+    "top_features": [
+      [
+        "30m:ev_close_remain",
+        1584.4761474947543
+      ],
+      [
+        "30m:px_macd_h_60",
+        558.9402882015983
+      ],
+      [
+        "30m:ev_tod_cos",
+        438.95419856317795
+      ],
+      [
+        "30m:vl_rv_20",
+        425.5106410281585
+      ],
+      [
+        "30m:ev_open_elapsed",
+        413.3079067345559
+      ]
+    ],
+    "model_version": "real-20260820-2053-30m",
+    "latency_trace": {
+      "aggregator_to_decision_ms": 945.984
+    },
+    "rationale": "⑤ S=-0.242 (임계 ±0.2) → SHORT, n_experts=1, dispersion=0.000"
+  },
+  "expert_views": {
+    "Horizon.M30": {
+      "schema_version": 1,
+      "msg_id": "6390bbc7807343a79ae5030eaa06e6ac",
+      "ts_utc": "2026-08-24T02:00:00.889459Z",
+      "instance_id": "unset",
+      "symbol": "A05609",
+      "horizon": "30m",
+      "p_up": 0.05814788226848529,
+      "p_flat": 0.721105527638191,
+      "p_down": 0.22074659009332376,
+      "ens_std": 0.004271251225210964,
+      "meta_passed": true,
+      "model_version": "real-20260820-2053-30m",
+      "top_features": [
+        [
+          "ev_close_remain",
+          1065.418774152089
+        ],
+        [
+          "px_macd_h_60",
+          375.8374511484615
+        ],
+        [
+          "ev_tod_cos",
+          295.1575161806859
+        ],
+        [
+          "vl_rv_20",
+          286.11792375018456
+        ],
+        [
+          "ev_open_elapsed",
+          277.91267418997506
+        ]
+      ],
+      "valid_until": "2026-08-24T11:00:00+09:00"
+    }
+  },
+  "meta_features": {
+    "30m": {
+      "meta_p_primary": 0.721105527638191,
+      "meta_margin": 0.5003589375448673,
+      "meta_ens_std": 0.004271251225210964,
+      "meta_realized_vol": 0.0430142893816511,
+      "meta_minutes_since_open": 90.0
+    }
+  },
+  "net_er": {
+    "edge": 0.16259870782483848,
+    "atr_ticks": 110.35714285714286,
+    "cost_ticks": 1.6101188970402227,
+    "net_expected_return_ticks": 16.33380993077231,
+    "confidence": 0.22074659009332376,
+    "p_favorable": 0.22074659009332376,
+    "p_adverse": 0.05814788226848528,
+    "atr_window": 14,
+    "bars_used": 135
+  },
+  "risk": {
+    "approved": true,
+    "reason": "승인"
+  }
+}

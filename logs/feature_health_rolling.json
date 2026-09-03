@@ -141,6 +141,323 @@
           "constant": []
         }
       }
+    },
+    "2026-08-24": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-08-25": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-08-26": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-08-27": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": [
+            "vl_jump_60"
+          ]
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-08-28": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-08-31": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-09-01": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-09-02": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
+    },
+    "2026-09-03": {
+      "symbol": "A05609",
+      "horizons": {
+        "1m": {
+          "samples": 409,
+          "always_nan": [],
+          "constant": []
+        },
+        "3m": {
+          "samples": 136,
+          "always_nan": [],
+          "constant": []
+        },
+        "5m": {
+          "samples": 81,
+          "always_nan": [],
+          "constant": []
+        },
+        "10m": {
+          "samples": 41,
+          "always_nan": [],
+          "constant": []
+        },
+        "15m": {
+          "samples": 27,
+          "always_nan": [],
+          "constant": []
+        },
+        "30m": {
+          "samples": 14,
+          "always_nan": [],
+          "constant": []
+        }
+      }
     }
   }
 }
