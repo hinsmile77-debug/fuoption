@@ -109,6 +109,7 @@ from messiah.core.docker_bootstrap import (  # noqa: E402
 from messiah.core.event_calendar import DEFAULT_SESSION, EventCalendar  # noqa: E402
 from messiah.core.health import HealthReporter  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
+from messiah.core.supervise import run_isolated  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
 from messiah.core.ui_launcher import LaunchedUI, launch_command_center  # noqa: E402
 from messiah.data import backfill  # noqa: E402
@@ -540,7 +541,21 @@ async def _run_regular_session(
         *([regime_runtime.run_forever()] if regime_runtime is not None else []),
         # Options AI (2026-09-02). 둘 다 순수 구독자다 — 스마일 제공자는 `raw.option_chain.*`를,
         # 서비스는 `intel.futures`/`bar.5m`를 듣는다.
-        *([options[0].run_forever(), options[1].run_forever()] if options is not None else []),
+        #
+        # **이 둘만 `run_isolated()`로 감싼다** (2026-09-03 F-89). 2026-09-03 08:25:38에
+        # `ChainSmileProvider.run_forever()`의 배선 오류 하나가 이 gather를 타고 올라가 위의
+        # 형제 전부(판단·Risk·주문·국면·하트비트)를 함께 내렸다 — 정작 옵션 쪽은 주문 경로가
+        # 없는 **화면 표시 전용**인데도. 격리가 주문 경로에만 있고 프로세스 생존에는 없었다.
+        # 위 형제들에는 이 래퍼를 쓰지 않는다: 판단·주문·하트비트가 죽는 것은 프로세스가
+        # 죽어야 할 이유이고, 살려 두면 "살아 있는데 판단은 안 나가는" 거짓 정상이 된다.
+        *(
+            [
+                run_isolated("options.smile_provider", options[0].run_forever()),
+                run_isolated("options.ai_service", options[1].run_forever()),
+            ]
+            if options is not None
+            else []
+        ),
         HealthReporter(bus, "g2.pipeline").run_forever(),
     )
 

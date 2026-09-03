@@ -149,7 +149,10 @@ async def main() -> int:
         return 0
 
     cfg = load_instance(args.configs)
-    creds = KISCredentials.from_env()
+    # `from_broker_config`가 정본이다 — 다른 probe·backfill 스크립트 전부 이 경로를 쓴다.
+    # (2026-09-03 정정: 처음엔 존재하지 않는 `from_env()`를 불렀고, 후보 생성이 먼저 막혀
+    #  그 결함이 첫 실행에서 드러나지 않았다.)
+    creds = KISCredentials.from_broker_config(cfg.broker)
     adapter = KISBrokerAdapter(
         creds,
         tick_size=Decimal(cfg.futures_tick_size),

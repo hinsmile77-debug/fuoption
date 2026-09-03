@@ -424,8 +424,21 @@ class ChainSmileProvider:
             series=self._series,
             topic=topic,
         )
-        async for msg in self._bus.subscribe(topic):
-            await self.handle_snapshot(msg)
+        # **버스 구독은 콜백 등록이지 async 제너레이터가 아니다** (2026-09-03 P0, F-89).
+        #
+        # 여기에 종전엔 `async for msg in self._bus.subscribe(topic)`라고 적혀 있었다. 그
+        # 호출은 `MessageBus.subscribe(patterns, handler)`의 계약(`core/bus.py:173`)과 인자
+        # 개수부터 맞지 않아 **첫 실행에서 즉시 `TypeError`**였고, 그 예외가
+        # `_run_regular_session()`의 `asyncio.gather()`를 타고 올라가 2026-09-03 08:25:38에
+        # G2 세션 전체(선물 판단·Risk·Sizer·OrderGateway·국면·하트비트)를 기동 2초 만에
+        # 내렸다 — 그날 하루 판단 공백. 같은 토픽을 듣는
+        # `data/option_chain_archiver.py:256`과 형제 서비스
+        # `strategy/options/service.py:234`는 처음부터 이 형태였다.
+        #
+        # `on_kill`을 주지 않는 것은 의도다: 이 제공자는 봉만 보는 순수 구독자라
+        # `KillSignal`을 받을 이유가 없고, 받으면 `handle_snapshot`이 그것을 견뎌야 한다는
+        # 계약이 새로 생긴다(`core/bus.py`의 2026-08-07 P0-1 주석 — kill은 원한 구독자에게만).
+        await self._bus.subscribe([topic], self.handle_snapshot)
 
 
 def moneyness(strike: float, forward: float) -> float:

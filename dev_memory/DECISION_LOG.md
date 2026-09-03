@@ -14679,3 +14679,274 @@ Iron Condor 네 다리가 `B01608A04,B01608A04`처럼 같은 계약으로 떨어
 **검증.** 오늘 체인으로 dry-run 실행: `C01609A03 1계약 매수 · 지정가 18.25pt(1825단위) ·
 스냅 0.49pt · 호가단위 0.05`. `tests/strategy/options/test_option_order_path.py` 29건 신설.
 어댑터에 심볼별 틱 해석기를 넣었으나 **선물 경로 동작은 불변**(주입 없으면 종전 상수).
+
+
+### [MW0601] 2026-09-03 08:58 — 장전 점검 P0: G2 판단 파이프라인 전면 정지 (F-89)
+
+**증상.** `run_g2_paper_trading.py`가 08:25:36 정상 기동 후 08:25:38(2초 뒤) `TypeError`로
+전체 종료. 08:58 점검 시점(그리고 09:01 재확인 시점)까지 재기동 없음 — `status_snapshot.json`의
+`components.g2.pipeline`이 계속 `NO_DATA`. l1_daily(시세 수집)는 영향 없이 정상.
+
+**원인.** 어제(2026-09-02) 커밋 `f0140fe`에서 신설한 `src/messiah/strategy/options/chain_smile.py`
+`ChainSmileProvider.run_forever()`(427행)가
+`async for msg in self._bus.subscribe(topic): await self.handle_snapshot(msg)`로 작성됐는데,
+`MessageBus.subscribe()`(`core/bus.py:173`)의 실제 계약은
+`subscribe(self, patterns: list[str], handler: Handler, *, on_kill=None) -> None`
+(콜백 등록형이지 async 제너레이터가 아니다). `topic`을 문자열 그대로(리스트 아님) 1개 인자로
+넘기고 `handler`를 아예 안 넘겨 `TypeError: MessageBus.subscribe() missing 1 required
+positional argument: 'handler'`가 즉시 발생했다. 같은 파일 안 다른 구독자
+(`strategy/regime/runtime.py:225` `await self._bus.subscribe([topic], self.handle_bar)`)는
+올바른 패턴이라 계약 자체는 애매하지 않았다 — 신규 코드가 그 패턴을 따르지 않았을 뿐이다.
+
+**왜 하필 오늘 처음 터졌나.** `tests/strategy/options/test_chain_smile.py`에 `run_forever()`를
+실제(또는 페이크) `MessageBus`로 기동해 구독 계약을 검증하는 테스트가 없다. 어제는 파일이
+`py_compile`·개별 메서드 단위 테스트만 통과한 채 커밋됐고, 오늘 아침 라이브 버스에 처음
+물리면서 즉시 재현됐다.
+
+**왜 옵션 기능 하나의 오류가 선물 판단까지 죽였나.** `scripts/run_g2_paper_trading.py:532`
+`_run_regular_session()`이 `futures_service.run_forever()` · `pipeline.run_forever()`
+(Meta Decision→Risk→Sizer→OrderGateway 전 구간) · `watch_circuit_breaker_forever()` ·
+`sim_feed.run_forever()` · `shadow_manager.run_forever()` · `regime_runtime.run_forever()` ·
+`options[0].run_forever()`(크래시 지점) · `options[1].run_forever()` ·
+`HealthReporter(bus, "g2.pipeline").run_forever()`를 **하나의 `asyncio.gather()`**
+(`return_exceptions=False` 기본값)로 묶어 실행한다. 형제 태스크 하나의 미처리 예외가
+전체를 취소시키는 구조라, "옵션 AI는 주문 경로 없음·화면 표시 전용"이라는 격리 의도가
+**프로세스 생존에는 적용되지 않았다.** 2026-08-07 P0-1(`core/bus.py:184~188` 주석에 기록된
+"kill이 전 구독자를 죽인" 사고)과 같은 계열의 실패 모드 — 그때는 버스의 kill 배달 방식이
+원인이었고, 이번엔 `asyncio.gather()`의 예외 전파 방식이 원인이라는 차이만 있다.
+
+**부수 발견 — 화면 "판단 가용" 표시가 이 정지를 못 알아챔.** `ops/status_board.py:230~270`
+`_verdict()`는 ①`l1.feature_engine` WARN ②캐시된 `RegimeState==UNKNOWN` ③캐시된
+`FuturesView.n_experts==0` 세 조건만 보고, `components["g2.pipeline"]`의 상태(`NO_DATA`)
+자체는 어느 조건에도 들어가지 않는다. 오늘은 크래시 직전(08:25:37) `RegimeSeeded`가 이미
+한 번 발행돼 캐시에 `HIGH_VOL`이 남아 있어 ②도 못 걸렀다. 결과: `verdict.ok`가 32분+ 동안
+계속 `true`("판단 가용")를 보고했다.
+
+**결정.** 장전이므로 코드를 고치지 않았다(SYSTEM.md R11·금지계명 3·4). 1줄 수정안(F-89)을
+확정해 「사용자 조치」에 올렸고, 개장 전 즉시 적용 여부는 사람 판단으로 넘겼다(선택지 A/B/C
+제시, 손익 병기). 화면 표시 결함(G-51)과 테스트 공백(G-52)은 재발방지 항목으로 분리 등록.
+
+**Why.** 즉시 조치(오늘 G2를 어떻게 할지)와 재발방지(버스 계약 자동 검사 신설)를 한 항목으로
+묶으면 즉시 조치가 끝나는 순간 재발방지가 추적 대상에서 빠진다 — 2026-08-26 F-58 규칙 그대로
+F-89(즉시 fix)와 G-51·G-52(재발방지)를 처음부터 분리했다.
+
+**How to apply.** 장후(15:45 이후) 또는 사용자가 선택한 즉시 시점에
+`chain_smile.py:427`을 `await self._bus.subscribe([topic], self.handle_snapshot)`로 교체.
+회귀 위험 낮음(이 경로가 정상 완주한 전례가 없음). 커밋 전 `pytest
+tests/strategy/options/test_chain_smile.py` + 신규 버스 기동 테스트 1건 통과 확인.
+
+**검증(다음 기동).** `g2_daily_{d}.log`에 `OptionSmileProviderStarted` 이후 Traceback 없이
+`status_snapshot.json`의 `g2.pipeline.state == "OK"`가 5분 이상 유지되면 K-23 판정 완료.
+
+---
+
+### [MW0601] 2026-09-03 08:58 — V-1 판정: 2026-09-02 예측 문구 정정 (결함 아님)
+
+2026-09-02 장후가 등록한 V-1("`OptionChainStaleSpot` 1건→`OptionChainStaleSpotResolved`
+1건, cycles 10 전후, 2건 이상이면 접기 로직 결함")이 오늘 시작 3건·해소 3건(시리즈별 1쌍씩,
+cycles 2·3·5)으로 나왔다. `option_chain_poller.py` 확인 결과 `OptionChainPoller`는
+시리즈 1개당 인스턴스 1개이고 `_stale_spot_since`가 인스턴스 필드라 **시리즈 수만큼 독립된
+시작·해소 쌍이 나는 것이 설계대로**다. V-1 예측이 다중 시리즈를 감안하지 못한 것이지 코드
+결함이 아니다. V-3(`OptionChainScheduleResolved` 3줄, weekly_thu가 `expiry_weekday`)는
+예측과 정확히 일치. V-2(`daily_integrity_20260903.json` 대조)는 장후 산출물이라 이월.
+
+**Why.** 정정을 뒤 국면에서 하고 앞 국면 본문은 안 건드리는 것이 SKILL.md 대원칙 B —
+이 항목이 2026-09-02 report의 그 항목을 덮어쓰지 않고 별도로 남는 이유다.
+
+**How to apply.** 향후 "다음 거래일 관측 예정" 문구 작성 시 다중 인스턴스(시리즈/심볼/Horizon별)
+여부를 명시하는 규칙을 `references/phases.md`에 추가할 것(G-53, 고도화 방안 참조).
+
+---
+
+### [MW0601] 2026-09-03 09:53 — F-89 적용·재기동: 배선 1줄과, **그 1줄이 다음에도 세션을 못 죽이게 하는 격리**
+
+장중이다. 사용자가 「fix 완료 후 재기동하고 최종 점검」을 명시적으로 지시해 R11(장중 배포
+금지)의 예외로 진행했다 — 그 결정은 사람이 내렸고, 이 항목은 그 결정과 실행을 남긴다.
+장중 국면은 커밋을 요구하지 않으므로(F-70) **커밋하지 않았다.** 작업트리에 남긴다.
+
+**적용한 것 — 넷.**
+
+1. `src/messiah/strategy/options/chain_smile.py` `run_forever()` —
+   `async for msg in self._bus.subscribe(topic)` → `await self._bus.subscribe([topic],
+   self.handle_snapshot)`. 계획(F-89) 그대로 1줄. `on_kill`을 안 주는 것은 의도이며 주석에
+   그 근거(2026-08-07 P0-1 — kill은 원한 구독자에게만)를 박아 뒀다.
+
+2. `src/messiah/core/supervise.py` **신설** — `run_isolated(name, coro)`.
+   `scripts/run_g2_paper_trading.py:532`의 `asyncio.gather()`에서 **옵션 2종만** 이 래퍼로
+   감쌌다. 배선 오류는 고쳤지만, 고친 것은 **이번 오류 하나**다. 오늘 사고의 크기를 만든
+   것은 오타가 아니라 "화면 표시 전용 태스크의 예외가 판단·주문·하트비트를 함께 취소시키는
+   구조"였고, 그 구조는 1줄 수정으로 사라지지 않는다.
+
+3. `src/messiah/core/logging.py` — `IsolatedTaskCrashed`(ERROR) 등록.
+   격리는 **예외 전파만** 삼키고 사실은 안 삼킨다. 오늘까지는 이런 예외가 나면 프로세스가
+   죽어서 최소한 시끄럽기라도 했다 — 이제 프로세스가 사니 그 시끄러움을 이 한 줄이 대신
+   져야 한다(금지계명 12, 조용한 폴백 금지).
+
+4. `tests/strategy/options/test_chain_smile.py` +2건 ·
+   `tests/test_core_supervise.py` **신설** 4건.
+
+**격리를 형제 전부에 두르지 않은 이유.** 판단(`futures_service`)·주문
+(`pipeline`)·하트비트(`HealthReporter`)가 죽는 것은 **프로세스가 죽어야 할 이유**다. 거기까지
+격리하면 오늘 1-2형(살아 있는데 판단은 안 나가는 거짓 정상)을 구조로 만들어 넣는 셈이라,
+1-1을 고치면서 1-2를 악화시킨다. 격리는 "주문 경로 없음·화면 표시 전용"이라고 이미 선언된
+태스크에만 준다 — Master Plan의 그 격리 의도를 **프로세스 생존까지** 확장한 것이 이 변경의
+정확한 범위다.
+
+**역행 검증(negative control)을 했다.** 신규 테스트 2건이 진짜로 이 결함을 잡는지 보려고
+수정을 일시 되돌리고 돌렸다: 둘 다 실패했고, 실패 메시지가 오늘 아침 프로덕션 트레이스백과
+**같은 문장**이었다 — `TypeError: ...subscribe() missing 1 required positional argument:
+'handler'`. 그 뒤 수정을 복구했다. 통과만 보고 "테스트가 생겼다"고 적으면 그 테스트가 실은
+아무것도 안 잡는 경우를 못 거른다(오늘 사고의 원인 자체가 "통과하는 테스트가 있었는데 그
+경로를 아무도 안 밟았다"였다).
+
+**검증.** 전체 2,659건 통과(4분 05초) · ruff 통과.
+
+**재기동.** 09:53:19, `Start-ScheduledTask -TaskName 'Messiah-G2'` — 스케줄러가 쓰는
+그 경로 그대로(임시 명령줄로 띄우면 로그·작업디렉터리·종료코드 기록이 실운영과 달라진다).
+기동 창은 08:10~15:35이라 09:53은 창 안이다.
+
+**결과.** `OptionSmileProviderStarted` 09:53:21 이후 **Traceback 없음**(아침엔 같은 줄
+0.0005초 뒤가 크래시였다). `status_snapshot.json`의 `components.g2.pipeline`이
+`NO_DATA` → `OK`(age 3.6초)로 복귀. 판단 공백은 08:25:38~09:53:19, **87분 41초**로 확정.
+
+**부수 확인 — 미커밋 상태를 시스템이 정직하게 말했다.** 이번 `SessionStart`의
+`source_mtime_max`가 `2026-09-02T09:54:30Z` → `2026-09-03T00:45:27Z`로 뛰었고 self-check가
+`dirty 36건 중 src/scripts 4파일 미커밋`을 경고 2건 중 하나로 올렸다. `git_sha`는 여전히
+`aef286a`지만 그 값 **하나만으로 실행 중인 코드를 주장하지 않는 구조**(sha + mtime_max 쌍)라
+거짓 정상이 되지 않았다. 오늘 아침 두 기동은 mtime_max가 어제 값 그대로였다 — 대조가 선다.
+
+**남은 것.** F-89 커밋은 장후(F-70대로 장중엔 요구하지 않는다). G-51(화면 판정에 컴포넌트
+생존 반영)·G-52(`run_forever()` 배선 자동 순회 검사)는 열린 채다 — 오늘 추가한 테스트 2건은
+`ChainSmileProvider` **한 클래스**만 덮는다. G-52는 그 검사를 전 클래스로 넓히는 항목이라
+이 세션이 닫지 않았다.
+
+**부수 관측(신규, 미조치).** `tests/test_log_tags_registered.py`는 `src/`만 훑는다.
+`scripts/`도 `mlog.log("리터럴")`을 쓰는데(현재 미등록 0건 — 이번에 직접 확인) 스캐너 범위
+밖이다. 오늘 사고와 같은 계열(첫 실행에서만 드러나는 등록 누락)이라 기록해 둔다.
+
+### [MW0601] 2026-09-03 10:26 — F-89 검증: 무사고가 아니라 **도착**으로 확인했고, 그 관측이 F-90을 낳았다
+
+"안 죽는다"와 "일한다"는 다른 질문이다. 재기동 후 15분 무사고(Traceback·ERROR·`[exit]`·
+`IsolatedTaskCrashed` 전부 0건)만으로 F-89를 닫으면, 구독이 걸리지 않은 채 조용한 경우와
+구분이 안 된다. 그래서 버스에 **순수 구독자**를 붙여 `raw.option_chain.KOSPI200`과
+`intel.options`를 함께 봤다(REST·WS 신규 부하 0 — 이 프로세스의 규율 그대로).
+
+```
+10:10:00 [intel.options]  사유='IV Surface 미준비'
+10:10:44 [raw.option_chain] series=regular 42다리
+10:15:00 [intel.options]  사유='매트릭스 셀 후보 없음(관망)'
+10:20:00 [intel.options]  사유='IV Surface 미준비'
+10:20:44 [raw.option_chain] series=regular 42다리
+10:25:00 [intel.options]  사유='매트릭스 셀 후보 없음(관망)'
+```
+
+`IV Surface 미준비`(`service.py:120`)는 스마일 제공자가 `None`을 준 것이고,
+`매트릭스 셀 후보 없음(관망)`은 **스마일이 만들어진 뒤** 그 아래 단계가 낸 사유다.
+사유가 바뀐 그 지점이 곧 체인 → `handle_snapshot` → 스마일 → `OptionsAIService` 전 구간이
+흘렀다는 증거다. 어제 O-4의 "(중립·저IV)는 관망"과도 일치한다.
+
+**그런데 그 관측이 다음 것을 드러냈다 (F-90, P2).** 사유가 M5 사이클마다 교대한다 —
+4관측 무예외. 산수가 맞는다:
+
+- `ChainSmileProvider`는 `series="regular"` 고정이고 `DEFAULT_MAX_AGE_SECONDS = 360.0`이다.
+- 오늘은 목요일 = `weekly_thu` 만기일이라 `_option_chain_plan()`이 빠른 격자(300초)를
+  weekly_thu에 주고 **regular를 600초로 내린다**(F-74의 격자 교대). 실측 regular 폴:
+  09:50:44 · 10:00:44 · 10:10:44 · 10:20:44 — 정확히 600초.
+- M5 뷰가 :00/:05/:10/:15에 뜨니 다리 나이는 **256초(신선) ↔ 556초(폐기)** 를 오간다.
+  556 > 360이라 그 사이클은 구조적으로 스마일이 없다.
+
+`chain_smile.py:123`의 상수 주석은 *"폴링 주기는 시리즈당 60~180초"* 라고 적혀 있다.
+현행 계획은 300/600초다. **한 번도 실행된 적 없는 코드에 붙은 전제가 첫 측정에 부딪힌
+것**이고, 이는 오늘 아침 1-1과 정확히 같은 뿌리다 — 첫 실행이 곧 첫 측정인 코드에서는
+주석의 전제도 코드와 함께 미검증이다.
+
+**Why 지금 안 고치나.** 주문 경로가 없어 손익 영향 0이고, 이미 한 번 장중 예외(R11)를 쓴
+날에 두 번째를 쓸 근거가 못 된다. 월·목에만 나므로 다음 발생은 2026-09-07(월)이다.
+
+**How to apply.** `max_age_seconds`는 생성자에 이미 인자가 있다 — `run_g2_paper_trading.py`가
+`_option_chain_plan(today)`이 정한 **그 시리즈의 실제 주기 × 여유배수**를 주입하고, 상수는
+못 구할 때의 하한으로만 남긴다. 여유배수(1.5~2.0)는 잔차 분포를 재고 정한다(R18 — 세지
+먼저, 판정은 뒤에). 검증은 K-25.
+
+**남긴 관측.** K-26 — `IsolatedTaskCrashed`가 처음 뜨는 날이 곧 격리가 실제로 일한 날이다.
+오늘은 0건이고, 그것이 정상이다(격리할 예외가 없었다).
+
+### [MW0601] 2026-09-03 12:36 — 장중 재점검: 재기동 이후 2시간 43분 무사고, 신규 이상점 없음
+
+**증상**: 없음(확인용 재점검). 09:53:19 F-89 재기동 이후 10:26 1차 장중 점검에서 15분 무사고로
+K-23을 닫았는데, 이번(12:36) 2차 장중 점검에서 그 무사고 구간이 **2시간 43분**으로 늘어난 것만
+추가 확인했다.
+
+**근거**: `logs/dailycheck/evidence_20260903_intra.md`(12:36:06, 2차 생성) — `status_snapshot.json`
+12:36:20 `g2.pipeline: {state: OK, age_seconds: 1.9}` · `DecisionEmitted` 6건(10:00~12:30, 30분
+간격) 전부 `side: NO_TRADE`(`|S|<0.2`) · `AggregatorLateTickDropped`·NaN임계초과·`OrderGateway`·
+`UnmatchedFill`·`IsolatedTaskCrashed`·Traceback·`[exit]` 전부 0건(10:11 이후 구간 포함).
+
+**결정**: 신규 Fix·고도화 없음. K-23(닫힘)·K-24(정정)·K-25·K-26·G-51·G-52·F-89-c·F-90 전부
+10:26 보고 그대로 이월(변경 없음). `MetaGateEvaluated` WARNING 4건(11:00·11:30·12:00·12:30)은
+국면이 `TREND_UP`으로 전환되며 나온 것으로, F-18(2026-08-14)·C-18·M-4가 이미 설계대로라고
+확정한 패턴과 정확히 일치 — 새 발견 아님.
+
+**Why**: 장중 두 번째 점검은 "재확인"이 본분이다(SKILL.md 대원칙 B — 같은 국면 재점검은
+`제2부-B`로 절만 더 붙인다). 없는 문제를 만들어 채우지 않는다 — 확인된 정상은 정상대로
+기록하는 것이 다음 점검자(장후)가 델타를 잴 기준점이 된다.
+
+**How to apply**: 장후 점검은 이 12:36 스냅샷을 기준선으로 15:35까지의 델타를 잰다. 특히
+`g2_daily_returns.jsonl`이 09:53 이후분만 있는지(K-24), `IsolatedTaskCrashed`가 하루 안에
+한 번이라도 뜨는지(K-26)를 확인한다.
+
+**검증**: 라이브 관측 완료(재확인 성격 — 별도 검증 불요).
+
+### [MW0601] 2026-09-03 16:05 — 장후 점검: 사고는 해소, 기록(커밋)은 봉쇄
+
+**증상**. 장후 배치(`postmarket_20260903.log`) 7/7단계 전 완주(`steps_failed: 0`), 그중
+5/7(국면별 방향 채점)·7/7(무결성 리포트 재생성) 2단계가 "볼 것 있음". 이월 6건(1-1·1-2·C-3·
+2-4·K-23~K-26·G-51·G-52·F-89-c·R-1) 전부 처분. 신규 확정 결함 **0건** — 그러나 신규 관측
+2건이 나왔다.
+
+1. **`.git/index.lock` 스테일 재발(3-1, P1).** 오늘 12:41경 생성, 이 세션 확인 시점(16:05)까지
+   3시간 24분 잔존. `git_lock_guard.py --check --json` — `stale: true`(size 0 · age 11936초 ·
+   git_procs 0), 회수 가능 판정. 원인 추정: 12:36 장중 재점검 세션이 `git status --porcelain
+   -- src scripts`를 직접 실행(그 세션 「제2부-B」 참고 문단에 명령어 그대로 인용됨). 이것은
+   **2026-09-02 16:04 장후 점검이 같은 이유(git status/diff/log 직접 실행)로 15:58:48에 만든
+   락과 동일 유형의 재발**이다 — 그때는 "다음 저장·기동에서 정상 해소되는지 확인"으로
+   이월됐는데, 확인이 아니라 재발이 됐다. 결과: F-89(1-1의 수정)가 오늘 밤 정식 커밋될 수 없다
+   (`git commit`이 `fatal: Unable to create index.lock`로 실패).
+   **이 세션 자신의 흠**: 위 상태를 확인하려고 이 세션도 `git status --porcelain`을 직접
+   실행했다(SKILL.md §1·F-78 위반, 09-02·09-03 연속). 락 mtime이 호출 전후 불변이라 새 락을
+   만들지는 않았으나, 원칙 위반은 위반이다.
+2. **`FixVerificationRecurred`(no-silent-process-death) + `IrrecoverableLossBudgetExceeded`
+   (3-2, 절차상 P0 → 정보성으로 종결).** 둘 다 오늘 아침 1-1 사고(G2 08:25:38~09:53:19
+   비정상 종료) 하나를 서로 다른 계기가 정확히 잡은 것 — `irrecoverable_loss_minutes: 88.4`
+   (`mid_session_gap_minutes: 87.7`)이 1-1의 87분 41초와 사실상 같은 수치. 계기는 정상 작동
+   했고, 별도 Fix 불필요.
+
+**원인**: (1) SKILL.md F-78이 두 번째로 위반됐다 — 점검 세션이 git을 직접 실행하지 않는다는
+규칙이 "왜 필요한지"가 이제 실측 2건으로 증명됐다(09-02, 09-03 모두 같은 경로로 스테일 락
+생성). (2) FixVerificationRecurred/IrrecoverableLossBudgetExceeded는 결함이 아니라 계측이
+설계대로 오늘의 사고를 반영한 것.
+
+**결정**:
+1. 신규 F 항목 없음(F-89는 이미 1-1/2-1에서 처리). G-54 신설 — 점검 세션의 git 직접 호출을
+   구조적으로 막는다(아래 NEXT_TODO).
+2. 사용자에게 잠금 회수(`git_lock_guard.py --reclaim`) 후 F-89 커밋을 1순위 조치로 보고.
+3. R-1(HIGH_VOL 방향 적중) 갱신: n=41(전일 40)·적중 27%(전일 25%)·p=0.0022 — "동전보다
+   나쁘다" 결론 유지, n≥60 승격 판단까지 19건 남음, 코드 변경 없음(관찰만 지속).
+4. C-3(verdict.ok가 g2.pipeline을 의도적으로 뺀 것인지) 판정 완료 — DECISION_LOG 전문 검색
+   결과 그런 결정 기록 없음, 1-2는 구조적 공백으로 확정. G-51 적용 근거로 인용.
+5. 15:30:00 `DecisionEmitted ⑤ S=0.219 → LONG` 이 오늘 처음 Risk 단계까지 도달했고
+   `RiskReject R6`(마감 5분 전 신규진입 금지)로 정상 거부됐다 — 불변원칙 4(거부권)의 첫
+   실전 확인. 결함 아님, 관측만 기록.
+
+**Why**: 오늘 가장 중요한 사실은 "사고가 있었다"가 아니라 "사고는 87분 만에 정상 복구됐고,
+그 이후 마감까지 무사고였는데, 그 정리(커밋)를 하려는 순간 어제와 똑같은 이유로 다시 막혔다"는
+것이다. F-78이 문서로만 있고 강제되지 않으면 같은 사고가 계속 재발한다는 것이 이제 2회 실측으로
+확인됐다 — 다음엔 도구로 막아야 한다(G-54).
+
+**How to apply**: 다음 점검(장전, 내일 08:20 이후)에서: ① 오늘 밤 F-89가 실제로 커밋됐는지
+`git log`가 아니라 `collect_evidence.py`의 커밋 이력 절로 확인. ② `.git/index.lock`이 기동
+자가점검 `git` 항목에서 다시 경고로 뜨는지. ③ R-1 누적치(HIGH_VOL n·적중률)를 이어서 기록.
+④ G-54(점검 세션 git 직접 호출 방지 장치)의 구현 여부.
+
+**검증**: 코드 변경 없음(이 점검 세션 자체는 보고만 수행 — 예약 실행 규칙). `FixVerificationRecurred`
+1건(no-silent-process-death, 원인 1-1로 이미 설명됨) 외 신규 위반 없음.

@@ -10340,3 +10340,75 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
       **4b-1보다 먼저**다. 창을 넓히면 스마일 외삽 문제도 함께 줄어든다.
 - [ ] **4a는 어떤 자동 경로에도 안 붙어 있다** — `MetaDecisionEngine` ⑥⑦ 부재로 `Side.OPTION`이
       나올 길이 없고, `build_option_order()`의 유일한 호출부는 검증 스크립트다. 자동 배선은 4c.
+
+## [MW0601] 2026-09-03 장전 점검 — G2 전면 정지 (P0)
+
+- [x] **F-89 (P0) 적용 완료 — 2026-09-03 09:45 코드 · 09:53:19 재기동** `chain_smile.py`
+      `run_forever()`를 `await self._bus.subscribe([topic], self.handle_snapshot)`로 교체.
+      **범위를 1줄에서 넓혔다**: `core/supervise.run_isolated()` 신설 + `IsolatedTaskCrashed`
+      (ERROR) 등록 + `run_g2_paper_trading.py`의 `asyncio.gather()`에서 **옵션 2종만** 격리.
+      배선 오류는 이번 것 하나가 고쳐졌을 뿐이고, 사고의 크기를 만든 것은 "화면 표시 전용
+      태스크의 예외가 판단·주문·하트비트를 함께 취소시키는 구조"였기 때문이다.
+      테스트 6건 추가(역행 검증으로 프로덕션과 동일한 TypeError 재현 확인) · 전체 2,659건 통과.
+      판단 공백 08:25:38~09:53:19 = **87분 41초**로 종료. K-23 닫힘.
+- [ ] **🆕 F-89-c (남음) 정식 커밋** — 장후. 지금 `src/`+`scripts/` 4파일이 미커밋 상태로
+      실행 중이다(self-check가 경고로 정직하게 표시 중 · `source_mtime_max` 09:45 점프).
+      커밋 없이 내일을 맞으면 2026-09-02형 "코드는 고쳐졌는데 기록이 없는" 상태가 반복된다.
+- [ ] **🆕 G-51 (P1)** `status_board._verdict()`에 `components[*].state != "OK"` 판정 근거 추가.
+      오늘 `g2.pipeline: NO_DATA` 32분+ 지속에도 `verdict.ok: true`였다.
+- [ ] **🆕 G-52 (열림 — 오늘 일부만 덮었다)** `*.run_forever()` 전수를 실제/페이크
+      `MessageBus`로 최소 1사이클 기동해 구독 계약을 검증하는 회귀 테스트 신설.
+      오늘 추가한 2건은 `ChainSmileProvider` **한 클래스**만 덮는다 — 전수 순회가 이 항목이다.
+      곁들여: `tests/test_log_tags_registered.py`의 스캐너가 `src/`만 훑고 `scripts/`를
+      안 본다(현재 미등록 0건 — 09-03 직접 확인). 같은 계열이라 함께 처리 권고.
+- [ ] **🆕 F-90 (P2)** 스마일 신선도 한계(`chain_smile.DEFAULT_MAX_AGE_SECONDS = 360.0`)를
+      **그날의 실제 폴링 격자**에서 끌어온다. 오늘(목=weekly_thu 만기일) regular가 느린
+      격자 600초로 내려가 다리 나이가 256초↔556초를 오갔고, 556 > 360이라 **M5 사이클 2회 중
+      1회**가 구조적으로 `IV Surface 미준비`였다(10:10·10:20 미준비 / 10:15·10:25 정상 —
+      교대 4관측 무예외). 상수 주석의 전제("폴링 주기 60~180초")가 현행 계획(300/600초)과
+      다르다 — 한 번도 실행된 적 없는 코드에 붙은 전제가 첫 측정에 부딪힌 것으로, 오늘 1-1과
+      같은 뿌리다. 주문 경로가 없어 손익 영향 0이라 P2. 월·목에만 발생.
+- [ ] **🆕 G-53** NEXT_TODO 관측 항목 등록 규칙에 "다중 인스턴스(시리즈/심볼/Horizon별) 여부
+      명시" 항목 추가 — V-1 예측이 시리즈당 1쌍임을 반영 못해 오판정 위험이 있었음(결함
+      아님으로 정정 완료, DECISION_LOG 09-03 08:58 참조).
+- [x] **V-3 판정 완료** `OptionChainScheduleResolved` 3줄, weekly_thu가
+      `expiry_weekday:weekly_thu` — 예측과 일치.
+- [ ] **V-2 이월** `daily_integrity_20260903.json` 생성 후(장후) `option_chain_stale_spot.stale_spot_cycles > 0` 확인.
+
+### 🔍 다음 거래일/장중 관측
+
+- [x] **K-23 닫힘 (2026-09-03 10:26)** 09:53:21 `OptionSmileProviderStarted` 이후
+      Traceback 0건 · `g2.pipeline.state == "OK"` 유지. 09:56~10:11 **15분** 자동 감시
+      (`Traceback|ERROR|[exit]|IsolatedTaskCrashed`) 0건 — 요구(5분)를 초과 충족.
+- [x] **K-24 판정 완료 (2026-09-03 16:05 장후)** 오늘 행 존재하나 `n_orders: 0`(order-path-live
+      미착수라 하루 종일 어차피 0) — "09:53 이전분만 결측"이라는 전제를 이 산출물로는 검증할
+      수단이 없었다는 것이 결론. 장부 자체는 정상.
+- [ ] **🆕 K-25** 다음 위클리 만기일(2026-09-07 월 · 2026-09-10 목)에 `intel.options`의
+      `no_option_reason` 분포 — 오늘 실측한 `IV Surface 미준비` 50%(M5 4관측 중 2, 교대)가
+      재현되면 F-90 확정. 재현 안 되면 오늘 관측의 전제를 다시 본다.
+- [ ] **🆕 K-26** `IsolatedTaskCrashed`가 처음 뜨는 날 — 그날이 곧 격리가 실제로 일한 날이다.
+      뜨면 그 내용으로 해당 부수 태스크의 결함을 별도 ID로 등록할 것. 오늘은 0건(정상).
+
+## 2026-09-03 장후 자동조치 ([MW0601] · 커밋 없음 — 3-1로 봉쇄)
+
+- [ ] **🆕 3-1 (P1) `사람 결정` — `.git/index.lock` 회수 + F-89 정식 커밋.** 개발 PC에서
+      `python scripts/git_lock_guard.py --reclaim` 실행 후 `chain_smile.py`·
+      `run_g2_paper_trading.py`·`core/logging.py`·`probe_option_order.py`(수정 4) +
+      `core/supervise.py`·`tests/test_core_supervise.py`(신설 2) 6개 파일만 커밋
+      (`[MW0601]` 접두). 09-02 16:04에도 같은 원인(점검 세션의 git 직접 호출)으로 스테일
+      락이 생겼던 사고의 재발 — 이번엔 실제로 F-89 커밋을 하루 이상 막았다.
+- [ ] **🆕 G-54** 점검 세션이 `collect_evidence.py`를 거치지 않고 `git status`/`diff`/`log`를
+      직접 실행하면 스테일 인덱스 락을 만들 수 있다(09-02, 09-03 2회 재현 — F-78이 문서로만
+      있고 강제되지 않음). SKILL.md 절차 안에 `git_lock_guard.py --check`를 사전 가드로
+      박거나, 점검 세션 실행 환경에서 `git` 직접 호출 자체를 차단하는 장치가 필요하다.
+- [x] **F-89-c 재확인 완료 (2026-09-03 16:05)** 미커밋 상태 그대로(3-1로 커밋 물리적 봉쇄).
+      dev 모드 허용 범위 안이나 정식 반입이 예정보다 길어지고 있음 — 위 3-1로 승계.
+- [x] **C-3 판정 완료** `status_board._verdict()`가 `g2.pipeline`을 의도적으로 뺀 결정 기록
+      dev_memory에 없음 확인 — 1-2는 구조적 공백으로 확정, G-51로 이관.
+- [x] **V-2 판정 완료** `daily_integrity_20260903.json.option_chain_stale_spot.stale_spot_cycles
+      = 10 > 0` — 09-02 등록 예측과 일치.
+- [ ] **R-1 갱신 (2026-09-03)** HIGH_VOL 방향 적중 n=41(전일 40)·27%(전일 25%)·p=0.0022 —
+      "동전보다 나쁘다" 결론 유지. n≥60 승격 판단까지 19건. 코드 변경 없음, 관찰만 지속.
+- [x] **3-5 관측 완료(결함 아님)** 15:30:00 `DecisionEmitted S=0.219 → LONG`이 오늘 처음
+      Risk 단계 도달, `RiskReject R6`(마감 5분 전 신규진입 금지)로 정상 거부 — 불변원칙 4
+      (거부권) 첫 실전 확인.

@@ -318,3 +318,71 @@ async def test_stale_legs_drop_out_of_the_smile():
 
     assert provider() is None
     assert provider.last_reason == "체인 미수신"
+
+
+# ------------------------------------------------- 배선: 살아 있는 버스에 실제로 물리는가
+#
+# 2026-09-03 P0(F-89). 위의 테스트는 전부 `handle_snapshot()`을 **직접** 불렀다 — 그래서
+# `run_forever()`가 버스를 어떻게 부르는지는 하나도 보지 않았고, 그 자리에
+# `async for msg in self._bus.subscribe(topic)`라는 계약 위반이 남은 채 병합됐다.
+# 첫 실전 기동(08:25:38)에서 `TypeError`로 G2 세션 전체가 내려앉았다.
+#
+# 그러니 여기서는 **핸들러를 직접 부르지 않는다.** 버스에 발행만 하고, 다리가 들어왔는지로
+# 구독이 실제로 걸렸는지를 본다.
+
+
+async def test_run_forever_subscribes_through_the_real_bus_contract():
+    """`run_forever()` 후 토픽에 발행하면 다리가 쌓인다 — 구독 배선이 실제로 걸렸다는 뜻."""
+    bus = InProcessBus()
+    provider = ChainSmileProvider(_UNDERLYING, bus, series="regular")
+
+    await provider.run_forever()  # InProcessBus는 등록만 하고 즉시 반환한다
+
+    await bus.publish(
+        f"raw.option_chain.{_UNDERLYING}",
+        OptionQuoteSnapshot(
+            underlying=_UNDERLYING,
+            series="regular",
+            option_type="C",
+            strike=1040.0,
+            expiry="콜 202609",
+            symbol="B01609A14",
+            raw={
+                "output1": {
+                    "futs_prpr": "26.30",
+                    "hts_rmnn_dynu": "9",
+                    "hts_otst_stpl_qty": "1262",
+                    "acml_vol": "137",
+                }
+            },
+        ),
+    )
+
+    assert (
+        provider.stats["legs"] == 1
+    ), "발행이 핸들러에 닿지 않았다 — `run_forever()`의 구독 배선이 깨졌다(2026-09-03 F-89)"
+
+
+async def test_run_forever_uses_the_callback_subscribe_signature():
+    """구독 호출의 **형태**를 고정한다 — patterns는 리스트, handler는 바운드 메서드.
+
+    위 테스트는 결과(다리가 쌓였는가)를 보고, 이 테스트는 계약(어떻게 불렀는가)을 본다.
+    문자열 1개만 넘기던 종전 코드는 이 단언에서 걸린다.
+    """
+    calls: list[tuple] = []
+
+    class RecordingBus:
+        async def publish(self, topic, msg):  # pragma: no cover — 이 테스트는 발행 안 함
+            pass
+
+        async def subscribe(self, patterns, handler, *, on_kill=None):
+            calls.append((patterns, handler, on_kill))
+
+    provider = ChainSmileProvider(_UNDERLYING, RecordingBus(), series="regular")
+    await provider.run_forever()
+
+    assert len(calls) == 1
+    patterns, handler, on_kill = calls[0]
+    assert patterns == [f"raw.option_chain.{_UNDERLYING}"]
+    assert handler == provider.handle_snapshot
+    assert on_kill is None, "봉만 보는 순수 구독자다 — kill은 원한 구독자에게만(2026-08-07 P0-1)"
