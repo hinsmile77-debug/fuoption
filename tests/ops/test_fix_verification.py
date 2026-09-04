@@ -176,6 +176,60 @@ def test_a_deadline_with_no_days_to_score_is_not_the_same_as_a_missed_one(tmp_pa
     assert verdict.needs_attention, "재조정도 사람이 해야 하는 일이다"
 
 
+def test_a_violation_after_the_deadline_does_not_erase_the_days_before_it(tmp_path: Path):
+    """**기한 뒤의 재발이 「잴 날이 없었다」로 둔갑하면 그 재발이 가려진다** (2026-09-04 F-92).
+
+    2026-09-04 실측 재현. `no-silent-process-death`는 기한(08-28)까지 7거래일을 전부
+    채점하고 통과했는데(08-28 판정 「7거래일 연속 기준 충족」), 기한이 지난 09-03에 새
+    위반이 났다. 그러자 채점 기산점이 09-03으로 밀려 (09-03, 08-28] 구간이 비었고,
+    판정은 **「채점 가능일이 0일뿐이었다 — 잴 날이 없었다. 기한 재조정 필요」** 로 나갔다.
+
+    두 번 틀린 문장이다. 잴 날은 7일 있었고, 처방은 기한 재조정이 아니라 09-03 재발을
+    보는 것이다. 그리고 그 재발이 이 문구 뒤에 숨었다 — 이 등록부가 막으려던 실패다.
+    """
+    registry = _registry(tmp_path)  # deadline 08-14 · 3거래일 연속
+    reports = {
+        # 기한까지 사흘 전부 채점됐고 전부 통과했다
+        date(2026, 8, 12): _report(date(2026, 8, 12)),
+        date(2026, 8, 13): _report(date(2026, 8, 13)),
+        date(2026, 8, 14): _report(date(2026, 8, 14)),
+        # 기한이 지난 뒤의 새 위반
+        date(2026, 8, 18): _report(
+            date(2026, 8, 18), native_crashes={"available": True, "count": 1, "details": []}
+        ),
+        date(2026, 8, 19): _report(date(2026, 8, 19)),
+    }
+
+    verdict = evaluate(registry, reports, today=date(2026, 8, 19))[0]
+
+    assert verdict.status == VerificationStatus.OVERDUE
+    assert "잴 날이 없었다" not in verdict.detail, "그날들은 실제로 있었고 실제로 채점됐다"
+    assert "1/3일" in verdict.detail, "08-18 재발 뒤 연속은 08-19 하루뿐이다"
+    assert verdict.last_violation == date(2026, 8, 18), "가려졌던 재발이 값으로 남아야 한다"
+    assert verdict.needs_attention, "판정을 무르게 하지 않는다 — 자리는 그대로다"
+
+
+def test_a_violation_before_the_deadline_still_reports_no_days_to_score(tmp_path: Path):
+    """**판정 불변** — F-92는 기한 **뒤**의 위반만 건드린다 (2026-09-04).
+
+    기한 **안**에서 위반이 나 기산점이 밀린 경우는 종전 그대로 `기한 불가`다. 그쪽은
+    문장이 참이기 때문이다: 위반 뒤로 기한까지 실제로 잴 날이 모자랐다.
+    """
+    registry = _registry(tmp_path)  # deadline 08-14 · 3거래일 연속
+    reports = {
+        date(2026, 8, 12): _report(
+            date(2026, 8, 12), native_crashes={"available": True, "count": 1, "details": []}
+        ),
+        date(2026, 8, 13): _report(date(2026, 8, 13)),
+        date(2026, 8, 14): _report(date(2026, 8, 14)),
+    }
+
+    verdict = evaluate(registry, reports, today=date(2026, 8, 15))[0]
+
+    assert verdict.status == VerificationStatus.UNREACHABLE
+    assert "채점 가능일이 2일뿐" in verdict.detail
+
+
 # ---------------------------------------------------------------- 못 잰 날 (L18)
 
 
