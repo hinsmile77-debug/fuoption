@@ -1,0 +1,74 @@
+{
+  "date": "2026-09-04",
+  "symbol": "A05609",
+  "horizons": {
+    "5m": {
+      "samples": 977,
+      "window_days": 15,
+      "excluded_days": [
+        "2026-08-07",
+        "2026-08-10",
+        "2026-08-14",
+        "2026-08-19",
+        "2026-09-03"
+      ],
+      "baseline_ic": 0.39978335828449385,
+      "baseline_used": [
+        "직전RV",
+        "vl_gk_5"
+      ],
+      "beats_baseline": [
+        "ev_tod_cos"
+      ],
+      "measurable": true,
+      "absent_features": [],
+      "undefined_after_control": []
+    },
+    "15m": {
+      "samples": 320,
+      "window_days": 15,
+      "excluded_days": [
+        "2026-08-07",
+        "2026-08-10",
+        "2026-08-14",
+        "2026-08-19",
+        "2026-09-03"
+      ],
+      "baseline_ic": 0.35708771570034864,
+      "baseline_used": [
+        "직전RV",
+        "vl_gk_5"
+      ],
+      "beats_baseline": [
+        "ev_tod_cos",
+        "ev_close_remain"
+      ],
+      "measurable": true,
+      "absent_features": [],
+      "undefined_after_control": []
+    },
+    "30m": {
+      "samples": 157,
+      "window_days": 15,
+      "excluded_days": [
+        "2026-08-07",
+        "2026-08-10",
+        "2026-08-14",
+        "2026-08-19",
+        "2026-09-03"
+      ],
+      "baseline_ic": 0.17763692406923884,
+      "baseline_used": [
+        "직전RV",
+        "vl_gk_5"
+      ],
+      "beats_baseline": [
+        "ev_tod_cos",
+        "ev_close_remain"
+      ],
+      "measurable": true,
+      "absent_features": [],
+      "undefined_after_control": []
+    }
+  }
+}
