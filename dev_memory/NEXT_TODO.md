@@ -10530,3 +10530,149 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
 - [ ] **G-54 (사람 결정 · 이월)** 점검 세션의 git 직접 호출 차단 장치 — 착수 여부 미정.
 - [ ] 새 기한 축을 만들 때 **기산점과 구간의 시제**를 함께 볼 것 — `deadline_pressure()`·
       `effective_deadline()`에 같은 형태가 남아 있는지 다음 점검에서 확인(F-92 파생).
+
+## 2026-09-07 장전 점검 ([MW0601] · 08:55 · 신규 확정결함 0건)
+
+### ✅ 완료(이월 처분)
+- [x] **1-1 닫음** `code_version.stale`이 오늘 기동에서 `false`로 회귀 확인(process=head=`dcc4eb3`).
+- [x] **K-27 닫음** index.lock 재발 없음 — 오늘 자가점검 `git` 라인 정상.
+
+### 🔄 지속 (다음 판단으로 이월)
+- [ ] **3-1** `px_max_ret_60`(10분봉) 상수 재현 여부 — 오늘 장중·장후 데이터로 판정.
+- [ ] **3-2/R-1** HIGH_VOL 방향 적중률 — 오늘 종가 기준 갱신, 09-30 전후 승격 심사.
+- [ ] **G-54 (우선순위 격상 유지 — 5세션 중 4세션 위반, 80%)** 점검 세션의 git 직접 호출
+      차단 장치. 09-02·09-03·09-04(장전) 위반 → 09-04(장중·장후) 무위반 → **09-07(장전) 재위반**.
+      착수 여부 사람 결정 대기.
+
+### 🆕 신규 — C-1 `P2` · F-92 공식 검증 확인 (오늘 장후)
+- [ ] **C-1** `postmarket_20260907.log`의 `no-silent-process-death` 항목이 `FixVerificationPassed`인지
+      확인. 오늘 기동 자가점검(`deadlines: 기한 도달 불가 0건`)은 F-92가 코드상 반영된 정황이나,
+      실거래일 데이터로 채점하는 공식 검증은 아직이다. `Recurred`나 재차 `DeadlineUnreachable`이면
+      F-92 자체의 결함으로 재분류.
+
+### 🔍 다음 장중 관측
+- [ ] **K-25** 위클리 만기일(오늘) `intel.options`의 `no_option_reason` 분포 — IV Surface 미준비
+      50%(09-03 관측치) 재현 여부.
+- [ ] **G-54** 이번 장중 세션이 `git`을 직접 호출하는지 자체 확인.
+- [ ] **3-1 · 3-2** 위와 동일.
+
+### 🤖 이 세션 자신의 절차 위반 (자기보고)
+- [ ] **F-78 위반 재발** `collect_evidence.py` 실행 전 `git log --oneline -15`·`git status --short`
+      직접 호출. 락 생성은 없었으나 규칙 위반. G-54 미착수의 직접 근거로 누적.
+
+## 2026-09-07 장중 점검 ([MW0601] · 12:41 · 신규 확정결함 0건, 1-2 신규 P2)
+
+### ✅ 처분(이월)
+- [x] **G-54 이번 세션** — `git` 직접 호출 없음(무위반). 장치 부재는 그대로, 변경 없음 유지.
+
+### 🔄 지속 (장후로 이월)
+- [ ] **3-1** `px_max_ret_60`(10분봉) 상수 — 장중 로그에 값 자체가 없음, 장후 무결성 리포트에서 판정.
+- [ ] **3-2/R-1** HIGH_VOL 방향 적중률 — 오늘 종가 확정 후 표본 갱신. 참고: 오늘 12:00~12:30
+      30분간 HIGH_VOL 진입(확신도 71%), 그 외 시간대는 RANGE.
+- [ ] **3-3/F-91** `no-silent-process-death` 기한 재조정 — 사람 결정 여전히 대기.
+- [ ] **C-1** F-92 공식 검증(`FixVerificationPassed`/`Recurred`) — 15:45 장후 배치 필요, 아직 미도달.
+- [ ] **K-26** `IsolatedTaskCrashed` 최초 발생 — 오늘 장중 0건, 계속 대기.
+- [ ] **G-54** 점검 세션 git 직접 호출 방지 장치 — 착수 여부 사람 결정 대기(변경 없음).
+
+### 🆕 신규 — 1-2 `P2` · 옵션 무결정 사유 로깅 공백 (K-25 판정을 막고 있던 원인)
+- [ ] **1-2** `src/messiah/strategy/options/service.py`의 `_publish_no_option()`이 `mlog.log()`를
+      호출하지 않아, "매매 후보 없음" 판단 사유가 로그에 거의 안 남는다. 오늘 46회 판단 기회 중
+      로그 태그로 확인 가능한 무결정 사유는 1건뿐(`OptionsCandidateUnbuildable`, 09:15).
+      K-25(위클리 만기일 `no_option_reason` 분포)는 이 항목이 고쳐져야 다시 관측 가능.
+
+### 🆕 신규 — F-93 `P2` · 대응 이상점 1-2 (장후 이후 적용)
+- [ ] **F-93** `service.py` `_publish_no_option(self, reason)`에 `mlog.log("OptionsNoCandidate",
+      reason, symbol=self._symbol, reason=reason)` 추가(INFO). 검증: `tests/strategy/options/
+      test_options_service.py` 4개 케이스(83·94·104·176행)에 태그 발행 assertion 추가 후
+      `pytest tests/strategy/options/` 통과. 적용 시점: 장후(15:45) 이후, 장중 배포 금지.
+
+### 🆕 신규 — C-2 `P2` · 확인 필요
+- [ ] **C-2** 2026-09-03 "IV Surface 미준비 50%" 관측치의 원 데이터 출처 불명 — 로그 태그로는
+      안 나오는데 그 수치가 어디서 나왔는지 역추적 필요. 여유 있을 때(다음 장전 등) 확인.
+
+### 🆕 참고(고도화 후보) — G-56
+- [ ] **G-56** K-계열 관측 항목을 등재할 때 데이터 출처(로그 태그·필드)를 함께 못박는 절차.
+      코드 변경 아님, 점검 절차 보강. 다음 점검부터 적용 가능.
+
+### 🔍 다음 장후 관측
+- [ ] **C-1** `postmarket_20260907.log`의 `no-silent-process-death` 항목 `FixVerificationPassed` 여부.
+- [ ] **3-1 · 3-2/R-1** 종가 데이터로 최종 갱신.
+- [ ] **G-54** 장후 세션의 git 직접 호출 여부(6세션 중 5세션째).
+- [ ] **F-93** 장후 코드 반입 여부 결정.
+
+## 2026-09-07 장후 점검 ([MW0601] · 16:10 · composer-bucket-completeness 3차 재발 P0 1-3, 오늘 주문 0건·손익 0원)
+
+### ✅ 처분(이월)
+- [x] **C-1 판정 완료** `postmarket_20260907.log` 15:47:09 — `FixVerificationOverdue`(기한
+      2026-08-28 경과, 아직 2/3일). Passed도 Recurred도 아님 — 3거래일 연속 조건 중 2일째.
+- [x] **3-2/R-1 갱신 완료** `logs/regime_direction_20260907.json` — HIGH_VOL n=44(전일 41)·
+      적중 27.27%(12/44)·오늘 기여 -911.8틱·p=0.0018("동전보다 나쁘다" 유지). n≥60까지 16건.
+- [x] **3-1 이관 완료** 오늘 `degenerate_features.10m.constant`=빈 배열 — R18 섀도 관찰
+      (`v2026.08-ev-sb`, ~09-17 전후 승격)로 이관, 매일 재판정 대상 아님.
+- [x] **K-25 재확인(신규 아님)** 오늘도 1-2(로깅 공백) 때문에 판정 불가 — F-93 반입 후
+      다음 위클리 만기일(2026-09-10 목) 재시도.
+- [x] **K-26** 오늘 하루 전체 0건, 계속 대기.
+- [x] **G-54 이번 세션도 무위반** `collect_evidence.py --phase post`만 실행, `git` 직접
+      호출 없음. 6세션 중 4세션(67%) 위반 스트릭 유지(장중·장후 2연속 무위반, 악화 없음).
+- [x] **1-2 지속** F-93 계획 확정, 코드 미반입(사람 지시 대기).
+- [x] **3-3/F-91** 사람 결정 여전히 대기, 변경 없음.
+- [x] **C-2** 오늘도 추가 확인 못 함, 계속 이월.
+
+### 🆕 신규 — 1-3 `P0` · composer-bucket-completeness 3차 재발
+- [ ] **1-3** 14:55경 5m 버킷(14:50~14:55)의 마지막 1분봉(14:54)이 대기 상한 5초 안에 안 와
+      짧게 확정(`ComposerFlushedIncomplete`) 후 1.4초 뒤 도착한 그 1분봉이 버려짐
+      (`ComposerLateBarDropped`, lost_volume=162). `late_bar_drops: 2`,
+      `FixVerificationRecurred`(최초위반 08-13 이후 3회, 그 사이 23거래일 0건). 하루 전체
+      `TickDeliveryLatency`는 정상(p99 1.030s)이라 국소 스파이크가 원인.
+
+### 🆕 신규 — F-94 `P0` · 대응 이상점 1-3 (사람 승인 후 적용)
+- [ ] **F-94** `src/messiah/data/close_grace.py` 37행 `MAX_CONSTITUENT_WAIT_SECONDS = 5.0`을
+      08-05~09-07 실측 지연 분포 재수집 후 재산정(가안 7~8초, **기준 완화성 변경이므로 값은
+      사람이 확정**). `src/messiah/data/bar_composer.py` 610행 부근 —
+      `ComposerFlushedIncomplete`/`ComposerLateBarDropped` 쌍을 `incident_id`로 상관관계
+      로깅. 검증: `tests/data/test_bar_composer.py`에 지연 스파이크(4.5~8초) 케이스 추가,
+      replay로 08-13·08-14·09-07 재생 후 `late_bar_drops` 0 확인, 다음 3거래일 연속 관찰.
+      **주의**: 대기를 늘리면 `PublishGraceBreached` 판정 기준과 충돌 가능 — 유예 판정
+      기준도 같이 재계산 필요(SYSTEM.md §4-3 "세 값은 서로 다른 질문에 답한다").
+
+### 🆕 참고(고도화 후보) — G-57 · G-58
+- [ ] **G-57** 완성봉 지연을 일평균이 아니라 5분 롤링 p99로 감시하는 축 신설.
+      `MAX_CONSTITUENT_WAIT_SECONDS`의 80% 초과 시 사전 경보 태그(`DeliveryLatencySpike`).
+      F-94와 함께 설계(임계값이 서로 어긋나지 않게).
+- [ ] **G-58** `FixVerificationRecurred` 발행 시 `clean_streak_before_recurrence_days` 필드
+      추가 — 재발이 연속인지 오랜만인지 즉시 판단 가능하게(`ops/fix_verification.py`).
+
+### 🔍 다음 장전 관측
+- [ ] **C-1** 3/3 채점 완료 여부 공식 확인(no-silent-process-death).
+- [ ] **F-94** 사람 승인 여부 확인, 승인 시 착수.
+- [ ] **G-54** 장전 세션의 git 직접 호출 여부(6세션 중 4세션 위반 스트릭 지속 여부).
+- [ ] **K-25** 2026-09-10(다음 위클리 만기일) 전까지 F-93 반입 여부 결정 필요.
+
+## 2026-09-07 장후 자동조치 결과 (18:30)
+
+### ✅ 구현·커밋 완료
+- [x] **F-93** 옵션 무결정 사유 로깅 — `OptionsNoCandidate`(INFO) 신설, `_publish_no_option()`
+      배선. 커밋 `06bdd9f`(태그 등록) + `6363759`(배선·테스트 4건). replay 통과.
+- [x] **G-58** 재발 판정에 직전 무위반 구간 길이 — `clean_streak_before_violation` 필드가
+      판정문·스코어보드·`FixVerificationRecurred` 로그에 실린다. 커밋 `dd289d6`(테스트 6건,
+      그중 1건은 「판정 불변」 전용).
+
+### ⏸ C등급 보류 — 사람 결정 대기 (자동조치가 손대지 않음)
+- [ ] **F-94** `close_grace.MAX_CONSTITUENT_WAIT_SECONDS = 5.0` 재산정 — **상한 값은 사람이
+      확정한다**(기준 완화 방향). 오늘 실측 지연 최대 7881.6ms. 값 확정 시 `PublishGraceBreached`
+      유예 판정 기준도 같이 재계산해야 한다(SYSTEM.md §4-3). 09-07 리포트 「Fix 작업 구현계획
+      — 장후」 참조.
+- [ ] **G-57** 구간 스파이크 사전 경보(`DeliveryLatencySpike`) — **선행 조건 F-94**. 임계
+      80%의 기준값(상한)이 안 정해져 착수 불가.
+- [ ] **G-54** 점검 세션의 git 직접 호출 방지 장치 — 리포트가 "사람이 착수 여부부터 결정"으로
+      넘김(09-04 회차와 동일 사유로 2회 연속 보류). 약 30분.
+- [ ] **F-91** `no-silent-process-death` 검증 기한 재조정 — 사람 결정 계속 대기. 다만
+      2026-09-08 하루 더 깨끗하면 3/3으로 자동 종결 가능(급하지 않음).
+
+### 🔍 다음 거래일(2026-09-08) 장중·장후에서 확인
+- [ ] **F-93 반입 확인** — 장중에 `OptionsNoCandidate`가 5분 주기로 실제로 쌓이는지
+      (`logs/g2_daily_20260908.log`). 라이브 미검증 상태 해소 여부.
+- [ ] **G-58 반입 확인** — 재발이 나면 `FixVerificationRecurred`에
+      `clean_streak_before_recurrence_days`가 실려 나오는지. 재발이 없으면 확인 보류.
+- [ ] **K-25** F-93이 들어갔으므로 2026-09-10(목) 위클리 만기일에 `no_option_reason` 분포
+      재시도 가능.
