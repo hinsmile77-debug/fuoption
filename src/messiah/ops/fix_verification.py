@@ -769,6 +769,14 @@ class VerificationVerdict:
     axis: str = "outcome"
     # negative control이 가리킨 사건 — (날짜, 값) (2026-08-19 G-4).
     control: tuple[date, float] | None = None
+    # **가장 최근 위반 직전의 무위반 구간 길이**(채점된 거래일 수) (2026-09-07 G-58).
+    # 재발의 성격은 "몇 번째냐"만으로 안 갈린다 — 연속 재발과 23거래일 만의 재발은
+    # 원인이 다르다(전자는 최근 변경 대조, 후자는 국소 스파이크 조사). 09-07에
+    # `composer-bucket-completeness`가 3회째 재발했을 때, 그 사이 23거래일이 깨끗했다는
+    # 사실은 조사자가 `daily_integrity_*.json`을 날짜별로 손으로 훑어야 알 수 있었다.
+    # 위반 이력이 없으면 0이다 — "직전 위반이 없다"와 "직전 무위반이 0일"은
+    # `violation_count`로 갈린다.
+    clean_streak_before_violation: int = 0
 
     @property
     def needs_attention(self) -> bool:
@@ -1084,6 +1092,8 @@ def evaluate(
         # 성립하지 않는다(옛날에 한 번 통과했으면 오늘 계측이 죽어도 안 걸린다).
         trailing_unmeasured = 0
         violated_today = False
+        # 마지막 위반 직전의 무위반 구간 (2026-09-07 G-58) — 위반이 없으면 0으로 남는다.
+        clean_streak_before_violation = 0
         # **지표값도 계산하고 버리고 있었다** (2026-08-18 G-0818P-1). 08-16 P0-1이
         # `degenerate 57 → 0`을 만든 성과를 알아내려고 사람이 추출기를 손으로 다시 돌려야
         # 했다 — 채점기가 이미 매일 계산하는 값인데 판정만 남기고 값을 버렸기 때문이다.
@@ -1115,6 +1125,9 @@ def evaluate(
                 measured_bad.append(day)
             else:
                 violations.append(day)
+                # 이 위반 **직전까지** 몇 거래일이 깨끗했나 (2026-09-07 G-58). 0으로 밀기
+                # 전에 집어둔다 — 마지막 위반의 값만 남으면 되므로 매번 덮어써도 된다.
+                clean_streak_before_violation = clean_streak
                 clean_streak = 0
                 if day == today:
                     violated_today = True
@@ -1137,6 +1150,7 @@ def evaluate(
                 prev_value=measured[-2] if len(measured) >= 2 else None,
                 measured_bad=measured_bad,
                 control=_latest_control(item, reports),
+                clean_streak_before_violation=clean_streak_before_violation,
             )
         )
     return verdicts
@@ -1338,6 +1352,7 @@ def _verdict_for(
     prev_value: float | None = None,
     measured_bad: list[date] | None = None,
     control: tuple[date, float] | None = None,
+    clean_streak_before_violation: int = 0,
 ) -> VerificationVerdict:
     """판정 하나 — **오늘 위반이 맨 앞이다** (2026-08-18 F-0818P-1).
 
@@ -1388,6 +1403,7 @@ def _verdict_for(
             measured_bad=tuple(measured_bad or ()),
             control=control,
             axis=item.axis,
+            clean_streak_before_violation=clean_streak_before_violation,
         )
 
     # ⓪ **계기가 자기 자신을 채점하고 있지 않은가** (2026-08-19 G-4).
@@ -1445,6 +1461,12 @@ def _verdict_for(
                 when += f"({days_since_violation}거래일 전)"
             elif days_since_violation == 0:
                 when += "(오늘)"
+        # **몇 거래일 만의 재발인지가 조사 범위를 가른다** (2026-09-07 G-58). 연속 재발은
+        # 최근 변경을 대조할 일이고, 오랜만의 재발은 그날의 국소 사건을 팔 일이다. 종전엔
+        # 이 값을 알려면 `daily_integrity_*.json`을 날짜별로 손으로 훑어야 했다.
+        # **판정에는 관여하지 않는다** — 문구와 필드만 는다.
+        if len(violations) > 1 and clean_streak_before_violation > 0:
+            history += f" · 직전 무위반 {clean_streak_before_violation}거래일"
         return _verdict(
             VerificationStatus.RECURRED,
             f"{when} — 수정이 듣지 않았다{history} {note}",
@@ -1623,6 +1645,8 @@ def scoreboard(verdicts: list[VerificationVerdict], *, today: date) -> dict[str,
             # 계측은 됐는데 값이 나빴던 날들 (2026-08-19 F-4) — 비어 있으면 그런 날이 없었다.
             "measured_bad": [d.isoformat() for d in v.measured_bad],
             "axis": v.axis,
+            # 가장 최근 위반 직전의 무위반 구간 (2026-09-07 G-58) — 재발의 성격을 가른다.
+            "clean_streak_before_violation": v.clean_streak_before_violation,
         }
 
     buckets: dict[str, list[dict[str, Any]]] = {

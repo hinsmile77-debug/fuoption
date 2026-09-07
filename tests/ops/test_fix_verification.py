@@ -1291,3 +1291,113 @@ def _registry_file(tmp_path, *, registered, fix_committed=None):
         encoding="utf-8",
     )
     return path
+
+
+# ------------------------------------------------- 재발의 성격 — 직전 무위반 구간 (G-58)
+#
+# 2026-09-07에 `composer-bucket-completeness`가 3회째 재발했을 때, 판정문은 "최초 위반
+# 2026-08-13 이후 3회"까지만 말했다. 그런데 그 사이 **23거래일이 깨끗했다**는 사실이
+# 조사 방향을 정한다 — 연속 재발이면 최근 변경을 대조할 일이고, 오랜만의 재발이면 그날의
+# 국소 사건을 팔 일이다. 그 값은 `daily_integrity_*.json`을 날짜별로 손으로 훑어야 나왔다.
+
+
+def _crashy(day: date) -> dict:
+    return _report(day, native_crashes={"available": True, "count": 1, "details": []})
+
+
+def test_recurrence_carries_the_clean_streak_that_preceded_it(tmp_path: Path):
+    """위반 → 깨끗한 3거래일 → 다시 위반. 판정문이 그 3거래일을 말한다."""
+    registry = _registry(tmp_path)
+    days = [date(2026, 8, d) for d in (4, 5, 6, 7, 10, 11)]
+    reports = {d: (_crashy(d) if d in (days[0], days[-1]) else _report(d)) for d in days}
+
+    verdict = evaluate(registry, reports, today=days[-1])[0]
+
+    assert verdict.status == VerificationStatus.RECURRED
+    assert verdict.clean_streak_before_violation == 4
+    assert "직전 무위반 4거래일" in verdict.detail
+
+
+def test_back_to_back_recurrence_says_nothing_about_a_clean_streak(tmp_path: Path):
+    """이틀 연속 위반이면 직전 무위반이 0이다 — 문구가 붙지 않는다.
+
+    "직전 무위반 0거래일"을 굳이 적으면 연속 재발마다 뜻 없는 꼬리가 붙는다.
+    없다는 사실은 `violation_count`와 문구 부재로 이미 말해진다.
+    """
+    registry = _registry(tmp_path)
+    days = [date(2026, 8, d) for d in (4, 5)]
+    reports = {d: _crashy(d) for d in days}
+
+    verdict = evaluate(registry, reports, today=days[-1])[0]
+
+    assert verdict.status == VerificationStatus.RECURRED
+    assert verdict.clean_streak_before_violation == 0
+    assert "직전 무위반" not in verdict.detail
+
+
+def test_a_single_first_violation_is_not_dressed_as_a_recurrence(tmp_path: Path):
+    """위반이 한 번뿐이면 재발 서사가 아니다 — 앞의 깨끗한 날들을 세지 않는다."""
+    registry = _registry(tmp_path)
+    days = [date(2026, 8, d) for d in (4, 5, 6)]
+    reports = {d: (_crashy(d) if d == days[-1] else _report(d)) for d in days}
+
+    verdict = evaluate(registry, reports, today=days[-1])[0]
+
+    assert verdict.status == VerificationStatus.RECURRED
+    assert verdict.violation_count == 1
+    assert "직전 무위반" not in verdict.detail
+
+
+def test_clean_streak_before_violation_is_zero_without_any_violation(tmp_path: Path):
+    """위반 이력이 없으면 0 — 「직전 위반이 없다」와 「직전 무위반이 0일」은
+    `violation_count`로 갈린다."""
+    registry = _registry(tmp_path)
+    reports = {date(2026, 8, d): _report(date(2026, 8, d)) for d in (4, 5, 6)}
+
+    verdict = evaluate(registry, reports, today=date(2026, 8, 7))[0]
+
+    assert verdict.status == VerificationStatus.VERIFIED
+    assert verdict.violation_count == 0
+    assert verdict.clean_streak_before_violation == 0
+
+
+def test_the_new_field_does_not_move_any_verdict(tmp_path: Path):
+    """**판정 불변** — G-58은 계측 필드를 늘릴 뿐 상태·연속일수를 건드리지 않는다.
+
+    위 세 시나리오(연속 재발 · 간격을 둔 재발 · 무위반)를 한자리에서 대조한다. 이 항목이
+    판정에 닿으면 재발 판정 자체가 흔들리므로, 필드 추가와 판정 이동을 여기서 갈라 둔다.
+    """
+    registry = _registry(tmp_path)
+    d = {n: date(2026, 8, n) for n in (4, 5, 6, 7, 10, 11)}
+    cases = [
+        ({d[4]: _crashy(d[4]), d[5]: _crashy(d[5])}, d[5], VerificationStatus.RECURRED, 0),
+        (
+            {
+                d[4]: _crashy(d[4]),
+                d[5]: _report(d[5]),
+                d[6]: _report(d[6]),
+                d[7]: _report(d[7]),
+                d[10]: _report(d[10]),
+                d[11]: _crashy(d[11]),
+            },
+            d[11],
+            VerificationStatus.RECURRED,
+            0,
+        ),
+        ({d[n]: _report(d[n]) for n in (4, 5, 6)}, d[7], VerificationStatus.VERIFIED, 3),
+    ]
+    for reports, today, expected_status, expected_clean in cases:
+        verdict = evaluate(registry, reports, today=today)[0]
+        assert verdict.status == expected_status, today
+        assert verdict.clean_days == expected_clean, today
+
+
+def test_scoreboard_carries_the_field(tmp_path: Path):
+    """산출물에도 실린다 — 로그를 파싱하지 않고 회복률 데이터 원천에서 바로 읽는다."""
+    registry = _registry(tmp_path)
+    days = [date(2026, 8, d) for d in (4, 5, 6, 7, 10, 11)]
+    reports = {d: (_crashy(d) if d in (days[0], days[-1]) else _report(d)) for d in days}
+
+    board = scoreboard(evaluate(registry, reports, today=days[-1]), today=days[-1])
+
+    assert board["today_violating"][0]["clean_streak_before_violation"] == 4

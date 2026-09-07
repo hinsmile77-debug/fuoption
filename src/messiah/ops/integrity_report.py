@@ -3828,6 +3828,10 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
             date=day.isoformat(),
             fix_id=verdict.id,
             status=verdict.status,
+            # 가장 최근 위반 직전의 무위반 구간 (2026-09-07 G-58) — 재발 조사의 진입점이
+            # 이 값으로 갈린다(연속 재발이면 최근 변경 대조, 오랜만이면 국소 사건 조사).
+            # 위반 이력이 없는 판정에서는 0이다.
+            clean_streak_before_recurrence_days=verdict.clean_streak_before_violation,
         )
 
     # **오늘 몇 개가 회복됐나를 한 줄로** (2026-08-18 G-0818P-1). 항목별 판정은 위 23줄이
