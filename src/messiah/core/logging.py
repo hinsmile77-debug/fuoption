@@ -268,6 +268,12 @@ TAG_LEVELS: dict[str, int] = {
     # 후보 생성 실패 — 구조 미지원(코드 결함)과 델타 미도달(그날 시장)이 섞여 있어 필드
     # `supported`로 가른다. 지금 75% 사이클에서 뜨므로 WARNING은 잡음이 된다.
     "OptionsCandidateUnbuildable": logging.INFO,
+    # **무결정도 판단이다** (2026-09-07 F-93). `_publish_view()`의 무결정 경로 4갈래가 전부
+    # `_publish_no_option()`으로 모이는데 그 함수가 버스 발행만 하고 로그를 안 남겼다 —
+    # 09-07 장중에 46번의 판단 기회 중 "왜 안 샀는지"가 로그로 재구성되는 것이 최대 1건
+    # 이었고, 그 때문에 K-25(위클리 만기일 `no_option_reason` 분포)가 판정 자체를 못 했다.
+    # 정상적인 무결정이므로 INFO다 — WARNING으로 올리면 하루 ~78건이 잡음이 된다.
+    "OptionsNoCandidate": logging.INFO,
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired
