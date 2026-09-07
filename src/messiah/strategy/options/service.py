@@ -209,6 +209,17 @@ class OptionsAIService:
         await self._bus.publish(TOPIC_OPTIONS, view)
 
     async def _publish_no_option(self, reason: str) -> None:
+        # **무결정도 로그로 남긴다** (2026-09-07 F-93). 이 함수로 모이는 경로가 넷인데
+        # (① Futures 방향 뷰 미수신 ② IV Surface 미준비 ③ IV Rank 이력 부족/매트릭스 셀
+        # 없음 ④ 후보를 만들었지만 안전규칙에서 전부 기각) 종전엔 버스 발행만 하고 로그를
+        # 안 남겼다. 09-07 장중 46사이클 중 사유가 로그로 재구성되는 것이 최대 1건이었고,
+        # 그래서 "왜 안 샀나"를 사후에 못 짚었다 — 발행된 뷰는 다음 발행이 덮는다.
+        mlog.log(
+            "OptionsNoCandidate",
+            reason,
+            symbol=self._symbol,
+            reason=reason,
+        )
         view = OptionsView(
             symbol=self._symbol,
             underlying=self._underlying,

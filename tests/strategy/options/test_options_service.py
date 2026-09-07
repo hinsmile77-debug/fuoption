@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
+from messiah.core import logging as mlog
 from messiah.core.messages import BarClosed, FuturesView, Horizon
 from messiah.core.timeutil import KST
 from messiah.simulator.inprocess_bus import InProcessBus
@@ -189,3 +192,78 @@ async def test_run_forever_wires_subscriptions_end_to_end():
 
     assert len(published) == 1
     assert published[0].no_option_reason == "IV Rank 이력 부족"
+
+
+# ---------------------------------------------------------------- 무결정 사유 로깅 (F-93)
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """`mlog.log` 호출을 그대로 받는다 — `tests/risk/test_sizer_shortfall.py`와 같은 방식."""
+    records: list[tuple[str, str, dict]] = []
+
+    def fake_log(tag, message="", **fields):
+        records.append((tag, message, fields))
+
+    monkeypatch.setattr(mlog, "log", fake_log)
+    return records
+
+
+def _no_candidate(records) -> list[tuple[str, str, dict]]:
+    return [r for r in records if r[0] == "OptionsNoCandidate"]
+
+
+async def test_no_option_paths_each_leave_a_tag(captured):
+    """무결정 경로 셋이 각각 사유를 태그로 남긴다 — 2026-09-07 이상점 1-2.
+
+    이 셋(방향 뷰 미수신 · IV Surface 미준비 · IV Rank 이력 부족)은 종전에 버스로만
+    발행됐고, 발행된 뷰는 다음 발행이 덮는다. 그래서 09-07 장중 46사이클 중 "왜 안 샀나"가
+    로그로 재구성되는 것이 최대 1건이었다.
+    """
+    bus = InProcessBus()
+    await _collect(bus)
+    await OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus).handle_bar(_bar())
+    await OptionsAIService(_SYMBOL, _UNDERLYING, lambda: None, bus).handle_futures_view(
+        _futures_view(0.5)
+    )
+    await OptionsAIService(
+        _SYMBOL, _UNDERLYING, lambda: _smile(), bus, iv_history=IVHistory()
+    ).handle_futures_view(_futures_view(0.5))
+
+    assert [fields["reason"] for _, _, fields in _no_candidate(captured)] == [
+        "Futures AI 방향 뷰 미수신",
+        "IV Surface 미준비",
+        "IV Rank 이력 부족",
+    ]
+    assert all(fields["symbol"] == _SYMBOL for _, _, fields in _no_candidate(captured))
+
+
+async def test_all_candidates_rejected_leaves_a_tag(captured):
+    """넷째 경로 — 후보는 만들었는데 안전규칙이 전부 걸렀다. 위 셋과 고칠 곳이 다르다."""
+    bus = InProcessBus()
+    await _collect(bus)
+    service = OptionsAIService(
+        _SYMBOL,
+        _UNDERLYING,
+        lambda: _smile(),
+        bus,
+        iv_history=IVHistory(),
+        event_calendar=FakeEventCalendar(is_expiry=True),
+    )
+    await service.handle_futures_view(_futures_view(0.5))
+    await service.handle_futures_view(_futures_view(0.5))
+
+    assert _no_candidate(captured)[-1][2]["reason"] == "생성된 후보가 전부 안전규칙에서 기각됨"
+
+
+async def test_successful_publish_leaves_no_no_candidate_tag(captured):
+    """후보가 나온 사이클엔 이 태그가 없다 — 있으면 분포 집계가 그만큼 부풀려진다."""
+    bus = InProcessBus()
+    published = await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus, iv_history=IVHistory())
+
+    await service.handle_futures_view(_futures_view(0.5))
+    await service.handle_futures_view(_futures_view(0.5))
+
+    assert published[-1].no_option_reason is None
+    assert len(_no_candidate(captured)) == 1, "첫 사이클(이력 부족) 1건뿐"
