@@ -274,6 +274,16 @@ TAG_LEVELS: dict[str, int] = {
     # 이었고, 그 때문에 K-25(위클리 만기일 `no_option_reason` 분포)가 판정 자체를 못 했다.
     # 정상적인 무결정이므로 INFO다 — WARNING으로 올리면 하루 ~78건이 잡음이 된다.
     "OptionsNoCandidate": logging.INFO,
+    # 판단이 **빈 사이클**의 원인을 세 갈래로 가른다 (2026-09-09 이상점 1-4). 09-09에
+    # 5분 그리드 09:15·09:25 두 마크만 무로그였는데, ㉠미도달·㉡필터·㉢예외가 전부 흔적을
+    # 남기지 않아 저녁까지 원인을 못 골랐다. 자세한 사정은 `strategy/options/service._dispatch`.
+    #
+    # 예외는 이 서비스가 맥락을 얹고 **다시 던진다** — 버스도 자기 몫(`SubscriberHandlerFailed`)을
+    # 남긴다. 그쪽은 로그를 조절해 2~9번째 실패가 안 보이므로 이 태그가 그 빈자리를 메운다.
+    "OptionsHandleBarFailed": logging.ERROR,
+    # 구독 패턴이 M5·`intel.futures`뿐이라 정상 운영에서 0건이다 — 뜨면 그 자체가 결함
+    # 신호(패턴이 넓거나 심볼·호라이즌이 어긋났다)이므로 INFO로 묻으면 안 된다.
+    "OptionsDispatchIgnored": logging.WARNING,
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired
