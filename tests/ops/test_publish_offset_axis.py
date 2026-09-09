@@ -891,3 +891,90 @@ def test_breached_horizons_does_not_change_the_verdict(monkeypatch) -> None:
     ]
     for key in ("worst_horizon", "headroom_ms", "by_horizon", "over_grace_by_hour"):
         assert key in loud[0], key
+
+
+# ------------------------- 유실 전 사전 경보의 배선 (2026-09-10 G-57)
+#
+# 값의 근거와 임계 시뮬레이션은 `tests/ops/test_delay_spike.py`와 `obs/delay_spike`
+# docstring에 있다. 여기서 재는 것은 **엔진이 그 창에 무엇을 넣는가**뿐이다.
+
+
+def _publish_m1_with_delay(engine, now, bar_open, delay_ms: float) -> None:
+    vector = _vector(Horizon.M1, bar_open)
+    now[0] = vector.valid_until + timedelta(milliseconds=delay_ms)
+    engine._note_delay_spike(vector, engine._record_publish_offset(vector)[0])
+
+
+def test_the_spike_alarm_fires_on_the_live_axis(monkeypatch) -> None:
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 9, 7, 14, 50, tzinfo=KST)]
+    engine = _engine(now, mode="live")
+
+    for minute, delay in ((0, 300.0), (1, 500.0), (2, 7880.0)):
+        _publish_m1_with_delay(
+            engine, now, datetime(2026, 9, 7, 14, 50 + minute, tzinfo=KST), delay
+        )
+
+    spikes = [r for r in records if r["tag"] == "BarPublishDelaySpike"]
+    assert len(spikes) == 1
+    assert spikes[0]["headroom_seconds"] > 0, "아직 유실이 아니라는 것이 이 경보의 요지다"
+    assert "유실 아님" in spikes[0]["msg"]
+
+
+def test_replay_does_not_ride_the_spike_alarm(monkeypatch) -> None:
+    """`_note_publish_sla`와 같은 규율 (2026-08-24 F-28) — 재생의 발행 지연은 실시간의
+    그것이 아니므로, 그 값으로 경보를 내면 재생할 때마다 가짜 스파이크가 뜬다."""
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 9, 7, 14, 50, tzinfo=KST)]
+    engine = _engine(now, mode="replay")
+
+    for minute, delay in ((0, 300.0), (1, 8730.0)):
+        _publish_m1_with_delay(
+            engine, now, datetime(2026, 9, 7, 14, 50 + minute, tzinfo=KST), delay
+        )
+
+    assert [r for r in records if r["tag"] == "BarPublishDelaySpike"] == []
+
+
+def test_composed_horizons_never_enter_the_window(monkeypatch) -> None:
+    """3m 이상의 오프셋에는 **기다린 시간이 섞여 있다** — 그것을 창에 넣으면
+    「상한에 가까워졌나」를 상한이 만든 값으로 되묻는 순환이 된다."""
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 9, 7, 14, 50, tzinfo=KST)]
+    engine = _engine(now, horizons=[Horizon.M1, Horizon.M5], mode="live")
+
+    # 상한을 거의 소진한 5분봉 — 합성기가 기다렸기 때문에 큰 값이다. 경보 대상이 아니다.
+    vector = _vector(Horizon.M5, datetime(2026, 9, 7, 14, 50, tzinfo=KST))
+    now[0] = vector.valid_until + timedelta(milliseconds=9800.0)
+    engine._note_delay_spike(vector, engine._record_publish_offset(vector)[0])
+
+    assert [r for r in records if r["tag"] == "BarPublishDelaySpike"] == []
+
+
+def test_an_unmeasured_offset_is_not_a_zero_sample(monkeypatch) -> None:
+    """오프셋을 못 잰 발행(`valid_until` 없음)을 0초로 넣으면 창이 조용해진다 (L18)."""
+    from messiah.core import logging as mlog
+
+    monkeypatch.setattr(mlog, "log", lambda tag, msg, **f: None)
+    now = [datetime(2026, 9, 7, 14, 50, tzinfo=KST)]
+    engine = _engine(now, mode="live")
+
+    before = len(engine._delay_spike._samples)
+    engine._note_delay_spike(_vector(Horizon.M1, now[0]), None)
+
+    assert len(engine._delay_spike._samples) == before

@@ -54,6 +54,7 @@ from messiah.core.timeutil import KST, now_kst
 from messiah.data.close_grace import close_grace_ms
 from messiah.features import px_core
 from messiah.features import spec as feature_spec
+from messiah.obs.delay_spike import DelaySpikeWatch
 
 # 등록된 **모든** 피처가 계산 가능한 최소 봉 수 이상이어야 한다.
 #
@@ -525,6 +526,10 @@ class FeatureEngine:
         # (발행 시각, 오프셋ms, Horizon, 축) — 축을 함께 들고 있어야 세션 요약이
         # "1m은 보정된 값, 3m+는 원래부터 한 축"임을 말할 수 있다 (2026-08-21 F-12).
         self._publish_offsets: list[tuple[datetime, float, Horizon, str]] = []
+        # 유실 **전에** 뜨는 사전 경보의 창 (2026-09-10 G-57). 하루 단위 분위수가 못 보는
+        # 「짧고 굵은」 스파이크를 5분 롤링으로 본다 — 근거는 `obs/delay_spike` docstring.
+        # 막는 것이 아니라 남기는 것이다(R18: 신설 축은 20거래일 섀도 관찰 뒤 승격 판단).
+        self._delay_spike = DelaySpikeWatch()
         # 발행 시점의 **롤링** 시계 스큐를 읽는 콜러블(보통 `TickCollector.clock_skew_seconds`).
         # 없으면 보정하지 않는다 — 보정 못 하는 것이지 스큐가 0인 것이 아니다(L18).
         self._clock_skew_seconds = clock_skew_seconds
@@ -1037,6 +1042,7 @@ class FeatureEngine:
         # 확정 시각을 그대로 실으면 그 모호성이 **구조적으로** 사라진다. 값은 이미 손에 있다
         # (`vector.valid_until` = `bar_open_kst + Horizon길이`) — 새 입력이 필요 없다.
         offset_ms, offset_axis, skew_ms = self._record_publish_offset(vector)
+        self._note_delay_spike(vector, offset_ms)
         # **엔진이 자기 몫으로 쓴 시간** (2026-08-24 F-21) — 위 오프셋과 다른 것을 잰다.
         # monotonic 차라 시계 스큐·리플레이와 무관하고, 대기가 섞여 있지 않다.
         bar_to_publish_ms: float | None = None
@@ -1125,6 +1131,41 @@ class FeatureEngine:
         offset_ms = round(offset_ms, 1)
         self._publish_offsets.append((moment, offset_ms, vector.horizon, axis))
         return offset_ms, axis, skew_ms
+
+    def _note_delay_spike(self, vector: FeatureVector, offset_ms: float | None) -> None:
+        """1분봉 발행 지연의 5분 롤링 최댓값이 상한의 70%를 넘는 **순간**을 남긴다 (G-57).
+
+        ## M1만 넣는다
+
+        합성기가 기다리는 것은 그 버킷의 **마지막 1분봉**이고 상한이 재는 것도 그것이다.
+        3m 이상의 오프셋에는 **기다린 시간이 섞여 있어서**(`_record_publish_offset` 주석)
+        그것을 창에 넣으면 「상한에 가까워졌나」를 상한이 만든 값으로 되묻는 순환이 된다.
+
+        ## 리플레이는 이 축을 안 탄다
+
+        `_note_publish_sla`와 같은 규율이다 (2026-08-24 F-28). 재생은 저장된 봉을 순서대로
+        흘리므로 발행 지연이 실시간의 그것이 아니다 — 그 값으로 경보를 내면 재생할 때마다
+        가짜 스파이크가 뜬다.
+        """
+        if not self._live or vector.horizon is not Horizon.M1 or offset_ms is None:
+            return
+        spike = self._delay_spike.observe(self._now(), offset_ms / 1000.0)
+        if spike is None:
+            return
+        mlog.log(
+            "BarPublishDelaySpike",
+            f"1분봉 발행 지연 5분 최댓값 {spike.window_max_seconds:.2f}초 — "
+            f"합성 대기 상한 {spike.bound_seconds:.0f}초까지 "
+            f"{spike.headroom_seconds:.2f}초 남았다(아직 유실 아님)",
+            symbol=vector.symbol,
+            window_max_seconds=spike.window_max_seconds,
+            threshold_seconds=spike.threshold_seconds,
+            bound_seconds=spike.bound_seconds,
+            headroom_seconds=spike.headroom_seconds,
+            headroom_ratio=round(spike.headroom_ratio, 4),
+            samples=spike.samples,
+            worst_at=spike.worst_at.isoformat(),
+        )
 
     def _note_publish_sla(self, vector: FeatureVector, elapsed_ms: float | None) -> None:
         """**발행 예산**을 넘긴 발행을 모아 두고, 순간이 바뀌면 한 줄로 남긴다.

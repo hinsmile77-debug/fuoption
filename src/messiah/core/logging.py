@@ -284,6 +284,17 @@ TAG_LEVELS: dict[str, int] = {
     # 구독 패턴이 M5·`intel.futures`뿐이라 정상 운영에서 0건이다 — 뜨면 그 자체가 결함
     # 신호(패턴이 넓거나 심볼·호라이즌이 어긋났다)이므로 INFO로 묻으면 안 된다.
     "OptionsDispatchIgnored": logging.WARNING,
+    # **유실 전에 뜨는 사전 경보** (2026-09-10 G-57). 1분봉 발행 지연의 5분 롤링 최댓값이
+    # 합성 대기 상한의 70%를 넘는 순간 — 그 시점엔 아직 상한이 남아 있으므로 유실이 아니다.
+    #
+    # 09-07에 5분봉 하나가 짧게 확정돼 거래량 162가 빠졌는데 그날 하루 분위수는 전부 정상
+    # 범위였다(틱 지연 p99 1.030초). 하루를 한 덩어리로 요약하는 계기는 「짧고 굵은」
+    # 스파이크를 구조적으로 못 본다 — 이 태그가 그 사각을 맡는다.
+    #
+    # WARNING인 이유: 실측 빈도가 5거래일당 1회다(14거래일 시뮬레이션). INFO로 묻으면
+    # 사후 조사에서만 읽히고, 그러면 「사전」이라는 목적 자체가 없어진다. 임계 근거와
+    # 80%를 쓰지 않은 이유는 `obs/delay_spike.py` docstring에 있다.
+    "BarPublishDelaySpike": logging.WARNING,
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired
