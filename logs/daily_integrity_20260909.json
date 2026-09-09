@@ -1,0 +1,1290 @@
+{
+  "date": "2026-09-09",
+  "symbol": "A05609",
+  "instance_id": "messiah-dev-01",
+  "bar_continuity": [
+    {
+      "horizon": "1m",
+      "rows": 410,
+      "first_bar_kst": "08:45",
+      "last_bar_kst": "15:34",
+      "missing_minutes": 0,
+      "longest_gap_minutes": 0,
+      "gaps": [],
+      "tail_gap_minutes": 0
+    }
+  ],
+  "restarts": 0,
+  "starts_by_process": {
+    "l1_daily": 1,
+    "g2_paper": 1
+  },
+  "restarts_by_process": {
+    "l1_daily": 0,
+    "g2_paper": 0
+  },
+  "ui_restarts": 0,
+  "session_starts_kst": {
+    "l1_daily": [
+      "08:20:42"
+    ],
+    "g2_paper": [
+      "08:25:26"
+    ]
+  },
+  "nan_ratio_by_horizon": {
+    "10m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 41
+    },
+    "15m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 27
+    },
+    "1m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 409
+    },
+    "30m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 14
+    },
+    "3m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 136
+    },
+    "5m": {
+      "median": 0.0,
+      "min": 0.0,
+      "last": 0.0,
+      "samples": 81
+    }
+  },
+  "log_level_counts": {
+    "INFO": 231,
+    "WARNING": 12,
+    "DEBUG": 839
+  },
+  "tag_counts": {
+    "SessionStart": 4,
+    "CrashForensicsArmed": 4,
+    "LaunchWindowRefused": 2,
+    "OptionChainScheduleResolved": 3,
+    "FeatureWarmStart": 1,
+    "OptionChainStaleSpot": 2,
+    "OptionChainPollRetried": 11,
+    "OptionChainPolled": 130,
+    "OptionChainSeriesNotListed": 1,
+    "InvestorFlowPollRetried": 5,
+    "CollectorFirstTick": 4,
+    "ClockSkewMeasured": 14,
+    "FeaturePublish": 708,
+    "OptionChainStaleSpotResolved": 2,
+    "CollectorWSDisconnected": 3,
+    "CollectorWSReconnected": 3,
+    "DailyCloseBarHandedOff": 1,
+    "FeatureHealthSummary": 4,
+    "FeatureHealthNotJudged": 2,
+    "TickDeliveryLatency": 1,
+    "FeaturePublishOffset": 1,
+    "PublishGraceBreached": 1,
+    "TickArchiveSummary": 1,
+    "ArchiveCompacted": 6,
+    "Recomposed": 1,
+    "IntegrityReportGenerated": 1,
+    "SessionEnd": 2,
+    "CommandCenterUIPortConfirmed": 1,
+    "RegimeWarmStart": 1,
+    "RegimeSeeded": 1,
+    "IVHistorySeeded": 1,
+    "OptionSmileProviderStarted": 1,
+    "OptionsNoCandidate": 91,
+    "RegimeClassified": 14,
+    "MetaGateEvaluated": 14,
+    "DecisionEmitted": 14,
+    "OptionsCandidateUnbuildable": 20,
+    "OrderPendingSet": 1,
+    "OrderSubmit": 1,
+    "PassCycleSnapshot": 2,
+    "RiskReject": 1,
+    "SelfEvalReportGenerated": 1
+  },
+  "circuit_breaker_events": {},
+  "data_flow_findings": [],
+  "horizon_findings": [],
+  "late_bar_drops": 0,
+  "clock_skew_seconds": -0.169,
+  "clock_skew_range_seconds": 0.116,
+  "delivery_latency": {
+    "p50": 0.4964,
+    "p90": 0.9161,
+    "p99": 1.0216,
+    "max": 1.1198,
+    "samples": 20000.0,
+    "capacity": 20000.0,
+    "observed_total": 69038.0,
+    "truncated": true,
+    "population": "tail_ringbuffer",
+    "by_hour": {
+      "08": {
+        "p50": 0.51908,
+        "p90": 0.928894,
+        "samples": 1088.0,
+        "population": "all",
+        "p90_tail": null,
+        "samples_tail": 0.0
+      },
+      "09": {
+        "p50": 0.5133059999999999,
+        "p90": 0.924004,
+        "samples": 15305.0,
+        "population": "all",
+        "p90_tail": null,
+        "samples_tail": 0.0
+      },
+      "10": {
+        "p50": 0.512756,
+        "p90": 0.92374,
+        "samples": 10279.0,
+        "population": "all",
+        "p90_tail": null,
+        "samples_tail": 0.0
+      },
+      "11": {
+        "p50": 0.509991,
+        "p90": 0.919055,
+        "samples": 9725.0,
+        "population": "all",
+        "p90_tail": null,
+        "samples_tail": 0.0
+      },
+      "12": {
+        "p50": 0.498397,
+        "p90": 0.913435,
+        "samples": 9920.0,
+        "population": "all",
+        "p90_tail": null,
+        "samples_tail": 0.0
+      },
+      "13": {
+        "p50": 0.499363,
+        "p90": 0.9161349999999999,
+        "samples": 9445.0,
+        "population": "all",
+        "p90_tail": 0.9076630000000001,
+        "samples_tail": 6724.0
+      },
+      "14": {
+        "p50": 0.501668,
+        "p90": 0.9217000000000001,
+        "samples": 10042.0,
+        "population": "all",
+        "p90_tail": 0.9217000000000001,
+        "samples_tail": 10042.0
+      },
+      "15": {
+        "p50": 0.47985900000000004,
+        "p90": 0.911625,
+        "samples": 3234.0,
+        "population": "all",
+        "p90_tail": 0.911625,
+        "samples_tail": 3234.0
+      }
+    }
+  },
+  "publish_offset": {
+    "p50": 582.4,
+    "p90": 1219.8,
+    "p99": 2594.4,
+    "max": 5856.7,
+    "samples": 708.0,
+    "by_hour": {
+      "08": {
+        "p50": 520.6,
+        "p90": 1640.9,
+        "p99": 2210.2,
+        "samples": 21.0,
+        "over_1000": 7.0,
+        "over_1000_ratio": 0.3333,
+        "over_grace": 1.0
+      },
+      "09": {
+        "p50": 343.5,
+        "p90": 752.8,
+        "p99": 1501.8,
+        "samples": 104.0,
+        "over_1000": 3.0,
+        "over_1000_ratio": 0.0288,
+        "over_grace": 0.0
+      },
+      "10": {
+        "p50": 490.0,
+        "p90": 859.5,
+        "p99": 2378.4,
+        "samples": 104.0,
+        "over_1000": 5.0,
+        "over_1000_ratio": 0.0481,
+        "over_grace": 2.0
+      },
+      "11": {
+        "p50": 594.2,
+        "p90": 1344.4,
+        "p99": 1691.0,
+        "samples": 104.0,
+        "over_1000": 22.0,
+        "over_1000_ratio": 0.2115,
+        "over_grace": 1.0
+      },
+      "12": {
+        "p50": 599.2,
+        "p90": 1543.2,
+        "p99": 3185.4,
+        "samples": 104.0,
+        "over_1000": 21.0,
+        "over_1000_ratio": 0.2019,
+        "over_grace": 3.0
+      },
+      "13": {
+        "p50": 595.8,
+        "p90": 1242.8,
+        "p99": 2820.7,
+        "samples": 104.0,
+        "over_1000": 17.0,
+        "over_1000_ratio": 0.1635,
+        "over_grace": 3.0
+      },
+      "14": {
+        "p50": 585.5,
+        "p90": 1052.8,
+        "p99": 1711.5,
+        "samples": 104.0,
+        "over_1000": 13.0,
+        "over_1000_ratio": 0.125,
+        "over_grace": 1.0
+      },
+      "15": {
+        "p50": 634.4,
+        "p90": 1477.4,
+        "p99": 3473.6,
+        "samples": 63.0,
+        "over_1000": 21.0,
+        "over_1000_ratio": 0.3333,
+        "over_grace": 1.0
+      }
+    },
+    "by_horizon": {
+      "1m": {
+        "axis": "exchange_vs_local",
+        "p50": 303.3,
+        "p90": 1136.7,
+        "samples": 409.0,
+        "negative": 0.0,
+        "by_hour_p50": {
+          "08": 456.7,
+          "09": 179.6,
+          "10": 220.7,
+          "11": 362.9,
+          "12": 377.4,
+          "13": 321.9,
+          "14": 348.4,
+          "15": 339.8
+        },
+        "day_drift_ms": 277.1
+      },
+      "3m": {
+        "axis": "local_only",
+        "p50": 613.6,
+        "p90": 1344.4,
+        "samples": 136.0,
+        "negative": 0.0,
+        "by_hour_p50": {
+          "08": 556.3,
+          "09": 594.6,
+          "10": 599.6,
+          "11": 675.8,
+          "12": 651.2,
+          "13": 821.6,
+          "14": 613.6,
+          "15": 583.2
+        },
+        "day_drift_ms": 265.3
+      },
+      "10m": {
+        "axis": "local_only",
+        "p50": 700.7,
+        "p90": 1001.6,
+        "samples": 41.0,
+        "negative": 0.0,
+        "by_hour_p50": {
+          "08": 562.9,
+          "09": 666.4,
+          "10": 661.4,
+          "11": 601.5,
+          "12": 670.6,
+          "13": 635.6,
+          "14": 592.6,
+          "15": 920.5
+        },
+        "day_drift_ms": 357.6
+      },
+      "5m": {
+        "axis": "local_only",
+        "p50": 668.8,
+        "p90": 1222.3,
+        "samples": 81.0,
+        "negative": 0.0,
+        "by_hour_p50": {
+          "08": 433.7,
+          "09": 586.7,
+          "10": 656.2,
+          "11": 674.3,
+          "12": 829.1,
+          "13": 648.1,
+          "14": 668.8,
+          "15": 1041.4
+        },
+        "day_drift_ms": 607.7
+      },
+      "30m": {
+        "axis": "local_only",
+        "p50": 647.9,
+        "p90": 936.6,
+        "samples": 14.0,
+        "negative": 0.0,
+        "by_hour_p50": {
+          "09": 657.0,
+          "10": 589.8,
+          "11": 566.0,
+          "12": 602.7,
+          "13": 578.3,
+          "14": 608.6,
+          "15": 704.6
+        },
+        "day_drift_ms": 138.6
+      },
+      "15m": {
+        "axis": "local_only",
+        "p50": 721.9,
+        "p90": 918.8,
+        "samples": 27.0,
+        "negative": 0.0,
+        "by_hour_p50": {
+          "09": 640.5,
+          "10": 657.8,
+          "11": 646.0,
+          "12": 676.7,
+          "13": 714.0,
+          "14": 689.6,
+          "15": 849.5
+        },
+        "day_drift_ms": 209.0
+      }
+    },
+    "grace_headroom": {
+      "by_horizon": {
+        "1m": {
+          "grace_ms": 2000.0,
+          "max_offset_ms": 5856.7,
+          "headroom_ms": -3856.7,
+          "headroom_ratio": -1.9284
+        },
+        "3m": {
+          "grace_ms": 5000.0,
+          "max_offset_ms": 3682.2,
+          "headroom_ms": 1317.8,
+          "headroom_ratio": 0.2636
+        },
+        "5m": {
+          "grace_ms": 5000.0,
+          "max_offset_ms": 3185.4,
+          "headroom_ms": 1814.6,
+          "headroom_ratio": 0.3629
+        },
+        "10m": {
+          "grace_ms": 5000.0,
+          "max_offset_ms": 2490.3,
+          "headroom_ms": 2509.7,
+          "headroom_ratio": 0.5019
+        },
+        "15m": {
+          "grace_ms": 5000.0,
+          "max_offset_ms": 1205.9,
+          "headroom_ms": 3794.1,
+          "headroom_ratio": 0.7588
+        },
+        "30m": {
+          "grace_ms": 5000.0,
+          "max_offset_ms": 939.3,
+          "headroom_ms": 4060.7,
+          "headroom_ratio": 0.8121
+        }
+      },
+      "worst_headroom_ms": -3856.7,
+      "worst_horizon": "1m",
+      "breached_horizons": [
+        "1m"
+      ]
+    }
+  },
+  "publish_grace": {
+    "horizons": {
+      "10m": {
+        "measured": true,
+        "axis": "local_only",
+        "p50_ms": 700.7,
+        "p90_ms": 1001.6,
+        "samples": 41.0,
+        "day_drift_ms": 357.6
+      },
+      "15m": {
+        "measured": true,
+        "axis": "local_only",
+        "p50_ms": 721.9,
+        "p90_ms": 918.8,
+        "samples": 27.0,
+        "day_drift_ms": 209.0
+      },
+      "1m": {
+        "measured": true,
+        "axis": "exchange_vs_local",
+        "p50_ms": 303.3,
+        "p90_ms": 1136.7,
+        "samples": 409.0,
+        "day_drift_ms": 277.1
+      },
+      "30m": {
+        "measured": true,
+        "axis": "local_only",
+        "p50_ms": 647.9,
+        "p90_ms": 936.6,
+        "samples": 14.0,
+        "day_drift_ms": 138.6
+      },
+      "3m": {
+        "measured": true,
+        "axis": "local_only",
+        "p50_ms": 613.6,
+        "p90_ms": 1344.4,
+        "samples": 136.0,
+        "day_drift_ms": 265.3
+      },
+      "5m": {
+        "measured": true,
+        "axis": "local_only",
+        "p50_ms": 668.8,
+        "p90_ms": 1222.3,
+        "samples": 81.0,
+        "day_drift_ms": 607.7
+      }
+    },
+    "verdict": "recorded_only"
+  },
+  "publish_sla": {
+    "sla_ms": 1000.0,
+    "p50_ms": 63.0,
+    "p90_ms": 93.0,
+    "p99_ms": 141.0,
+    "max_ms": 516.0,
+    "samples": 708.0,
+    "over_sla": 0.0,
+    "over_sla_ratio": 0.0,
+    "horizons": {
+      "10m": {
+        "p50_ms": 63.0,
+        "p90_ms": 79.0,
+        "max_ms": 125.0,
+        "samples": 41.0,
+        "over_sla": 0.0
+      },
+      "15m": {
+        "p50_ms": 78.0,
+        "p90_ms": 94.0,
+        "max_ms": 141.0,
+        "samples": 27.0,
+        "over_sla": 0.0
+      },
+      "1m": {
+        "p50_ms": 63.0,
+        "p90_ms": 93.0,
+        "max_ms": 516.0,
+        "samples": 409.0,
+        "over_sla": 0.0
+      },
+      "30m": {
+        "p50_ms": 110.0,
+        "p90_ms": 156.0,
+        "max_ms": 234.0,
+        "samples": 14.0,
+        "over_sla": 0.0
+      },
+      "3m": {
+        "p50_ms": 63.0,
+        "p90_ms": 78.0,
+        "max_ms": 125.0,
+        "samples": 136.0,
+        "over_sla": 0.0
+      },
+      "5m": {
+        "p50_ms": 63.0,
+        "p90_ms": 78.0,
+        "max_ms": 140.0,
+        "samples": 81.0,
+        "over_sla": 0.0
+      }
+    },
+    "verdict": "recorded_only"
+  },
+  "intraday_trend": {
+    "publish_offset": {
+      "first_hour": "09",
+      "last_hour": "15",
+      "first": 343.5,
+      "last": 634.4,
+      "ratio": 1.85,
+      "slope": 38.0,
+      "step_detected": null,
+      "hours": 7,
+      "dropped": [
+        "08"
+      ],
+      "key": "p50",
+      "drift": true,
+      "axes": {
+        "p50": {
+          "first_hour": "09",
+          "last_hour": "15",
+          "first": 343.5,
+          "last": 634.4,
+          "ratio": 1.85,
+          "slope": 38.0,
+          "step_detected": null,
+          "hours": 7,
+          "dropped": [
+            "08"
+          ],
+          "key": "p50",
+          "drift": false
+        },
+        "p90": {
+          "first_hour": "09",
+          "last_hour": "15",
+          "first": 752.8,
+          "last": 1477.4,
+          "ratio": 1.96,
+          "slope": 87.8,
+          "step_detected": null,
+          "hours": 7,
+          "dropped": [
+            "08"
+          ],
+          "key": "p90",
+          "drift": false
+        },
+        "over_1000_ratio": {
+          "first_hour": "09",
+          "last_hour": "15",
+          "first": 0.0288,
+          "last": 0.3333,
+          "ratio": 11.57,
+          "slope": 0.0364,
+          "step_detected": "10",
+          "hours": 7,
+          "dropped": [
+            "08"
+          ],
+          "key": "over_1000_ratio",
+          "drift": true
+        }
+      },
+      "drift_axes": [
+        "over_1000_ratio"
+      ],
+      "drift_p50_only": false
+    },
+    "delivery_latency": {
+      "first_hour": "09",
+      "last_hour": "14",
+      "first": 0.5,
+      "last": 0.5,
+      "ratio": 0.98,
+      "slope": -0.0,
+      "step_detected": null,
+      "hours": 6,
+      "dropped": [
+        "08",
+        "15"
+      ],
+      "key": "p50",
+      "drift": false,
+      "axes": {
+        "p50": {
+          "first_hour": "09",
+          "last_hour": "14",
+          "first": 0.5,
+          "last": 0.5,
+          "ratio": 0.98,
+          "slope": -0.0,
+          "step_detected": null,
+          "hours": 6,
+          "dropped": [
+            "08",
+            "15"
+          ],
+          "key": "p50",
+          "drift": false
+        }
+      },
+      "drift_axes": [],
+      "drift_p50_only": false
+    }
+  },
+  "record_vs_commit": {
+    "n_closed": 36,
+    "n_commits": 0,
+    "verdict": "closed_without_commit",
+    "detail": "구현 15건(전체 36건)을 완료로 적었는데 그날 커밋이 0건이다 — 구현분이 반입되지 않은 채 다음 기동을 맞는다",
+    "dirty_files": 0,
+    "n_implementation": 15,
+    "closed_items": [
+      "- [x] 1-2/F-93 — 코드 반입 확인(HEAD `49c047c`에 포함, 실행 중). 라이브 검증은 진행 중(아래 C-3 참조).",
+      "- [x] 1-3/F-94 — 사람 승인 여전히 대기, 지속.",
+      "- [x] F-91 — 사람 결정 계속 대기, 지속. 오늘(09-08) 깨끗하면 3/3 충족 가능.",
+      "- [x] G-54 — 재발 확인(아래 신규 항목 참조).",
+      "- [x] G-57/3-1/3-2·R-1/order-path-live/C-1/C-2/K-25/K-26/G-56/G-58반입확인 — 전부 지속·대기, 새 정보 없음(G-58만 아래 예외)."
+    ]
+  },
+  "session_git_shas": [
+    "49c047c"
+  ],
+  "degenerate_features": {
+    "1m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 409
+    },
+    "3m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 136
+    },
+    "5m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 81
+    },
+    "10m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": true,
+      "samples": 41
+    },
+    "15m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 27,
+      "rolling_judged": true,
+      "rolling_days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "rolling_samples": 81
+    },
+    "30m": {
+      "always_nan": [],
+      "constant": [],
+      "judged": false,
+      "samples": 14,
+      "rolling_judged": true,
+      "rolling_days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "rolling_samples": 42
+    }
+  },
+  "allowed_constant_values": {
+    "ev_dow_fri": 0.0,
+    "ev_dow_mon": 0.0,
+    "ev_dow_thu": 0.0,
+    "ev_dow_tue": 0.0,
+    "ev_dow_wed": 1.0,
+    "ev_dte_fut": 1.0,
+    "ev_dte_opt_m": 1.0,
+    "ev_dte_opt_w": 3.0,
+    "ev_expiry_flag": 0.0,
+    "ev_holiday_adj": 0.0,
+    "ev_rollover_win": 1.0,
+    "px_gap_open": 0.005375380683834392
+  },
+  "volume_check": {
+    "date": "2026-09-09",
+    "symbol": "A05609",
+    "ratio": 0.9918917591936649,
+    "common_minutes": 410,
+    "archived_volume": 141415,
+    "official_volume": 142571,
+    "missing_minutes": 0,
+    "head_missing_minutes": 0,
+    "middle_missing_minutes": 0,
+    "tail_missing_minutes": 0,
+    "warn_ratio": 0.95,
+    "missing_minutes_limit": 20,
+    "head_missing_minutes_limit": 0,
+    "ok": true
+  },
+  "vol_axis": {
+    "date": "2026-09-09",
+    "symbol": "A05609",
+    "horizons": {
+      "5m": {
+        "samples": 1223,
+        "window_days": 17,
+        "excluded_days": [
+          "2026-08-14",
+          "2026-08-19",
+          "2026-09-03"
+        ],
+        "baseline_ic": 0.40175367935205714,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "15m": {
+        "samples": 402,
+        "window_days": 17,
+        "excluded_days": [
+          "2026-08-14",
+          "2026-08-19",
+          "2026-09-03"
+        ],
+        "baseline_ic": 0.36070549155794634,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos",
+          "ev_close_remain",
+          "px_high_dist_5"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      },
+      "30m": {
+        "samples": 198,
+        "window_days": 17,
+        "excluded_days": [
+          "2026-08-14",
+          "2026-08-19",
+          "2026-09-03"
+        ],
+        "baseline_ic": 0.14755905353563695,
+        "baseline_used": [
+          "직전RV",
+          "vl_gk_5"
+        ],
+        "beats_baseline": [
+          "ev_tod_cos",
+          "ev_close_remain",
+          "px_high_dist_5",
+          "px_ema_dev_5"
+        ],
+        "measurable": true,
+        "absent_features": [],
+        "undefined_after_control": []
+      }
+    }
+  },
+  "host_health": {
+    "checks": [
+      {
+        "name": "disk",
+        "available": true,
+        "ok": true,
+        "detail": "여유 544.8GB (최소 5GB)"
+      },
+      {
+        "name": "power",
+        "available": true,
+        "ok": true,
+        "detail": "AC 절전 없음"
+      },
+      {
+        "name": "docker",
+        "available": true,
+        "ok": true,
+        "detail": "v29.6.1"
+      },
+      {
+        "name": "cpu",
+        "available": true,
+        "ok": true,
+        "detail": "사용률 18% · 외부 파이썬 0개"
+      },
+      {
+        "name": "boot_recovery",
+        "available": true,
+        "ok": true,
+        "detail": "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+      },
+      {
+        "name": "schedule_drift",
+        "available": true,
+        "ok": true,
+        "detail": "정본 일치 Messiah=08:20, Messiah-ClockResync=08:10, Messiah-G2=08:25, Messiah-Postmarket=15:45, Messiah-Shutdown=15:40 (기동 창 08:15~)"
+      },
+      {
+        "name": "active_hours",
+        "available": true,
+        "ok": true,
+        "detail": "08:00~16:00"
+      }
+    ],
+    "degraded": [],
+    "unmeasured": []
+  },
+  "unmeasured": [],
+  "unmeasured_kinds": {
+    "accruing": [],
+    "failed": [],
+    "absent": []
+  },
+  "flat_price_minutes": 1,
+  "pre_open_minutes": 15,
+  "market_findings": [],
+  "native_crashes": {
+    "available": true,
+    "count": 0,
+    "details": [],
+    "supported": true
+  },
+  "crash_forensics": {
+    "armed": {
+      "ui": true,
+      "l1_daily": true,
+      "g2_paper": true
+    },
+    "dumps": [],
+    "findings": []
+  },
+  "tick_rows": 124820,
+  "series_coverage": [
+    {
+      "name": "flow_intraday/K2I",
+      "rows": 434,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 99.8,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:21~15:34 · 카덴스 1분",
+      "window_start_kst": "08:20",
+      "expected_legs": 3,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/regular",
+      "rows": 90,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 99.8,
+      "expectation_note": "",
+      "first_kst": "08:25",
+      "last_kst": "15:30",
+      "cadence_minutes": 5.0,
+      "head_gap_minutes": 5.0,
+      "tail_gap_minutes": 5.0,
+      "longest_gap_minutes": 5.0,
+      "gaps": [],
+      "detail": "08:25~15:30 · 카덴스 5분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_mon",
+      "rows": 88,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:21",
+      "last_kst": "15:32",
+      "cadence_minutes": 10.0,
+      "head_gap_minutes": 1.0,
+      "tail_gap_minutes": 3.0,
+      "longest_gap_minutes": 9.0,
+      "gaps": [],
+      "detail": "08:21~15:32 · 카덴스 10분",
+      "window_start_kst": "08:20",
+      "expected_legs": 42,
+      "short_cycles": []
+    },
+    {
+      "name": "option_chain/weekly_thu",
+      "rows": 0,
+      "measured": true,
+      "expected": false,
+      "coverage_pct": 100.0,
+      "expectation_note": "미상장(먼슬리 만기 주(09-10 만기) — KRX 미상장) · 09-11 재개 예정",
+      "first_kst": null,
+      "last_kst": null,
+      "cadence_minutes": null,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 0.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "미상장일이라 0행이 정상 — 미상장(먼슬리 만기 주(09-10 만기) — KRX 미상장) · 09-11 재개 예정",
+      "window_start_kst": "08:20",
+      "expected_legs": null,
+      "short_cycles": []
+    },
+    {
+      "name": "ticks",
+      "rows": 410,
+      "measured": true,
+      "expected": true,
+      "coverage_pct": 100.0,
+      "expectation_note": "",
+      "first_kst": "08:45",
+      "last_kst": "15:34",
+      "cadence_minutes": 1.0,
+      "head_gap_minutes": 0.0,
+      "tail_gap_minutes": 1.0,
+      "longest_gap_minutes": 0.0,
+      "gaps": [],
+      "detail": "08:45~15:34 · 카덴스 1분",
+      "window_start_kst": "08:45",
+      "expected_legs": null,
+      "short_cycles": []
+    }
+  ],
+  "series_findings": [],
+  "option_chain_stale_spot": {
+    "episodes": 2,
+    "resolved_episodes": 2,
+    "unresolved_episodes": 0,
+    "stale_spot_cycles": 8,
+    "max_age_seconds": 61860.0,
+    "cycles_by_series": {
+      "regular": 5,
+      "weekly_mon": 3
+    },
+    "episodes_detail": [
+      {
+        "series": "regular",
+        "first_spot_as_of": "2026-09-08T15:34:00+09:00",
+        "first_age_seconds": 60660.0,
+        "threshold_seconds": 60.0,
+        "resolved_at_kst": "2026-09-09T08:50:00.018201+09:00",
+        "cycles": 5,
+        "max_age_seconds": 61860.0,
+        "resolved": true
+      },
+      {
+        "series": "weekly_mon",
+        "first_spot_as_of": "2026-09-08T15:34:00+09:00",
+        "first_age_seconds": 60460.0,
+        "threshold_seconds": 60.0,
+        "resolved_at_kst": "2026-09-09T08:51:39.901996+09:00",
+        "cycles": 3,
+        "max_age_seconds": 61660.0,
+        "resolved": true
+      }
+    ]
+  },
+  "observation_gaps": [],
+  "host_events": [
+    {
+      "event_id": 12,
+      "at_kst": "07:30:22",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 12,
+      "at_kst": "07:30:23",
+      "kind": "boot",
+      "detail": ""
+    },
+    {
+      "event_id": 6005,
+      "at_kst": "07:30:42",
+      "kind": "boot",
+      "detail": ""
+    }
+  ],
+  "breaches": [],
+  "series_contract": [
+    "option_chain/weekly_thu: 미상장(먼슬리 만기 주(09-10 만기) — KRX 미상장) · 09-11 재개 예정"
+  ],
+  "abnormal_exits": [],
+  "collection_start_lag_minutes": 0.7,
+  "task_exit_codes": {
+    "exits": [
+      {
+        "task": "Messiah",
+        "at_kst": "15:35:40",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-ClockResync",
+        "at_kst": "08:10:04",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "15:35:01",
+        "code": 0,
+        "win32_code": 0
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:02",
+        "code": 0,
+        "win32_code": 0
+      }
+    ],
+    "available": true,
+    "detail": "작업 4개 · 기동 5회",
+    "launches": [
+      {
+        "task": "Messiah-ClockResync",
+        "at_kst": "08:10:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah",
+        "at_kst": "08:20:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-G2",
+        "at_kst": "08:25:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-Shutdown",
+        "at_kst": "15:40:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      },
+      {
+        "task": "Messiah-Postmarket",
+        "at_kst": "15:45:00",
+        "event_id": 107,
+        "reason": "정시 트리거"
+      }
+    ]
+  },
+  "irrecoverable_loss_minutes": 0.7,
+  "irrecoverable_loss_breakdown": {
+    "start_lag_minutes": 0.7,
+    "series_head_gap_minutes": 5.0,
+    "mid_session_gap_minutes": 0.0,
+    "mid_session_gap_by_process": {}
+  },
+  "mid_session_gap_minutes": 0.0,
+  "canonical_consumer_findings": [],
+  "regime_distribution": {
+    "RANGE": 9,
+    "TREND_UP": 5
+  },
+  "provisional": false,
+  "incomplete_day": false,
+  "incomplete_reason": [],
+  "session_coverage_pct_min": 99.8,
+  "symbol_mismatch_suspected": false,
+  "symbol_candidates": [],
+  "verdict_surface_gaps": [],
+  "regime_unseeded_cycles": 0,
+  "regime_seed_delivery": {
+    "bus+direct": 1
+  },
+  "no_contribution_reasons": {},
+  "feature_health_rolling": [
+    {
+      "horizon": "10m",
+      "days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "samples": 123,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "15m",
+      "days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "samples": 81,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "1m",
+      "days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "samples": 1227,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "30m",
+      "days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "samples": 42,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "3m",
+      "days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "samples": 408,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    },
+    {
+      "horizon": "5m",
+      "days": [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09"
+      ],
+      "samples": 243,
+      "judged": true,
+      "always_nan": [],
+      "constant": [],
+      "symbols": [
+        "A05609"
+      ],
+      "spans_rollover": false,
+      "excluded_days": []
+    }
+  ],
+  "decision_funnel": {
+    "pass": 2,
+    "score": 12
+  },
+  "meta_gate": {
+    "evaluations": 14,
+    "passes": 14,
+    "threshold": 0.0,
+    "p50": 0.0258,
+    "p90": 0.2833,
+    "max": 0.382,
+    "frozen_run": 5,
+    "frozen_suspected": true,
+    "input_frozen_run": 1,
+    "shadow_measured": 14,
+    "shadow_passes": 8,
+    "shadow_blocks": 6,
+    "blocked_by_regime": {
+      "RANGE": 6
+    }
+  },
+  "sizer_funnel": {
+    "cycles": 2,
+    "risk_rejects": 1,
+    "risk_approved": 1,
+    "zero_qty": 0,
+    "submitted": 1,
+    "shortfall_ratio_p50": null,
+    "shortfall_ratio_max": null,
+    "shortfall_samples": 0
+  },
+  "bundle_gates_unvalidated": {
+    "promotion_evidence_eligible": false,
+    "reason": "미측정·미달 관문이 남은 번들이 현역이다: real-20260820-2053-30m(max_drawdown, negative_window_ratio, sharpe)",
+    "traded": true,
+    "sample_window": {
+      "from": "2026-07-29",
+      "rows_total": 30,
+      "rows_counted": 17,
+      "excluded": {
+        "roll_day": 1,
+        "not_countable": 12
+      },
+      "legacy_rows_without_countable": 17
+    }
+  }
+}
