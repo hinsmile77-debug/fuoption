@@ -60,6 +60,7 @@ from messiah.ops import (
     feature_health_rolling,
     incomplete_days,
     observation_gaps,
+    order_path_rolling,
     series_coverage,
     series_expectation,
     session_guard,
@@ -499,6 +500,10 @@ class IntegrityReport:
     # 캐야 했고, `shortfall_ratio`가 없어 "손에 닿는 거리"와 "몇 배 떨어짐"이 구별되지
     # 않았다. None은 미측정(사이저가 한 번도 안 불렸다 = 판단이 리스크까지 못 갔다)이다.
     sizer_funnel: dict[str, Any] | None = None
+    # 그 제출이 **재현되는가** (2026-09-09 고도화). 하루 값(`sizer_funnel.submitted`)과
+    # 연속 충족일(`order-path-live`) 사이에 빠져 있던 발생 빈도 — 최근 창에서 며칠에
+    # 제출이 있었나. 판정은 안 한다(관측 축이다).
+    order_path_window: dict[str, Any] | None = None
     # **검증 관문을 못 채운 번들이 현역인가** (2026-08-24 F-17 → F-27 흡수).
     # {bundle_id, blocking: [...], traded: bool, promotion_evidence_eligible: bool}.
     # 막는 것이 아니라 **표식**이다 — R18이 차단 계층을 3개로 고정하므로 네 번째 차단
@@ -2934,6 +2939,15 @@ def build_report(
             + " · ".join(incomplete_reason)
             + " (롤링 판정 창에서 제외된다)"
         )
+    # 「오늘 제출이 있었나」 옆에 **「최근 며칠에 있었나」**를 놓는다 (2026-09-09 고도화).
+    # 09-09에 `order-path-live`가 09-07 위반에서 회복했는데, 그 통과가 재현되는 성질인지
+    # 그날의 우연인지 말할 자리가 없었다 — 하루 값과 연속일 사이에 발생 빈도가 빠져 있다.
+    # 오늘 값은 파일에 아직 없으므로 직접 건넨다(`feature_health_rolling`과 같은 사정).
+    order_path_window = order_path_rolling.judge(
+        day=day,
+        today_submitted=(sizer_funnel or {}).get("submitted"),
+        log_dir=resolved_log_dir,
+    )
     rolling = feature_health_rolling.judge(
         day=day,
         min_samples=min_samples,
@@ -3074,6 +3088,7 @@ def build_report(
         regime_distribution=regime_distribution,
         decision_funnel=decision_funnel,
         sizer_funnel=sizer_funnel,
+        order_path_window=order_path_window.to_dict(),
         bundle_gates_unvalidated=bundle_gates_unvalidated,
         meta_gate=meta_gate,
         symbol_mismatch_suspected=bool(symbol_candidates),
@@ -3320,6 +3335,9 @@ def format_summary(report: IntegrityReport) -> str:
             f"  주문 깔때기: 판단통과={sf.get('cycles')} 리스크거절={sf.get('risk_rejects')} "
             f"0계약={sf.get('zero_qty')} 제출={sf.get('submitted')}{near}"
         )
+    window_line = order_path_rolling.summary_line(report.order_path_window)
+    if window_line:
+        lines.append(f"  {window_line}")
     # **임계까지의 거리** (2026-08-18 F-0818I-1) — `blocked_by_meta` 건수는 위 사슬이 이미
     # 말하고, 이 줄이 새로 답하는 것은 "그 벽이 얼마나 두꺼운가"다. 판정은 안 한다(R18).
     if report.meta_gate:
