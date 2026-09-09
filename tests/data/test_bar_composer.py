@@ -864,3 +864,117 @@ async def test_restore_failure_falls_back_to_cold_start(monkeypatch, tmp_path: P
 
     assert composer.restore_open_buckets(_DAY) == {}
     assert logged == ["ComposerRestoreFailed"]
+
+
+# ------------------------------------------- 대기 상한 재산정 (2026-09-10 F-94)
+#
+# 상한이 5.0초였을 때 39거래일 로그에서 유실이 난 날이 넷이고, 그중 **상한으로 막을 수
+# 있는 것**은 둘이었다 — 08-14(필요대기 8.69초) · 09-07(7.98초). 관측된 1분봉 발행 지연의
+# 최대는 8.73초(09-01)이고 9초 초과는 5,726건 중 0건이다. 사용자 결정으로 10.0초.
+#
+# 나머지 둘(08-13, 필요대기 정확히 60.00초)은 **마감 무렵 거래가 없어 봉 자체가 발행되지
+# 않은 분**이라 어떤 상한으로도 못 막는다. 그 경로는 아래 `test_incomplete_flush_...`가
+# 이미 덮고 있고, 별건으로 남겨 뒀다.
+
+#: 실측 최악 — 이 값보다 상한이 작으면 그날의 유실이 되돌아온다.
+_OBSERVED_WORST_DELAY_SECONDS = 8.73
+
+
+def test_the_bound_covers_the_observed_worst_delay():
+    """**근거보다 작은 값으로 되돌리지 못하게 한다.**
+
+    5.0초는 관측 p99.9(5.47초) 바로 아래에 있었고 꼬리의 마지막 한 마디를 덮지 못했다.
+    누가 이 상수를 다시 낮추면 여기서 걸린다 — 값이 아니라 **근거와의 관계**를 잰다.
+    """
+    from messiah.data.close_grace import MAX_CONSTITUENT_WAIT_SECONDS
+
+    assert MAX_CONSTITUENT_WAIT_SECONDS >= _OBSERVED_WORST_DELAY_SECONDS
+    # 08-14(8.69초)·09-07(7.98초) 두 실제 유실이 이 상한 안에 들어온다.
+    for needed in (8.69, 7.98):
+        assert needed < MAX_CONSTITUENT_WAIT_SECONDS
+
+
+def test_the_grace_sits_above_the_bound_so_overhead_alone_is_not_a_breach():
+    """유예 = 상한 + 오버헤드 여유 (F-94).
+
+    같은 값이던 시절엔 대기를 끝까지 쓴 날이 유실 0건인데도 위반으로 찍혔다 —
+    3m 5.53·5.79·5.16초 · 5m 6.63초. 오버헤드는 스케줄러 위상(0.5초)과 계산 시간
+    (p99 479ms · 최대 602ms)의 합이라 최대 1.1초가량이고, 여유 1.5초가 그것을 덮는다.
+    """
+    from messiah.core.messages import Horizon as H
+    from messiah.data.bar_composer import _COMPOSE_SCHEDULER_PHASE_SECONDS
+    from messiah.data.close_grace import (
+        COMPOSED_GRACE_OVERHEAD_SECONDS,
+        MAX_CONSTITUENT_WAIT_SECONDS,
+        close_grace_ms,
+    )
+
+    bound_ms = MAX_CONSTITUENT_WAIT_SECONDS * 1000.0
+    for horizon in (H.M3, H.M5, H.M10, H.M15, H.M30):
+        assert close_grace_ms(horizon) > bound_ms, "유예가 상한 이하면 오버헤드가 위반이 된다"
+
+    # 여유가 실측 오버헤드(위상 + 계산 최대 602ms)보다 커야 의미가 있다.
+    observed_overhead = _COMPOSE_SCHEDULER_PHASE_SECONDS + 0.602
+    assert COMPOSED_GRACE_OVERHEAD_SECONDS > observed_overhead
+
+
+async def test_a_bar_arriving_at_eight_seconds_is_no_longer_dropped(tmp_path: Path):
+    """09-07형 회귀 — 8초에 도착하는 마지막 1분봉을 이제 기다려 준다.
+
+    실제로 8초를 자면 스위트가 못 쓰게 되므로, 주입 sleep의 **호출 횟수**로 경과를 센다
+    (`wait_for_bar()`가 시간이 아니라 횟수로 세도록 만들어져 있다 — 그쪽 docstring).
+    폴링 간격이 0.05초이므로 160번째 호출이 8.0초에 해당한다.
+    """
+    from messiah.data.bar_composer import _CONSTITUENT_POLL_SECONDS
+
+    arrival_poll = int(8.0 / _CONSTITUENT_POLL_SECONDS)  # 160
+    calls = {"n": 0}
+    bus = FakeBus()
+    composer: list = []
+
+    async def _clock(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] == arrival_poll:
+            await composer[0].handle_one_minute_bar(_m1(34))
+
+    composer.append(_composer(tmp_path, bus, sleep=_clock))
+    for minute in range(30, 34):  # 09:34봉이 아직 안 왔다
+        await composer[0].handle_one_minute_bar(_m1(minute))
+
+    await composer[0].flush_due_horizon(Horizon.M5)
+
+    published = [b for _, b in bus.published]
+    assert len(published) == 1
+    assert published[0].volume == 50, "8초에 온 마지막 봉을 안 기다리고 4봉으로 확정했다"
+    assert published[0].quality_ok is True
+    assert composer[0].incomplete_flushes == 0
+    assert composer[0].late_bar_drops == 0
+    # 상한이 5.0초면 100번째에 포기해 160번째 도착을 놓쳤다 — 그것이 09-07의 유실이다.
+    assert calls["n"] >= arrival_poll
+
+
+async def test_a_bar_that_never_comes_still_gives_up_at_the_bound(tmp_path: Path):
+    """상한을 올린 것이 **무한 대기가 된 것은 아니다** — 08-13형(무거래 분)은 포기해야 한다.
+
+    포기하지 않으면 그 Horizon이 통째로 멈춘다(유실보다 나쁘다). 상한을 10초로 올렸으므로
+    포기까지의 폴링 횟수도 그만큼 늘어난다는 것을 함께 못 박는다.
+    """
+    from messiah.data.bar_composer import _CONSTITUENT_POLL_SECONDS
+    from messiah.data.close_grace import MAX_CONSTITUENT_WAIT_SECONDS
+
+    calls = {"n": 0}
+
+    async def _count(_seconds: float) -> None:
+        calls["n"] += 1
+
+    bus = FakeBus()
+    composer = _composer(tmp_path, bus, sleep=_count)
+    for minute in range(30, 34):
+        await composer.handle_one_minute_bar(_m1(minute))
+
+    await composer.flush_due_horizon(Horizon.M5)
+
+    assert [b.volume for _, b in bus.published] == [40], "포기하지 않고 계속 기다렸다"
+    assert composer.incomplete_flushes == 1
+    expected_polls = int(MAX_CONSTITUENT_WAIT_SECONDS / _CONSTITUENT_POLL_SECONDS)
+    assert calls["n"] == expected_polls

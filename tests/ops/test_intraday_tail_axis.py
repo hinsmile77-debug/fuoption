@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 
 from messiah.core.messages import HORIZON_SECONDS, FeatureVector, Horizon
 from messiah.core.timeutil import KST
+from messiah.data.close_grace import close_grace_ms
 from messiah.ops.integrity_report import (
     INTRADAY_OVER_RATIO_FLOOR,
     _intraday_trends,
@@ -243,14 +244,24 @@ def _engine(now_value: list[datetime], horizons=None):
 
 
 def test_grace_is_read_from_the_upstream_constants_not_retyped() -> None:
-    """두 곳에 숫자를 적으면 두 곳이 갈라진다 — 이 테스트가 그것을 막는다."""
+    """두 곳에 숫자를 적으면 두 곳이 갈라진다 — 이 테스트가 그것을 막는다.
+
+    2026-09-10 F-94로 합성봉 유예가 **상한 + 오버헤드 여유**가 됐다. 같은 값이던 시절엔
+    대기를 끝까지 쓴 날이 유실 0건인데도 위반으로 찍혔다(3m 5.53·5.79·5.16초 · 5m 6.63초).
+    관계가 바뀌어도 **숫자를 여기 다시 적지 않는다**는 규율은 그대로다.
+    """
     from messiah.data.bar_composer import _MAX_CONSTITUENT_WAIT_SECONDS
+    from messiah.data.close_grace import COMPOSED_GRACE_OVERHEAD_SECONDS
     from messiah.data.normalizer import MINUTE_CLOSE_GRACE_SECONDS
     from messiah.features.engine import _grace_ms
 
     assert _grace_ms(Horizon.M1) == MINUTE_CLOSE_GRACE_SECONDS * 1000.0
+    expected = (_MAX_CONSTITUENT_WAIT_SECONDS + COMPOSED_GRACE_OVERHEAD_SECONDS) * 1000.0
     for horizon in (Horizon.M3, Horizon.M5, Horizon.M30):
-        assert _grace_ms(horizon) == _MAX_CONSTITUENT_WAIT_SECONDS * 1000.0
+        assert _grace_ms(horizon) == expected
+
+    # **유예는 상한보다 커야 한다.** 같거나 작으면 오버헤드만으로 위반이 나온다.
+    assert expected > _MAX_CONSTITUENT_WAIT_SECONDS * 1000.0
 
 
 def test_the_engine_counts_the_tail_per_hour(monkeypatch) -> None:
@@ -303,7 +314,11 @@ def test_the_grace_breach_is_counted_against_each_horizon_own_boundary(monkeypat
 
 
 def test_the_headroom_answers_how_much_is_left_not_how_late_it_was(monkeypatch) -> None:
-    """2026-08-25에 이 뺄셈(5,000 − 3,119.7 = 1,880.3)을 사람이 했다. 계기가 하게 한다."""
+    """2026-08-25에 이 뺄셈(5,000 − 3,119.7 = 1,880.3)을 사람이 했다. 계기가 하게 한다.
+
+    2026-09-10 F-94로 합성봉 유예가 11,500ms가 됐다. **기대값을 여기 다시 적지 않고**
+    정본에서 끌어온다 — 상수가 또 바뀌어도 이 테스트가 재는 것(여유 = 경계 − 최악)은 같다.
+    """
     from messiah.core import logging as mlog
 
     records: list[dict] = []
@@ -317,7 +332,8 @@ def test_the_headroom_answers_how_much_is_left_not_how_late_it_was(monkeypatch) 
 
     assert engine.log_publish_offsets() is not None
     headroom = records[-1]["grace_headroom"]
-    assert headroom["by_horizon"]["3m"]["headroom_ms"] == 1880.3
+    expected_3m = round(close_grace_ms(Horizon.M3) - 3119.7, 1)
+    assert headroom["by_horizon"]["3m"]["headroom_ms"] == expected_3m
     # **최악은 여유가 가장 적은 계열이다** — 지연이 가장 큰 계열이 아니다. 1분봉은
     # 1,200ms로 더 빨랐지만 경계가 2,000ms라 남은 여유는 800ms로 더 아슬아슬하다.
     assert headroom["worst_horizon"] == "1m"

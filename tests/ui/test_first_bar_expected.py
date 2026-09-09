@@ -88,9 +88,20 @@ def test_an_unknown_horizon_keeps_the_old_threshold() -> None:
 
 def test_expected_times_match_the_observed_first_bars() -> None:
     """2026-09-01 실측(1m 08:46 · 3m 08:48 · 5m 08:50)과 계산이 같은 분에 떨어진다 —
-    유예를 화면이 따로 적지 않고 `data/close_grace`에서 가져오기 때문이다."""
+    유예를 화면이 따로 적지 않고 `data/close_grace`에서 가져오기 때문이다.
+
+    **분까지만 잰다.** 2026-09-10 F-94로 상위 유예가 5,000 → 11,500ms가 되어 초 자리는
+    08:48:05 → 08:48:11.5로 움직였지만, 이 임계가 답하는 질문은 「첫 봉이 도착할 만한
+    분이 지났는가」다. 초 단위로 고정하면 유예를 조정할 때마다 이 테스트가 깨지면서
+    정작 재려던 것(실측과 같은 분인가)을 말하지 못한다.
+    """
     first_tick = DEFAULT_SESSION.first_tick_time
 
+    observed = {"1m": time(8, 46), "3m": time(8, 48), "5m": time(8, 50)}
+    for horizon, seen in observed.items():
+        expected = _first_bar_expected_at(first_tick, horizon)
+        assert expected is not None
+        assert (expected.hour, expected.minute) == (seen.hour, seen.minute), horizon
+
+    # 유예가 커져도 **1분봉은 첫 틱 다음 분**을 넘지 않아야 한다 — 그쪽 유예는 2초 그대로다.
     assert _first_bar_expected_at(first_tick, "1m") == time(8, 46, 2)
-    assert _first_bar_expected_at(first_tick, "3m") == time(8, 48, 5)
-    assert _first_bar_expected_at(first_tick, "5m") == time(8, 50, 5)

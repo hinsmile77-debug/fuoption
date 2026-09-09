@@ -845,8 +845,16 @@ def _run_two_horizon_session(monkeypatch, delays_ms: dict):
 
 
 def test_every_breached_horizon_is_listed_not_just_the_worst(monkeypatch) -> None:
-    """1m −2,926ms · 3m −160ms인 날 — 목록에 **둘 다** 있어야 한다."""
-    records = _run_two_horizon_session(monkeypatch, {Horizon.M1: 4926.0, Horizon.M3: 5160.0})
+    """1m −2,926ms · 3m −160ms인 날 — 목록에 **둘 다** 있어야 한다.
+
+    3m 지연은 **그 Horizon의 경계에서 거꾸로 잡는다** — 2026-09-10 F-94로 합성봉 유예가
+    상한 + 오버헤드가 되면서 고정 5,160ms가 더는 위반이 아니게 됐다. 이 테스트가 재는 것은
+    특정 숫자가 아니라 「둘 다 넘긴 날에 둘 다 적히는가」다.
+    """
+    from messiah.data.close_grace import close_grace_ms
+
+    m3_delay = close_grace_ms(Horizon.M3) + 160.0
+    records = _run_two_horizon_session(monkeypatch, {Horizon.M1: 4926.0, Horizon.M3: m3_delay})
 
     breached = [r for r in records if r["tag"] == "PublishGraceBreached"]
     assert len(breached) == 1

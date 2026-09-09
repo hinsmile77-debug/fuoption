@@ -149,7 +149,7 @@ _TARGET_HORIZON_SECONDS: dict[Horizon, int] = {
 #: **늦은 틱을 실제로 막는 값은 따로 있다.**
 #:
 #:     1분봉   `data/normalizer.MINUTE_CLOSE_GRACE_SECONDS`      = 2.0초
-#:     합성봉  `_MAX_CONSTITUENT_WAIT_SECONDS`(겹④, 아래)        = 5.0초
+#:     합성봉  `_MAX_CONSTITUENT_WAIT_SECONDS`(겹④, 아래)        = 10.0초
 #:
 #: 이 상수가 하는 일은 둘뿐이다: 스케줄러가 **언제 처음 들여다보는가**(`run_forever`)와,
 #: 거래소 경계가 아직 안 지났을 때의 **여유 폭**(`_defer_until_boundary_passed`).
