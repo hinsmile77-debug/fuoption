@@ -267,3 +267,102 @@ async def test_successful_publish_leaves_no_no_candidate_tag(captured):
 
     assert published[-1].no_option_reason is None
     assert len(_no_candidate(captured)) == 1, "첫 사이클(이력 부족) 1건뿐"
+
+
+# ------------------------------------------- 빈 사이클의 원인을 가른다 (2026-09-09 1-4)
+#
+# 09-09 장중에 5분 그리드 중 09:15·09:25 두 마크만 `OptionsNoCandidate`가 없었고, ㉠메시지
+# 미도달 · ㉡필터 기각 · ㉢처리 예외가 **전부 무로그**여서 저녁까지 원인을 못 골랐다.
+# 아래는 ㉡·㉢에 이름이 붙었는지, 그리고 그 계측이 **판정을 바꾸지 않았는지**를 잰다.
+
+
+def _ignored(records) -> list[tuple[str, str, dict]]:
+    return [r for r in records if r[0] == "OptionsDispatchIgnored"]
+
+
+async def test_dispatch_of_a_normal_m5_bar_logs_nothing_extra(captured):
+    bus = InProcessBus()
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus)
+
+    await service._dispatch(_bar())
+
+    assert _ignored(captured) == [], "정상 경로에서 기각 로그가 떠서는 안 된다"
+
+
+async def test_wrong_horizon_bar_is_named_instead_of_vanishing(captured):
+    bus = InProcessBus()
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus)
+
+    await service._dispatch(_bar(Horizon.M1))
+
+    ignored = _ignored(captured)
+    assert len(ignored) == 1
+    assert ignored[0][2]["horizon"] == Horizon.M1.value
+    assert ignored[0][2]["message_type"] == "BarClosed"
+
+
+async def test_other_symbol_bar_is_named(captured):
+    bus = InProcessBus()
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus)
+    other = _bar().model_copy(update={"symbol": "다른심볼"})
+
+    await service._dispatch(other)
+
+    ignored = _ignored(captured)
+    assert len(ignored) == 1
+    assert ignored[0][2]["message_symbol"] == "다른심볼"
+
+
+async def test_unknown_message_type_is_named(captured):
+    bus = InProcessBus()
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus)
+
+    await service._dispatch(_futures_view(0.5).model_copy(update={"symbol": "다른심볼"}))
+
+    assert len(_ignored(captured)) == 1
+
+
+async def test_handler_exception_is_logged_and_re_raised(captured):
+    """**삼키지 않는다** — 여기서 먹으면 버스의 실패 카운터와 루프 보호 로그가 사라진다.
+    이 서비스는 맥락만 얹고 그대로 올려보낸다."""
+    bus = InProcessBus()
+
+    def exploding_smile():
+        raise RuntimeError("스마일 제공자가 터졌다")
+
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, exploding_smile, bus)
+
+    with pytest.raises(RuntimeError, match="스마일 제공자가 터졌다"):
+        await service._dispatch(_futures_view(0.5))
+
+    failed = [r for r in captured if r[0] == "OptionsHandleBarFailed"]
+    assert len(failed) == 1
+    assert failed[0][2]["message_type"] == "FuturesView"
+    assert "RuntimeError" in failed[0][2]["error"]
+
+
+async def test_instrumentation_did_not_change_what_gets_published():
+    """**판정 불변** — `_dispatch`를 거친 발행이 핸들러 직접 호출과 같은가.
+
+    계측은 「무엇을 발행하는가」에 손대지 않았다. 두 경로의 산출물을 나란히 비교한다.
+    """
+    direct_bus = InProcessBus()
+    direct = await _collect(direct_bus)
+    direct_service = OptionsAIService(
+        _SYMBOL, _UNDERLYING, lambda: _smile(), direct_bus, iv_history=IVHistory()
+    )
+    await direct_service.handle_futures_view(_futures_view(0.5))
+    await direct_service.handle_bar(_bar())
+
+    routed_bus = InProcessBus()
+    routed = await _collect(routed_bus)
+    routed_service = OptionsAIService(
+        _SYMBOL, _UNDERLYING, lambda: _smile(), routed_bus, iv_history=IVHistory()
+    )
+    await routed_service._dispatch(_futures_view(0.5))
+    await routed_service._dispatch(_bar())
+
+    assert len(routed) == len(direct) == 2
+    for a, b in zip(direct, routed):
+        assert a.no_option_reason == b.no_option_reason
+        assert [c.structure for c in a.candidates] == [c.structure for c in b.candidates]

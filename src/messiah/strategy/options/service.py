@@ -95,20 +95,28 @@ class OptionsAIService:
         # `cadence_seconds`로 실어 화면이 추측하지 않게 한다.
         self._futures_cadence_seconds: float | None = None
 
-    async def handle_futures_view(self, msg: BusMessage) -> None:
+    async def handle_futures_view(self, msg: BusMessage) -> bool:
+        """`intel.futures`를 받아 점수를 캐싱하고 뷰를 다시 낸다.
+
+        **처리했는가를 돌려준다** (2026-09-09 1-4) — 걸러낸 것과 처리한 것을 `_dispatch`가
+        가려 로그로 남기기 위해서다. 그 이유는 `_dispatch` docstring에 있다.
+        """
         if not isinstance(msg, FuturesView) or msg.symbol != self._symbol:
-            return
+            return False
         self._latest_score = msg.score
         self._has_futures_view = True
         self._futures_cadence_seconds = msg.cadence_seconds
         await self._publish_view(as_of=msg.valid_until or msg.ts_utc)
+        return True
 
-    async def handle_bar(self, msg: BusMessage) -> None:
+    async def handle_bar(self, msg: BusMessage) -> bool:
+        """M5 완성봉을 받아 뷰를 다시 낸다. 반환값의 뜻은 `handle_futures_view`와 같다."""
         if not isinstance(msg, BarClosed) or msg.symbol != self._symbol:
-            return
+            return False
         if msg.horizon != Horizon.M5:
-            return
+            return False
         await self._publish_view(as_of=msg.bar_open_kst)
+        return True
 
     async def _publish_view(self, *, as_of: datetime) -> None:
         if not self._has_futures_view:
@@ -245,7 +253,56 @@ class OptionsAIService:
         await self._bus.subscribe(patterns, self._dispatch)
 
     async def _dispatch(self, msg: BusMessage) -> None:
-        if isinstance(msg, BarClosed):
-            await self.handle_bar(msg)
-        elif isinstance(msg, FuturesView):
-            await self.handle_futures_view(msg)
+        """구독 메시지를 두 핸들러로 갈라 보내고, **아무도 처리하지 않은 것을 남긴다**.
+
+        ## 왜 계측을 붙였나 (2026-09-09 이상점 1-4)
+
+        09-09 장중에 5분 그리드 중 09:15·09:25 두 마크만 `OptionsNoCandidate`가 없었다.
+        그날 저녁까지 원인을 못 가린 이유는 **세 가능성이 전부 무로그**였기 때문이다:
+
+            ㉠ 메시지가 아예 안 왔다        (수집·버스 쪽)
+            ㉡ 왔는데 필터가 걸러냈다        (심볼·호라이즌 불일치)
+            ㉢ 왔는데 처리 중 예외가 났다    (이 서비스 쪽)
+
+        ㉢은 버스가 이미 `SubscriberHandlerFailed`로 잡는다 — 다만 **로그를 조절한다**
+        (1·10·20…100번째만 찍는다, `core/bus._log_subscriber_failure`). 그래서 2~9번째
+        실패는 원리적으로 안 보인다. 09-09는 그 태그가 하루 0건이었으므로 ㉢은 아니었지만,
+        「0건이니 아니다」를 말할 수 있는 것은 첫 건이 반드시 찍히는 덕이고 그 이상은 못 센다.
+
+        여기서 ㉡을 이름 붙이면 세 갈래가 로그로 갈린다 — 마크가 없는데 이 태그도 없으면
+        ㉠(메시지 미도달)이고, 있으면 ㉡이다. 다음 재발 때 고칠 곳이 바로 정해진다.
+
+        ## 예외를 다시 던지는 이유
+
+        여기서 삼키면 버스의 실패 카운터가 안 오르고 루프 보호 로그도 사라진다 — 판정과
+        동작이 바뀐다. 이 서비스는 **맥락만 얹고**(어느 핸들러·어느 심볼) 그대로 올려보낸다.
+        조절되지 않는 한 줄이 남으므로 2~9번째 실패도 이제는 보인다.
+        """
+        handled = False
+        try:
+            if isinstance(msg, BarClosed):
+                handled = await self.handle_bar(msg)
+            elif isinstance(msg, FuturesView):
+                handled = await self.handle_futures_view(msg)
+        except Exception as exc:
+            mlog.log(
+                "OptionsHandleBarFailed",
+                f"{type(msg).__name__} 처리 중 예외 — 이 사이클의 판단이 비었다: {exc}",
+                symbol=self._symbol,
+                message_type=type(msg).__name__,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        if handled:
+            return
+        # 구독 패턴이 M5·`intel.futures`뿐이므로 정상 운영에서 이 로그는 0건이다 —
+        # **한 건이라도 뜨면 그것이 1-4의 답이다.** 그래서 조절하지 않는다.
+        mlog.log(
+            "OptionsDispatchIgnored",
+            f"{type(msg).__name__}을 아무 핸들러도 처리하지 않았다 — "
+            f"심볼·호라이즌 불일치이거나 구독 패턴이 넓다",
+            symbol=self._symbol,
+            message_type=type(msg).__name__,
+            message_symbol=getattr(msg, "symbol", None),
+            horizon=getattr(getattr(msg, "horizon", None), "value", None),
+        )
