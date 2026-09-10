@@ -18,6 +18,7 @@ from datetime import datetime
 from math import isfinite
 from typing import Any
 
+from messiah.core.log_dedup import RepeatFolder
 from messiah.core.timeutil import now_kst
 from messiah.core.version import PROCESS_GIT_SHA
 
@@ -551,6 +552,9 @@ TAG_LEVELS: dict[str, int] = {
 
 _logger = logging.getLogger("messiah")
 
+#: 반복 접기 상태 (2026-08-13 G-2). 프로세스 안에만 있고 `setup()`이 세션마다 비운다.
+_repeat_folder = RepeatFolder()
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -626,6 +630,7 @@ def setup(instance_id: str, stream: Any = None) -> None:
     _logger.handlers.clear()
     _logger.addHandler(handler)
     _logger.setLevel(logging.DEBUG)
+    _repeat_folder.reset()
     session_start(instance_id)
 
 
@@ -725,4 +730,23 @@ def log(tag: str, msg: str, level: int | None = None, **fields: Any) -> None:
                 f"'{tag}': 레벨을 낮출 수 없다({effective} -> {level}) — 올리는 방향만 허용"
             )
         effective = level
+
+    # 2026-08-13 G-2 — 같은 사유가 폴링마다 다시 적히는 태그만 접는다(`core/log_dedup`).
+    # 첫 건은 그대로 나가고, 삼킨 건수는 반드시 다음 요약에 실린다. 접기가 예외를 내면
+    # 그 줄을 잃는 쪽이 더 나쁘므로 실패는 「접지 않는다」로 떨어진다.
+    try:
+        emit, folded = _repeat_folder.admit(tag, fields, now_kst())
+    except Exception:  # noqa: BLE001 — 계기 하나가 발행을 막으면 본말전도다
+        emit, folded = True, None
+    if not emit:
+        return
+    if folded is not None:
+        msg = f"{msg} · 같은 사유 {folded.repeat_count}회 반복(최초 {folded.first_at:%H:%M:%S})"
+        fields = {
+            **fields,
+            "folded": True,
+            "repeat_count": folded.repeat_count,
+            "first_at": folded.first_at.isoformat(),
+        }
+
     _logger.log(effective, msg, extra={"tag": tag, "fields": fields})
