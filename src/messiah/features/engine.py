@@ -1152,12 +1152,19 @@ class FeatureEngine:
         spike = self._delay_spike.observe(self._now(), offset_ms / 1000.0)
         if spike is None:
             return
+        # 2026-09-10 G-62 — 상한을 넘긴 경보에 「아직 유실 아님」을 쓰지 않는다. 그날 15:21의
+        # 경보가 상한을 5.99배 넘기고도 그 문구를 달고 있었고, 사람이 그 줄만 보고는 정상
+        # 스파이크 4건과 같은 것으로 읽었다. 태그는 하나 그대로고 무게만 `severity`로 가른다.
+        if spike.severity == "overrun":
+            tail = f"상한을 {-spike.headroom_seconds:.2f}초 넘겼다(유실 위험)"
+        else:
+            tail = f"{spike.headroom_seconds:.2f}초 남았다(아직 유실 아님)"
         mlog.log(
             "BarPublishDelaySpike",
             f"1분봉 발행 지연 5분 최댓값 {spike.window_max_seconds:.2f}초 — "
-            f"합성 대기 상한 {spike.bound_seconds:.0f}초까지 "
-            f"{spike.headroom_seconds:.2f}초 남았다(아직 유실 아님)",
+            f"합성 대기 상한 {spike.bound_seconds:.0f}초까지 {tail}",
             symbol=vector.symbol,
+            severity=spike.severity,
             window_max_seconds=spike.window_max_seconds,
             threshold_seconds=spike.threshold_seconds,
             bound_seconds=spike.bound_seconds,

@@ -924,6 +924,65 @@ def test_the_spike_alarm_fires_on_the_live_axis(monkeypatch) -> None:
     assert len(spikes) == 1
     assert spikes[0]["headroom_seconds"] > 0, "아직 유실이 아니라는 것이 이 경보의 요지다"
     assert "유실 아님" in spikes[0]["msg"]
+    assert spikes[0]["severity"] == "spike", "여유가 남은 경보는 스파이크다 (G-62)"
+
+
+def test_an_overrun_is_not_reported_as_a_harmless_spike(monkeypatch) -> None:
+    """상한을 넘긴 경보에 「아직 유실 아님」을 달지 않는다 (2026-09-10 G-62).
+
+    그날 15:21:00의 실측(5분 최댓값 59.93초, 상한 10초의 5.99배)을 그대로 재현한다.
+    이 값에도 종전 문구는 *"-49.93초 남았다(아직 유실 아님)"* 였고, 실제로는 그 경보가
+    같은 시각의 완성봉 유실(1-10)을 가리키고 있었다.
+    """
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 9, 10, 15, 19, tzinfo=KST)]
+    engine = _engine(now, mode="live")
+
+    for minute, delay in ((0, 300.0), (1, 59930.0)):
+        _publish_m1_with_delay(
+            engine, now, datetime(2026, 9, 10, 15, 19 + minute, tzinfo=KST), delay
+        )
+
+    spikes = [r for r in records if r["tag"] == "BarPublishDelaySpike"]
+    assert len(spikes) == 1
+    assert spikes[0]["severity"] == "overrun"
+    assert spikes[0]["headroom_seconds"] < 0
+    assert spikes[0]["headroom_ratio"] < 0
+    assert "유실 아님" not in spikes[0]["msg"], "상한을 넘겼는데 안심시키면 안 된다"
+    assert "유실 위험" in spikes[0]["msg"]
+
+
+def test_severity_splits_weight_without_splitting_the_tag(monkeypatch) -> None:
+    """**판정 불변** (G-62) — `severity`는 경보를 가르지 태그를 가르지 않는다.
+
+    태그를 새로 파면 같은 사실이 두 태그로 갈려 집계가 어긋난다(`core/logging.py`의
+    `_LEVEL_ESCALATABLE` 주석). R18 관찰대장이 세는 「경보 몇 건」은 이 변경 전후로 같아야
+    하고, 달라지는 것은 그 안에서 무게를 가를 수 있느냐뿐이다.
+    """
+    from messiah.core import logging as mlog
+
+    records: list[dict] = []
+    monkeypatch.setattr(
+        mlog, "log", lambda tag, msg, **f: records.append({"tag": tag, "msg": msg, **f})
+    )
+    now = [datetime(2026, 9, 10, 12, 30, tzinfo=KST)]
+    engine = _engine(now, mode="live")
+
+    # 정상 스파이크 → 문턱 아래로 복귀(재무장) → 상한 초과. 그날의 형태 그대로다.
+    for minute, delay in ((0, 7880.0), (6, 100.0), (12, 59930.0)):
+        _publish_m1_with_delay(
+            engine, now, datetime(2026, 9, 10, 12, 30 + minute, tzinfo=KST), delay
+        )
+
+    spikes = [r for r in records if r["tag"] == "BarPublishDelaySpike"]
+    assert len(spikes) == 2, "경보 건수는 종전과 같다 — 태그가 갈리지 않았다"
+    assert {r["tag"] for r in spikes} == {"BarPublishDelaySpike"}
+    assert [r["severity"] for r in spikes] == ["spike", "overrun"]
 
 
 def test_replay_does_not_ride_the_spike_alarm(monkeypatch) -> None:
