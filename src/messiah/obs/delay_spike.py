@@ -110,6 +110,21 @@ class DelaySpike:
         """여유를 비율로도 낸다 — 상한이 바뀌면 같은 초 수가 같은 위험이 아니다."""
         return self.headroom_seconds / self.bound_seconds if self.bound_seconds else 0.0
 
+    @property
+    def severity(self) -> str:
+        """`"spike"`(여유 남음) 대 `"overrun"`(상한 초과) — 2026-09-10 G-62.
+
+        2026-09-10에 이 경보가 5건 떴는데 앞의 4건(12:32~13:28)은 여유를 2~3초 남긴 정상
+        범위였고 마지막 1건(15:21:00)은 상한을 5.99배 초과해 실제 유실(그날 1-10)로 이어졌다.
+        그런데 로그에는 다섯 건이 같은 무게로 남아, R18 관찰대장에도 「스파이크 5회」로만
+        쌓였다 — 승격 심사가 「정상 4 + 사고 1」을 못 가른다.
+
+        **태그를 새로 파지 않는다.** 같은 사실이 두 태그로 갈리면 집계가 어긋난다
+        (`core/logging.py`의 `_LEVEL_ESCALATABLE` 주석과 같은 규율). 가르는 것은 필드다 —
+        경보 건수는 그대로고, 그 안에서 무게만 갈린다.
+        """
+        return "overrun" if self.headroom_seconds < 0 else "spike"
+
 
 class DelaySpikeWatch:
     """1분봉 발행 지연의 5분 롤링 최댓값이 문턱을 **넘는 순간**만 잡는다.
