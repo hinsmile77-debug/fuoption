@@ -6,6 +6,7 @@ import pytest
 
 from messiah.core.messages import BarClosed, Horizon
 from messiah.core.timeutil import KST
+from messiah.features import px_core
 from messiah.features.px_core import W_STD
 from messiah.features.px_core import atr as px_atr
 from messiah.features.vl_core import (
@@ -322,6 +323,100 @@ def test_vl_jump_higher_with_injected_outlier_return():
     jump_smooth = vl_jump(_bars_from_closes(smooth), window=10)
     jump_outlier = vl_jump(_bars_from_closes(with_outlier), window=10)
     assert jump_outlier > jump_smooth
+
+
+def _m10_bars(closes: list[float]) -> list[BarClosed]:
+    """10m 지평 실물 배치 — 한 거래일 39봉(09:00~15:20), 넘치면 다음 거래일로 넘어간다.
+
+    `vl_jump_60`의 창(60봉)은 한 세션(39봉)보다 길어 **매일** 세션 경계를 넘는다. 그래서
+    이 형태로 깔지 않으면 재현되지 않는다 (`px_core.same_session_pairs` 주석).
+    """
+    bars_per_session = 39
+    out: list[BarClosed] = []
+    for i, c in enumerate(closes):
+        day, slot = divmod(i, bars_per_session)
+        moment = _START + timedelta(days=day, minutes=10 * slot)
+        out.append(
+            BarClosed(
+                symbol=_SYMBOL,
+                horizon=Horizon.M10,
+                bar_open_kst=moment,
+                o_ticks=int(c),
+                h_ticks=int(c) + 1,
+                l_ticks=int(c) - 1,
+                c_ticks=int(c),
+                volume=10,
+            )
+        )
+    return out
+
+
+def test_vl_jump_60_latches_at_zero_across_a_10m_session():
+    """`vl_jump_60`이 10m 지평에서 세션 내내 상수인 기전을 못 박는다 (2026-09-10 1-11 / F-97).
+
+    ## 무엇이 관측됐나
+
+    2026-09-10 15:34:59 `FeatureHealthDegenerate` — 10m 지평 40표본 전 구간에서 `vl_jump_60`이
+    상수였다. 같은 시각 1m·3m·5m는 퇴화 0건이었다.
+
+    ## 왜 10m의 60창에서만인가 — 희석이 아니라 **걸쇠**다
+
+    장후 리포트의 가설은 *"창이 길어 세션 내 변동이 묻힌다"* 였다. 그 방향은 맞지만 기전은
+    희석이 아니다. `vl_jump`는 `max(RV - BV, 0.0)`으로 **클립**하고, 점프가 없는 계열에서
+    `RV - BV`가 음수가 될 확률은 창 길이와 거의 무관하다(모의: 창 5·20·60 모두 52~55%).
+
+    가르는 것은 **창 겹침**이다. 한 표본에서 다음 표본으로 창이 한 봉 미끄러지므로 창 60은
+    직전과 59/60(98.3%)이 같다 — 한 번 0.0으로 클립되면 그 상태가 세션 내내 풀리지 않는다.
+    창 5는 4/5(80%)만 겹쳐 세션 안에서 풀린다. 10m은 세션 표본이 40개뿐이라 창이 풀릴 기회
+    자체가 40번밖에 없고, 1m(≈390표본)은 그 열 배다 — 그래서 10m의 `_60`에서만 드러났다.
+
+    ## 이 테스트는 값을 바꾸지 않는다
+
+    창 길이 변경은 모델 입력 값 전환이라 재학습을 동반하고(`features/engine`의
+    `session_boundary_inflation` 주석과 같은 규율), 화이트리스트 등재는 검출을 끄는 방향이다.
+    둘 다 사람 결정 사안이다 — 여기서는 **지금 무슨 일이 벌어지는지**만 고정한다.
+    """
+    # 점프 없는 계열 — 창 60이 세션 경계를 넘으므로 네 세션치(160봉)를 깐다. 틱 규모는
+    # 실물(KOSPI200 선물 ≈ 7,000틱)을 쓴다. 100틱 부근에서 만들면 봉당 변화가 반올림에
+    # 먹혀 전 수익률이 0이 되고, 그러면 「상수」가 이 기전이 아니라 계열이 죽어서가 된다.
+    steps = [-3, -2, -1, 1, 2, 3]
+    closes = [7000.0]
+    for i in range(159):
+        closes.append(closes[-1] + steps[(i * 7 + i // 6) % len(steps)])
+    bars = _m10_bars(closes)
+
+    # 세션 내 40표본을 흉내 낸다 — 봉이 하나씩 늘어날 때마다 창이 한 칸 미끄러진다.
+    w60 = [vl_jump(bars[: len(bars) - k], window=60) for k in reversed(range(40))]
+    w5 = [vl_jump(bars[: len(bars) - k], window=5) for k in reversed(range(40))]
+
+    assert all(v is not None for v in w60), "표본 부족이 아니다 — 값은 나온다"
+    assert set(w60) == {0.0}, "창 60은 0.0에 걸쇠가 걸린 채 세션을 난다 (퇴화의 정체)"
+    assert len(set(w5)) > 1, "같은 계열에서 창 5는 세션 안에서 풀린다 — 계열이 죽은 게 아니다"
+
+    # **0.0이 클립의 결과임을 못 박는다.** `n_nan == n`이면 `FeatureStat.constant`가 False라
+    # 퇴화로 세지도 않는다(`features/engine`) — 즉 이 피처는 값을 내면서 안 변한 것이고,
+    # 그 값은 `RV - BV`가 음수라 0으로 잘린 것이다. 「데이터가 없어서」가 아니다.
+    log_rets = px_core.same_session_log_returns(bars, 60)
+    assert log_rets is not None and len(log_rets) == 60
+    rv = sum(r * r for r in log_rets)
+    bv = (math.pi / 2) * (60 / 59) * sum(abs(a) * abs(b) for a, b in zip(log_rets, log_rets[1:]))
+    assert rv - bv < 0, "클립 전 원값이 음수다 — 0.0은 잘린 결과지 「점프 없음」의 측정값이 아니다"
+
+
+def test_vl_jump_still_reports_a_real_jump_at_window_60():
+    """걸쇠는 **점프가 없을 때**의 이야기다 — 진짜 점프는 창 60에서도 잡힌다.
+
+    이것이 없으면 위 테스트가 "이 피처는 늘 0"으로 오독된다. 퇴화는 계산이 고장 난 것이
+    아니라 입력에 점프가 없었다는 뜻이기도 하다.
+    """
+    steps = [-3, -2, -1, 1, 2, 3]
+    closes = [7000.0]
+    for i in range(159):
+        closes.append(closes[-1] + steps[(i * 7 + i // 6) % len(steps)])
+    with_jump = closes[:-1] + [closes[-2] + 350.0]  # 마지막 수익률만 큰 점프
+
+    assert vl_jump(_m10_bars(closes), window=60) == 0.0
+    assert vl_jump(_m10_bars(with_jump), window=60) > 0.0
 
 
 # ---------------------------------------------------------------- vl_range_exp
