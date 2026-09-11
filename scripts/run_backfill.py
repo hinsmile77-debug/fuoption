@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -35,7 +34,6 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import httpx  # noqa: E402
 import redis  # noqa: E402
 
 from messiah.broker.kis.credentials import KISCredentials  # noqa: E402
@@ -45,7 +43,7 @@ from messiah.broker.kis.rest_client import KISRestClient  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
-from messiah.data import backfill  # noqa: E402
+from messiah.data import backfill, backfill_retry  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 
@@ -59,29 +57,22 @@ _EARLIEST_START = date(2025, 12, 12)
 # 일시적 네트워크/서버 장애 재시도 — 835회 호출을 한 번에 도는 작업이라 1회 실패로 전체가
 # 멈추면 안 된다(2026-08-04 첫 실행이 13일째에 `RemoteProtocolError: Server disconnected`로
 # 중단). `fetch_day_bars()`가 예외를 그대로 올리는 계약이라(모듈 docstring) 재시도 정책은
-# 호출측인 여기가 정한다.
-_RETRY_ERRORS = (httpx.TransportError, httpx.HTTPStatusError)
-_RETRY_ATTEMPTS = 4
-_RETRY_BACKOFF_SECONDS = 3.0
+# 호출측이 정한다.
+#
+# **2026-09-11 F-100**: 그 정책이 이 파일 안에만 있어서, 같은 `fetch_day_bars()`를 부르는
+# `verify_archive_volume.py`는 KIS 500 하나에 통째로 죽었다(장후 배치 3/7단계 크래시 →
+# `daily-axes-measured` 게이트 위반). 정책을 `data/backfill_retry.py` 하나로 옮기고 여기선
+# 콘솔 문구만 유지한다 — 옮긴 것이지 복사한 것이 아니다.
 
 
 def _fetch_with_retry(fetch, symbol: str, day: date, tick_size: Decimal):
-    last: Exception | None = None
-    for attempt in range(1, _RETRY_ATTEMPTS + 1):
-        try:
-            return backfill.fetch_day_bars(fetch, symbol, day, tick_size)
-        except _RETRY_ERRORS as exc:
-            last = exc
-            if attempt == _RETRY_ATTEMPTS:
-                break
-            wait = _RETRY_BACKOFF_SECONDS * attempt
-            print(
-                f"      재시도 {attempt}/{_RETRY_ATTEMPTS - 1} — {exc.__class__.__name__}: "
-                f"{exc} ({wait:.0f}초 대기)",
-                flush=True,
-            )
-            time.sleep(wait)
-    raise RuntimeError(f"{symbol} {day}: {_RETRY_ATTEMPTS}회 재시도 후에도 실패") from last
+    return backfill_retry.fetch_day_bars_with_retry(
+        fetch,
+        symbol,
+        day,
+        tick_size,
+        notify=lambda line: print(line, flush=True),
+    )
 
 
 def _parse_day(text: str) -> date:

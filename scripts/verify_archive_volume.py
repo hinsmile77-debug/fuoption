@@ -25,6 +25,17 @@
 
 행별로 비교하지 않는다 — 거래소 분봉과 수집 분봉은 장전 구간 포함 여부가 다를 수 있다.
 **공통 분(minute)의 거래량 합 비율**만 본다. 1.0에서 멀면 파서나 수집 경로를 의심한다.
+
+## 종료 코드 (2026-09-11 F-100)
+
+    0   전 구간 정상
+    1   의심일 있음 — 도구는 완주했고 **볼 것을 찾았다**
+    2   session_guard 거부 (장중)
+    3   일부 종목·일자를 **재지 못했다** — 거래소 조회가 재시도 후에도 실패
+
+3이 1과 갈라져 있는 이유: 1은 `run_postmarket._run_step`이 「완료 — 볼 것이 있다」로 읽는
+코드다. 대조 자체를 못 한 날을 그 코드로 내보내면 **미측정이 발견으로 둔갑한다** —
+2026-09-11 15:45에 KIS 500 한 건이 이 루프를 끊었을 때 배치 요약이 정확히 그렇게 말했다.
 """
 
 from __future__ import annotations
@@ -50,7 +61,7 @@ from messiah.broker.kis.redis_token_cache import RedisTokenDaemon  # noqa: E402
 from messiah.broker.kis.rest_client import KISRestClient  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
-from messiah.data import backfill  # noqa: E402
+from messiah.data import backfill, backfill_retry  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 
@@ -214,14 +225,25 @@ def main() -> int:
 
     suspicious: list[tuple[str, date, float]] = []
     results: list[tuple[str, date, DayComparison]] = []
+    unreachable: list[tuple[str, date, str]] = []
     for symbol, day in targets:
         frame = archiver.read_day(symbol, Horizon.M1, day)
         if frame is None or frame.height == 0:
             print(f"  {symbol} {day}  아카이브 없음 — 건너뜀")
             continue
-        official = backfill.fetch_day_bars(
-            client.get_futureoption_minute_chart, symbol, day, tick_size
-        )
+        # **한 종목·일자의 네트워크 실패가 나머지를 죽이지 않는다** (2026-09-11 F-100).
+        # 2026-09-11 15:45 KIS 500 한 건이 이 루프를 통째로 끊어 그날 `volume_check_*.json`이
+        # 아예 안 만들어졌고, 그 미측정 하나가 `daily-axes-measured` 게이트를 뒤집었다.
+        # 이 파일의 `_resolve_symbol` 쪽 판단과 같은 철학이다 — *"부가 정보 하나 때문에
+        # 배치 전체가 죽는 것이 훨씬 나쁘다."* 삼키지는 않는다: 아래 종료 코드 3이 말한다.
+        try:
+            official = backfill_retry.fetch_day_bars_with_retry(
+                client.get_futureoption_minute_chart, symbol, day, tick_size
+            )
+        except Exception as exc:  # noqa: BLE001 — 한 종목·일자의 실패가 나머지를 막지 않는다
+            print(f"  {symbol} {day}  대조 실패(네트워크) — {exc}")
+            unreachable.append((symbol, day, str(exc)))
+            continue
         if not official:
             print(f"  {symbol} {day}  공식 분봉 0봉 — 대조 불가")
             continue
@@ -300,6 +322,19 @@ def main() -> int:
         print(f"\n의심 {len(suspicious)}일 — 그 날짜는 수집 당시 코드로 파싱된 값이다.")
         print("  재백필: python scripts/run_backfill.py --start <일> --end <일>")
         print("  재합성: python scripts/run_recompose.py --start <일> --end <일>")
+
+    # **"덜 쟀다"는 "재 봤더니 이상하다"와 다른 사건이다** (2026-09-11 F-100).
+    # 종료 코드 1은 "도구가 완주했고 볼 것을 찾았다"는 뜻이라 `run_postmarket._run_step`이
+    # 그것을 「완료 — 볼 것이 있다」로 표시한다. 대조 자체를 못 한 날을 그 코드로 내보내면
+    # 배치 요약이 미측정을 발견으로 오분류한다(오늘 사고의 절반이 그것이었다). 그래서 3이다.
+    if unreachable:
+        print(f"\n대조 불가 {len(unreachable)}건 — 거래소 조회가 재시도 후에도 실패했다.")
+        for symbol, day, reason in unreachable:
+            print(f"  {symbol} {day}  {reason}")
+        print("  장 마감 후 같은 명령을 다시 돌리면 그날치가 사후 생성된다.")
+        return 3
+
+    if suspicious:
         return 1
 
     print("\n전 구간 정상.")
