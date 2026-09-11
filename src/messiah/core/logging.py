@@ -79,6 +79,11 @@ TAG_LEVELS: dict[str, int] = {
     # 백필 하루치 페이징이 호출 상한에 걸림 — 더 이른 봉이 남아 있을 수 있다(조용히 잘린
     # 하루가 학습 데이터에 섞이면 그 결손을 나중에 시장 상태로 오인한다).
     "BackfillPagingLimit": logging.WARNING,
+    # 배치의 하루치 조회가 재시도로 살아남 (2026-09-11 F-100, `data/backfill_retry.py`).
+    # `OptionChainPollRetried`·`InvestorFlowPollRetried`와 같은 규율 — **살아난 것은 결손이
+    # 아니므로** INFO다. 끝내 실패하면 이 태그가 아니라 예외가 나가고, 호출측이 그 종목·일자를
+    # "대조 불가"로 기록한다.
+    "BackfillFetchRetried": logging.INFO,
     # 일별 수급 페이징이 상한에 걸림 — 더 이른 날이 남아 있을 수 있다
     # (`data/investor_flow_history.py`).
     "InvestorFlowPagingLimit": logging.WARNING,
@@ -296,6 +301,13 @@ TAG_LEVELS: dict[str, int] = {
     # 사후 조사에서만 읽히고, 그러면 「사전」이라는 목적 자체가 없어진다. 임계 근거와
     # 80%를 쓰지 않은 이유는 `obs/delay_spike.py` docstring에 있다.
     "BarPublishDelaySpike": logging.WARNING,
+    # 완성봉을 **몇 명이 받았는가** (2026-09-11 G-6, `core/bus._log_bar_receivers`).
+    # 평상시 기록이라 DEBUG다 — 09-09·09-11의 5분 그리드 침묵이 "구독자가 아예 없었다"인지
+    # "구독은 있었는데 유실됐다"인지 가르는 유일한 자료다.
+    "BarPublishSubscriberCount": logging.DEBUG,
+    # 그 수가 0이면 **그 봉은 아무에게도 안 갔다** — 위 태그와 같은 자리에서 나오지만
+    # 전혀 다른 사건이라 태그를 가른다(R6: 태그 하나에 심각도 하나).
+    "BarPublishNoSubscriber": logging.WARNING,
     "RegistryBundleRegistered": logging.INFO,  # 신규 번들 candidate 등록 (Ver 1.6 §9.2)
     "RegistryTransitionRejected": logging.ERROR,  # 상태기계 위반 전이 시도 — 호출부 버그 신호
     "RegistryLiveRetired": logging.INFO,  # 신규 live 승격에 따른 이전 live 자동 retired
