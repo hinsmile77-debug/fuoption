@@ -138,6 +138,51 @@ def _log_subscriber_failure(failures: int, kind: str, exc: Exception, patterns: 
     return failures
 
 
+def _log_bar_receivers(topic: str, receivers: object) -> None:
+    """완성봉을 **몇 명이 받았는지** 남긴다 (2026-09-11 G-6, 대응 3-2).
+
+    ## 왜 봉 토픽만인가
+
+    2026-09-09·09-11에 `g2_daily`가 5분 그리드에서 조용히 비었다. 발행 쪽(`l1_daily`)은
+    정시에 발행 로그를 남겼고, 수신 쪽은 `OptionsDispatchIgnored`(도달했으나 아무도 처리
+    안 함)·`OptionsHandleBarFailed`(처리 중 예외)가 **둘 다 0건**이었다 — 즉 메시지가 그
+    서비스에 아예 도달하지 않았다(㉠). 거기서 조사가 멈췄다: **"발행 시점에 구독자가
+    없었다"와 "구독자는 있었는데 유실됐다"를 가를 자료가 없기 때문이다.**
+
+    Redis `PUBLISH`는 그 답을 이미 돌려주고 있었다 — 수신한 클라이언트 수다. 그동안
+    버리고 있었을 뿐이다. 다음 재발 때 이 한 줄이 ㉠을 두 갈래로 가른다.
+
+    다른 토픽까지 세지 않는 이유는 양이다 — 이 질문이 걸린 계열은 완성봉이고, 폴링 계열까지
+    켜면 하루 수만 줄이 된다.
+
+    ## 태그가 둘인 이유 (R6)
+
+    **태그 하나에 심각도 하나**다. "평소 몇 명이 받았나"(DEBUG)와 "아무도 못 받았다"
+    (WARNING)를 한 태그의 가변 레벨로 쓰면 무결성 리포트가 그 태그의 WARNING 수를 셀 수
+    없게 된다 — `poll_retry`가 `Retried`/`Error`를 가른 것과 같은 규율이다.
+
+    발행이 끝난 **뒤에** 부른다 — 계측이 본 임무 앞에 서면 안 된다.
+    """
+    if topic.split(".")[0] != TOPIC_BAR or not isinstance(receivers, int):
+        return
+    from messiah.core.logging import log  # 순환 import 방지 — bus는 logging보다 먼저 뜬다
+
+    if receivers:
+        log(
+            "BarPublishSubscriberCount",
+            f"{topic} → {receivers}명",
+            topic=topic,
+            receivers=receivers,
+        )
+    else:
+        log(
+            "BarPublishNoSubscriber",
+            f"{topic} — 발행 시점에 구독자가 0명이었다(이 봉은 아무에게도 안 갔다)",
+            topic=topic,
+            receivers=0,
+        )
+
+
 class MessageBus:
     """Redis 기반 버스. redis 패키지는 지연 import — 코덱 테스트에 서버 불필요."""
 
@@ -167,7 +212,8 @@ class MessageBus:
         if topic in STREAM_TOPICS or base in STREAM_TOPICS:
             await self._redis.xadd(topic, {"data": data}, maxlen=100_000, approximate=True)
         else:
-            await self._redis.publish(topic, data)
+            receivers = await self._redis.publish(topic, data)
+            _log_bar_receivers(topic, receivers)
 
     # ---- 구독 (pub/sub) -------------------------------------------------
     async def subscribe(
