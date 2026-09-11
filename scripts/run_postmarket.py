@@ -228,12 +228,44 @@ def _symbols_holding_day(day: date) -> list[str]:
     )
 
 
+_TRACEBACK_HEADER = "Traceback (most recent call last):"
+"""파이썬이 **미처리 예외**로 죽을 때만 찍는 정확한 헤더 (2026-09-11 F-101).
+
+줄 전체가 이것과 같을 때만 크래시로 본다 — 재백필 안내문 등에 "Traceback"이라는 단어가
+섞여도 오탐하지 않게 하기 위해서다."""
+
+_CHILD_UNMEASURED_EXIT_CODE = 3
+"""**자식 도구가** "재지 못했다"고 말하는 종료 코드 (2026-09-11 F-100/F-101).
+
+0(정상)·1(발견)과 다른 세 번째 사건이다. `verify_archive_volume.py`가 거래소 조회 실패로
+그날 대조를 못 했을 때 이 코드를 쓴다 — 1로 내보내면 `one_means_finding` 단계에서
+「완료 — 볼 것이 있다」로 표시돼 **미측정이 발견으로 둔갑한다**(2026-09-11 사고의 절반).
+
+값이 `_SYMBOL_MISMATCH_EXIT_CODE`와 같지만 **방향이 다르다** — 그쪽은 이 스크립트가
+자기 호출자에게 돌려주는 코드이고, 이쪽은 자식에게서 받는 코드다."""
+
+
+def _crashed(stderr_text: str) -> bool:
+    """자식이 미처리 예외로 죽었는가 — 종료 코드가 못 가르는 것을 표준오류가 가른다.
+
+    `one_means_finding=True`인 단계는 종료 코드 1을 「볼 것이 있다」로 읽는다. 그런데
+    미처리 예외도 파이썬 기본 동작상 종료 코드 1이라, 2026-09-11엔 KIS 500으로 죽은 3/7단계가
+    「완료 — 볼 것이 있다」로 요약에 실렸다. 구조화 로그는 표준출력으로 나가고
+    (`core/logging.configure`) 역추적만 표준오류로 가므로, 이 검사가 둘을 가른다.
+    """
+    return any(line.strip() == _TRACEBACK_HEADER for line in stderr_text.splitlines())
+
+
 def _run_step(step: Step) -> StepResult:
     """한 단계를 자식 프로세스로 돌리고 종료 코드를 규약대로 읽는다.
 
     자식 프로세스인 이유: 네 도구 다 자기 `main()`에서 `sys.argv`를 파싱하고
     `session_guard`를 직접 부른다. 같은 프로세스에서 import해 부르면 argv를 갈아끼우는
     잔재주가 필요하고, 한 도구의 `SystemExit`가 나머지를 끊는다.
+
+    **표준오류만 받아 둔다** (2026-09-11 F-101): 표준출력은 그대로 흘려보내 배치 로그의
+    진행 표시를 유지하고, 표준오류는 받아서 역추적 여부를 판정한 뒤 그대로 다시 내보낸다.
+    구조화 로그가 표준출력으로 나가는 구조라(`core/logging.configure`) 이 분리가 성립한다.
     """
     printable = " ".join(
         Path(part).name if part.endswith(".py") else part for part in step.argv[1:]
@@ -250,15 +282,31 @@ def _run_step(step: Step) -> StepResult:
             timeout=_STEP_TIMEOUT_SECONDS,
             check=False,
             env=child_env,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="backslashreplace",
         )
     except subprocess.TimeoutExpired:
         return StepResult(step.name, False, f"{_STEP_TIMEOUT_SECONDS}초 내에 안 끝남")
     except Exception as exc:  # noqa: BLE001 — 한 단계 실패가 나머지를 막지 않는다
         return StepResult(step.name, False, f"실행 실패: {exc}")
 
+    # 받아 둔 표준오류는 **반드시 그대로 다시 내보낸다** — 판정하려고 받은 것이지 삼키려고
+    # 받은 것이 아니다(R10). 이게 빠지면 배치 로그에서 역추적 원문이 사라진다.
+    stderr_text = completed.stderr or ""
+    if stderr_text:
+        print(stderr_text, end="", file=sys.stderr, flush=True)
+
     code = completed.returncode
+    if _crashed(stderr_text):
+        # **종료 코드보다 역추적이 우선이다** (2026-09-11 F-101). 크래시도 1로 죽으므로
+        # 이 검사를 뒤에 두면 `one_means_finding` 단계에서 또 「볼 것이 있다」가 된다.
+        return StepResult(step.name, False, "미처리 예외로 실패(Traceback — 위 출력 참조)")
     if code == 0:
         return StepResult(step.name, True, "완료")
+    if code == _CHILD_UNMEASURED_EXIT_CODE:
+        # 도구가 스스로 "못 쟀다"고 말했다 — 발견이 아니라 결손이다(그 상수 docstring).
+        return StepResult(step.name, False, "일부를 재지 못함(대조 불가 — 위 출력 참조)")
     if code == 1 and step.one_means_finding:
         # 도구가 정상 동작했고 볼 것을 찾았다 — 실패로 세면 늑대소년이 된다(docstring).
         return StepResult(step.name, True, "완료 — 볼 것이 있다(위 출력 참조)", finding=True)
