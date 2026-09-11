@@ -11,7 +11,7 @@
 - [ ] Windows 작업 스케줄러 `Messiah`(L1) · `Messiah-G2` · `Messiah-Shutdown` · `Messiah-Postmarket` 4종이 등록·무장 상태인가 (`scripts/install_scheduled_tasks.ps1` 정본과 일치)
 - [ ] 자가점검의 `schedule_drift` 가 "정본 일치"인가 — 불일치면 트리거 시각이 코드와 어긋난 것
 - [ ] 기동 창(08:15~15:35) 밖 기동 시도가 있었는가 → `LaunchWindowRefused`. **거부 자체는 정상**이지만, 거부 후 정시 트리거로 실제 기동됐는지까지 확인해야 완결이다
-- [ ] `SessionStart` 가 프로세스별로 정확히 1회인가 — 2회 이상이면 중복 기동 또는 크래시 후 재기동
+- [ ] `SessionStart` 가 프로세스별로 정확히 1회인가 — 2회 이상이면 중복 기동 또는 크래시 후 재기동. **단, 05:15~08:14 사이의 `SessionStart` 뒤에 `LaunchWindowRefused`가 따라오는 짝은 `AtStartup`(부팅) 트리거 설계이며 결함이 아니다** — `scripts/install_scheduled_tasks.ps1` 138~145행이 `Messiah`·`Messiah-G2` 두 작업에 정시 트리거와 **별도로** 부팅 트리거를 이중 등록한다. 시각이 날마다 다른 것(05:50→06:35→07:32)은 PC 부팅·기상 시각이 다르기 때문이다(2026-09-11 F-98 확정). 실제 기동은 08:20/08:25 정시 트리거가 맡는다
 - [ ] `SessionStart.git_sha` 가 HEAD와 같은가 — 다르면 옛 코드로 기동한 것
 
 ### A-2. 기동 자가 점검 (SYSTEM.md 불변원칙 6)
@@ -30,7 +30,7 @@
 
 ### A-4. 국면 특유의 함정
 - [ ] 08:15~09:00 사이 10분 이상 로그 공백 — 무엇으로 채워졌어야 하나
-- [ ] UI(Command Center) 기동 확인. `logs/ui_YYYYMMDD.log`에 (a) 역추적(Traceback)·`Logging error`·`UnicodeEncodeError` 문자열이 0건인가 (b) 구조화 JSON 행이 2행 이상인가(`SessionStart` + `UISnapshotFreshness`). **표준오류는 표준출력에 합쳐지므로 별도 `.err.log`는 존재하지 않는다**(`core/ui_launcher.py`: `stderr=subprocess.STDOUT`) — 2026-08-21 F-4 정정
+- [ ] UI(Command Center) 기동 확인. `logs/ui_YYYYMMDD.log`에 (a) 역추적(Traceback)·`Logging error`·`UnicodeEncodeError` 문자열이 0건인가 (b) 구조화 JSON 행이 2행 이상인가(`SessionStart` + `UISnapshotFreshness`). **표준오류는 표준출력에 합쳐지므로 별도 `.err.log`는 존재하지 않는다**(`core/ui_launcher.py`: `stderr=subprocess.STDOUT`) — 2026-08-21 F-4 정정. **단, `ConnectionResetError`·`[WinError 10054]`·`_ProactorBasePipeTransport` 계열은 브라우저 탭이 비정상 종료될 때 Streamlit 내부 이벤트 루프가 내는 알려진 무해 패턴이므로 F-99 반입 전까지 P2로만 기록한다** (2026-09-11 G-5). F-99가 들어오면 이 문구를 지우고 `UISocketResetSuppressed` 태그 유무로 판정을 바꾼다
 - [ ] 웜업이 끝났는가 — 끝나지 않은 웜업이 회색(UNKNOWN)으로 표시되며 조용히 지나가는 사례가 과거에 있었다
 
 ---
