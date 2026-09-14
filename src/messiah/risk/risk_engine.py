@@ -121,6 +121,16 @@ class RiskEngine:
         self._order_errors: deque[datetime] = deque()
 
     @property
+    def overnight_flatten_lead_minutes(self) -> float:
+        """R6 창 폭을 **장마감 청산 쪽에 빌려주는 자리** (2026-09-15 F-104).
+
+        진입 차단(R6, 이 클래스)과 강제청산(`strategy/eod_flatten.py`)이 **같은 값**을 봐야
+        한다 — 어긋나면 둘 사이 구간에 들어간 포지션이 청산 뒤에 남거나, 아직 진입이 열려
+        있는데 청산이 먼저 돈다. 설정을 복사하지 않고 이 한 곳에서만 읽게 한다.
+        """
+        return self._config.overnight_flatten_lead_minutes
+
+    @property
     def consecutive_losses(self) -> int:
         return self._consecutive_losses
 
