@@ -129,7 +129,7 @@ docstring 참고).
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable
@@ -177,6 +177,7 @@ from messiah.risk.cost_model import CostModel
 from messiah.risk.kill_switch import KillSwitch
 from messiah.risk.risk_engine import RiskEngine
 from messiah.risk.sizer import PositionSizer
+from messiah.strategy import eod_flatten
 from messiah.strategy.decision.meta_decision import MetaDecisionEngine
 
 _BAR_HISTORY_LIMIT = 200
@@ -313,6 +314,10 @@ class TradingPipeline:
         # 수집기의 마지막 heartbeat — CB 오탐 억제의 유일한 입력(모듈 docstring "한산과 단절",
         # `risk/circuit_breaker_monitor.py` 동명 절). 이 필드가 None이면 판정 자체를 안 한다.
         self._last_collector_health: Health | None = None
+        # 장마감 강제청산을 **그날 이미 쐈는가** (2026-09-15 F-104). 고정 틱은 30초마다
+        # 도는데 창 안에서는 매 틱이 「청산 대상」으로 판정되므로, 날짜로 한 번만 잠근다.
+        # 날짜인 이유는 장중 재기동에도 같은 날 두 번 쏘지 않기 위해서다.
+        self._eod_flatten_done_for: date | None = None
 
     @property
     def sizer(self) -> PositionSizer:
@@ -709,6 +714,81 @@ class TradingPipeline:
             collector_healthy=self._collector_healthy(as_of),
         )
         await self._apply_circuit_breaker_event(event)
+
+    async def watch_eod_flatten_forever(self) -> None:
+        """장마감 강제청산 워치독 (2026-09-15 F-104, 대응 1-3).
+
+        **봉이 아니라 시계에 건다.** 09-14에 5분 판단 루프가 45분간 조용히 비었고(이상점
+        1-4, 원인 미확정), 그 침묵이 15:20~15:30에 오는 날 청산을 봉에 매달아 두면 포지션이
+        그대로 밤을 넘긴다. 근거와 설계는 `strategy/eod_flatten.py` 모듈 docstring에 있다.
+
+        `_event_calendar`가 없으면 즉시 반환한다 — 재생·스모크처럼 실제 KRX 세션 개념이
+        없는 경로다(R6이 같은 조건에서 건너뛰는 것과 같은 계약).
+
+        틱 30초는 CB 워치독과 같은 격자다. 마감 10분 창에 최소 20틱이 들어가므로 한두 틱이
+        브로커 조회 실패로 날아가도 그날 안에 반드시 다시 시도한다.
+        """
+        if self._event_calendar is None:
+            return
+        await FixedTickScheduler(tick_seconds=30.0).run_forever(self.observe_eod_flatten_tick)
+
+    async def observe_eod_flatten_tick(self) -> None:
+        """워치독의 **1틱**만 — 루프에서 떼어낸 이유는 `observe_circuit_breaker_tick()`과 같다
+        (주입된 시계와 짝지으면 실제로 마감을 기다리지 않고 재현된다).
+
+        예외를 삼키지 않고 **남긴 뒤** 넘어간다 — 이 루프가 죽으면 그날 청산이 통째로
+        사라지는데, 그 사실이 로그에 없으면 다음 날 아침에야 안다. 다음 틱이 재시도한다.
+        """
+        if self._event_calendar is None:
+            return
+        as_of = self._now()
+        try:
+            plan = eod_flatten.decide(
+                minutes_to_close=self._event_calendar.minutes_to_close(as_of),
+                positions=await self._broker.positions(),
+                today=to_kst(as_of).date(),
+                already_done_for=self._eod_flatten_done_for,
+                # R6과 **같은 값**을 건넨다 — 진입 차단 창과 청산 창이 어긋나면 그 사이에
+                # 들어간 포지션이 청산 뒤에 남는다(`eod_flatten` 모듈 상수 주석).
+                lead_minutes=self._risk_engine.overnight_flatten_lead_minutes,
+            )
+        except Exception as exc:  # noqa: BLE001 — 루프가 죽으면 그날 청산이 사라진다
+            log(
+                "EodFlattenFailed",
+                f"청산 판정 실패 — 이 틱을 건너뛰고 30초 뒤 재시도: {exc}",
+                symbol=self._symbol,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        if not plan.should_flatten:
+            # 창 안인데 쏠 것이 없었던 경우만 남긴다 — 창 밖 틱은 하루 수백 건이다.
+            # 그 한 줄이 "청산이 안 돌았다"와 "돌았는데 무포지션이었다"를 가른다.
+            if plan.in_window and self._eod_flatten_done_for != to_kst(as_of).date():
+                self._eod_flatten_done_for = to_kst(as_of).date()
+                log("EodFlattenNoPosition", plan.reason, symbol=self._symbol)
+            return
+
+        # **먼저 표시하고 쏜다.** 제출 도중 죽어도 그날 다시 쏘지 않는다 — 중복 청산은
+        # 미청산보다 고치기 어렵다(반대 방향 포지션이 새로 생긴다).
+        self._eod_flatten_done_for = to_kst(as_of).date()
+        try:
+            for request in self._kill_switch.liquidate(list(plan.positions)):
+                log(
+                    "EodFlattenLiquidating",
+                    f"{request.symbol} {request.qty}계약 장마감 강제청산 — {plan.reason}",
+                    symbol=request.symbol,
+                    qty=request.qty,
+                    minutes_to_close=self._event_calendar.minutes_to_close(as_of),
+                )
+                await self._gateway.submit(request)
+        except Exception as exc:  # noqa: BLE001 — 위와 같은 이유
+            log(
+                "EodFlattenFailed",
+                f"청산 주문 제출 실패 — 포지션이 남았을 수 있다(사람 확인 필요): {exc}",
+                symbol=self._symbol,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
     async def run_forever(self) -> None:
         patterns = [

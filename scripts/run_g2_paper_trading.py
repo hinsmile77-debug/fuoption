@@ -534,6 +534,10 @@ async def _run_regular_session(
         futures_service.run_forever(),
         pipeline.run_forever(),
         pipeline.watch_circuit_breaker_forever(),
+        # 장마감 강제청산 워치독 (2026-09-15 F-104, 대응 1-3). CB 워치독과 같은 이유로
+        # 벽시계다 — 09-14에 판단 루프가 45분간 조용히 비었고(1-4), 그 침묵이 마감 10분
+        # 창에 오는 날 청산을 봉에 매달아 두면 포지션이 그대로 밤을 넘긴다.
+        pipeline.watch_eod_flatten_forever(),
         sim_feed.run_forever(),
         shadow_manager.run_forever(),
         # 국면 발행 (2026-08-11 ④-c). 저장된 RegimeAI가 없으면 이 자리는 비고, 그 사실은

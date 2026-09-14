@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from messiah.broker.base import BrokerPosition
 from messiah.broker.simulator.adapter import SimBroker
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.health import COLLECTOR_COMPONENT, staleness_status
@@ -946,3 +947,98 @@ async def test_a_broken_provider_does_not_kill_the_trade(tmp_path):
 
     positions = await broker.positions()
     assert len(positions) == 1, "스냅샷이 실패해도 주문은 나간다"
+
+
+# --- 장마감 강제청산 결선 (2026-09-15 F-104, 대응 1-3) -------------------------
+
+
+def _hold(broker, *, qty: int) -> None:
+    """시뮬 브로커에 보유 포지션을 심는다 — 체결 경로를 타지 않고 상태만 만든다."""
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=qty, avg_price_ticks=41_000)
+
+
+async def _flatten_pipeline(now_kst: datetime):
+    """청산 워치독만 보는 최소 구성 — 마감(15:35) 기준 시각을 주입한다.
+
+    시뮬 브로커에 봉을 먼저 먹인다 — `on_bar()` 전에는 기준가도 TTL 기산점도 없어
+    시장가 제출이 거부된다(`broker/simulator/adapter.submit`). 청산은 시장가다.
+    """
+    clock = {"t": now_kst}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"],
+        event_calendar=EventCalendar(frozenset(), years=frozenset({2026})),
+    )
+    for bar in _m1_bars(3, now_kst - timedelta(minutes=3)):
+        broker.on_bar(bar)
+    return clock, broker, gateway, pipeline
+
+
+@pytest.mark.asyncio
+async def test_eod_flatten_submits_opposite_orders_inside_the_window():
+    """**핵심 회귀** — 마감 10분 창 안에서 보유 포지션이 실제로 반대매매로 나간다.
+
+    09-09·09-10·09-14 사흘간 진입만 나가고 이 주문이 한 번도 안 나간 것이 이상점 1-3이다.
+    """
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 27, tzinfo=KST)  # 마감 8분 전 — 창 안
+    )
+    _hold(broker, qty=2)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_eod_flatten_tick()
+
+    assert gateway.accepted_orders == before + 1, "청산 주문이 실제로 제출돼야 한다"
+
+
+@pytest.mark.asyncio
+async def test_eod_flatten_does_not_fire_outside_the_window():
+    """마감 25분 전에는 아무것도 안 나간다 — 하루 종일 도는 틱이 조기 청산을 하면 안 된다."""
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 10, tzinfo=KST)  # 마감 25분 전 — 창 밖
+    )
+    _hold(broker, qty=2)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_eod_flatten_tick()
+
+    assert gateway.accepted_orders == before
+
+
+@pytest.mark.asyncio
+async def test_eod_flatten_fires_once_even_across_many_ticks():
+    """30초 틱이 창 안에서 스무 번 돌아도 청산은 한 번이다 — 중복 청산은 반대 포지션을 만든다."""
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 27, tzinfo=KST)
+    )
+    _hold(broker, qty=2)
+    before = gateway.accepted_orders
+
+    for _ in range(20):
+        await pipeline.observe_eod_flatten_tick()
+
+    assert gateway.accepted_orders == before + 1
+
+
+@pytest.mark.asyncio
+async def test_eod_flatten_survives_a_broker_failure():
+    """브로커 조회가 실패해도 워치독은 죽지 않는다 — 다음 틱이 재시도한다.
+
+    이 루프가 조용히 죽으면 그날 청산이 통째로 사라지고, 그 사실을 다음 날 아침에야 안다.
+    """
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 27, tzinfo=KST)
+    )
+
+    async def _boom():
+        raise RuntimeError("broker down")
+
+    broker.positions = _boom  # type: ignore[method-assign]
+    await pipeline.observe_eod_flatten_tick()  # 예외가 새어나오면 이 줄에서 실패한다
+
+    # 브로커가 돌아오면 같은 날 안에 다시 시도한다 — 실패 틱이 날짜 잠금을 걸면 안 된다.
+    del broker.positions
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+    await pipeline.observe_eod_flatten_tick()
+
+    assert gateway.accepted_orders == before + 1, "실패한 틱이 그날 청산을 영구히 막으면 안 된다"
