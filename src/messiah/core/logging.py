@@ -168,6 +168,16 @@ TAG_LEVELS: dict[str, int] = {
     # INFO 서른 줄이 아니라 WARNING 한 줄로 보여야 한다. 0계약이 0건인 날은 안 뜬다.
     "SizerZeroQtyStreak": logging.WARNING,
     "KillSwitchLiquidating": logging.WARNING,  # Kill Switch 발동에 따른 강제청산 주문 발행
+    # 장마감 강제청산 (2026-09-15 F-104, 대응 1-3). KillSwitch·CB와 **동급 WARNING** —
+    # 사람이 안 시켰는데 포지션이 나가는 세 경로가 같은 무게로 보여야 한다.
+    "EodFlattenLiquidating": logging.WARNING,
+    # 창 안에 들어왔는데 청산할 것이 없었다 (하루 최대 1건). **침묵과 무포지션을 가른다** —
+    # 이 줄이 없으면 "청산 로직이 안 돌았다"와 "돌았는데 들고 있는 게 없었다"가 로그에서
+    # 같은 소리를 낸다. 09-14 이상점 1-4가 정확히 그 혼동이었다. R6 규율대로 태그를 갈랐다.
+    "EodFlattenNoPosition": logging.INFO,
+    # 청산 판정·제출 자체가 실패했다. **ERROR다** — 이 경로가 조용히 죽으면 포지션이 밤을
+    # 넘기고, 그 사실을 다음 날 아침에야 안다. 워치독 루프는 계속 돈다(다음 틱이 재시도).
+    "EodFlattenFailed": logging.ERROR,
     # 구독 루프가 메시지 하나를 처리하다 실패했다 (2026-08-07 P0-1). **루프는 살아 있다** —
     # 그게 이 태그의 존재 이유다. 2026-08-07엔 이 격리가 없어 `KillSignal` 한 건이
     # 수집 프로세스를 통째로 죽였다(1시간 54분 유실). 이제 살아남으므로 **로그가 유일한
