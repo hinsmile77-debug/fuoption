@@ -33,9 +33,10 @@
 청산을 세는 칸은 없었다. 한쪽만 세면 「열린 것」과 「닫힌 것」의 차이가 리포트 위에서
 사라진다.
 
-지금 시스템에는 **선물 방향 포지션을 정리하는 경로가 아예 없다**(F-104 사람 결정 대기).
-그래서 이 칸은 당분간 `0/3`처럼 찍힐 것이고, 그것이 정확히 이 칸이 말해야 할 사실이다 —
-축이 먼저 서 있어야 F-104가 반입되는 날 그 칸이 저절로 올라가는 것으로 검증이 된다.
+2026-09-14에는 선물 방향 포지션을 정리하는 경로가 아예 없어 이 칸이 `0/3`으로 찍혔고,
+그것이 정확히 이 칸이 말해야 할 사실이었다. **2026-09-15에 F-104가 그 경로를 만들었다**
+(`strategy/eod_flatten.py`) — 축이 먼저 서 있었기 때문에, 그날부터 이 칸이 저절로 올라가는
+것 자체가 F-104의 라이브 검증이 된다.
 
 ## 왜 `FillMatched`를 청산 증거로 안 쓰나
 
@@ -43,7 +44,7 @@
 「청산 확인됨」으로 둔갑한다 — 이 축이 잡으려는 바로 그 구멍을 이 축이 스스로 덮는 꼴이다.
 증거로 인정하는 것은 **포지션을 실제로 내보내는 경로가 남기는 태그뿐**이고, 지금 등록부에
 그런 태그는 강제청산 둘(`KillSwitchLiquidating`·`CircuitBreakerLiquidating`)이다.
-F-104가 EOD 청산 태그를 만들면 `_EXIT_EVIDENCE_TAGS`에 한 줄 더하는 것으로 끝난다.
+F-104(2026-09-15 반입)가 만든 `EodFlattenLiquidating`이 그렇게 더해졌다.
 
 ## 이 칸은 `breaches`에 넣지 않는다 (R18)
 
@@ -74,7 +75,11 @@ DEFAULT_WINDOW_DAYS = 5
 #: 포지션을 **실제로 내보낸** 경로만 (2026-09-14 G-65). 진입에도 뜨는 태그는 넣지 않는다 —
 #: 이유는 모듈 docstring "왜 `FillMatched`를 청산 증거로 안 쓰나". F-104가 EOD 청산 태그를
 #: 만들면 여기에 한 줄 더하면 된다.
-_EXIT_EVIDENCE_TAGS = ("KillSwitchLiquidating", "CircuitBreakerLiquidating")
+_EXIT_EVIDENCE_TAGS = (
+    "EodFlattenLiquidating",  # 2026-09-15 F-104 — 장마감 강제청산, 이 축이 기다리던 태그
+    "KillSwitchLiquidating",
+    "CircuitBreakerLiquidating",
+)
 
 
 @dataclass
