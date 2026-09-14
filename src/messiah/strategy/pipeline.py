@@ -314,10 +314,18 @@ class TradingPipeline:
         # 수집기의 마지막 heartbeat — CB 오탐 억제의 유일한 입력(모듈 docstring "한산과 단절",
         # `risk/circuit_breaker_monitor.py` 동명 절). 이 필드가 None이면 판정 자체를 안 한다.
         self._last_collector_health: Health | None = None
-        # 장마감 강제청산을 **그날 이미 쐈는가** (2026-09-15 F-104). 고정 틱은 30초마다
-        # 도는데 창 안에서는 매 틱이 「청산 대상」으로 판정되므로, 날짜로 한 번만 잠근다.
-        # 날짜인 이유는 장중 재기동에도 같은 날 두 번 쏘지 않기 위해서다.
-        self._eod_flatten_done_for: date | None = None
+        # 장마감 강제청산 진행 상태 (2026-09-15 F-104). 분할이라 「했다/안 했다」 하나로는
+        # 모자란다 — 심볼별 **미체결 잔량**(보냈는데 아직 포지션에 안 잡힌 수량)을 들고
+        # 체결 지연 중 이중 발행을 막는다. **누계가 아니다**: 체결이 잡히면 포지션이 이미
+        # 줄어드는데 누계까지 빼면 두 번 차감해 분할이 도중에 멈춘다(`eod_flatten` docstring).
+        self._eod_flatten_day: date | None = None
+        self._eod_flatten_inflight: dict[str, int] = {}
+        # 직전 틱에 본 보유 수량 — 이번 틱의 감소분이 「그 사이 체결된 양」이고, 그만큼
+        # 미체결 잔량을 깎는다. 이 관측이 없으면 잔량이 영영 안 줄어 청산이 멈춘다.
+        self._eod_flatten_last_qty: dict[str, int] = {}
+        # 「창은 열렸는데 들 것이 없었다」를 그날 한 번만 말하기 위한 표식.
+        self._eod_flatten_announced = False
+        self._eod_flatten_sent_any = False
 
     @property
     def sizer(self) -> PositionSizer:
@@ -725,12 +733,42 @@ class TradingPipeline:
         `_event_calendar`가 없으면 즉시 반환한다 — 재생·스모크처럼 실제 KRX 세션 개념이
         없는 경로다(R6이 같은 조건에서 건너뛰는 것과 같은 계약).
 
-        틱 30초는 CB 워치독과 같은 격자다. 마감 10분 창에 최소 20틱이 들어가므로 한두 틱이
-        브로커 조회 실패로 날아가도 그날 안에 반드시 다시 시도한다.
+        틱 30초는 CB 워치독과 같은 격자다. 마감 10분 창에 20틱이 들어가고, **그 틱이 그대로
+        분할 시장가의 리듬이 된다** — 한 틱에 `slice_contracts`씩 내보내고, 마감 2분 전부터는
+        남은 전량을 쓸어담는다(Master Plan "분할 시장가", 2026-09-15 사용자 결정). 한두 틱이
+        브로커 조회 실패로 날아가도 남은 틱이 그날 안에 반드시 마저 내보낸다.
         """
         if self._event_calendar is None:
             return
         await FixedTickScheduler(tick_seconds=30.0).run_forever(self.observe_eod_flatten_tick)
+
+    def _settle_eod_flatten_inflight(self, positions: list[BrokerPosition]) -> None:
+        """직전 틱 대비 **줄어든 수량만큼 미체결 잔량을 깎는다** (2026-09-15 F-104).
+
+        분할 청산에서 세야 하는 것은 「그날 보낸 누계」가 아니라 「보냈는데 아직 포지션에
+        안 잡힌 수량」이다. 누계로 세면 체결이 잡히는 순간 포지션이 이미 줄어드는데 누계까지
+        빼서 **같은 수량을 두 번 차감**하고, 분할이 도중에 멈춰 포지션이 남는다 — 구현 중
+        회귀 테스트가 정확히 그 형태로 잡아냈다(5계약 중 3계약만 나가고 2계약이 남았다).
+
+        체결을 직접 구독하지 않고 **보유 수량의 감소**로 재는 이유는, 이 워치독이 어차피
+        매 틱 브로커에 포지션을 다시 묻기 때문이다 — 그 답 하나로 충분하고, 체결 스트림에
+        의존하면 그 배선이 끊긴 날 청산이 같이 멈춘다(09-14가 가르쳐 준 형태다).
+
+        포지션이 사라진 심볼은 전량 체결된 것이므로 잔량도 함께 지운다.
+        """
+        seen = {p.symbol: abs(p.qty) for p in positions if p.qty != 0}
+        for symbol, previous in list(self._eod_flatten_last_qty.items()):
+            filled = previous - seen.get(symbol, 0)
+            if filled > 0 and symbol in self._eod_flatten_inflight:
+                left = self._eod_flatten_inflight[symbol] - filled
+                if left > 0:
+                    self._eod_flatten_inflight[symbol] = left
+                else:
+                    del self._eod_flatten_inflight[symbol]
+        for symbol in list(self._eod_flatten_inflight):
+            if symbol not in seen:
+                del self._eod_flatten_inflight[symbol]  # 포지션이 없어졌다 — 전량 체결
+        self._eod_flatten_last_qty = seen
 
     async def observe_eod_flatten_tick(self) -> None:
         """워치독의 **1틱**만 — 루프에서 떼어낸 이유는 `observe_circuit_breaker_tick()`과 같다
@@ -742,12 +780,23 @@ class TradingPipeline:
         if self._event_calendar is None:
             return
         as_of = self._now()
+        today = to_kst(as_of).date()
+        if self._eod_flatten_day != today:
+            # 날이 바뀌면 전부 버린다 — 어제의 잔량 기록이 오늘 청산을 막으면 안 된다.
+            self._eod_flatten_day = today
+            self._eod_flatten_inflight = {}
+            self._eod_flatten_last_qty = {}
+            self._eod_flatten_announced = False
+            self._eod_flatten_sent_any = False
         try:
+            # **매 틱 다시 조회한다** — 체결된 만큼 저절로 줄어드는 것이 분할의 자기교정
+            # 장치다. 제출 기록과 실제 보유가 어긋나도 여기서 수렴한다.
+            positions = await self._broker.positions()
+            self._settle_eod_flatten_inflight(positions)
             plan = eod_flatten.decide(
                 minutes_to_close=self._event_calendar.minutes_to_close(as_of),
-                positions=await self._broker.positions(),
-                today=to_kst(as_of).date(),
-                already_done_for=self._eod_flatten_done_for,
+                positions=positions,
+                in_flight=self._eod_flatten_inflight,
                 # R6과 **같은 값**을 건넨다 — 진입 차단 창과 청산 창이 어긋나면 그 사이에
                 # 들어간 포지션이 청산 뒤에 남는다(`eod_flatten` 모듈 상수 주석).
                 lead_minutes=self._risk_engine.overnight_flatten_lead_minutes,
@@ -762,26 +811,45 @@ class TradingPipeline:
             return
 
         if not plan.should_flatten:
-            # 창 안인데 쏠 것이 없었던 경우만 남긴다 — 창 밖 틱은 하루 수백 건이다.
-            # 그 한 줄이 "청산이 안 돌았다"와 "돌았는데 무포지션이었다"를 가른다.
-            if plan.in_window and self._eod_flatten_done_for != to_kst(as_of).date():
-                self._eod_flatten_done_for = to_kst(as_of).date()
+            # 창 안인데 내보낼 것이 없었던 경우만 남긴다 — 창 밖 틱은 하루 수백 건이다.
+            # **그날 한 장도 안 보냈을 때만**이다. 다 내보낸 뒤의 빈 틱까지 남기면
+            # 「무포지션」이 거짓말이 된다 — 청산한 날과 들 게 없던 날이 다시 섞인다.
+            nothing_sent_yet = not self._eod_flatten_announced and not self._eod_flatten_sent_any
+            if plan.in_window and nothing_sent_yet:
+                self._eod_flatten_announced = True
                 log("EodFlattenNoPosition", plan.reason, symbol=self._symbol)
             return
 
-        # **먼저 표시하고 쏜다.** 제출 도중 죽어도 그날 다시 쏘지 않는다 — 중복 청산은
-        # 미청산보다 고치기 어렵다(반대 방향 포지션이 새로 생긴다).
-        self._eod_flatten_done_for = to_kst(as_of).date()
+        # 분할된 몫을 원 포지션의 **부호만 물려받은** 가짜 포지션으로 만들어 넘긴다 —
+        # 반대매매 방향 결정은 `KillSwitch.liquidate()` 한 곳에만 둔다.
+        sliced = [
+            BrokerPosition(
+                symbol=piece.position.symbol,
+                qty=piece.qty if piece.position.qty > 0 else -piece.qty,
+                avg_price_ticks=piece.position.avg_price_ticks,
+            )
+            for piece in plan.slices
+        ]
         try:
-            for request in self._kill_switch.liquidate(list(plan.positions)):
+            for request in self._kill_switch.liquidate(sliced):
                 log(
                     "EodFlattenLiquidating",
                     f"{request.symbol} {request.qty}계약 장마감 강제청산 — {plan.reason}",
                     symbol=request.symbol,
                     qty=request.qty,
+                    final_sweep=plan.final_sweep,
+                    in_flight=self._eod_flatten_inflight.get(request.symbol, 0),
                     minutes_to_close=self._event_calendar.minutes_to_close(as_of),
                 )
-                await self._gateway.submit(request)
+                ack = await self._gateway.submit(request)
+                if ack is None:
+                    # 게이트웨이가 거부했다 — **잔량에 올리지 않는다.** 거부를 「보냈다」로
+                    # 세면 그 수량이 영영 안 나간다. 다음 틱이 그대로 재시도한다.
+                    continue
+                self._eod_flatten_sent_any = True
+                self._eod_flatten_inflight[request.symbol] = (
+                    self._eod_flatten_inflight.get(request.symbol, 0) + request.qty
+                )
         except Exception as exc:  # noqa: BLE001 — 위와 같은 이유
             log(
                 "EodFlattenFailed",

@@ -952,9 +952,9 @@ async def test_a_broken_provider_does_not_kill_the_trade(tmp_path):
 # --- 장마감 강제청산 결선 (2026-09-15 F-104, 대응 1-3) -------------------------
 
 
-def _hold(broker, *, qty: int) -> None:
+def _hold(broker, *, qty: int, symbol: str = _SYMBOL) -> None:
     """시뮬 브로커에 보유 포지션을 심는다 — 체결 경로를 타지 않고 상태만 만든다."""
-    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=qty, avg_price_ticks=41_000)
+    broker._positions[symbol] = BrokerPosition(symbol=symbol, qty=qty, avg_price_ticks=41_000)
 
 
 async def _flatten_pipeline(now_kst: datetime):
@@ -982,12 +982,13 @@ async def test_eod_flatten_submits_opposite_orders_inside_the_window():
     _clock, broker, gateway, pipeline = await _flatten_pipeline(
         datetime(2026, 9, 15, 15, 27, tzinfo=KST)  # 마감 8분 전 — 창 안
     )
-    _hold(broker, qty=2)
+    _hold(broker, qty=1)
     before = gateway.accepted_orders
 
     await pipeline.observe_eod_flatten_tick()
 
     assert gateway.accepted_orders == before + 1, "청산 주문이 실제로 제출돼야 한다"
+    assert (await broker.positions()) == [], "1계약은 한 틱에 전량 빠져야 한다"
 
 
 @pytest.mark.asyncio
@@ -1005,18 +1006,109 @@ async def test_eod_flatten_does_not_fire_outside_the_window():
 
 
 @pytest.mark.asyncio
-async def test_eod_flatten_fires_once_even_across_many_ticks():
-    """30초 틱이 창 안에서 스무 번 돌아도 청산은 한 번이다 — 중복 청산은 반대 포지션을 만든다."""
-    _clock, broker, gateway, pipeline = await _flatten_pipeline(
-        datetime(2026, 9, 15, 15, 27, tzinfo=KST)
-    )
-    _hold(broker, qty=2)
-    before = gateway.accepted_orders
+async def test_eod_flatten_splits_a_large_position_across_ticks():
+    """**분할 시장가** (Master Plan) — 5계약이 한 장으로 나가지 않는다.
 
-    for _ in range(20):
+    기본 슬라이스는 1계약이라 틱마다 한 장씩 나가고, 시뮬 브로커가 즉시 체결하므로
+    포지션이 한 계약씩 줄어든다.
+    """
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 30, tzinfo=KST)  # 마감 5분 전 — 창 안, 쓸어담기 전
+    )
+    _hold(broker, qty=5)
+
+    await pipeline.observe_eod_flatten_tick()
+    assert gateway.accepted_orders == 1, "한 틱에 한 장만"
+    assert (await broker.positions())[0].qty == 4, "전량이 아니라 1계약만 빠져야 한다"
+
+    await pipeline.observe_eod_flatten_tick()
+    assert gateway.accepted_orders == 2
+    assert (await broker.positions())[0].qty == 3
+
+
+@pytest.mark.asyncio
+async def test_eod_flatten_drains_everything_before_the_close():
+    """분할을 반복하면 마감 전에 전량이 빠진다 — 분할이 미청산으로 끝나면 안 된다."""
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 30, tzinfo=KST)
+    )
+    _hold(broker, qty=5)
+
+    for _ in range(10):
         await pipeline.observe_eod_flatten_tick()
 
-    assert gateway.accepted_orders == before + 1
+    assert (await broker.positions()) == [], "마감 전에 전량이 빠져야 한다"
+    assert gateway.accepted_orders == 5, "5계약이 5장으로 나뉘어 나가야 한다"
+
+
+@pytest.mark.asyncio
+async def test_final_sweep_sends_the_remainder_in_one_order():
+    """마감 2분 전부터는 분할을 그만두고 남은 전량을 한 번에 내보낸다."""
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 34, tzinfo=KST)  # 마감 1분 전 — 쓸어담기 구간
+    )
+    _hold(broker, qty=5)
+
+    await pipeline.observe_eod_flatten_tick()
+
+    assert gateway.accepted_orders == 1, "쓸어담기는 한 장이다"
+    assert (await broker.positions()) == [], "남은 전량이 한 번에 빠져야 한다"
+
+
+@pytest.mark.asyncio
+async def test_eod_flatten_does_not_oversend_when_fills_lag():
+    """체결이 안 잡혀 포지션이 그대로여도 같은 수량을 또 보내지 않는다.
+
+    이 가드가 없으면 체결 지연 구간에서 매 틱 중복 발행돼 **반대 방향 포지션**이 생긴다 —
+    미청산보다 고치기 어려운 사고다.
+    """
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 34, tzinfo=KST)  # 쓸어담기 — 전량을 한 번에 시도
+    )
+    _hold(broker, qty=3)
+    # 제출은 접수되지만 포지션은 갱신되지 않는 상태를 만든다(체결 지연 모사).
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=3, avg_price_ticks=41_000)
+
+    async def _frozen():
+        return [BrokerPosition(symbol=_SYMBOL, qty=3, avg_price_ticks=41_000)]
+
+    broker.positions = _frozen  # type: ignore[method-assign]
+
+    await pipeline.observe_eod_flatten_tick()
+    first = gateway.accepted_orders
+    for _ in range(5):
+        await pipeline.observe_eod_flatten_tick()
+
+    assert first == 1
+    assert gateway.accepted_orders == first, "포지션이 안 줄어도 재발행하면 안 된다"
+
+
+@pytest.mark.asyncio
+async def test_rejected_slice_is_retried_next_tick():
+    """게이트웨이가 거부한 몫은 누적하지 않는다 — 거부를 「보냈다」로 세면 영영 안 나간다."""
+    _clock, broker, gateway, pipeline = await _flatten_pipeline(
+        datetime(2026, 9, 15, 15, 30, tzinfo=KST)
+    )
+    _hold(broker, qty=2)
+
+    real_submit = broker.submit
+    calls = {"n": 0}
+
+    async def _reject_first(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            from messiah.broker.base import SubmitResult
+
+            return SubmitResult(ok=False, error="시뮬 거부")
+        return await real_submit(req)
+
+    broker.submit = _reject_first  # type: ignore[method-assign]
+
+    await pipeline.observe_eod_flatten_tick()
+    assert gateway.accepted_orders == 0, "첫 틱은 거부됐다"
+
+    await pipeline.observe_eod_flatten_tick()
+    assert gateway.accepted_orders == 1, "거부된 몫이 다음 틱에 재시도돼야 한다"
 
 
 @pytest.mark.asyncio
@@ -1035,7 +1127,7 @@ async def test_eod_flatten_survives_a_broker_failure():
     broker.positions = _boom  # type: ignore[method-assign]
     await pipeline.observe_eod_flatten_tick()  # 예외가 새어나오면 이 줄에서 실패한다
 
-    # 브로커가 돌아오면 같은 날 안에 다시 시도한다 — 실패 틱이 날짜 잠금을 걸면 안 된다.
+    # 브로커가 돌아오면 같은 날 안에 다시 시도한다 — 실패 틱이 그날 청산을 막으면 안 된다.
     del broker.positions
     _hold(broker, qty=1)
     before = gateway.accepted_orders
