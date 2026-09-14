@@ -11413,3 +11413,24 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
 - [ ] F-99 방향 결정(UI 소켓 리셋 예외 처리) — 변경 없음.
 - [ ] `tests/test_rollover_day.py` 날짜 결합 해소 — 변경 없음, 사람 확인 필요.
 - [ ] `pytest -k champion_sample` 실제 PC 재실행 — 11세션째 요청.
+
+---
+
+## [MW0601] 2026-09-15 오전 — F-104 반입 (사용자 지시)
+
+### ✅ 반입 완료
+- [x] **F-104** 선물 방향 포지션 장마감 강제청산 — `strategy/eod_flatten.py`(판정) + `pipeline.watch_eod_flatten_forever()`(벽시계 30초 틱) + 로그 태그 3종. `KillSwitch.liquidate()` 재사용, 창 폭은 R6(`overnight_flatten_lead_minutes`)에서 받음. 테스트 16건, replay 통과. 커밋 a6610bb~f9b93a1.
+- [x] G-65 축에 `EodFlattenLiquidating` 연결 — 어제 `0/3`으로 찍히던 「청산 확인」 칸이 오늘부터 저절로 올라간다.
+
+### 🔍 오늘(09-15) 장후 반드시 확인
+- [ ] **F-104 라이브 검증** — 15:25 이후 `EodFlattenLiquidating`(포지션 있었음) 또는 `EodFlattenNoPosition`(없었음) 중 **하나는 반드시** 찍혀야 한다. 둘 다 없으면 워치독 자체가 안 돈 것이고 그것이 다음 조사 대상이다.
+- [ ] 청산이 나갔다면 `OrderSubmit accepted`까지 이어졌는지, 그리고 `daily_integrity_20260915.json`의 `order_path_window.days_with_exit_evidence`가 1 이상으로 올라갔는지.
+- [ ] 청산 주문이 **중복 발행되지 않았는지**(창 안 20틱 × 1회 보장) — `EodFlattenLiquidating` 건수가 보유 종목 수와 같아야 한다.
+- [ ] `EodFlattenFailed` 0건인지.
+
+### 🙋 사람 결정 대기(갱신)
+- [ ] **(신규) 분할 시장가 여부** — Master Plan은 "분할 시장가"라 적었으나 이번 반입은 `KillSwitch.liquidate()`를 그대로 써서 **전량 단일 시장가**다. 모의 1~2계약에서는 차이가 없지만 수량이 커지면 시장충격이 문제가 된다. 분할이 필요한 수량대에 도달하기 전에 결정 필요.
+- [ ] **(신규) R18 사후 판단** — 이번엔 섀도 없이 바로 켰다. 며칠 관찰 후 이 경로를 그대로 둘지, 섀도 계측 기간을 소급해 둘지.
+- [ ] **G-65 적신호 승격 여부** — 청산이 실제로 올라가기 시작하면 `breaches`로 올릴지(R18 관례).
+- [ ] **F-102/F-103**(점검 세션 git 직접호출 구조적 차단) — 누적 10회 요청, 변경 없음.
+- [ ] F-99 방향 결정 · `tests/test_rollover_day.py` 날짜 결합 · `pytest -k champion_sample` 재실행 — 변경 없음.
