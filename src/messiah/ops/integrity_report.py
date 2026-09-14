@@ -2943,9 +2943,14 @@ def build_report(
     # 09-09에 `order-path-live`가 09-07 위반에서 회복했는데, 그 통과가 재현되는 성질인지
     # 그날의 우연인지 말할 자리가 없었다 — 하루 값과 연속일 사이에 발생 빈도가 빠져 있다.
     # 오늘 값은 파일에 아직 없으므로 직접 건넨다(`feature_health_rolling`과 같은 사정).
+    # 「제출이 있었나」 옆에 **「그 제출을 닫았나」**를 함께 놓는다 (2026-09-14 G-65, 대응 1-3).
+    # 09-09·09-10·09-14 사흘 내리 진입만 나가고 청산 흔적이 없었는데, 제출만 세는 칸밖에
+    # 없어 사흘 동안 아무 리포트에도 안 걸렸다. 이 축은 **`breaches`에 넣지 않는다**(R18) —
+    # 그 이유는 `order_path_rolling` 모듈 docstring에 있다.
     order_path_window = order_path_rolling.judge(
         day=day,
         today_submitted=(sizer_funnel or {}).get("submitted"),
+        today_tag_counts=logs["tag_counts"],
         log_dir=resolved_log_dir,
     )
     rolling = feature_health_rolling.judge(
