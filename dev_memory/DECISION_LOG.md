@@ -17081,7 +17081,7 @@ process_git_sha=beffd71, head_git_sha=1fec4be, worktree_dirty_files=0`을 보인
 
 ### 검증
 
-**전체 pytest 2,821 passed / 2 failed** (230s). 통과 수가 전 회차 2,774에서 **47 증가** — 신규 회귀 테스트가 전부 통과했다(`tests/execution/test_position_reconciler.py` 14 · `tests/test_session_git_guard.py` 17 · `tests/ops/test_options_cycle_axis.py` 9 · `tests/strategy/options/test_options_service.py` +6 · `tests/models/test_wiring_completeness.py` +2, 기존 3건은 기대값 갱신).
+**전체 pytest 2,822 passed / 2 failed** (230s). 통과 수가 전 회차 2,774에서 **48 증가** — 신규 회귀 테스트가 전부 통과했다(`tests/execution/test_position_reconciler.py` 14 · `tests/test_session_git_guard.py` 17 · `tests/ops/test_options_cycle_axis.py` 9 · `tests/strategy/options/test_options_service.py` +6 · `tests/models/test_wiring_completeness.py` +2, 기존 3건은 기대값 갱신).
 
 실패 2건은 `tests/test_rollover_day.py::test_symbol_is_resolved_from_the_date_not_from_today[day3·day4]`로 **작업 착수 전 베이스라인에서 이미 동일하게 실패**했다(09-11부터 7회차 연속 이월). 이번 변경과 무관해 손대지 않았다.
 
