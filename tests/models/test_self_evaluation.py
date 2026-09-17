@@ -109,7 +109,20 @@ def test_run_self_evaluation_aggregates_metrics():
 
 
 def test_run_self_evaluation_with_no_trades_is_degenerate_but_safe():
-    """표본이 없어도 죽지 않는다 — 다만 결선이 됐다고 주장한 경우엔 0.0이 정직한 값이다."""
+    """표본이 없어도 죽지 않는다 — 그리고 **0.0이라고 말하지도 않는다**.
+
+    ## 이 테스트의 기대값이 2026-09-17에 뒤집혔다
+
+    종전 이 테스트는 *"결선이 됐다고 주장한 경우엔 0.0이 정직한 값이다"* 라고 적고
+    `sharpe == 0.0`을 단언했다. **그 전제가 틀렸다.** 표본 0의 0.0은 성적이 아니라
+    계산 불능이고(`metrics.sharpe_ratio`가 스스로 그렇게 적었다 — "예외 대신 0.0을
+    반환한다"), 그 값이 `pnl_measurable=True`를 달고 나가는 것이 이 프로젝트가 네 번
+    막아 온 바로 그 형태다.
+
+    그동안 이 전제가 드러나지 않은 이유는 `fills_countable`이 상수 False라 **결선이 끝난
+    적이 자체가 없었기** 때문이다. 2026-09-17에 F-114로 그 상수가 사라지고 계약 명세까지
+    확정되면서 이 경로가 실제로 열렸고, 같은 날 옛 정의의 36행이 표본에서 빠지면서
+    `champion_returns=[]`가 **운영에서 실제로 나오는 상태**가 됐다."""
     report = run_self_evaluation(
         date="2026-07-27",
         symbol="TEST",
@@ -118,9 +131,11 @@ def test_run_self_evaluation_with_no_trades_is_degenerate_but_safe():
         wiring=_measurable(),
     )
     assert report.n_return_samples == 0
-    assert report.sharpe == 0.0
-    assert report.win_rate == 0.0
-    assert report.profit_factor == 0.0
+    assert report.pnl_measurable is False, "결선은 끝났지만 잰 것이 없다"
+    assert report.sharpe is None
+    assert report.win_rate is None
+    assert report.profit_factor is None
+    assert report.max_drawdown is None
 
 
 def test_pnl_metrics_are_none_when_not_measurable():

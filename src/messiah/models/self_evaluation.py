@@ -100,6 +100,11 @@ def reconcile_slippage(
     )
 
 
+#: 손익 4지표를 측정값이라고 말하기 위한 최소 표본 수 — `metrics.sharpe_ratio`가 스스로
+#: "표본 2개 미만이면 계산 불능"이라고 적은 그 수와 같게 둔다.
+_MIN_RETURN_SAMPLES = 2
+
+
 @dataclass(frozen=True)
 class ChampionSample:
     """승격 표본과 **그 표본이 어떻게 잘렸는지** (2026-08-24 F-27)."""
@@ -114,7 +119,7 @@ def champion_sample(rows: Sequence[dict]) -> ChampionSample:
     입력은 파일에 적힌 순서 그대로의 행들이다(날짜 오름차순 가정). 각 행:
     `{"date": ..., "symbol": ..., "return": ..., "countable": bool | 없음}`.
 
-    ## 빼는 것은 둘뿐이다
+    ## 빼는 것은 셋이다
 
     1. **롤 당일 한 개.** 직전 행과 `symbol`이 다른 날은 두 계약이 섞인 하루라 어느 쪽
        성적도 아니다. 첫 행은 롤이 아니다(비교할 앞이 없다).
@@ -122,11 +127,19 @@ def champion_sample(rows: Sequence[dict]) -> ChampionSample:
        「거래가 없었다」와 「그 시절엔 안 쟀다」는 다른 사실이고, 후자를 `False`로 채우면
        기존 18행이 소급해서 「셀 수 없는 날」이 된다(L18). 그 수는 `sample_window`의
        `legacy_rows_without_countable`로 따로 보인다.
+    3. **`return_basis`가 없는 날** (2026-09-17 추가). 그 행의 `return`은 자산 변화율이고,
+       `SimBroker._cash`가 안 바뀌므로 **항상 0.0**이다 — 성적이 아니라 미측정이다. 실현손익
+       기반의 새 행과 섞으면 0이 다수 낀 Sharpe가 나오는데 그건 희석이지 성적이 아니다.
+       `excluded.legacy_return_basis`가 그 수를 보인다.
+
+       **이 절단으로 표본이 한동안 0이 된다.** 옛 36행이 전부 빠지기 때문이고, 그것이 옳다 —
+       없던 성적이 있었던 것처럼 남아 있는 편이 나쁘다. G2 관문의 40거래일은 이 날부터 다시
+       센다.
 
     종목 필터는 **없다.** 그것이 이 함수가 생긴 이유다 — 모듈 docstring 참고.
     """
     counted: list[float] = []
-    excluded = {"roll_day": 0, "not_countable": 0}
+    excluded = {"roll_day": 0, "not_countable": 0, "legacy_return_basis": 0}
     legacy = 0
     first_counted: str | None = None
     previous_symbol: str | None = None
@@ -142,6 +155,18 @@ def champion_sample(rows: Sequence[dict]) -> ChampionSample:
             legacy += 1
         elif row.get("countable") is False:
             excluded["not_countable"] += 1
+            continue
+        # **정의가 다른 수는 같은 표본이 아니다** (2026-09-17, 계약 명세 확정 후).
+        #
+        # 2026-07-29~09-17의 36행은 수익률을 `(end_equity-start_equity)/start_equity`로
+        # 적었고, `SimBroker._cash`가 안 바뀌므로 그 값은 **전부 0.0**이다 — 본전인 날이
+        # 아니라 아무것도 안 잰 값이다. 그것을 실현손익 기반의 새 행과 한 리스트에 넣으면
+        # 0이 열일곱 개 섞인 Sharpe가 나오는데, 그건 성적이 아니라 희석이다.
+        #
+        # 롤 당일을 빼는 것과 같은 규율이고(F-27), 같은 이유로 **조용히 빼지 않는다** —
+        # `sample_window.excluded.legacy_return_basis`가 그 수를 보인다.
+        if not row.get("return_basis"):
+            excluded["legacy_return_basis"] += 1
             continue
         value = row.get("return")
         if not isinstance(value, (int, float)):
@@ -203,7 +228,21 @@ def run_self_evaluation(
     # 전부 0.0으로 나오는데, 그 0은 "본전"이 아니라 "표본이 없음"이다. 5거래일 연속
     # `sharpe=0.0`이 성적처럼 읽힌 것이 이 변경의 직접 계기다
     # (`core/messages.py`의 SelfEvalReport docstring).
-    measurable = wiring.pnl_measurable if wiring else False
+    # **표본이 없으면 결선이 끝났어도 측정값이 아니다** (2026-09-17, 다섯 번째 같은 실패).
+    #
+    # `sharpe_ratio`는 표본 2개 미만이면 0.0을 돌려주고 `win_rate`·`profit_factor`·
+    # `max_drawdown`도 빈 입력에 0.0이다(전부 "계산 불능 대신 0.0" 규약). 결선이 완성되는
+    # 순간 그 0.0 넷이 `pnl_measurable=True`를 달고 나가면, 이 모듈이 2026-08-03·08-05에
+    # 두 번 막은 바로 그 형태가 세 번째로 재현된다.
+    #
+    # 계약 명세 확정으로 `returns_convertible`이 True가 되면서 이 경로가 실제로 열렸고,
+    # 같은 날 옛 정의의 36행이 표본에서 빠지면서 `champion_returns`가 한동안 **빈 리스트**가
+    # 된다 — 즉 이 가드가 없으면 그 상태가 곧장 "Sharpe 0.00 측정됨"으로 나간다.
+    #
+    # 임계는 `sharpe_ratio`가 스스로 계산 불능이라고 말하는 그 수(2)와 같게 둔다. 지표마다
+    # 다른 하한을 두면 "어떤 건 재고 어떤 건 못 쟀다"가 한 플래그로 표현되지 않는다.
+    enough_samples = len(champion_returns) >= _MIN_RETURN_SAMPLES
+    measurable = (wiring.pnl_measurable if wiring else False) and enough_samples
     report = SelfEvalReport(
         **({"instance_id": instance_id} if instance_id else {}),
         date=date,
@@ -242,6 +281,9 @@ def run_self_evaluation(
         sharpe=report.sharpe,
         # 이 필드가 로그에 있어야 나중에 "그날 Sharpe 0이 성적인지 무운영인지"를 되짚을 수 있다.
         pnl_measurable=report.pnl_measurable,
+        # 결선은 끝났는데 표본이 모자란 상태를 **로그에서 구별**할 수 있게 한다 —
+        # `wiring_stage`만 보면 "손익 측정 가능"인데 `pnl_measurable`이 False인 날이 그것이다.
+        enough_return_samples=enough_samples,
         wiring_stage=report.wiring_stage,
         # **왜 그 표본 수인가**를 로그가 같이 말한다 (F-27). 종전엔 코드를 읽어야 알았다.
         sample_window=report.sample_window,

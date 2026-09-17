@@ -143,3 +143,69 @@ def test_self_eval_reports_measurable_when_fully_wired():
 
     assert report.pnl_measurable is True
     assert report.wiring_stage == STAGE_MEASURABLE
+
+
+# ------------------- 결선이 끝나도 표본이 없으면 측정값이 아니다 (2026-09-17)
+
+
+def test_a_finished_wiring_with_no_samples_still_is_not_measurable():
+    """**같은 실패 형태의 다섯 번째를 여기서 막는다.**
+
+    2026-09-17에 계약 명세가 확정되면서 `returns_convertible`이 True가 될 수 있게 됐고,
+    같은 날 옛 정의의 36행이 표본에서 빠지면서 `champion_returns`가 한동안 **빈 리스트**가
+    된다. `sharpe_ratio`는 표본 2개 미만에 0.0을 돌려주므로(계산 불능 대신 0.0 규약),
+    가드가 없으면 그 0.0이 `pnl_measurable=True`를 달고 나간다 — `n_trades`(07-31) ·
+    `slippage_realized_ticks`(08-03) · 손익 4지표(08-05) · `fills_countable`(09-17)에
+    이은 다섯 번째다."""
+    wiring = WiringCompleteness(
+        live_bundles=["real-20260820-2053-30m"],
+        n_decisions=14,
+        n_orders=2,
+        fills_countable=True,
+        returns_convertible=True,
+        positions_reconciled=True,
+    )
+
+    report = run_self_evaluation(
+        date="2026-09-18",
+        symbol="A05610",
+        champion_returns=[],
+        n_shadow_bundles=0,
+        wiring=wiring,
+    )
+
+    assert wiring.pnl_measurable is True, "결선 자체는 끝났다"
+    assert report.pnl_measurable is False, "그러나 잰 것이 없다"
+    assert report.sharpe is None and report.win_rate is None
+    assert report.n_return_samples == 0
+
+
+def test_one_day_is_not_enough_either():
+    """표본 1개의 Sharpe는 표준편차가 0이라 0.0이 된다 — 그것도 성적이 아니다.
+    임계는 `metrics.sharpe_ratio`가 스스로 "계산 불능"이라고 적은 수(2)와 같다."""
+    wiring = WiringCompleteness(
+        live_bundles=["b"],
+        n_decisions=1,
+        n_orders=1,
+        fills_countable=True,
+        returns_convertible=True,
+        positions_reconciled=True,
+    )
+
+    one = run_self_evaluation(
+        date="2026-09-18",
+        symbol="A05610",
+        champion_returns=[0.0006],
+        n_shadow_bundles=0,
+        wiring=wiring,
+    )
+    two = run_self_evaluation(
+        date="2026-09-21",
+        symbol="A05610",
+        champion_returns=[0.0006, -0.0002],
+        n_shadow_bundles=0,
+        wiring=wiring,
+    )
+
+    assert one.pnl_measurable is False
+    assert two.pnl_measurable is True and two.sharpe is not None

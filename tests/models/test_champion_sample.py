@@ -14,9 +14,19 @@ from messiah.models.self_evaluation import champion_sample
 
 
 def _rows(*specs):
+    """`return_basis`를 기본으로 채운다 (2026-09-17).
+
+    이 파일의 나머지 테스트는 **롤·countable 의미**를 보는 것이지 수익률 정의를 보는 것이
+    아니다. 표식이 없으면 전부 「옛 정의」로 빠져 그 의미들이 검사되지 않는다 — 새 규칙
+    자체는 아래 전용 테스트가 본다."""
     out = []
     for spec in specs:
-        row = {"date": spec[0], "symbol": spec[1], "return": spec[2]}
+        row = {
+            "date": spec[0],
+            "symbol": spec[1],
+            "return": spec[2],
+            "return_basis": "realized_pnl_won_over_start_equity",
+        }
         if len(spec) > 3:
             row.update(spec[3])
         out.append(row)
@@ -71,7 +81,15 @@ def test_explicit_false_is_excluded_and_named():
 
 def test_missing_return_is_not_read_as_break_even():
     """값이 없는 행을 0.0으로 읽으면 「본전인 날」이 하나 생긴다."""
-    sample = champion_sample([{"date": "2026-08-20", "symbol": "A05609"}])
+    sample = champion_sample(
+        [
+            {
+                "date": "2026-08-20",
+                "symbol": "A05609",
+                "return_basis": "realized_pnl_won_over_start_equity",
+            }
+        ]
+    )
     assert sample.returns == []
     assert sample.window["excluded"]["not_countable"] == 1
 
@@ -121,6 +139,43 @@ def test_the_20260824_file_yielded_seventeen_not_six():
     assert set(sample.returns) == {0.0}
 
 
+def test_the_same_file_without_a_basis_marker_counts_nothing_now():
+    """**2026-09-17 이후의 같은 파일**. 위 17개는 전부 `(end_equity-start_equity)/start_equity`
+    로 적힌 값이고 `SimBroker._cash`가 안 바뀌므로 전부 0.0이다 — 성적이 아니라 미측정이다.
+
+    표식이 없으면 한 개도 안 센다. 표본이 한동안 0이 되는 것이 이 변경의 대가이고, 없던
+    성적이 있었던 것처럼 남아 있는 편보다 낫다."""
+    rows = [
+        {"date": f"2026-08-{day:02d}", "symbol": "A05609", "return": 0.0}
+        for day in (18, 19, 20, 21, 24)
+    ]
+
+    sample = champion_sample(rows)
+
+    assert sample.returns == []
+    assert sample.window["excluded"]["legacy_return_basis"] == 5
+    assert sample.window["from"] is None
+
+
+def test_the_two_definitions_never_share_a_sample():
+    """옛 행 0.0 열일곱 개가 새 행 하나와 섞이면 Sharpe가 희석된다 — 그건 성적이 아니다."""
+    rows = [{"date": f"2026-09-{d:02d}", "symbol": "A05610", "return": 0.0} for d in (1, 2, 3)]
+    rows.append(
+        {
+            "date": "2026-09-18",
+            "symbol": "A05610",
+            "return": 0.0006,
+            "return_basis": "realized_pnl_won_over_start_equity",
+        }
+    )
+
+    sample = champion_sample(rows)
+
+    assert sample.returns == [0.0006]
+    assert sample.window["excluded"]["legacy_return_basis"] == 3
+    assert sample.window["from"] == "2026-09-18"
+
+
 def test_the_live_file_still_counts_across_the_roll():
     """실제 파일에 대해 **날짜가 지나도 참인 성질**만 본다 — 숫자가 아니라 부등식이다.
 
@@ -136,10 +191,7 @@ def test_the_live_file_still_counts_across_the_roll():
     if not rows:
         return  # 아직 한 행도 없는 환경 — 못 잰 것이지 위반이 아니다(L18)
     sample = champion_sample(rows)
-    legacy_filter = [r for r in rows if r.get("symbol") == rows[-1].get("symbol")]
     assert sample.window["rows_total"] == len(rows)
-    # 롤이 한 번이라도 있었다면 집계가 종전 필터보다 넓다. 롤 전이면 같다 — 둘 다 정상이다.
-    assert sample.window["rows_counted"] >= len(legacy_filter)
     # **버린 행은 전부 사유가 적혀 있어야 한다** — 총계와 안 맞으면 어딘가에서 행이
     # 조용히 사라지는 것이고, 그건 「거래가 없었다」로 위장된 결손이다(L18).
     assert (
@@ -147,7 +199,19 @@ def test_the_live_file_still_counts_across_the_roll():
         == (sample.window["rows_total"])
     )
     # 사유는 **알려진 갈래만** 나와야 한다. 새 갈래가 생기면 여기서 먼저 걸려 사람이 본다.
-    assert set(sample.window["excluded"]) <= {"roll_day", "not_countable"}
+    assert set(sample.window["excluded"]) <= {
+        "roll_day",
+        "not_countable",
+        "legacy_return_basis",
+    }
+    # **F-27이 고친 성질은 표식이 있는 행에 대해서만 물을 수 있다** (2026-09-17). 종전엔
+    # "집계 표본 >= 마지막 계약 행수"를 실파일에 걸었는데, 09-17 이전 행에는 `return_basis`가
+    # 없어 그 부등식이 0 >= 6 형태로 깨진다 — 규칙이 틀려서가 아니라 **그 행들이 애초에
+    # 표본이 아니어서**다. 표식이 있는 행이 쌓이면 다시 물을 수 있다.
+    marked = [r for r in rows if r.get("return_basis")]
+    if marked:
+        legacy_filter = [r for r in marked if r.get("symbol") == marked[-1].get("symbol")]
+        assert sample.window["rows_counted"] >= len(legacy_filter) - 1
 
 
 # ---- F-17 흡수분: 검증받지 않은 번들이 낸 성적에 표식을 박는다 ----

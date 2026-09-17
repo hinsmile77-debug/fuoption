@@ -100,8 +100,10 @@ from messiah.broker.kis import symbol_master  # noqa: E402
 from messiah.broker.simulator.adapter import SimBroker  # noqa: E402
 from messiah.core import crash_forensics  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
+from messiah.core import universe as universe_vocab  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
 from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
+from messiah.core.contract_spec import ContractSpec, spec_for  # noqa: E402
 from messiah.core.docker_bootstrap import (  # noqa: E402
     DEFAULT_DOCKER_DESKTOP_EXE,
     ensure_docker_ready,
@@ -142,6 +144,11 @@ from messiah.strategy.regime.service import RegimeAI  # noqa: E402
 # 만기 당일 t<=0으로 스마일이 서지 않는 날이 시리즈당 주 1회씩 있고, 정규 월물 하나로
 # 먼저 20거래일을 관측한 뒤 늘리는 것이 R18 순서다.
 _OPTION_UNDERLYING = "KOSPI200"
+
+#: 이 스크립트가 손익을 계산하는 상품 (2026-09-17). `_resolve_front_month_symbol()`이
+#: `PRODUCT_TYPE_MINI_FUTURES`로 근월물을 뽑으므로 계약 명세도 같은 상품이어야 한다 —
+#: 둘이 갈리면 승수가 틀린 채로 손익이 나온다. 옵션은 아직 주문 실행 경로가 없다.
+_TRADED_CONTRACT = spec_for(universe_vocab.K200_MINI_FUT)
 _OPTION_SERIES = "regular"
 # IV Rank 이력 시드가 읽는 아카이브 — `data/option_chain_archiver`가 쓰는 자리와 같다.
 _OPTION_CHAIN_DIR = Path("data") / "option_chain"
@@ -592,7 +599,7 @@ def _assess_wiring(
     gateway: OrderGateway,
     *,
     reconciler: PositionReconciler | None,
-    contract_multiplier: float | None,
+    contract: ContractSpec | None,
 ) -> WiringCompleteness:
     """오늘 G2가 실제로 어디까지 결선돼 돌았는지 (2026-08-03 고도화 C).
 
@@ -618,10 +625,11 @@ def _assess_wiring(
             if reconciler is None or reconciler.last_reconciliation is None
             else reconciler.last_reconciliation.matched
         ),
-        # 틱 → 자본 대비 비율 환산 가능 여부. 계약 승수는 **사람이 설정에 적어야** 생긴다
-        # (`core/config.InstanceConfig.contract_multiplier`) — 없으면 손익 4지표는 계속
-        # 자리표시자다(`models/wiring_completeness.STAGE_NO_PNL_UNIT`).
-        returns_convertible=contract_multiplier is not None,
+        # 틱 → 자본 대비 비율 환산 가능 여부 (2026-09-17). 계약 명세가 `core/contract_spec.py`에
+        # 못 박히면서 이 칸이 True가 될 수 있게 됐다 — 단, 구간이 여럿인 상품(옵션)은 가격
+        # 없이 틱 가치를 정할 수 없으므로 **단일 구간 상품일 때만** True다. 미니선물이
+        # 그 조건을 만족한다(0.02pt × 50,000원 = 1,000원/틱).
+        returns_convertible=contract is not None and contract.has_single_tick,
     )
 
 
@@ -637,7 +645,7 @@ async def _daily_close(
     start_equity: Decimal,
     today: str,
     instance_id: str,
-    contract_multiplier: float | None = None,
+    contract: ContractSpec | None = None,
 ) -> None:
     """봉 flush는 `run_l1_daily.py`의 책임(그 프로세스가 실제 Collector/Composer를 갖고
     있다) — 이 스크립트는 자기 것이 없으므로 flush할 것도 없다."""
@@ -665,12 +673,31 @@ async def _daily_close(
         else None
     )
 
-    end_equity = (await broker.account()).total_equity
-    # **이 값은 손익이 아니다.** `SimBroker.account().total_equity`는 `_cash`이고 `_cash`는
-    # `__init__` 이후 바뀌지 않는다 — 2026-07-29~09-17의 36행이 전부 `0.0`인 이유다. 지우지
-    # 않는 것은 그 36행과 같은 축이어야 이력이 이어지기 때문이고, **틱 손익은 아래 `ledger`가
-    # 따로 싣는다.** 둘을 한 필드에 섞으면 그게 더 나쁜 거짓말이다(`SimBroker` 모듈 docstring).
-    daily_return = float((end_equity - start_equity) / start_equity) if start_equity > 0 else 0.0
+    # **오늘 수익률은 실현손익에서 나온다** (2026-09-17, 계약 명세 확정 후).
+    #
+    # 2026-07-29~09-17의 36행은 `(end_equity - start_equity) / start_equity`였고 그 값은
+    # **전부 0.0**이었다 — `SimBroker.account().total_equity`는 `_cash`이고 `_cash`는
+    # `__init__` 이후 바뀌지 않기 때문이다(손익은 `_realized_pnl_ticks`에 따로 쌓인다).
+    # 즉 그 36개는 "본전인 날"이 아니라 **아무것도 안 잰 값**이다.
+    #
+    # 계약 명세(`core/contract_spec.py`)가 못 박히면서 틱을 원으로 환산할 수 있게 됐다:
+    # 미니선물 1틱 = 0.02pt × 50,000원 = 1,000원. 그래서 이제 **실현손익 ÷ 기초자본**이
+    # 그날의 수익률이다.
+    #
+    # `return_basis`가 같은 행에 있는 것이 핵심이다 — 옛 36행과 새 행은 **정의가 다른 수**라
+    # 한 표본에 섞으면 안 된다. `champion_sample()`이 그 표식으로 가른다(F-27이 롤 당일을
+    # 가른 것과 같은 규율: 절단을 조용히 하지 않는다).
+    realized_won: int | None = None
+    if ledger is not None and contract is not None and contract.has_single_tick:
+        realized_won = int(round(ledger["realized_pnl_ticks"] * contract.tick_value_won()))
+    if realized_won is not None and start_equity > 0:
+        daily_return = float(realized_won / float(start_equity))
+        return_basis = "realized_pnl_won_over_start_equity"
+    else:
+        # 장부나 명세가 없으면 **옛 정의로 돌아가지 않는다** — 그 값은 항상 0.0이라
+        # "본전"으로 읽힌다. 못 잰 날은 None이다(L18).
+        daily_return = None
+        return_basis = None
     returns_path = _LOG_DIR / "g2_daily_returns.jsonl"
 
     # **이 날 성적을 승격 근거로 쓸 수 있는가** (2026-08-24 F-27, F-17 흡수).
@@ -684,6 +711,10 @@ async def _daily_close(
             "date": today,
             "symbol": symbol,
             "return": daily_return,
+            # **이 수가 무엇인가**를 같은 행이 말한다. `None`이면 옛 정의(자산 변화율,
+            # 항상 0.0)이거나 못 잰 날이고, 어느 쪽이든 승격 표본에 안 들어간다.
+            "return_basis": return_basis,
+            "realized_pnl_won": realized_won,
             "n_orders": gateway.accepted_orders,
             # 장부가 붙었으면 **진짜 0과 진짜 N**이다. 안 붙었으면 여전히 모름(None)이다 —
             # 이 필드가 09-17까지 36행 연속 `null`이었던 이유가 후자였다(L18).
@@ -705,7 +736,7 @@ async def _daily_close(
         pipeline,
         gateway,
         reconciler=reconciler,
-        contract_multiplier=contract_multiplier,
+        contract=contract,
     )
     report = run_self_evaluation(
         date=today,
@@ -738,7 +769,9 @@ async def _daily_close(
         unreal = ledger["unrealized_pnl_ticks"]
         print(
             f"오늘 장부: 체결 {ledger['n_fills']}건 · 실현 "
-            f"{ledger['realized_pnl_ticks']:+.1f}틱 · 평가 "
+            f"{ledger['realized_pnl_ticks']:+.1f}틱"
+            + (f"({realized_won:+,}원)" if realized_won is not None else "")
+            + " · 평가 "
             + ("측정 불가(종가 미상)" if unreal is None else f"{unreal:+.1f}틱")
             + f" · 잔여포지션 {ledger['open_positions'] or '없음'} · 대사 "
             + {None: "미실시", True: "일치", False: "불일치"}[ledger["reconciled"]],
@@ -754,11 +787,15 @@ async def _daily_close(
     print(
         f"승격 표본 {window['rows_counted']}/{_PROMOTION_TRADING_DAYS}거래일 "
         f"(파일 {window['rows_total']}행 중 롤일 {window['excluded']['roll_day']}일 · "
-        f"셀 수 없는 날 {window['excluded']['not_countable']}일 제외 · "
+        f"셀 수 없는 날 {window['excluded']['not_countable']}일 · "
+        f"옛 수익률 정의 {window['excluded']['legacy_return_basis']}일 제외 · "
         f"기산 {window['from']}) · 그중 거래 발생일 {traded_days}일",
         flush=True,
     )
-    if wiring.pnl_measurable:
+    # **리포트가 판정한 값을 쓴다** — `wiring.pnl_measurable`은 결선만 보고 표본 수를
+    # 모른다. 결선이 끝나고 표본이 아직 1개 미만인 날 여기서 `report.sharpe:.2f`를 부르면
+    # None 포매팅으로 장 마감 절차가 죽는다(2026-09-17 계약 명세 확정으로 실제 가능해진 상태).
+    if report.pnl_measurable:
         print(
             f"Self Evaluation: 누적 {len(champion_returns)}거래일 · "
             f"Sharpe {report.sharpe:.2f} · MDD {report.max_drawdown:.1%} · "
@@ -917,7 +954,7 @@ async def main(cfg: InstanceConfig) -> None:
                 start_equity=start_equity,
                 today=today.isoformat(),
                 instance_id=cfg.instance_id,
-                contract_multiplier=cfg.contract_multiplier,
+                contract=_TRADED_CONTRACT,
             ),
             timeout=shutdown_budget,
         )

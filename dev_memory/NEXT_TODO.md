@@ -11773,3 +11773,27 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
 ### 📌 점검 세션에 남기는 요청
 - [ ] **「계측이 0건이다」를 「그 경로가 아니다」로 읽기 전에, 그 경로에 계측이 있는지부터 확인할 것.** F-111이 열흘·일곱 회차를 태운 이유가 이것이다 — `OptionsHandleBarFailed`·`OptionsDispatchIgnored`·`SubscriberHandlerFailed` 3종이 전량 0건인 것은 사실이었지만, **성공 경로에는 애초에 태그가 없었다.** 「무로그」의 후보에 「계측되지 않은 정상 경로」를 항상 넣어야 한다.
 - [ ] **F-112가 닫혔으므로 G-54 계열 「이번 세션 위반 여부」 항목은 더 이상 세션마다 셀 필요가 없다.** 대신 훅이 실제로 살아 있는지를 한 번 확인하는 것으로 대체 가능하다(`.claude/settings.json`의 `hooks.PreToolUse` matcher에 `Bash|PowerShell` + `session_git_guard.py` 존재 — `tests/test_session_git_guard.py`가 CI로 고정하고 있다).
+
+## [MW0601] 2026-09-17 밤 — 계약 명세 등록 + 손익 축 재정의
+
+### ✅ 완료
+- [x] **계약 승수 확정 등록** — `core/contract_spec.py`. 미니선물 50,000 / 정규선물 250,000 / 옵션 3종 250,000 / 미니옵션 50,000원+호가단위+최소가격변동금액. 웹 확인(2017-03-27 KRX 인하 시행 기준). **사람 결정 대기 항목이었던 「계약 승수를 적는다」는 이것으로 닫혔다** — 설정이 아니라 코드에 출처를 달아 못 박았다(PC마다 다른 승수로 손익을 계산하는 상태를 막는다).
+- [x] **자기검산** — `승수 × 호가단위 = 최소가격변동금액` 항등식을 전 상품·전 구간에 단언(`tests/test_contract_spec.py`). 10배 오타가 기동 전에 깨진다.
+- [x] **수익률을 실현손익 기반으로 재정의** — `daily_return = 실현손익(원) / 기초자본`. `return_basis`·`realized_pnl_won` 필드 신설.
+- [x] **표본 절단** — `champion_sample()`이 `return_basis` 없는 행(옛 정의, 항상 0.0)을 뺀다. `excluded.legacy_return_basis`로 그 수를 보인다.
+- [x] **표본 하한 가드** — 결선이 끝나도 표본 2개 미만이면 `pnl_measurable=False`. 같은 실패 형태의 다섯 번째를 막았다.
+- [x] **크래시 동반 수정** — `_daily_close()`가 `wiring.pnl_measurable`로 분기해 `report.sharpe:.2f`를 포맷했다. 결선 완료·표본 부족인 날에 `None` 포매팅으로 장 마감 절차가 죽는다. `report.pnl_measurable`로 고쳤다.
+- [x] **틀린 기대값 정정** — `test_run_self_evaluation_with_no_trades_is_degenerate_but_safe`가 "표본 0의 0.0이 정직한 값"을 단언하고 있었다. 뒤집고 이유를 docstring에 남겼다.
+
+### 🔴 알고 감수한 대가 (사람이 알아야 함)
+- [ ] **승격 표본이 0에서 다시 시작한다.** 옛 36행이 전부 `return_basis` 없음으로 빠진다. G2 관문 40거래일은 2026-09-18부터 다시 센다. 없던 성적이 있었던 것처럼 남아 있는 편보다 낫다고 판단했으나, **관문 통과 시점이 그만큼 밀린다**는 뜻이므로 되돌릴지는 사람이 정할 수 있다(되돌리려면 `champion_sample()`의 `return_basis` 절단을 빼면 되고, 그러면 0.0 36개가 다시 섞인다).
+
+### 🔍 라이브 검증 — 기한 2026-09-18 장후
+- [ ] `g2_daily_returns.jsonl` 새 행에 `return_basis: "realized_pnl_won_over_start_equity"`·`realized_pnl_won`이 실리는지.
+- [ ] 거래가 있었다면 `return`이 0.0이 아닌 실수인지. 거래가 없으면 0.0이 맞다(실현손익 0).
+- [ ] 콘솔 승격 표본 줄이 `옛 수익률 정의 36일 제외`를 말하는지.
+- [ ] `self_eval_2026-09-18.json`의 `wiring_stage`가 `손익 측정 가능`이고 `pnl_measurable`은 `false`인지(표본 2개 미만이므로) — 둘이 갈리는 것이 정상이고, 그 조합이 나와야 표본 하한 가드가 실제로 도는 것이다.
+- [ ] `PositionReconcileMismatch`(ERROR) 0건.
+
+### 📌 점검 세션에 남기는 요청
+- [ ] **미측정 표식을 해제하는 변경은 그 표식에 의존하던 소비자를 전부 따라가 본다.** 이번에 승수 하나를 등록했더니 `pnl_measurable` → 손익 4지표 → 콘솔 포매팅 → 승격 표본으로 네 단계가 연쇄됐고, 뒤 두 개는 코드를 읽어서가 아니라 **값을 실제로 넣어 돌려 보고** 찾았다. 「상수 등록」으로 분류된 항목을 A등급으로 보기 전에 이 연쇄를 확인할 것.

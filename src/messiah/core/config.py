@@ -70,16 +70,10 @@ class InstanceConfig(BaseModel):
     # 미니선물(A05608) 2026-07-22 실측값(호가 5단계 간격 역산) — 다른 상품/근월물에 그대로
     # 일반화하지 말 것(capability_matrix.md "알려진 갭" 참고, 상품별 실측 전까지는 이 값만 사용).
     futures_tick_size: str = "0.02"
-    # 계약 승수 — **1 지수포인트가 몇 원인가** (2026-09-17 F-114).
-    #
-    # 기본값이 `None`인 것이 이 필드의 전부다. 이 값이 없으면 시스템은 손익을 **틱으로만**
-    # 말하고 자본 대비 수익률로 환산하지 않는다(`models/wiring_completeness.STAGE_NO_PNL_UNIT`).
-    # 2026-08-23부터 `SimBroker`가 실현손익을 틱으로 쌓고 있었는데 승수가 없어 `max_drawdown`
-    # (자본 대비 비율 임계)이 구조적으로 미측정이었고, 그 사실이 코드 주석에만 있었다.
-    #
-    # **지어내지 않는다** — 거래소 명세를 실측 확인한 사람이 여기 적는 순간 손익 4지표가
-    # 자리표시자에서 측정값으로 승격된다. 그전까지는 승격되지 않는 것이 옳다(R4).
-    contract_multiplier: float | None = None
+    # **거래승수는 여기 없다** (2026-09-17 정정). 이 자리에 `contract_multiplier`를 잠깐
+    # 뒀었는데, 그러면 거래소가 공표한 사실이 **PC별 설정값**처럼 보인다 — PC마다 다른
+    # 승수로 손익을 계산하는 상태가 구조적으로 가능해진다. 정본은 `core/contract_spec.py`의
+    # 표이고, 위 `futures_tick_size`와의 정합성은 `tests/test_contract_spec.py`가 지킨다.
     # 1분봉을 언제 닫는가 (2026-08-05 고도화 1, `data/normalizer.py` "봉을 언제 닫는가").
     #
     #   tick  — 다음 분의 첫 틱이 도착하면 닫는다(종전 동작, 기본값)
