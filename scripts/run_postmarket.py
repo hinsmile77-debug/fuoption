@@ -284,6 +284,14 @@ def _run_step(step: Step) -> StepResult:
             env=child_env,
             stderr=subprocess.PIPE,
             text=True,
+            # **자식이 쓴 코덱으로 읽는다** (2026-09-17 F-115). 네 도구 다 자기 첫 줄에서
+            # `sys.stderr.reconfigure(encoding="utf-8")`을 하는데, 여기서 `encoding=`을
+            # 비워 두면 파이썬은 부모의 로캘(한국어 Windows = cp949)로 그 바이트열을
+            # 해독한다. 2026-09-14~09-17 나흘간 `RollBasisUnmeasured` 안내문이
+            # `A05608â넂A05609 ... basis 痢≪젙 遺덇°` 로 저장된 것이 그것이다.
+            # `errors=`는 그대로 둔다 — 코덱을 맞춘 뒤에도 남는 깨짐은 조용히 사라지지
+            # 않고 자국으로 남아야 한다(금지계명 12 · `core/logging.setup` 같은 취지).
+            encoding="utf-8",
             errors="backslashreplace",
         )
     except subprocess.TimeoutExpired:
