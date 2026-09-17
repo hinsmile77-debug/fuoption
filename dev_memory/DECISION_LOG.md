@@ -16988,3 +16988,116 @@ process_git_sha=beffd71, head_git_sha=1fec4be, worktree_dirty_files=0`을 보인
 **부수 관찰(항목 미신설)**. `scripts/run_postmarket.py`가 이번 변경으로 616→625줄이 됐다. R5 권장 상한(500줄) 초과는 이번에 생긴 것이 아니라 상존 상태이고, 오늘 점검이 항목으로 세우지 않아 그대로 뒀다 — `pipeline.py`(F-107)와 같은 성격의 사람 결정 대상이다.
 
 **git 규약 준수**. 읽기는 전부 `.git/*` 직접 읽기 또는 `git --no-optional-locks`. 쓰기(`add`·`commit`)는 전부 네이티브 PowerShell 도구. `git add .` 미사용(경로 명시). 시작·각 커밋 전후로 `.git/index.lock` 부재 확인. 커밋 메시지는 BOM 없는 UTF-8 파일 + `git commit -F`. 파일 append는 `io.open(newline="\n")`으로 LF 유지(CR 0건 확인), 리포트 앞 본문은 append 전후 문자열 비교로 무변경을 확인했다.
+
+## [MW0601] 2026-09-17 저녁 — 사용자 지시 구현 4건: F-114(손익 계산)·F-111(오후 침묵 원인 규명)·F-112(저장소 조회 구조적 차단)·G-9·G-10, 구현 중 드러난 동반 결함 4건 수정
+
+사용자가 09-17 리포트의 「사람 결정 대기」 4묶음을 한 번에 지시했다(손익 계산 기능 구현 / 오후 침묵 원인 딥다이브하고 계측 / 저장소 조회 차단 방식 설명하고 개선 계획 제안해서 구현 / 관측 기능 두 건 설명하고 진행). 자동조치가 C등급으로 보류해 오던 것들이라 **표식이 사람 지시로 해제된 회차**다.
+
+---
+
+### F-111 — 「오후 침묵」은 **침묵이 아니었다** (일곱 번의 보고가 전부 오진)
+
+**증상**. 2026-09-08~09-17에 일일점검이 일곱 번 "오후에 5분 보조 판단 절차가 조용히 멈춘다"를 보고했다. 계측 3종(F-105: `OptionsHandleBarFailed`·`OptionsDispatchIgnored`·`SubscriberHandlerFailed`)이 그 열흘 내내 **전량 0건**이라 원인을 못 골랐고, 리포트는 「㉠수신 미도달 vs ㉢콜백 내부 실패 판별 불가」로 남겼다.
+
+**원인 — 멈춘 적이 없다**. 09-17 실측:
+
+```
+14:30:01  bar.5m.A05610 발행(receivers=5) → OptionsNoCandidate "IV Surface 미준비"
+14:35:01  bar.5m.A05610 발행(receivers=5) → 로그 0줄                ← "침묵"
+14:40:03  bar.5m.A05610 발행(receivers=5) → OptionsNoCandidate "IV Surface 미준비"
+```
+
+`receivers`는 Redis `PUBLISH`의 반환값, 즉 **실제로 배달된 구독자 수**다(`core/bus.publish` → `_log_bar_receivers`). 봉은 왔고 핸들러는 돌았다. `_publish_view()`의 종료 경로는 다섯인데 넷(무결정 4갈래, F-93)이 전부 로그를 남기고 **성공 발행 경로 하나만 안 남겼다** — 소거법으로 그 경로가 답이다.
+
+09-16이 더 분명하다. 13:30~14:25는 매 마크가 `매트릭스 셀 후보 없음(관망)`이었고 **14:30~15:20 열한 마크가 통째로 무로그**, 15:25에 다시 `후보 생성 실패(BULL_CALL_SPREAD)`가 찍혔다. 그 한 시간은 정지가 아니라 **후보가 실제로 나온 구간**이다(그 사이 시장이 관망 셀에서 방향 셀로 이동). 같은 날이 첫 실거래일이었다.
+
+게다가 `intel.options`는 pub/sub이라 이력이 없고(`STREAM_TOPICS` 밖) 구독자는 화면(`ui/app.py`) 하나뿐이라 다음 발행이 덮는다 — **그 사이클들이 무엇을 사려 했는지는 어디에도 안 남고 사라졌다.**
+
+**결정**. `strategy/options/service.py::_publish_view()` 성공 경로에 `OptionsViewPublished`(INFO) 신설 — 구조 이름 **목록**·`n_candidates`·`iv_rank`·`score`·`is_expiry_day`. 개수가 아니라 목록인 이유는 이 로그가 그 후보의 유일한 기록이기 때문이다.
+
+**Why**. 2026-09-07 F-93이 무결정 4갈래에 로그를 달면서 **결정 경로에는 안 달았다.** 그 비대칭이 "판단이 나온 사이클"을 로그상 "아무 일도 없던 사이클"과 **같은 모양**으로 만들었다. 계측을 늘려도 못 잡은 이유가 이것이다 — 없는 실패를 찾고 있었다.
+
+**How to apply**. 무결정에 로그를 달 때는 **결정에도 같이 단다.** 한쪽만 달면 침묵의 의미가 둘(정상 성공 / 이상 정지)로 갈라지고, 그 둘을 가르는 정보가 로그에서 사라진다. 이번 건은 그 상태로 열흘·일곱 회차를 태웠다.
+
+---
+
+### F-114 — 손익 계산(Position Reconciler)
+
+**증상**. `logs/g2_daily_returns.jsonl` **36행 전부** `"return": 0.0`. 09-16 첫 실거래(진입 2·청산 2)와 09-17 실거래(진입 1·EOD 청산 1)가 `n_fills: null`·`pnl_measurable: false`로 지나갔다.
+
+**원인**. `SimBroker`는 2026-08-23부터 `_realized_pnl_ticks`를 **이미 쌓고 있었는데 아무도 읽지 않았다.** `_daily_close()`는 수익률을 `account().total_equity`의 변화율로 계산하는데 그 값은 `SimBroker._cash`이고, `_cash`는 `__init__` 이후 한 번도 안 바뀐다. **손익을 세는 축과 보고하는 축이 서로 안 닿아 있었다.**
+
+**결정**.
+- `execution/position_math.py` 신설 — 체결→포지션·실현손익 네 갈래를 `SimBroker._apply()`에서 추출해 **한 곳**에만 둔다(판정 불변). 두 벌로 두면 대사 불일치가 「사건의 불일치」인지 「구현의 불일치」인지 못 가린다.
+- `execution/position_reconciler.py` 신설 — 주문·접수·체결 장부 + 브로커 진실원천 대사(L12). `PositionReconciled`·`PositionReconcileMismatch`(ERROR)·`PositionReconcileFailed`·`PositionLedgerUnattributedFill` 4태그.
+- `execution/order_gateway.py` — 장부를 게이트웨이에 붙인다. `Fill`에는 **방향이 없고**(`core/messages.Fill`), 방향을 가진 `OrderRequest`와 잇는 곳은 `on_fill()`의 pending 매칭 **하나뿐**이다(계명 1). `accepted_orders`를 여기 둔 것과 같은 이유.
+- `scripts/run_g2_paper_trading.py` — `fills_countable=False` 상수 제거, `orders`/`acks`/`fills`를 `run_self_evaluation()`에 실제 전달(슬리피지 3단 매칭이 처음으로 실데이터를 받는다), JSONL에 `ledger` 필드 추가.
+
+**동반 결함 ① — 시장가 체결의 `Fill`이 아무에게도 안 갔다**. e2e 검증에서 잡혔다. `SimBroker._fill_market()`이 `_settle()`로 `Fill`을 만들어 놓고 **반환값을 버렸다** — 포지션과 `_n_fills`는 갱신되는데 메시지는 아무 데도 안 갔다. 실증: 09-17 두 주문이 둘 다 시장가였고 그날 로그에 `FillMatched`·`FillUnmatched`가 **0건**이다. `OrderGateway`의 pending 2건은 영영 안 지워졌다(누수). 09-16의 4계약도 같다. `SubmitResult.fill` 필드를 신설해 게이트웨이가 정상 체결 흐름(`on_fill()`)에 태우도록 고쳤다 — rekey **뒤**여야 자기 주문이 미매칭으로 잡혀 스스로 정지하지 않는다. 실전 KIS는 체결을 비동기 통지로 주므로 `fill=None`, 무영향.
+
+**동반 결함 ② — 체결을 세게 되면 `sharpe=0.0`이 「측정값」 도장을 받는다**. `fills_countable=True`가 되는 순간 `stage`가 `MEASURABLE`로 넘어가고, 그러면 **36행 전부 0.0인 수익률 파일로 계산한 4지표가 자리표시자에서 측정값으로 승격된다** — `models/wiring_completeness.py`가 2026-08-03에 막으려고 만들어진 바로 그 형태다. `STAGE_NO_PNL_UNIT`("수익률 환산 불가(계약 승수 미정)")를 체결 집계 **뒤**에 신설하고 `returns_convertible`·`positions_reconciled` 두 칸을 추가했다.
+
+**Why**. 원 환산에 필요한 **계약 승수(원/지수포인트)가 이 저장소 어디에도 없다**(`configs/instance.yaml`에 `futures_tick_size`는 있어도 승수는 없다). 없는 상수를 코드가 지어내는 것이 R4가 금지하는 바로 그것이다. 그래서 손익은 **틱으로만** 말하고, 자본 대비 비율로는 환산하지 않는다.
+
+**How to apply**. `configs/instance.yaml`에 `contract_multiplier`를 **사람이** 적는 순간 `returns_convertible=True`가 되고 4지표가 측정값으로 승격된다. 코드 변경 불필요 — 마지막 한 칸을 설정 한 줄로 만들어 뒀다. 거래소 명세 실측 확인이 선행돼야 한다.
+
+**남은 한계(명시)**. 지금 `return` 필드는 여전히 equity 기준(항상 0.0)이다. **지우지 않았다** — 기존 36행과 같은 축이어야 이력이 이어지고, 틱 손익은 `ledger`가 별 필드로 싣는다. 둘을 한 필드에 섞으면 그게 더 나쁜 거짓말이다(`SimBroker` 모듈 docstring의 `_cash` 판단과 같은 규율).
+
+---
+
+### F-112 — 점검 세션 저장소 조회의 구조적 차단
+
+**증상**. F-78(2026-08-31)이 "점검 세션은 `git`을 직접 실행하지 않는다 — 어떤 하위명령도 예외가 아니다"를 SKILL.md §1에 **산문으로** 세웠는데, 그 뒤로도 09-16·09-17 두 날 장중 세션이 `git -c core.pager=cat diff --stat`을 직접 불렀다. G-54는 5세션 중 4세션 위반(80%)까지 갔다.
+
+**리포트가 적어 둔 두 후보는 둘 다 틀렸다**. 이것을 먼저 판정했다.
+- **셸 래퍼**(PATH 앞에 가짜 `git`): PATH는 자식이 통째로 물려받는다 — F-60에서 화이트리스트·`--no-optional-locks`로 안전하게 만들어 08-27에 합격 판정을 받은 `collect_evidence.run_git()`까지 같이 막힌다. 막아야 할 것과 남겨야 할 것을 PATH는 구분하지 못한다.
+- **`collect_evidence.py` 시작 가드**: 그 스크립트는 **이미 안전한 쪽**이다. 사고가 난 경로는 세션이 직접 부르는 `git`이고, 수집기에 가드를 걸어도 그 경로는 그대로 열려 있다 — F-78이 "두 경로가 있는데 하나만 막았다"고 적은 지점이 정확히 이것이다.
+
+**결정 — PreToolUse 훅**. `scripts/hooks/session_git_guard.py` + `.claude/settings.json`. **호출자 기준**으로 가른다: 세션의 셸 도구를 지나는 `git`만 보고, 수집기가 `subprocess`로 부르는 `git`은 훅을 안 지나므로 종전대로 돈다.
+- **조회형을 막고 기록형을 남긴다.** 막는 것: `status`·`diff`·`log`·`show`·`ls-files` 등(F-78이 겨냥한 「근거를 만들려고 부르는 git」, 전부 수집기 §1이 이미 답하는 질문). 남기는 것: `add`·`commit`·`push`·`mv` 등(장후 자동조치가 실제로 커밋하는 길 — 같이 막으면 이 훅이 자동조치 자체를 못 하게 만든다).
+- **목록 밖은 기본 거절**(F-60의 "플래그를 믿지 않는다"와 같은 규율).
+- **`.git` 파일 직접 읽기는 안 막는다** — 수집기 자신이 권하는 대안이라 그것까지 막으면 대안이 사라진다.
+- 거절 문자열에 **사유와 대안**을 같이 싣는다. 대안을 안 주면 세션이 다른 우회로를 찾는다.
+
+**동반 결함 ③ — 셸 도구가 둘이다**. 처음엔 `matcher: "Bash"`로 걸었는데, 이 저장소의 커밋 규약은 오히려 "쓰기는 전부 네이티브 PowerShell 도구"다(09-17 장후 자동조치 기록). `Bash`만 막으면 **F-78이 지적한 그 형태가 이 훅 자신에게서 재발한다** — 두 경로가 있는데 하나만 막고 그 사실이 「차단했다」는 한 줄에 가린다. `matcher: "Bash|PowerShell"`로 고쳤다.
+
+**동반 결함 ④ — 한글 사유가 cp949에서 깨져 훅이 죽었다**. 첫 파이프 테스트에서 `UnicodeEncodeError`로 거절 JSON이 **중간에 잘렸다.** 잘린 JSON은 파싱 실패라 사실상 통과와 같다 — 차단 장치가 조용히 무력화되는 형태다. 훅이 스스로 표준출력을 UTF-8로 세우게 했다(F-115와 같은 계열의 결함).
+
+**검증(실동작)**. 훅 반입 후 이 세션에서 `git --version`을 실제로 호출해 **거절되는 것을 확인**했다(하위명령 없음 → 기본 거절). 파이프 테스트·단위 테스트가 아니라 **살아 있는 세션의 실제 차단**이다.
+
+---
+
+### G-9 · G-10 — 관측 축 두 건 (리포트 원안을 재정의해서 구현)
+
+**G-9는 원안대로면 못 쓴다**. 「무결정 로그가 없는 마크 = 정지」로 감시하면 **후보가 나온 마크를 결손으로 읽어** F-111의 오진이 리포트 쪽에서 그대로 재발한다. 사이클을 **결정·무결정 가리지 않고** 세도록 정의를 바꾸고, 두 장치로 나눴다:
+- `OptionsSubLoopStalled`(INFO, R18 — 판정 안 함) — 서비스가 실시간으로 「끊겼다 **이어짐**」을 잡는다. 임계는 주기의 **1.5배**. 2.0배면 한 마크 결손(600초)이 정확히 경계에 걸려 그날그날 다르게 판정된다(09-17 실측 간격 597·600·602초).
+- `ops/integrity_report.py`의 `options_cycles` 축 — 장 마감 뒤 전수로 다시 재 **「끊긴 채 끝남」**까지 본다. 루프가 영영 죽으면 실시간 태그는 안 뜨기 때문이다. 둘의 수가 다르면 **그 차이 자체가 신호다**(겹치는 것이 의도).
+
+**G-10** — `session_boundary_inflation` 축. 태그는 2026-08-20부터 있었는데 리포트에는 `tag_counts`의 숫자 하나뿐이라 **판정에 쓰이는 값(`ratio`)이 어디에도 안 실렸다** = 사실상 미측정. Horizon별로 그날 **최악의 한 건**을 남긴다(평균도 마지막도 아니다 — `clock_skew_seconds`가 절댓값 최대를 쓰는 것과 같은 규율).
+
+두 축 모두 `None`은 「0건 정상」이 아니라 「이 계측 이전 로그이거나 미배선」이다(L18). 새 필드는 dataclass **기본값 블록 끝**에 뒀다 — 옛 리포트를 `IntegrityReport(**entry)`로 되읽는 경로가 깨지지 않게(`series_contract`가 같은 이유로 그렇게 돼 있다).
+
+---
+
+### 검증
+
+**전체 pytest 2,821 passed / 2 failed** (230s). 통과 수가 전 회차 2,774에서 **47 증가** — 신규 회귀 테스트가 전부 통과했다(`tests/execution/test_position_reconciler.py` 14 · `tests/test_session_git_guard.py` 17 · `tests/ops/test_options_cycle_axis.py` 9 · `tests/strategy/options/test_options_service.py` +6 · `tests/models/test_wiring_completeness.py` +2, 기존 3건은 기대값 갱신).
+
+실패 2건은 `tests/test_rollover_day.py::test_symbol_is_resolved_from_the_date_not_from_today[day3·day4]`로 **작업 착수 전 베이스라인에서 이미 동일하게 실패**했다(09-11부터 7회차 연속 이월). 이번 변경과 무관해 손대지 않았다.
+
+`ruff check` 전체 통과, `ruff format` 이번에 건드린 전 파일 통과. `pyright` — 새 모듈 4개 오류 0건(`integrity_report.py`에 남은 5건은 전부 안 건드린 줄대의 상존 항목).
+
+**라이브 대조 2종** — 리포트가 손으로 센 값과 신규 축의 산출을 대조했다(저장소 산출물은 미변경, 스크래치 디렉터리로 생성):
+
+| | 09-17 | 09-16 |
+|---|---|---|
+| `options_cycles` | 92사이클 · 공백 3건(14:30→14:40 602초 · 14:40→14:50 597초 · 15:20→15:30 600초) | 69사이클 · 최대 공백 3600초(14:25→15:25) |
+| `session_boundary_inflation` | `null`(그날 태그 0건) | `10m` ratio 1.00 · pairs 1 · window 60 |
+
+둘 다 리포트 본문의 수치와 **정확히 일치**한다.
+
+**버그 먼저 재현**. F-114의 두 핵심 테스트는 수정 전 동작을 명시적으로 고정한다 — 장부를 안 붙이면 `gateway.reconciler is None`(종전과 동일 동작), 시장가 체결은 수정 전이면 `n_fills == 0`이고 pending이 누수된다. F-112는 09-17에 **실제로 불린 그 명령줄**을 그대로 테스트에 박았다.
+
+**라이브 미검증 — 검증 기한: 2026-09-18 장후.** ① `OptionsViewPublished`가 실제 장중에 나오는지(09-17 기준이라면 세 마크에서 나와야 한다) ② `options_cycles.n_published > 0`인지 ③ 실거래가 나면 `ledger.n_fills > 0` · `reconciled: true` · `wiring_stage: "수익률 환산 불가(계약 승수 미정)"`인지.
+
+**git 규약**. 이번 세션의 읽기는 `.git/*` 직접 읽기와 `collect_evidence.py` 인용만 사용, `git` 조회 하위명령 직접 호출 0건. 쓰기는 `add`/`commit`만(경로 명시, `git add .` 미사용). **이번 세션부터는 그것이 규율이 아니라 훅이 강제한다.**

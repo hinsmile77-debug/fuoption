@@ -11742,3 +11742,34 @@ F-36 → F-35 · **F-37** · F-32 · F-33 · F-45 · F-46 · F-38 · F-39 · F-4
 
 ### 참고 (항목 미신설)
 - [ ] `scripts/run_postmarket.py` 616→625줄, R5 권장 상한(500) 초과 상존. 이번 변경으로 생긴 것이 아니고 오늘 점검이 항목으로 세우지 않아 그대로 뒀다 — `pipeline.py`(F-107)와 같은 성격.
+
+## [MW0601] 2026-09-17 저녁 — 사용자 지시 구현 4건 (F-114·F-111·F-112·G-9·G-10)
+
+### ✅ 완료 (이번 회차 구현 · 라이브 미검증)
+- [x] **F-114** 손익 계산(Position Reconciler) — `execution/position_math.py`·`execution/position_reconciler.py` 신설, `OrderGateway`에 장부 결선, `run_g2_paper_trading.py`의 `fills_countable=False` 상수 제거 + 슬리피지 3단 매칭에 실데이터 전달. **범위: 실시간 배선까지**(회귀테스트만이 아니라).
+- [x] **F-114-a (동반)** `SimBroker._fill_market()`이 만든 `Fill`을 버리던 결함 — `SubmitResult.fill`로 게이트웨이에 전달. 09-16·09-17 실거래 4계약 전부가 `FillMatched` 0건이었던 직접 원인.
+- [x] **F-111** 오후 침묵 원인 규명 + 계측 — **원인은 정지가 아니라 「성공 발행 경로에만 로그가 없었던 것」**. `OptionsViewPublished` 신설. 일곱 회차의 보고가 전부 오진이었다.
+- [x] **F-112** 점검 세션 저장소 조회 구조적 차단 — PreToolUse 훅(`scripts/hooks/session_git_guard.py`, matcher `Bash|PowerShell`). 리포트의 두 후보(셸 래퍼 / 수집기 가드)는 둘 다 틀렸고 그 이유를 DECISION_LOG에 남겼다. **G-54 종결.**
+- [x] **G-9** `OptionsSubLoopStalled`(서비스, 실시간) + `options_cycles` 축(무결성 리포트, 장마감 전수). 원안(무결정 로그 결손 = 정지)은 F-111 오진을 재현하므로 정의를 바꿨다.
+- [x] **G-10** `session_boundary_inflation` 축 — Horizon별 `ratio`·`boundary_pairs`·`window_bars`, 그날 최악의 한 건.
+
+### 🔴 사람이 해야 하는 일 (코드로는 못 채움)
+- [ ] **계약 승수를 `configs/instance.yaml`에 적는다** (`contract_multiplier`, 원/지수포인트). 이 한 줄이 없으면 손익은 **틱으로만** 나가고 승률·PF·Sharpe·MDD는 계속 자리표시자다(`wiring_completeness.STAGE_NO_PNL_UNIT`). 코드 변경 불필요 — 설정 한 줄이면 `returns_convertible=True`가 되고 4지표가 측정값으로 승격된다. **거래소 명세 실측 확인이 선행돼야 한다**(R4: 코드가 지어내지 않는다).
+
+### 🔍 라이브 검증 — 기한 2026-09-18 장후
+- [ ] `OptionsViewPublished`가 장중에 실제로 나오는지. 09-17 기준이라면 14:35·14:45·15:25 세 마크에서 나와야 한다 — 나오면 F-111 진단 확정, 안 나오면 진단이 틀렸다는 뜻이므로 원인 재조사.
+- [ ] `daily_integrity_20260918.json`의 `options_cycles.n_published > 0` 및 `gaps` 내용이 `OptionsNoCandidate` 손 계수와 일치하는지.
+- [ ] 실거래가 나면 `g2_daily_returns.jsonl`의 `ledger.n_fills > 0` · `reconciled: true`, `self_eval_2026-09-18.json`의 `wiring_stage`가 `"수익률 환산 불가(계약 승수 미정)"`인지(`"체결 집계 불가"`가 아니어야 한다).
+- [ ] `slippage_realized_ticks`가 `null`에서 벗어나는지(지정가 체결이 있는 날에만 — 시장가만 나면 계속 `null`이 맞다).
+- [ ] `PositionReconcileMismatch`(ERROR) 0건인지. 뜨면 체결 이벤트가 새거나 겹친 것이므로 **즉시 조사 대상**.
+
+### 🙋 남은 사람 결정 대기 (이번 회차 미착수 — 변경 없음)
+- [ ] **F-107** `pipeline.py` 1,014줄 분할 기준. 보류 사유: 분할 기준이 사람 결정.
+- [ ] **F-109 · F-110 · G-8** 실전투입 심사 09-11 결측 진단(`models/regime_direction.py::summarise()`). 09-17 기준 최소 4번째 창 연속 결측. 자연 해소 예상 10월 중순.
+- [ ] **F-115 라이브 검증 — 기한 2026-09-18 장후**(전 회차 항목, 그대로 유지).
+- [ ] **S-1** HIGH_VOL 방향 신호 반전 — 리포트 자신이 「구현 대상에서 제외」로 적었다. 변경 없음.
+- [ ] **test_rollover_day 날짜 결합** `day3`·`day4` 2건, 09-11부터 **7회차 연속** 실패. 이번 작업 착수 전 베이스라인에서도 동일 실패 — 무관함을 재확인했다. 고치는 방향이 「합격을 만드는 방향」이라 자동 수정 금지, 무엇이 맞는 값인지를 사람이 정해야 풀린다.
+
+### 📌 점검 세션에 남기는 요청
+- [ ] **「계측이 0건이다」를 「그 경로가 아니다」로 읽기 전에, 그 경로에 계측이 있는지부터 확인할 것.** F-111이 열흘·일곱 회차를 태운 이유가 이것이다 — `OptionsHandleBarFailed`·`OptionsDispatchIgnored`·`SubscriberHandlerFailed` 3종이 전량 0건인 것은 사실이었지만, **성공 경로에는 애초에 태그가 없었다.** 「무로그」의 후보에 「계측되지 않은 정상 경로」를 항상 넣어야 한다.
+- [ ] **F-112가 닫혔으므로 G-54 계열 「이번 세션 위반 여부」 항목은 더 이상 세션마다 셀 필요가 없다.** 대신 훅이 실제로 살아 있는지를 한 번 확인하는 것으로 대체 가능하다(`.claude/settings.json`의 `hooks.PreToolUse` matcher에 `Bash|PowerShell` + `session_git_guard.py` 존재 — `tests/test_session_git_guard.py`가 CI로 고정하고 있다).
