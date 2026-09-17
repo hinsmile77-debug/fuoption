@@ -68,10 +68,10 @@ from messiah.core.messages import (
     BarClosed,
     Fill,
     Horizon,
-    OrderKind,
     OrderRequest,
     Side,
 )
+from messiah.execution.position_math import PositionState, apply_fill, signed_fill_qty
 
 
 @dataclass
@@ -135,6 +135,15 @@ class SimBroker(BrokerAdapter):
     def realized_pnl_ticks(self) -> float:
         """지금까지 **닫은 만큼**의 손익(틱). 열려 있는 포지션은 안 들어간다."""
         return self._realized_pnl_ticks
+
+    def last_close_ticks(self) -> dict[str, int]:
+        """심볼별 마지막 관측 종가(틱) — 평가손익의 기준가 (2026-09-17 F-114).
+
+        `unrealized_pnl_ticks()`가 이미 내부에서 쓰던 값인데, 독립 장부
+        (`execution/position_reconciler.py`)도 같은 기준가로 평가해야 두 값이 비교 가능해진다.
+        **복사본을 준다** — 장부가 브로커의 내부 상태를 붙들면 대사가 대사가 아니게 된다.
+        """
+        return dict(self._last_close)
 
     def unrealized_pnl_ticks(self) -> float | None:
         """열려 있는 포지션의 평가손익(틱) — 마지막 종가 기준. 종가를 모르면 None.
@@ -240,8 +249,13 @@ class SimBroker(BrokerAdapter):
             return SubmitResult(ok=False, error="no market data yet — 시장가 체결 기준가 없음")
         slip = self._slippage_ticks if req.side == Side.LONG else -self._slippage_ticks
         price = ref_price + slip
-        self._settle(order_no, req, price, now)
-        return SubmitResult(ok=True, broker_order_no=order_no)
+        # **만든 체결을 버리지 않는다** (2026-09-17 F-114). 종전엔 `self._settle(...)`의
+        # 반환값을 그냥 흘렸다 — 포지션과 `_n_fills`는 갱신되는데 `Fill` 메시지는 아무 데도
+        # 안 갔고, 그래서 `OrderGateway.on_fill()`이 시장가 체결을 한 번도 못 봤다(09-16·09-17
+        # 실거래 4계약 전부가 그랬다, `broker/base.SubmitResult` docstring).
+        return SubmitResult(
+            ok=True, broker_order_no=order_no, fill=self._settle(order_no, req, price, now)
+        )
 
     def _settle(self, order_no: str, req: OrderRequest, price_ticks: int, ts: datetime) -> Fill:
         # 시장가 즉시 체결과 지정가 터치 체결이 **둘 다** 여기를 지난다 — 계수기를 여기
@@ -282,29 +296,21 @@ class SimBroker(BrokerAdapter):
 
         실현손익 = `닫은수량 × (청산가 − 진입가) × sign(기존포지션)`. LONG은 오를 때
         이익이고 SHORT은 그 반대라 부호 곱이 필요하다. 단위는 **틱**이다(모듈 docstring).
+
+        ## 계산 자체는 더 이상 여기 없다 (2026-09-17 F-114)
+
+        위 네 갈래와 실현손익 공식은 `execution/position_math.py`로 옮겼다 — 같은 계산이
+        `PositionReconciler`에도 필요해졌는데 두 벌로 두면 대사 불일치가 "체결이 새거나
+        겹쳤다"(잡으려는 것)인지 "두 구현의 평균단가 규칙이 달랐다"(잡을 필요 없는 것)인지
+        가릴 수 없다. 규칙은 한 글자도 안 바뀌었다.
         """
         cur = self._positions.get(req.symbol)
-        signed = req.qty if req.side == Side.LONG else -req.qty
-        if req.kind in (OrderKind.EXIT_FULL, OrderKind.EXIT_PARTIAL) and cur is not None:
-            signed = -cur.qty if req.kind == OrderKind.EXIT_FULL else signed
-
-        q0 = cur.qty if cur else 0
-        entry = cur.avg_price_ticks if cur else price_ticks
-        new_qty = q0 + signed
-
-        if q0 == 0 or (q0 > 0) == (signed > 0):
-            # 신규 진입 또는 같은 방향 물타기 — 실현 없음, 평균단가만 갱신.
-            if q0 == 0:
-                avg = price_ticks
-            else:
-                avg = round((abs(q0) * entry + abs(signed) * price_ticks) / (abs(q0) + abs(signed)))
-        else:
-            closed = min(abs(signed), abs(q0))
-            direction = 1 if q0 > 0 else -1
-            self._realized_pnl_ticks += closed * (price_ticks - entry) * direction
-            # 뒤집혔으면 남은 수량은 이번 체결가가 진입가다. 아니면 원래 진입가를 지킨다.
-            avg = price_ticks if (new_qty != 0 and (new_qty > 0) != (q0 > 0)) else entry
-
+        signed = signed_fill_qty(
+            side=req.side, kind=req.kind, qty=req.qty, current_qty=cur.qty if cur else 0
+        )
+        state = PositionState(qty=cur.qty, avg_price_ticks=cur.avg_price_ticks) if cur else None
+        updated, realized = apply_fill(state, signed_qty=signed, price_ticks=price_ticks)
+        self._realized_pnl_ticks += realized
         self._positions[req.symbol] = BrokerPosition(
-            symbol=req.symbol, qty=new_qty, avg_price_ticks=avg
+            symbol=req.symbol, qty=updated.qty, avg_price_ticks=updated.avg_price_ticks
         )

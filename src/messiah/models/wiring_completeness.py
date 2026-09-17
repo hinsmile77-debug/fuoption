@@ -37,6 +37,16 @@ STAGE_NO_BUNDLE = "번들 미결선"
 STAGE_NO_DECISION = "판단 미발생"
 STAGE_NO_ORDER = "주문 미발생"
 STAGE_NO_FILL_ACCOUNTING = "체결 집계 불가"
+# 2026-09-17 F-114로 새로 생긴 칸. **체결을 세게 됐는데도 손익 4지표를 못 내는 구간이
+# 실재한다** — `PositionReconciler`가 실현손익을 내지만 단위가 **틱**이고, 승률·PF·Sharpe·MDD가
+# 먹는 `champion_returns`는 **자본 대비 비율**이다. 틱을 비율로 바꾸려면 계약 승수(원/지수
+# 포인트)가 있어야 하는데 그 값이 이 저장소 어디에도 없다(`configs/instance.yaml`에
+# `futures_tick_size`는 있어도 승수는 없다).
+#
+# 이 칸이 없으면 F-114 결선 직후 `fills_countable=True`가 곧장 `pnl_measurable=True`로
+# 이어지고, 그 순간 **36행 전부 0.0인 `g2_daily_returns.jsonl`로 계산한 `sharpe=0.0`이
+# 「측정값」 도장을 받는다** — 이 모듈이 2026-08-03에 막으려고 만들어진 바로 그 형태다.
+STAGE_NO_PNL_UNIT = "수익률 환산 불가(계약 승수 미정)"
 STAGE_MEASURABLE = "손익 측정 가능"
 
 
@@ -52,6 +62,12 @@ class WiringCompleteness:
     n_decisions: int = 0
     n_orders: int = 0
     fills_countable: bool = False
+    # 틱 손익을 **자본 대비 비율**로 바꿀 수 있는가 — 계약 승수가 설정에 있어야 True다.
+    # 기본값 False가 의도다: 모르는 것을 좋은 쪽으로 가정하지 않는다(모듈 docstring).
+    returns_convertible: bool = False
+    # 로컬 장부와 브로커 포지션 대사 결과. `None` = **대사를 안 돌렸다**(False = 돌렸는데
+    # 틀렸다). 셋을 구분해야 "체결 수를 믿어도 되는가"가 한 줄로 읽힌다.
+    positions_reconciled: bool | None = None
 
     @property
     def stage(self) -> str:
@@ -64,6 +80,8 @@ class WiringCompleteness:
             return STAGE_NO_ORDER
         if not self.fills_countable:
             return STAGE_NO_FILL_ACCOUNTING
+        if not self.returns_convertible:
+            return STAGE_NO_PNL_UNIT
         return STAGE_MEASURABLE
 
     @property
@@ -78,8 +96,13 @@ class WiringCompleteness:
             else f"손익 측정 단계 아님({self.stage}) — 승률·PF·Sharpe·MDD는 자리표시자"
         )
         bundles = ",".join(self.live_bundles) if self.live_bundles else "없음"
+        # 대사는 **세 값**이다 — 안 함/일치/불일치. "불일치"를 "안 함"과 같은 말로
+        # 쓰면 유령 포지션이 침묵으로 읽힌다(L12).
+        reconciled = {None: "미실시", True: "일치", False: "**불일치**"}[self.positions_reconciled]
         return (
             f"{head} · live 번들 {bundles} · shadow {self.shadow_bundles}개 · "
             f"판단 {self.n_decisions}건 · 주문 {self.n_orders}건 · "
-            f"체결집계 {'가능' if self.fills_countable else '불가'}"
+            f"체결집계 {'가능' if self.fills_countable else '불가'} · "
+            f"포지션대사 {reconciled} · "
+            f"수익률환산 {'가능' if self.returns_convertible else '불가(계약 승수 미정)'}"
         )

@@ -98,6 +98,23 @@ TAG_LEVELS: dict[str, int] = {
     "FillMatched": logging.INFO,
     "FillUnmatched": logging.CRITICAL,  # L1: 미매칭 체결 = CRITICAL 정지
     "OrderExpired": logging.INFO,  # SimBroker: TTL 경과 미체결 자동 취소 — 정상 동작
+    # Position Reconciler 계열 (2026-09-17 F-114). 하루 1회(장 마감 대사) + 사고 시에만 난다.
+    #
+    # 셋을 **한 태그로 접지 않는다**(R6): 일치는 정상 종료의 증거고, 불일치는 유령 포지션
+    # 계열의 사고이며, 실패는 "재지 못했다"다. 한 태그에 넣으면 그 태그의 심각도가 상황마다
+    # 달라져 경보 규칙을 못 세운다.
+    "PositionReconciled": logging.INFO,
+    # 로컬 장부 != 브로커 포지션. 미륵이 최대 단일 손실 사건(유령 포지션)의 형태다 —
+    # `FillUnmatched`가 CRITICAL인 것과 같은 계열이지만 이쪽은 **장 마감 시점의 사후
+    # 발견**이라 즉시 정지 대상이 아니다(이미 하루가 끝났다). 사람이 다음 날 아침 전에
+    # 반드시 봐야 하므로 ERROR.
+    "PositionReconcileMismatch": logging.ERROR,
+    # 브로커 조회 자체가 안 됐다 — 대사 결과는 False가 아니라 **미실시**로 남는다.
+    "PositionReconcileFailed": logging.WARNING,
+    # 매칭된 주문 없는 체결이 장부에 왔다. 게이트웨이가 이미 `FillUnmatched`로 CRITICAL
+    # 정지를 걸므로 여기서 다시 CRITICAL을 내면 같은 사건이 두 번 센다 — 이 태그는
+    # "그래서 장부에는 반영하지 않았다"는 **장부 쪽 사실**만 남긴다.
+    "PositionLedgerUnattributedFill": logging.WARNING,
     "RiskReject": logging.INFO,  # 거부는 정상 동작 — 예외 밀도에 안 섞이게 INFO
     "KillSwitch": logging.CRITICAL,
     "DataFallback": logging.WARNING,  # L18: 폴백은 시끄럽게
@@ -290,6 +307,22 @@ TAG_LEVELS: dict[str, int] = {
     # 이었고, 그 때문에 K-25(위클리 만기일 `no_option_reason` 분포)가 판정 자체를 못 했다.
     # 정상적인 무결정이므로 INFO다 — WARNING으로 올리면 하루 ~78건이 잡음이 된다.
     "OptionsNoCandidate": logging.INFO,
+    # **결정도 판단이다** (2026-09-17 F-111). F-93은 무결정 4갈래에만 로그를 달았고 결정
+    # 경로는 비워 뒀다 — 그 비대칭 때문에 "후보가 나온 사이클"이 로그상 "아무 일도 없던
+    # 사이클"과 같은 모양이 됐고, 09-08~09-17에 **일곱 번** 「오후에 조용히 멈춘다」로
+    # 보고됐다. 실제로는 멈춘 적이 없다(`strategy/options/service._publish_view` docstring).
+    #
+    # `intel.options`는 pub/sub이라 이력이 없고 구독자는 화면 하나뿐이라 다음 발행이 덮는다 —
+    # **그 사이클에 무엇을 사려 했는지가 남는 곳은 이 로그가 유일하다.** 하루 최대 ~78건,
+    # 실제로는 후보가 나온 사이클만이므로 훨씬 적다.
+    "OptionsViewPublished": logging.INFO,
+    # 5분 보조 판단 전용 침묵 감시 (2026-09-17 G-9). **판정하지 않고 센다**(R18) —
+    # 게이트도 차단도 아니다. WARNING 승격은 라이브 20거래일 분포를 본 뒤 사람이 정한다
+    # (`OptionSmileResidualHigh`와 같은 규율, 늑대소년 방지).
+    #
+    # 이 태그는 「끊겼다 이어짐」만 잡는다 — 루프가 영영 죽은 경우는 장 마감 뒤
+    # `ops/integrity_report.py`의 `options_cycles` 축이 맡는다.
+    "OptionsSubLoopStalled": logging.INFO,
     # 판단이 **빈 사이클**의 원인을 세 갈래로 가른다 (2026-09-09 이상점 1-4). 09-09에
     # 5분 그리드 09:15·09:25 두 마크만 무로그였는데, ㉠미도달·㉡필터·㉢예외가 전부 흔적을
     # 남기지 않아 저녁까지 원인을 못 골랐다. 자세한 사정은 `strategy/options/service._dispatch`.

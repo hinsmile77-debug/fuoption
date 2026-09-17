@@ -115,6 +115,7 @@ from messiah.core.ui_launcher import LaunchedUI, launch_command_center  # noqa: 
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
 from messiah.execution.order_gateway import OrderGateway  # noqa: E402
+from messiah.execution.position_reconciler import PositionReconciler  # noqa: E402
 from messiah.features import spec as feature_spec  # noqa: E402
 from messiah.models.registry import (  # noqa: E402
     BundleStatus,
@@ -589,6 +590,9 @@ def _assess_wiring(
     shadow_manager: ShadowManager,
     pipeline: TradingPipeline,
     gateway: OrderGateway,
+    *,
+    reconciler: PositionReconciler | None,
+    contract_multiplier: float | None,
 ) -> WiringCompleteness:
     """오늘 G2가 실제로 어디까지 결선돼 돌았는지 (2026-08-03 고도화 C).
 
@@ -603,10 +607,21 @@ def _assess_wiring(
         shadow_bundles=len(shadow_manager.active_bundles),
         n_decisions=pipeline.decisions_emitted,
         n_orders=gateway.accepted_orders,
-        # Position Reconciler가 아직 없어 실제 체결을 셀 수단이 없다(알려진 갭 —
-        # `core/messages.py`의 `SelfEvalReport.n_fills`가 항상 None인 것과 같은 이유).
-        # 그 컴포넌트가 결선되면 여기가 True가 되고 손익 지표가 비로소 측정값이 된다.
-        fills_countable=False,
+        # **2026-09-17 F-114로 상수가 사라졌다.** 여기엔 2026-08-03부터 `fills_countable=False`가
+        # 리터럴로 박혀 있었고, 그 한 줄 때문에 리포트는 체결이 실제로 몇 건이었든 「체결 집계
+        # 불가」를 출력했다(09-16 진입 2·청산 2, 09-17 진입 1·청산 1이 그 상태로 지나갔다).
+        # 이제 장부가 붙었는지가 판정한다 — 안 붙였으면 여전히 False다(모르는 것을 좋은 쪽으로
+        # 가정하지 않는다).
+        fills_countable=reconciler is not None,
+        positions_reconciled=(
+            None
+            if reconciler is None or reconciler.last_reconciliation is None
+            else reconciler.last_reconciliation.matched
+        ),
+        # 틱 → 자본 대비 비율 환산 가능 여부. 계약 승수는 **사람이 설정에 적어야** 생긴다
+        # (`core/config.InstanceConfig.contract_multiplier`) — 없으면 손익 4지표는 계속
+        # 자리표시자다(`models/wiring_completeness.STAGE_NO_PNL_UNIT`).
+        returns_convertible=contract_multiplier is not None,
     )
 
 
@@ -622,6 +637,7 @@ async def _daily_close(
     start_equity: Decimal,
     today: str,
     instance_id: str,
+    contract_multiplier: float | None = None,
 ) -> None:
     """봉 flush는 `run_l1_daily.py`의 책임(그 프로세스가 실제 Collector/Composer를 갖고
     있다) — 이 스크립트는 자기 것이 없으므로 flush할 것도 없다."""
@@ -630,7 +646,30 @@ async def _daily_close(
     # 18거래일 연속 주문 0건이 "정상 동작" 서른 줄로만 남았다.
     pipeline.sizer.log_session_summary()
 
+    # **오늘 얼마를 벌었나** (2026-09-17 F-114). 장부는 게이트웨이가 하루 종일 먹여 왔고,
+    # 여기서 브로커 진실원천과 맞춰 본다(L12). 조회가 실패하면 "일치"라고 말하지 않는다 —
+    # 예외를 삼키되 대사 결과를 `None`(미실시)으로 남긴다.
+    reconciler = gateway.reconciler
+    if reconciler is not None:
+        try:
+            await reconciler.reconcile(broker)
+        except Exception as exc:  # noqa: BLE001 — 대사 실패가 장 마감 절차를 막으면 본말전도다
+            mlog.log(
+                "PositionReconcileFailed",
+                f"브로커 포지션 조회 실패 — 대사 미실시로 남긴다: {exc}",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+    ledger = (
+        reconciler.summary(last_close_ticks=broker.last_close_ticks())
+        if reconciler is not None
+        else None
+    )
+
     end_equity = (await broker.account()).total_equity
+    # **이 값은 손익이 아니다.** `SimBroker.account().total_equity`는 `_cash`이고 `_cash`는
+    # `__init__` 이후 바뀌지 않는다 — 2026-07-29~09-17의 36행이 전부 `0.0`인 이유다. 지우지
+    # 않는 것은 그 36행과 같은 축이어야 이력이 이어지기 때문이고, **틱 손익은 아래 `ledger`가
+    # 따로 싣는다.** 둘을 한 필드에 섞으면 그게 더 나쁜 거짓말이다(`SimBroker` 모듈 docstring).
     daily_return = float((end_equity - start_equity) / start_equity) if start_equity > 0 else 0.0
     returns_path = _LOG_DIR / "g2_daily_returns.jsonl"
 
@@ -646,8 +685,11 @@ async def _daily_close(
             "symbol": symbol,
             "return": daily_return,
             "n_orders": gateway.accepted_orders,
-            # Position Reconciler 부재 — 0이 아니라 모름이다(L18).
-            "n_fills": None,
+            # 장부가 붙었으면 **진짜 0과 진짜 N**이다. 안 붙었으면 여전히 모름(None)이다 —
+            # 이 필드가 09-17까지 36행 연속 `null`이었던 이유가 후자였다(L18).
+            "n_fills": None if ledger is None else ledger["n_fills"],
+            # 틱 단위 손익 (F-114). `return`(비율)과 **단위가 다르므로** 필드를 나눈다.
+            "ledger": ledger,
             # 검증 관문을 못 채운 번들이 낸 성적은 승격 근거로 세지 않는다.
             "countable": not unmeasured,
             "bundle_ids": sorted(unmeasured) or None,
@@ -657,7 +699,14 @@ async def _daily_close(
     sample = champion_sample(_read_jsonl(returns_path))
     champion_returns = sample.returns
 
-    wiring = _assess_wiring(registry, shadow_manager, pipeline, gateway)
+    wiring = _assess_wiring(
+        registry,
+        shadow_manager,
+        pipeline,
+        gateway,
+        reconciler=reconciler,
+        contract_multiplier=contract_multiplier,
+    )
     report = run_self_evaluation(
         date=today,
         symbol=symbol,
@@ -665,6 +714,12 @@ async def _daily_close(
         n_shadow_bundles=len(shadow_manager.active_bundles),
         instance_id=instance_id,
         wiring=wiring,
+        # **슬리피지 대사가 오늘 처음 실제 데이터를 받는다** (F-114). 종전엔 빈 시퀀스를
+        # 넘겨 `slippage_realized_ticks`가 항상 None이었다 — 3단 매칭에 필요한 세 이력
+        # (`OrderRequest`·`OrderAck`·`Fill`)을 아무도 모아두지 않았기 때문이다.
+        orders=reconciler.orders if reconciler is not None else (),
+        acks=reconciler.acks if reconciler is not None else (),
+        fills=reconciler.fills if reconciler is not None else (),
         sample_window=sample.window,
         promotion_evidence_eligible=not unmeasured,
         promotion_evidence_reason=(
@@ -679,6 +734,18 @@ async def _daily_close(
     )
     # 결선 상태를 **먼저** 찍는다 — 손익 숫자를 먼저 보여주면 사람은 그걸 성적으로 읽는다.
     print(f"결선 완성도: {wiring.summary()}", flush=True)
+    if ledger is not None:
+        unreal = ledger["unrealized_pnl_ticks"]
+        print(
+            f"오늘 장부: 체결 {ledger['n_fills']}건 · 실현 "
+            f"{ledger['realized_pnl_ticks']:+.1f}틱 · 평가 "
+            + ("측정 불가(종가 미상)" if unreal is None else f"{unreal:+.1f}틱")
+            + f" · 잔여포지션 {ledger['open_positions'] or '없음'} · 대사 "
+            + {None: "미실시", True: "일치", False: "불일치"}[ledger["reconciled"]],
+            flush=True,
+        )
+        if ledger["reconciled"] is False:
+            print(f"  ⚠ 대사 불일치: {ledger['reconcile_mismatches']}", flush=True)
     # **절단을 한 줄로 말한다** (2026-08-24 G-19). 재기만 하고 안 보이면 2026-08-18
     # 결정이 여섯 거래일 묻혔던 일이 그대로 반복된다. 마지막 절이 핵심이다 —
     # 분자가 아무리 늘어도 거래 발생일이 0이면 관문은 아무것도 안 묻는다.
@@ -789,7 +856,10 @@ async def main(cfg: InstanceConfig) -> None:
     broker = SimBroker(cash=cfg.capital.total)
     await broker.connect()
     start_equity = (await broker.account()).total_equity
-    gateway = OrderGateway(broker)
+    # 장부는 게이트웨이에 붙는다 — 주문·접수·체결 셋을 한자리에서 보는 유일한 지점
+    # (`execution/position_reconciler.py` 모듈 docstring "왜 게이트웨이에 붙나").
+    reconciler = PositionReconciler()
+    gateway = OrderGateway(broker, reconciler)
     pipeline = TradingPipeline(
         symbol,
         broker,
@@ -847,6 +917,7 @@ async def main(cfg: InstanceConfig) -> None:
                 start_equity=start_equity,
                 today=today.isoformat(),
                 instance_id=cfg.instance_id,
+                contract_multiplier=cfg.contract_multiplier,
             ),
             timeout=shutdown_budget,
         )

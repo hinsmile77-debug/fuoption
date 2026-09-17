@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
 
-from messiah.core.messages import GreeksProfile, OrderRequest
+from messiah.core.messages import Fill, GreeksProfile, OrderRequest
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,29 @@ class BrokerAccount:
 
 @dataclass(frozen=True)
 class SubmitResult:
+    """주문 전송 결과.
+
+    ## `fill`은 **제출 시점에 이미 체결된 경우**만 채운다 (2026-09-17 F-114)
+
+    실전 브로커(KIS)는 체결을 별도 통지(`broker/kis/order_notice.py`)로 비동기 전달하므로
+    여기는 항상 `None`이다. `SimBroker`의 **시장가**만 예외다 — 그 어댑터는 `submit()` 안에서
+    즉시 체결시키는데(`_fill_market()`), 종전에는 그때 만든 `Fill`을 **아무에게도 주지 않고
+    버렸다.**
+
+    실측 피해: 2026-09-17 15:00:01 진입 1계약(`SIM00000001`)과 15:25:00 EOD 강제청산
+    1계약(`SIM00000002`)이 둘 다 시장가였고, 그날 로그에 `FillMatched`·`FillUnmatched`가
+    **0건**이다. 즉 두 계약이 실제로 오갔는데 체결 경로는 하루 종일 조용했다. 그 결과
+    `OrderGateway`의 pending 두 건은 영영 안 지워졌고(누수), 체결을 세는 어떤 소비자도
+    그 둘을 볼 수 없었다. 09-16의 첫 실거래(진입 2·청산 2)도 같은 형태다.
+
+    `OrderGateway.submit()`이 이 필드를 보고 `on_fill()`로 넘긴다 — 주문 경로가 하나라는
+    계약(계명 1)을 지키면서 즉시 체결을 정상 체결 흐름에 태우는 유일한 자리다.
+    """
+
     ok: bool
     broker_order_no: str = ""
     error: str = ""
+    fill: "Fill | None" = None
 
 
 class BrokerAdapter(ABC):

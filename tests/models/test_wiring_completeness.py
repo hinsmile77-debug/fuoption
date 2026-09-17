@@ -14,6 +14,7 @@ from messiah.models.wiring_completeness import (
     STAGE_NO_DECISION,
     STAGE_NO_FILL_ACCOUNTING,
     STAGE_NO_ORDER,
+    STAGE_NO_PNL_UNIT,
     WiringCompleteness,
 )
 
@@ -36,11 +37,51 @@ def test_stage_points_at_the_first_missing_link():
         WiringCompleteness(live_bundles=["b1"], n_decisions=5, n_orders=2).stage
         == STAGE_NO_FILL_ACCOUNTING
     )
+    assert (
+        WiringCompleteness(
+            live_bundles=["b1"], n_decisions=5, n_orders=2, fills_countable=True
+        ).stage
+        == STAGE_NO_PNL_UNIT
+    )
+
+
+def test_counting_fills_alone_does_not_make_pnl_measurable():
+    """F-114가 체결을 셀 수 있게 만든 다음 날 이 테스트가 필요해졌다.
+
+    `PositionReconciler`는 실현손익을 **틱**으로 낸다. 승률·PF·Sharpe·MDD가 먹는
+    `champion_returns`는 **자본 대비 비율**이고, 틱을 비율로 바꾸려면 계약 승수가 있어야
+    하는데 그 값은 이 저장소에 없다. 이 칸이 없으면 `fills_countable=True`가 되는 순간
+    36행 전부 0.0인 수익률 파일로 계산한 `sharpe=0.0`이 「측정값」 도장을 받는다 — 이
+    모듈이 막으려고 만들어진 바로 그 형태다."""
+    wiring = WiringCompleteness(
+        live_bundles=["b1"], n_decisions=5, n_orders=2, fills_countable=True
+    )
+
+    assert wiring.stage == STAGE_NO_PNL_UNIT
+    assert not wiring.pnl_measurable
+    assert "계약 승수" in wiring.summary()
+
+
+def test_reconciliation_has_three_values_not_two():
+    """대사는 **안 함/일치/불일치**다. 「안 함」을 「불일치」로 쓰면 없는 사고가 생기고,
+    「불일치」를 「안 함」으로 쓰면 유령 포지션이 침묵으로 읽힌다(L12)."""
+    base = dict(live_bundles=["b1"], n_decisions=5, n_orders=2, fills_countable=True)
+
+    assert "포지션대사 미실시" in WiringCompleteness(**base).summary()
+    assert "포지션대사 일치" in WiringCompleteness(**base, positions_reconciled=True).summary()
+    assert "포지션대사 **불일치**" in (
+        WiringCompleteness(**base, positions_reconciled=False).summary()
+    )
 
 
 def test_fully_wired_is_measurable():
     wiring = WiringCompleteness(
-        live_bundles=["b1"], n_decisions=5, n_orders=2, fills_countable=True
+        live_bundles=["b1"],
+        n_decisions=5,
+        n_orders=2,
+        fills_countable=True,
+        returns_convertible=True,
+        positions_reconciled=True,
     )
 
     assert wiring.stage == STAGE_MEASURABLE
@@ -91,7 +132,12 @@ def test_self_eval_reports_measurable_when_fully_wired():
         champion_returns=[0.01, -0.005],
         n_shadow_bundles=1,
         wiring=WiringCompleteness(
-            live_bundles=["5m_A"], n_decisions=12, n_orders=3, fills_countable=True
+            live_bundles=["5m_A"],
+            n_decisions=12,
+            n_orders=3,
+            fills_countable=True,
+            returns_convertible=True,
+            positions_reconciled=True,
         ),
     )
 

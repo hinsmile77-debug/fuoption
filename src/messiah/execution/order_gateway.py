@@ -25,6 +25,7 @@ from messiah.broker.base import BrokerAdapter, SubmitResult
 from messiah.core.logging import log
 from messiah.core.messages import Fill, OrderAck, OrderKind, OrderRequest
 from messiah.core.timeutil import now_utc
+from messiah.execution.position_reconciler import PositionReconciler
 
 
 class PendingRegistry:
@@ -68,10 +69,18 @@ class PendingRegistry:
 class OrderGateway:
     """모든 진입·청산·헤지·비상 주문의 유일한 관문."""
 
-    def __init__(self, broker: BrokerAdapter) -> None:
+    def __init__(self, broker: BrokerAdapter, reconciler: PositionReconciler | None = None) -> None:
         self._broker = broker
         self._pending = PendingRegistry()
         self._halted = False
+        # 하루치 장부 (2026-09-17 F-114). **여기가 유일하게 「주문·접수·체결」 셋을 한자리에서
+        # 보는 곳이다** — `Fill`에는 방향이 없고(`core/messages.Fill`), 방향을 가진
+        # `OrderRequest`와 그 체결을 잇는 것은 `on_fill()`의 pending 매칭뿐이다. 그래서 장부는
+        # 버스를 구독하지 않고 게이트웨이가 먹인다(`_accepted_orders`를 여기 둔 것과 같은 이유).
+        #
+        # 기본값이 `None`인 것은 의도다 — 장부를 안 붙인 호출자(백테스트·단위테스트)는 종전과
+        # 정확히 같이 동작하고, 리포트는 그 경우 체결 수를 0이 아니라 **모름**으로 낸다.
+        self._reconciler = reconciler
         # 결선 완성도 계측 (2026-08-03 고도화 C). 여기가 "모든 주문의 유일한 관문"이라
         # (클래스 docstring) 주문 수를 세기에 자연스러운 유일한 자리다 —
         # 호출자마다 세면 경로가 하나 늘 때마다 조용히 빠진다.
@@ -80,6 +89,11 @@ class OrderGateway:
     @property
     def halted(self) -> bool:
         return self._halted
+
+    @property
+    def reconciler(self) -> PositionReconciler | None:
+        """붙어 있는 하루치 장부 — 없으면 `None`(체결을 셀 수 없는 상태)."""
+        return self._reconciler
 
     @property
     def accepted_orders(self) -> int:
@@ -112,16 +126,35 @@ class OrderGateway:
         log(
             "OrderSubmit", "accepted", request_id=req.msg_id, broker_order_no=result.broker_order_no
         )
-        return OrderAck(
+        ack = OrderAck(
             instance_id=req.instance_id,
             request_id=req.msg_id,
             broker_order_no=result.broker_order_no,
             pending_key=final_key,
         )
+        # 접수된 것만 장부에 넣는다 — 거부·롤백은 `accepted_orders`가 안 세는 것과 같은 규율.
+        # 슬리피지 대사(`models/self_evaluation.reconcile_slippage`)가 요구하는 3단 매칭
+        # (OrderRequest.msg_id -> OrderAck.request_id -> broker_order_no -> Fill)이 이 두 줄로
+        # 비로소 실제 데이터로 성립한다.
+        if self._reconciler is not None:
+            self._reconciler.record_order(req)
+            self._reconciler.record_ack(ack)
+        # **제출 시점에 이미 체결된 주문**(시뮬레이터 시장가)을 정상 체결 흐름에 태운다
+        # (2026-09-17 F-114). rekey **뒤**여야 pending 매칭이 성립한다 — 앞이면 방금 낸
+        # 자기 주문이 미매칭 체결로 잡혀 게이트웨이가 스스로 정지한다.
+        #
+        # 실전 브로커는 체결을 비동기 통지로 주므로 `fill`이 `None`이고 이 줄은 안 돈다.
+        if result.fill is not None:
+            await self.on_fill(result.fill)
+        return ack
 
     async def on_fill(self, fill: Fill) -> Fill:
         """체결 수신. 매칭 실패는 유령 포지션이 아니라 CRITICAL 정지다 (L1)."""
         matched = await self._pending.pop_match(fill.symbol, fill.broker_order_no)
+        # **매칭 결과와 함께** 넣는다 — 방향은 매칭된 요청에만 있다. 미매칭이면 장부는
+        # 포지션을 안 움직이고 세기만 한다(유령 포지션을 만들지 않는다, L1).
+        if self._reconciler is not None:
+            self._reconciler.record_fill(fill, matched)
         if matched is not None:
             log(
                 "FillMatched",

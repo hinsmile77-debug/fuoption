@@ -79,9 +79,17 @@ def test_reconcile_slippage_empty_inputs():
 
 
 def _measurable() -> WiringCompleteness:
-    """손익을 측정해도 되는 결선 상태 — 이 값이 있어야 4지표가 숫자로 나온다(2026-08-05)."""
+    """손익을 측정해도 되는 결선 상태 — 이 값이 있어야 4지표가 숫자로 나온다(2026-08-05).
+
+    2026-09-17 F-114로 칸이 둘 늘었다: 체결을 세는 것만으로는 부족하고, 틱 손익을 **비율로
+    환산할 수 있어야**(계약 승수) 4지표가 의미를 갖는다(`wiring_completeness` 모듈 주석)."""
     return WiringCompleteness(
-        live_bundles=["5m@v1"], n_decisions=5, n_orders=3, fills_countable=True
+        live_bundles=["5m@v1"],
+        n_decisions=5,
+        n_orders=3,
+        fills_countable=True,
+        returns_convertible=True,
+        positions_reconciled=True,
     )
 
 
