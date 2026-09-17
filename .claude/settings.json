@@ -4,5 +4,20 @@
     "allow": [
       "Bash(.venv/Scripts/python.exe scripts/build_bundles.py *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"${CLAUDE_PROJECT_DIR:-.}\"; if [ -x \"$p/.venv/Scripts/python.exe\" ]; then \"$p/.venv/Scripts/python.exe\" \"$p/scripts/hooks/session_git_guard.py\"; else python \"$p/scripts/hooks/session_git_guard.py\"; fi",
+            "timeout": 10,
+            "statusMessage": "F-112 저장소 조회 가드"
+          }
+        ]
+      }
+    ]
   }
 }
