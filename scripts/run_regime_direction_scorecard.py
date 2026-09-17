@@ -41,7 +41,9 @@ sys.stderr.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.backtest.harness import aggregate_to_horizon  # noqa: E402
+from messiah.core import logging as mlog  # noqa: E402
 from messiah.core import symbol_resolution  # noqa: E402
+from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.event_calendar import EventCalendar  # noqa: E402
 from messiah.core.messages import BarClosed, Horizon  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
@@ -82,6 +84,9 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--base-dir", default=str(_DATA_DIR))
     p.add_argument("--log-dir", default=str(_LOG_DIR))
+    # `daily_integrity_report.py`와 같은 이름·같은 기본값 — 구조화 로그의 `instance_id`가
+    # 어느 인스턴스의 채점인지 말한다 (2026-09-17 F-115, R4: 경로를 코드에 박지 않는다).
+    p.add_argument("--configs", default="configs")
     p.add_argument("--symbol", default=None, help="명시하면 이것이 이긴다(기본: 런타임 기록)")
     p.add_argument("--reachability", dest="reachability", action="store_true", default=True)
     p.add_argument("--no-reachability", dest="reachability", action="store_false")
@@ -174,6 +179,21 @@ def _reachability_summary(archiver: ParquetArchiver, end: date) -> dict[str, obj
 def main() -> int:
     args = _parse_args()
     session_guard.refuse_if_regular_session("국면별 방향 채점", force=args.force_intraday)
+    # **이 프로세스도 구조화 로그를 낸다** (2026-09-17 F-115). 종전엔 `setup()`이 없어
+    # `backfill.compute_roll_offsets()`의 `RollBasisUnmeasured`(등록부 WARNING)가 파이썬
+    # `lastResort` 핸들러로 포맷 없이 표준오류에 떨어졌다 — 09-02~09-17 장후 로그 어디에도
+    # 그 태그의 JSON 줄이 0건이었고, `tag_counts` 집계·자동 적신호는 이 신호를 원천적으로
+    # 못 봤다(R6). 부모가 `MESSIAH_NESTED_SESSION`을 세워 주므로 경계 마커는
+    # `SessionStart`가 아니라 `NestedSessionStart`로 나간다(`core/logging.session_start`,
+    # 2026-08-14 F-13) — 배치 5번째 도구가 늘어도 재기동 오탐이 생기지 않는다.
+    try:
+        instance_id = load_instance(args.configs).instance_id
+    except (OSError, ValueError):
+        # 설정을 못 읽어도 채점 자체는 내야 한다. 다만 `except Exception`으로 넓히지
+        # 않는다 — 2026-09-17 구현 중 `--configs` 인자 자체가 없어 `AttributeError`가
+        # 조용히 `"unset"`으로 둔갑한 것을 e2e 실행에서야 잡았다(금지계명 12).
+        instance_id = "unset"
+    mlog.setup(instance_id)
 
     calendar = EventCalendar.from_file()
     end = args.date or now_kst().date()
