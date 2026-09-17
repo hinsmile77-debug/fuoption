@@ -366,3 +366,122 @@ async def test_instrumentation_did_not_change_what_gets_published():
     for a, b in zip(direct, routed):
         assert a.no_option_reason == b.no_option_reason
         assert [c.structure for c in a.candidates] == [c.structure for c in b.candidates]
+
+
+# ------------------------------- 「오후 침묵」은 침묵이 아니었다 (2026-09-17 F-111 · G-9)
+#
+# 2026-09-08~09-17에 일일점검이 **일곱 번** "5분 보조 판단이 조용히 멈춘다"를 보고했다.
+# 09-17 실측: 14:35:01에 `bar.5m`이 receivers=5로 발행됐는데(=실제 배달된 구독자 수,
+# `core/bus.publish`) 이 서비스 로그는 그 마크에 한 줄도 없었다. 나머지 경로가 전부 로그를
+# 남기므로 소거법상 남는 것은 **성공 발행 경로 하나뿐**이고, 그 경로에만 로그가 없었다.
+
+
+def _published_tag(records) -> list[tuple[str, str, dict]]:
+    return [r for r in records if r[0] == "OptionsViewPublished"]
+
+
+async def test_a_cycle_that_produces_candidates_is_no_longer_silent(captured):
+    """**F-111의 재현과 수정을 한 테스트에 둔다.**
+
+    수정 전이라면 이 사이클은 `OptionsNoCandidate`도 `OptionsCandidateUnbuildable`도
+    `OptionsCandidateRejected`도 남기지 않는다 — 즉 로그상 "아무 일도 없던 사이클"과
+    구별되지 않는다. 그것이 열흘간 「침묵」으로 읽힌 형태다."""
+    bus = InProcessBus()
+    published = await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus, iv_history=IVHistory())
+
+    await service.handle_futures_view(_futures_view(0.5))
+    await service.handle_futures_view(_futures_view(0.5))
+
+    assert published[-1].no_option_reason is None  # 후보가 나온 사이클이다
+    tags = _published_tag(captured)
+    assert len(tags) == 1, "후보가 나온 사이클은 반드시 한 줄을 남긴다"
+    fields = tags[0][2]
+    assert fields["n_candidates"] == len(published[-1].candidates)
+    assert fields["structures"] == [c.structure for c in published[-1].candidates]
+    assert fields["iv_rank"] is not None
+
+
+async def test_the_published_candidates_survive_only_in_this_log(captured):
+    """`intel.options`는 pub/sub이라 이력이 없고 구독자는 화면 하나뿐이다(다음 발행이 덮는다) —
+    그 사이클에 **무엇을 사려 했는지**가 남는 곳은 이 로그가 유일하다. 그래서 구조 이름을
+    개수가 아니라 목록으로 싣는다."""
+    bus = InProcessBus()
+    await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus, iv_history=IVHistory())
+
+    await service.handle_futures_view(_futures_view(0.5))
+    await service.handle_futures_view(_futures_view(0.5))
+
+    structures = _published_tag(captured)[0][2]["structures"]
+    assert structures and all(isinstance(name, str) for name in structures)
+
+
+def _stalled(records) -> list[tuple[str, str, dict]]:
+    return [r for r in records if r[0] == "OptionsSubLoopStalled"]
+
+
+async def test_every_cycle_is_counted_whatever_it_decided(captured):
+    """결정이든 무결정이든 **사이클은 사이클이다** — 침묵 감시가 무결정만 세면 F-111이
+    그대로 재발한다(후보가 나온 마크가 결손으로 보인다)."""
+    bus = InProcessBus()
+    await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: _smile(), bus, iv_history=IVHistory())
+
+    await service.handle_futures_view(_futures_view(0.5))  # 무결정(이력 부족)
+    await service.handle_futures_view(_futures_view(0.5))  # 결정
+
+    assert service.cycles == 2
+
+
+async def test_a_skipped_mark_is_named_instead_of_vanishing(captured, monkeypatch):
+    """한 마크를 통째로 건너뛰면(=5분 격자에서 600초) 그 사실이 태그로 남는다 (G-9).
+
+    시계를 직접 밀어 09-17의 14:30→14:40 공백을 재현한다."""
+    bus = InProcessBus()
+    await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: None, bus)
+
+    from messiah.strategy.options import service as service_module
+
+    clock = [datetime(2026, 9, 17, 14, 30, 1, tzinfo=KST)]
+    monkeypatch.setattr(service_module, "now_utc", lambda: clock[0])
+
+    await service.handle_bar(_bar())
+    clock[0] = datetime(2026, 9, 17, 14, 40, 3, tzinfo=KST)  # 600초 뒤 — 14:35가 없다
+    await service.handle_bar(_bar())
+
+    stalled = _stalled(captured)
+    assert len(stalled) == 1
+    assert stalled[0][2]["gap_seconds"] == pytest.approx(602.0)
+    assert stalled[0][2]["cadence_seconds"] == 300.0
+
+
+async def test_normal_jitter_does_not_trip_the_watch(captured, monkeypatch):
+    """임계가 2.0배면 한 마크 결손(600초)이 정확히 경계에 걸려 그날그날 다르게 판정된다 —
+    09-17 실측 간격은 597·600·602초였다. 1.5배(450초)면 정상 지터는 안 걸린다."""
+    bus = InProcessBus()
+    await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: None, bus)
+
+    from messiah.strategy.options import service as service_module
+
+    clock = [datetime(2026, 9, 17, 14, 30, 0, tzinfo=KST)]
+    monkeypatch.setattr(service_module, "now_utc", lambda: clock[0])
+
+    await service.handle_bar(_bar())
+    clock[0] = datetime(2026, 9, 17, 14, 35, 4, tzinfo=KST)  # 304초 — 정상
+    await service.handle_bar(_bar())
+
+    assert _stalled(captured) == []
+
+
+async def test_the_first_cycle_of_the_day_is_never_a_stall(captured):
+    """비교할 앞이 없다 — 기동 첫 사이클에 이 태그가 뜨면 매일 아침 오탐 한 건이 쌓인다."""
+    bus = InProcessBus()
+    await _collect(bus)
+    service = OptionsAIService(_SYMBOL, _UNDERLYING, lambda: None, bus)
+
+    await service.handle_bar(_bar())
+
+    assert _stalled(captured) == []

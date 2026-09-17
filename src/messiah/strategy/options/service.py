@@ -44,6 +44,7 @@ from messiah.core.messages import (
     Horizon,
     OptionsView,
 )
+from messiah.core.timeutil import now_utc
 from messiah.strategy.options.config import OptionsConfig
 from messiah.strategy.options.evaluator import (
     EvaluatorConfig,
@@ -58,6 +59,9 @@ from messiah.strategy.options.surface import SmileFit
 from messiah.strategy.options.vol_metrics import IVHistory
 
 SmileProvider = Callable[[], SmileFit | None]
+
+#: 침묵 감시 임계 배수 (2026-09-17 G-9) — `_mark_cycle()` docstring "임계는 …".
+_STALL_CADENCE_MULTIPLE = 1.5
 
 
 class OptionsAIService:
@@ -94,6 +98,12 @@ class OptionsAIService:
         # M5 완성봉 **양쪽**에 트리거되므로 실제 갱신 간격은 둘 중 짧은 쪽이고, 그것을
         # `cadence_seconds`로 실어 화면이 추측하지 않게 한다.
         self._futures_cadence_seconds: float | None = None
+        # **사이클이 돌았다는 사실 자체**를 센다 (2026-09-17 F-111). 이 둘이 없어서
+        # 2026-09-08~09-17에 「오후에 5분 보조판단이 조용히 멈춘다」가 일곱 번 보고됐다 —
+        # 실제로는 안 멈췄고, `_publish_view()`의 **성공 경로에만 로그가 없었다**(아래
+        # `_publish_view` docstring). 무결정에만 로그를 단 F-93의 비대칭이 원인이다.
+        self._cycles = 0
+        self._last_cycle_at: datetime | None = None
 
     async def handle_futures_view(self, msg: BusMessage) -> bool:
         """`intel.futures`를 받아 점수를 캐싱하고 뷰를 다시 낸다.
@@ -119,6 +129,36 @@ class OptionsAIService:
         return True
 
     async def _publish_view(self, *, as_of: datetime) -> None:
+        """이 사이클의 판단을 만들어 `intel.options`로 낸다.
+
+        ## 성공 경로에 로그가 없어서 「침묵」으로 읽혔다 (2026-09-17 F-111)
+
+        2026-09-08부터 09-17까지 일일점검이 **일곱 번** *"오후에 5분 보조 판단 절차가 조용히
+        멈춘다"* 를 보고했다. 계측(F-105: `OptionsHandleBarFailed`·`OptionsDispatchIgnored`·
+        `SubscriberHandlerFailed`)은 그 열흘 내내 전량 0건이라 원인을 못 골랐다.
+
+        **멈춘 적이 없다.** 09-17 실측:
+
+            14:30:01  bar.5m 발행(receivers=5) → OptionsNoCandidate "IV Surface 미준비"
+            14:35:01  bar.5m 발행(receivers=5) → 로그 없음      ← "침묵"
+            14:40:03  bar.5m 발행(receivers=5) → OptionsNoCandidate "IV Surface 미준비"
+
+        `receivers`는 Redis `PUBLISH`의 반환값, 즉 **실제로 배달된 구독자 수**다(`core/bus.
+        publish`). 봉은 왔고 핸들러는 돌았다. 그 사이클에 스마일이 살아 있어 후보가
+        만들어졌고 안전규칙을 통과했으며, 그래서 **아래 마지막 블록(발행)** 으로 갔다 —
+        그리고 이 함수에서 로그를 안 남기는 경로는 그 하나뿐이었다.
+
+        09-16은 더 분명하다. 13:30~14:25는 매 마크가 `매트릭스 셀 후보 없음(관망)`이었고
+        14:30~15:20 열한 마크가 통째로 무로그, 15:25에 다시 `후보 생성 실패`가 찍혔다 —
+        그 한 시간은 정지가 아니라 **후보가 실제로 나온 구간**이다. 같은 날 첫 실거래
+        (진입 2·청산 2)가 있었다.
+
+        2026-09-07 F-93이 무결정 4갈래에 로그를 달면서 **결정 경로에는 안 달았다.** 그
+        비대칭이 "판단이 나온 사이클"을 로그상 "아무 일도 없던 사이클"과 같은 모양으로
+        만들었다. `intel.options`는 pub/sub이라 이력이 남지 않고 구독자는 화면 하나뿐이라
+        (다음 발행이 덮는다), 그 사이클의 후보는 **어디에도 남지 않은 채 사라졌다.**
+        """
+        self._mark_cycle()
         if not self._has_futures_view:
             await self._publish_no_option("Futures AI 방향 뷰 미수신")
             return
@@ -214,6 +254,20 @@ class OptionsAIService:
             candidates=ranked,
             cadence_seconds=self._cadence_seconds(),
         )
+        # **결정도 로그로 남긴다** (2026-09-17 F-111) — 무결정만 남기던 F-93의 비대칭을
+        # 여기서 닫는다. 이 한 줄이 없어서 판단이 나온 사이클이 "침묵"으로 일곱 번 보고됐다.
+        # `intel.options`는 pub/sub이라 이력이 없고 구독자는 화면뿐이므로(다음 발행이 덮는다),
+        # **후보가 실제로 뭐였는지 남는 곳은 이 로그가 유일하다.**
+        mlog.log(
+            "OptionsViewPublished",
+            f"후보 {len(ranked)}건 발행 — {', '.join(c.structure for c in ranked)}",
+            symbol=self._symbol,
+            n_candidates=len(ranked),
+            structures=[c.structure for c in ranked],
+            iv_rank=iv_rank,
+            score=self._latest_score,
+            is_expiry_day=is_expiry_day,
+        )
         await self._bus.publish(TOPIC_OPTIONS, view)
 
     async def _publish_no_option(self, reason: str) -> None:
@@ -235,6 +289,49 @@ class OptionsAIService:
             cadence_seconds=self._cadence_seconds(),
         )
         await self._bus.publish(TOPIC_OPTIONS, view)
+
+    def _mark_cycle(self) -> None:
+        """사이클 1회를 세고, **직전 사이클과의 간격이 비정상이면 그것도 남긴다** (G-9).
+
+        임계는 구동 주기의 1.5배다 — 5분 격자에서 한 마크를 통째로 건너뛰면(=600초) 걸리고,
+        정상 지터(±수 초)에는 안 걸린다. 임계를 2.0배로 두면 한 마크 결손이 정확히 경계에
+        걸려 그날그날 다르게 판정된다(09-17 실측 간격 597·600·602초).
+
+        ## 한계를 여기 적어둔다
+
+        이 측정은 **다음 사이클이 와야** 성립한다 — 루프가 영영 죽으면 이 태그는 안 뜬다.
+        그 경우는 장 마감 뒤 `ops/integrity_report.py`의 `options_cycles` 축이 하루치
+        `OptionsCycle*` 태그 간격을 훑어 잡는다. 두 장치가 각각 「끊겼다 이어짐」과
+        「끊긴 채 끝남」을 맡는다.
+
+        **판정은 하지 않는다**(R18) — 게이트도 차단도 아니고 세기만 한다. WARNING 승격은
+        라이브 20거래일 분포를 본 뒤 사람이 정한다(`OptionSmileResidualHigh`와 같은 규율).
+        """
+        now = now_utc()
+        previous = self._last_cycle_at
+        self._cycles += 1
+        self._last_cycle_at = now
+        if previous is None:
+            return
+        gap = (now - previous).total_seconds()
+        threshold = self._cadence_seconds() * _STALL_CADENCE_MULTIPLE
+        if gap <= threshold:
+            return
+        mlog.log(
+            "OptionsSubLoopStalled",
+            f"직전 판단 사이클과 {gap:.0f}초 — 구동 주기 "
+            f"{self._cadence_seconds():.0f}초의 {gap / self._cadence_seconds():.1f}배",
+            symbol=self._symbol,
+            gap_seconds=round(gap, 1),
+            cadence_seconds=self._cadence_seconds(),
+            threshold_seconds=round(threshold, 1),
+            cycle_index=self._cycles,
+        )
+
+    @property
+    def cycles(self) -> int:
+        """기동 이후 이 서비스가 판단을 만든 횟수 — 결정·무결정을 가리지 않는다."""
+        return self._cycles
 
     def _cadence_seconds(self) -> float:
         """이 뷰의 실제 갱신 간격 — 두 트리거 중 **짧은 쪽** (2026-08-20 F-A′).

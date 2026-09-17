@@ -510,6 +510,23 @@ class IntegrityReport:
     # 계층을 신설하지 않는다. 막을 것은 오늘의 거래가 아니라 **오늘의 성적이 승격 근거로
     # 쓰이는 일**이다. None은 미측정(그날 self_eval 산출물이 없다)이다.
     bundle_gates_unvalidated: dict[str, Any] | None = None
+    # **5분 보조 판단이 하루에 몇 번 돌았고 어디가 비었나** (2026-09-17 G-9).
+    #
+    # 2026-09-08~09-17에 「오후에 조용히 멈춘다」가 일곱 번 보고됐는데 리포트에는 그 사실을
+    # 담을 칸이 없었다 — 사람이 매번 로그를 5분 격자로 손수 훑어 세야 했다. 서비스 쪽
+    # `OptionsSubLoopStalled`가 「끊겼다 이어짐」(다음 사이클이 와야 간격이 재진다)을 맡고,
+    # 이 축이 **끊긴 채 끝남**까지 본다. 둘의 수가 다르면 그 차이 자체가 신호다.
+    #
+    # `None`은 "사이클이 0이었다"가 아니라 "이 계측 이전 로그이거나 옵션 서비스가 안
+    # 붙었다"다. 기본값이 있는 이유는 `series_contract`와 같다(옛 리포트 되읽기).
+    options_cycles: dict[str, Any] | None = None
+    # **야간 갭이 봉 한 칸으로 들어간 정도** (2026-09-17 G-10, 태그는 2026-08-20 F-G).
+    #
+    # 종전엔 `tag_counts.SessionBoundaryInflation`의 숫자 하나뿐이라 "몇 번 떴나"는 알아도
+    # "얼마나 심했나"를 알 수 없었다 — 판정에 쓰이는 값은 `ratio`이고, 그것이 리포트에 없으면
+    # 이 태그는 사실상 미측정이다. Horizon별로 **그날 최악의 한 건**을 남긴다(평균도 마지막도
+    # 아니다 — `clock_skew_seconds`가 절댓값 최대를 쓰는 것과 같은 규율).
+    session_boundary_inflation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1072,6 +1089,56 @@ def _slope(points: Sequence[tuple[int, float]], *, digits: int = 1) -> float | N
     return round(numerator / denominator, digits)
 
 
+#: 5분 보조 판단의 기본 구동 주기(초)와 침묵 임계 배수 —
+#: `strategy/options/service._STALL_CADENCE_MULTIPLE`와 같은 값이어야 두 장치의 판정이 갈리지
+#: 않는다. 로그에 실린 `cadence_seconds`가 있으면 그쪽이 우선이다(그 값이 실제 구동 주기다).
+_OPTIONS_CADENCE_SECONDS = 300.0
+_OPTIONS_STALL_MULTIPLE = 1.5
+
+
+def _options_cycle_axis(
+    stamps: Sequence[str], *, published: int, stalled: Sequence[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """5분 보조 판단 사이클의 하루치 요약 (2026-09-17 G-9).
+
+    입력: `OptionsNoCandidate`+`OptionsViewPublished`의 KST 시각들(`HH:MM:SS`), 결정 사이클
+         수, 서비스가 실시간으로 남긴 침묵 태그들.
+    계산: 시각을 정렬해 인접 간격을 재고, 임계(주기×1.5)를 넘는 구간을 전부 모은다.
+    반환: 태그가 하나도 없으면 **`None`** — "사이클이 0이었다"가 아니라 "이 계측 이전
+         로그이거나 서비스가 안 붙었다"이다(L18, `option_chain_stale_spot`과 같은 규율).
+
+    ## 실시간 태그와 겹치는 것이 의도다
+
+    `stalls_detected_live`는 서비스가 그때그때 남긴 수이고 `gaps`는 이 축이 사후에 전수로
+    다시 잰 것이다. **둘이 다르면 그 자체가 신호다** — 서비스가 죽어 있던 구간은 실시간
+    태그가 없고 이 축에만 남는다.
+    """
+    if not stamps:
+        return None
+    ordered = sorted(stamps)
+    seconds = [int(s[:2]) * 3600 + int(s[3:5]) * 60 + int(s[6:8]) for s in ordered]
+    threshold = _OPTIONS_CADENCE_SECONDS * _OPTIONS_STALL_MULTIPLE
+    gaps = [
+        {"from_kst": ordered[i], "to_kst": ordered[i + 1], "seconds": seconds[i + 1] - seconds[i]}
+        for i in range(len(ordered) - 1)
+        if seconds[i + 1] - seconds[i] > threshold
+    ]
+    return {
+        "n_cycles": len(ordered),
+        # 결정과 무결정을 **나눠서** 센다. F-111 이전에는 결정 사이클이 로그에 없어
+        # 이 둘의 구분 자체가 불가능했고, 그래서 결정이 결손으로 읽혔다.
+        "n_published": published,
+        "n_no_candidate": len(ordered) - published,
+        "first_kst": ordered[0],
+        "last_kst": ordered[-1],
+        "max_gap_seconds": max((g["seconds"] for g in gaps), default=0),
+        "gaps": gaps or None,
+        "threshold_seconds": threshold,
+        "stalls_detected_live": len(stalled),
+        "stalls_live": list(stalled) or None,
+    }
+
+
 def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     level_counts: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
@@ -1129,6 +1196,23 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
     # "몇 분 동안 어긋난 창에서 발행했나"다.
     stale_spot_episodes: list[dict[str, Any]] = []
     stale_spot_open: dict[str, dict[str, Any]] = {}
+    # **5분 보조 판단이 하루에 몇 번 돌았고 어디가 비었나** (2026-09-17 G-9).
+    #
+    # 서비스 쪽 `OptionsSubLoopStalled`는 「끊겼다 **이어짐**」만 잡는다 — 다음 사이클이 와야
+    # 간격이 재지기 때문이다. 루프가 끊긴 채 하루가 끝나면 그 태그는 안 뜬다. 이 축이 그
+    # 나머지 절반을 맡는다: 하루치 사이클 시각을 전수로 훑어 **마지막 사이클 이후**까지 본다.
+    #
+    # 사이클은 **결정·무결정을 가리지 않고** 센다. 무결정만 세면 2026-09-08~09-17에 일곱 번
+    # 보고된 그 오진(후보가 나온 마크를 결손으로 읽음)이 리포트 쪽에서 그대로 재발한다.
+    options_cycle_stamps: list[str] = []
+    options_published = 0
+    options_stalled: list[dict[str, Any]] = []
+    # **야간 갭이 봉 한 칸으로 들어간 정도** (2026-09-17 G-10, 태그는 2026-08-20 F-G).
+    #
+    # 태그는 작년부터 있었는데 리포트에는 `tag_counts`의 숫자 하나로만 들어갔다 — "몇 번
+    # 떴나"는 알아도 "얼마나 심했나"를 알 수 없었다. 판정에 쓰이는 값은 `ratio`이고 그것이
+    # 리포트에 없으면 이 태그는 사실상 미측정이다.
+    boundary_inflation: dict[str, dict[str, Any]] = {}
 
     # 그 프로세스가 **살아서 뭔가를 찍은 시각들** (2026-08-06). 관측 공백 계산의 재료다 —
     # 재기동 사이의 빈 구간이 얼마인지는 "마지막으로 뭔가 찍은 시각"과 "다음 기동 시각"
@@ -1350,6 +1434,41 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
                 }
             )
             stale_spot_episodes.append(episode)
+        elif tag in ("OptionsNoCandidate", "OptionsViewPublished"):
+            # 두 태그가 `_publish_view()`의 **모든** 종료 경로를 덮는다(F-93의 무결정 4갈래 +
+            # F-111의 결정 1갈래). 그래서 이 둘의 합이 곧 사이클 수다.
+            if len(stamp) == 8:
+                options_cycle_stamps.append(stamp)
+            if tag == "OptionsViewPublished":
+                options_published += 1
+        elif tag == "OptionsSubLoopStalled":
+            options_stalled.append(
+                {
+                    "at_kst": stamp,
+                    "gap_seconds": record.get("gap_seconds"),
+                    "cadence_seconds": record.get("cadence_seconds"),
+                }
+            )
+        elif tag == "SessionBoundaryInflation":
+            horizon = str(record.get("horizon") or "?")
+            ratio = record.get("ratio")
+            previous = boundary_inflation.get(horizon)
+            # **그날 최악의 한 건**을 남긴다 — 같은 Horizon에서 여러 번 뜨면 평균이 아니라
+            # 최대가 판정 기준이다(`clock_skew_seconds`가 절댓값 최대를 쓰는 것과 같은 규율).
+            if previous is None or (
+                isinstance(ratio, (int, float))
+                and isinstance(previous.get("ratio"), (int, float))
+                and float(ratio) > float(previous["ratio"])
+            ):
+                boundary_inflation[horizon] = {
+                    "at_kst": stamp,
+                    "ratio": ratio,
+                    "boundary_pairs": record.get("boundary_pairs"),
+                    "window_bars": record.get("window_bars"),
+                    "with_boundary": record.get("with_boundary"),
+                    "same_session": record.get("same_session"),
+                    "constant_features": record.get("constant_features"),
+                }
         elif tag.startswith("CircuitBreaker"):
             cb_events[tag] = cb_events.get(tag, 0) + 1
 
@@ -1405,6 +1524,12 @@ def analyze_logs(log_paths: Sequence[Path]) -> dict[str, Any]:
         "level_counts": level_counts,
         "tag_counts": tag_counts,
         "option_chain_stale_spot": stale_spot,
+        "options_cycles": _options_cycle_axis(
+            options_cycle_stamps, published=options_published, stalled=options_stalled
+        ),
+        # 비어 있으면 **미측정**이다 — 태그가 안 뜬 날과 계측 이전 로그를 이 축은 구별하지
+        # 못한다(F-G 태그는 퇴화 피처가 있을 때만 뜬다). 0건을 "정상"으로 읽지 않는다.
+        "session_boundary_inflation": dict(sorted(boundary_inflation.items())) or None,
         "no_contribution_reasons": no_contribution_reasons,
         "no_contribution_cycles": no_contribution_cycles,
         "regime_unseeded_cycles": regime_unseeded_cycles,
@@ -3077,6 +3202,8 @@ def build_report(
         series_coverage=[item.to_dict() for item in coverages],
         series_findings=series_findings,
         option_chain_stale_spot=logs["option_chain_stale_spot"],
+        options_cycles=logs["options_cycles"],
+        session_boundary_inflation=logs["session_boundary_inflation"],
         series_contract=series_contract,
         collection_start_lag_minutes=start_lag,
         task_exit_codes=task_exits.to_dict(),
