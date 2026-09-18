@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "msg_id": "b2c8566be9fa481b9ae17486fc3ca54d",
+  "ts_utc": "2026-09-18T06:34:59.602113Z",
+  "instance_id": "messiah-dev-01",
+  "date": "2026-09-18",
+  "symbol": "A05610",
+  "n_return_samples": 0,
+  "win_rate": null,
+  "profit_factor": null,
+  "sharpe": null,
+  "max_drawdown": null,
+  "n_shadow_bundles": 0,
+  "slippage_predicted_ticks": 1.0,
+  "slippage_realized_ticks": null,
+  "n_fills": null,
+  "pnl_measurable": false,
+  "wiring_stage": "주문 미발생",
+  "wiring_summary": "손익 측정 단계 아님(주문 미발생) — 승률·PF·Sharpe·MDD는 자리표시자 · live 번들 real-20260820-2053-30m · shadow 0개 · 판단 14건 · 주문 0건 · 체결집계 가능 · 포지션대사 일치 · 수익률환산 가능",
+  "sample_window": {
+    "from": null,
+    "rows_total": 37,
+    "rows_counted": 0,
+    "excluded": {
+      "roll_day": 2,
+      "not_countable": 18,
+      "legacy_return_basis": 17
+    },
+    "legacy_rows_without_countable": 17
+  },
+  "promotion_evidence_eligible": false,
+  "promotion_evidence_reason": "미측정·미달 관문이 남은 번들이 현역이다: real-20260820-2053-30m(max_drawdown, negative_window_ratio, sharpe)"
+}
