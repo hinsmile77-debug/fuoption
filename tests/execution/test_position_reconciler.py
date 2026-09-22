@@ -366,3 +366,84 @@ async def test_a_limit_fill_still_arrives_the_old_way():
 
     assert reconciler.n_fills == 1
     assert reconciler.positions[_SYMBOL].avg_price_ticks == 98
+
+
+# ---------------------------------------------------------------- R10 공급 (2026-09-22 F-120)
+#
+# `RiskEngine.record_trade_result()`는 2026-07-27부터 있었으나 호출자가 없었다. R10이 필요한
+# 것은 누계가 아니라 **닫힌 거래의 순서열**이고, 그 축을 여기서 고정한다.
+
+
+@pytest.mark.asyncio
+async def test_closed_trades_are_recorded_one_per_close():
+    from messiah.broker.simulator.adapter import SimBroker
+
+    broker = SimBroker(cash=50_000_000, slippage_ticks=0)
+    await broker.connect()
+    reconciler = PositionReconciler()
+    gateway = OrderGateway(broker, reconciler)
+
+    broker.on_bar(_m1_bar(0, 100))
+    await gateway.submit(_order(Side.LONG, 1))
+    assert reconciler.drain_closed_trades() == [], "진입은 닫은 것이 아니다"
+
+    broker.on_bar(_m1_bar(1, 90))
+    await gateway.submit(_order(Side.SHORT, 1, OrderKind.EXIT_FULL))
+
+    assert reconciler.drain_closed_trades() == [-10.0]
+
+
+@pytest.mark.asyncio
+async def test_draining_empties_so_the_same_close_is_never_fed_twice():
+    """읽은 쪽이 비운다 — 안 그러면 손실 하나가 매 사이클 스트릭을 늘린다."""
+    from messiah.broker.simulator.adapter import SimBroker
+
+    broker = SimBroker(cash=50_000_000, slippage_ticks=0)
+    await broker.connect()
+    reconciler = PositionReconciler()
+    gateway = OrderGateway(broker, reconciler)
+
+    broker.on_bar(_m1_bar(0, 100))
+    await gateway.submit(_order(Side.LONG, 1))
+    broker.on_bar(_m1_bar(1, 90))
+    await gateway.submit(_order(Side.SHORT, 1, OrderKind.EXIT_FULL))
+
+    assert reconciler.drain_closed_trades() == [-10.0]
+    assert reconciler.drain_closed_trades() == []
+
+
+@pytest.mark.asyncio
+async def test_a_breakeven_close_is_still_a_closed_trade():
+    """**핵심** — 본전 청산의 실현손익은 0.0이고, 그건 「닫은 게 없다」와 같은 숫자다.
+
+    R10은 그 둘을 반드시 갈라야 한다: 본전 청산은 연속손실 스트릭을 끊고, 미청산은
+    아무 일도 아니다. `position_math.closes_position()`이 그 구분을 하는 유일한 자리다.
+    """
+    from messiah.broker.simulator.adapter import SimBroker
+
+    broker = SimBroker(cash=50_000_000, slippage_ticks=0)
+    await broker.connect()
+    reconciler = PositionReconciler()
+    gateway = OrderGateway(broker, reconciler)
+
+    broker.on_bar(_m1_bar(0, 100))
+    await gateway.submit(_order(Side.LONG, 1))
+    broker.on_bar(_m1_bar(1, 100))  # 같은 가격에 되판다
+    await gateway.submit(_order(Side.SHORT, 1, OrderKind.EXIT_FULL))
+
+    assert reconciler.drain_closed_trades() == [0.0]
+
+
+def test_closes_position_agrees_with_apply_fill():
+    """술어와 계산이 **같은 분기**를 본다 — 따로 적혀 있으면 조용히 어긋난다."""
+    from messiah.execution.position_math import PositionState, apply_fill, closes_position
+
+    cases = [(0, 1), (0, -1), (2, 1), (2, -1), (2, -5), (-2, -1), (-2, 1), (-2, 5)]
+    for q0, signed in cases:
+        current = PositionState(qty=q0, avg_price_ticks=100) if q0 else None
+        _state, realized = apply_fill(current, signed_qty=signed, price_ticks=110)
+        predicted = closes_position(current_qty=q0, signed_qty=signed)
+        if not predicted:
+            assert realized == 0.0, f"안 닫았다고 했는데 실현이 났다: {q0=} {signed=}"
+        else:
+            assert realized != 0.0, f"닫았다고 했는데 실현이 0이다: {q0=} {signed=}"

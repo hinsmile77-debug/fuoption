@@ -144,6 +144,7 @@ from messiah.core.bus import (
     TOPIC_RESUME,
     BusLike,
 )
+from messiah.core.config import FuturesExitConfig
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.health import COLLECTOR_COMPONENT, HEALTH_STALE_AFTER_SECONDS
 from messiah.core.logging import log
@@ -177,10 +178,19 @@ from messiah.risk.cost_model import CostModel
 from messiah.risk.kill_switch import KillSwitch
 from messiah.risk.risk_engine import RiskEngine
 from messiah.risk.sizer import PositionSizer
-from messiah.strategy import eod_flatten
+from messiah.strategy import eod_flatten, position_exit
 from messiah.strategy.decision.meta_decision import MetaDecisionEngine
 
 _BAR_HISTORY_LIMIT = 200
+
+
+def _minutes_text(minutes: object) -> str:
+    """보유 시간을 사람이 읽는 문구로. **모르면 「미상」이라고 쓴다** — 0분이 아니다(L18).
+
+    재기동 직후엔 진입 시각을 브로커가 답해 주지 않아 실제로 모른다
+    (`strategy/position_exit.py` 모듈 docstring "재기동하면 시계가 다시 시작한다").
+    """
+    return f"{minutes:.0f}분" if isinstance(minutes, (int, float)) else "미상"
 
 
 def _directional_edge(view: FuturesView, side: Side) -> float:
@@ -260,6 +270,10 @@ class TradingPipeline:
         atr_window: int = DEFAULT_ATR_WINDOW,
         event_calendar: EventCalendar | None = None,
         circuit_breaker_monitor: CircuitBreakerMonitor | None = None,
+        # 장중 청산 (2026-09-22 F-119). **미지정이면 비무장** — 판정은 돌고 로그는 남지만
+        # 주문은 안 낸다. 기본값을 "안 쏜다"로 둔 이유는 `core/config.FuturesExitConfig`
+        # docstring에 있다(설정을 못 읽었는데 주문이 나가는 경로를 만들지 않는다).
+        futures_exit: FuturesExitConfig | None = None,
         now: Callable[[], datetime] = now_utc,
         # pass 사이클 입력 보존 (2026-08-18 G-0818P-3). 둘 다 미지정이면 스냅샷에서 해당
         # 항목이 빠질 뿐 보존 자체는 계속된다 — 재생·스모크처럼 서비스가 없는 경로에서도
@@ -326,6 +340,26 @@ class TradingPipeline:
         # 「창은 열렸는데 들 것이 없었다」를 그날 한 번만 말하기 위한 표식.
         self._eod_flatten_announced = False
         self._eod_flatten_sent_any = False
+        # 장중 청산 (2026-09-22 F-119). 수치의 정본은 `strategy/position_exit.py`의 상수라
+        # 설정이 None인 항목만 거기서 떨어뜨린다 — 기본값을 두 곳에 적으면 조용히 어긋난다.
+        self._futures_exit = futures_exit or FuturesExitConfig()
+        self._exit_stop_atr_mult = (
+            self._futures_exit.stop_atr_mult
+            if self._futures_exit.stop_atr_mult is not None
+            else position_exit.DEFAULT_STOP_ATR_MULT
+        )
+        self._exit_take_profit_atr_mult = self._futures_exit.take_profit_atr_mult
+        self._exit_tracker = position_exit.ExitStateTracker(
+            cooldown_seconds=(
+                self._futures_exit.resubmit_cooldown_seconds
+                if self._futures_exit.resubmit_cooldown_seconds is not None
+                else position_exit.DEFAULT_RESUBMIT_COOLDOWN_SECONDS
+            )
+        )
+        # 구동 Horizon 길이 — 시간배리어를 라벨에서 끌어오는 유일한 입력.
+        # `FuturesView`가 실어 오므로 **첫 뷰가 오기 전까지는 None**이고, 그동안 들어간
+        # 포지션에는 시간배리어가 안 걸린다(손절과 EOD 청산은 그대로 — 모듈 docstring).
+        self._last_cadence_seconds: float | None = None
 
     @property
     def sizer(self) -> PositionSizer:
@@ -352,12 +386,190 @@ class TradingPipeline:
             return
         self._bars.append(bar)
         self._last_bar_confirm_at = bar_confirm_time(bar)
+        # 완성봉이 곧 손절 판정 시점이다 — 가격 없이 손절할 방법은 없다
+        # (`strategy/position_exit.py` 모듈 docstring "왜 완성봉인가").
+        await self.observe_position_exit(bar)
+
+    def _feed_consecutive_loss_streak(self) -> None:
+        """Reconciler가 새로 닫은 거래를 R10에 먹인다 (2026-09-22 F-120).
+
+        ## 왜 이제야 되나
+
+        `RiskEngine.record_trade_result()`는 2026-07-27부터 있었지만 **호출자가 없었다** —
+        이 모듈 docstring이 "진입가·청산가를 매칭해 실현손익을 계산하는 포지션 추적기가
+        있어야 호출 가능하다"고 적어 둔 그대로다. 2026-09-17 F-114로
+        `PositionReconciler`가 들어오면서 그 선행 조건이 해소됐고, R10(연속손실 3회 →
+        신규 진입 차단)은 그때부터 오늘까지 **배선만 없는 채로 죽어 있었다.**
+
+        ## 단위는 틱이다 — 원으로 환산하지 않는다
+
+        `record_trade_result()`는 `Decimal`을 받지만 그 값의 **부호만** 본다(손실이면
+        누적, 이익이면 리셋). 계약 승수를 곱해 원으로 바꿀 이유가 없고, 없는 상수를
+        지어내지 않는다는 규율(`execution/position_reconciler.py` "못 재는 것을 재는
+        척하지 않는다")과도 맞는다.
+
+        장부가 안 붙은 경로(재생·스모크에서 `OrderGateway(broker)`만 넘긴 경우)는
+        조용히 아무것도 안 한다 — 기존 동작 그대로다.
+        """
+        reconciler = self._gateway.reconciler
+        if reconciler is None:
+            return
+        for realized_ticks in reconciler.drain_closed_trades():
+            self._risk_engine.record_trade_result(Decimal(str(realized_ticks)))
+
+    async def observe_position_exit(self, bar: BarClosed) -> None:
+        """완성봉 한 장에 대한 장중 청산 판정 1회 (2026-09-22 F-119).
+
+        공개 메서드인 이유는 `observe_eod_flatten_tick()`과 같다 — 루프에서 떼어내야
+        실제 시장 없이 "손절선 바로 위에서는 안 쏜다"를 재현할 수 있다.
+
+        예외를 삼키지 않고 **남긴 뒤** 넘어간다. 이 경로가 조용히 죽으면 손절 없는
+        포지션이 마감까지 가고(= F-119 이전 상태), 그 사실을 다음 날 아침에야 안다.
+        다음 완성봉이 재시도한다.
+
+        ## 두 구간에서는 아예 돌지 않는다 (`event_calendar` 주입 시)
+
+        **① 정규장 밖.** 08:45부터 틱이 들어오지만 이 파이프라인의 장전 정책은 "진입도
+        청산도 없이 시스템만 데워 놓는다"이다(모듈 docstring "장전 구간"). 그 문장에서
+        청산만 빼 갈 이유가 없다 — 이건 안전 이벤트 반응(KillSwitch·CB)이 아니라 평시
+        전략 청산이다.
+
+        **② 장마감 청산 창(마감 10분 전부터).** 그 창의 주인은 `eod_flatten`이고, 그쪽은
+        **자기 미체결 잔량만** 센다. 두 경로가 같은 포지션을 겹쳐 보면 이런 일이 난다 —
+        15:25:00 EOD가 1계약을 내보내고(아직 미체결), 15:26:00 완성봉이 도착해 이 경로가
+        **여전히 1계약인 브로커 포지션**을 보고 또 내보낸다. 그러면 없던 방향의 포지션이
+        새로 생긴다. 창이 열린 뒤엔 어차피 전량이 나가므로 손절이 더할 것도 없다.
+
+        `event_calendar`가 없으면(재생·스모크) 두 게이트 다 비활성이다 — R4/R6·CB와 같은
+        옵션 패턴이고, 그 경로엔 KRX 세션 개념 자체가 없다.
+        """
+        as_of = self._now()
+        if self._event_calendar is not None:
+            minutes_to_close = self._event_calendar.minutes_to_close(as_of)
+            if minutes_to_close is None:
+                return  # ① 정규장 밖
+            if minutes_to_close <= self._risk_engine.overnight_flatten_lead_minutes:
+                return  # ② 장마감 청산 창 — 주인은 eod_flatten이다
+        try:
+            positions = await self._broker.positions()
+            atr_ticks = compute_atr(list(self._bars), self._atr_window) if self._bars else None
+            held, armed = self._exit_tracker.observe(
+                positions,
+                as_of=as_of,
+                atr_ticks=atr_ticks,
+                cadence_seconds=self._last_cadence_seconds,
+                stop_atr_mult=self._exit_stop_atr_mult,
+            )
+            for notice in armed:
+                log(
+                    "PositionExitArmed",
+                    f"{notice.symbol} 손절선 {notice.stop_ticks:.1f}틱"
+                    + (
+                        f" · 시간배리어 {notice.time_barrier_minutes:.0f}분"
+                        if notice.time_barrier_minutes is not None
+                        else " · 시간배리어 미적용(구동 Horizon 미상)"
+                    ),
+                    symbol=notice.symbol,
+                    entry_price_ticks=notice.entry_price_ticks,
+                    stop_ticks=notice.stop_ticks,
+                    time_barrier_minutes=notice.time_barrier_minutes,
+                    armed=self._futures_exit.armed,
+                )
+            if not held:
+                return
+            plan = position_exit.decide(
+                last_price_ticks=bar.c_ticks,
+                held=held,
+                stop_atr_mult=self._exit_stop_atr_mult,
+                take_profit_atr_mult=self._exit_take_profit_atr_mult,
+                cooling=self._exit_tracker.cooling(as_of),
+            )
+        except Exception as exc:  # noqa: BLE001 — 죽으면 그 포지션이 손절 없이 남는다
+            log(
+                "PositionExitFailed",
+                f"청산 판정 실패 — 이 봉을 건너뛰고 다음 완성봉에 재시도: {exc}",
+                symbol=self._symbol,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        if not plan.should_exit:
+            return
+
+        for piece in plan.slices:
+            if not self._futures_exit.armed:
+                # R18 섀도 계측 — 판정만 남기고 주문은 안 낸다(`configs/holding_policy.yaml`).
+                log(
+                    "PositionExitShadow",
+                    f"{piece.position.symbol} {piece.qty}계약 {piece.reason.value} "
+                    f"조건 도달 — 비무장이라 주문 없음",
+                    symbol=piece.position.symbol,
+                    qty=piece.qty,
+                    exit_reason=piece.reason.value,
+                    **piece.detail,
+                )
+                continue
+            try:
+                await self._submit_position_exit(piece, as_of)
+            except Exception as exc:  # noqa: BLE001 — 위와 같은 이유
+                log(
+                    "PositionExitFailed",
+                    f"청산 주문 제출 실패 — 포지션이 남았다(다음 완성봉 재시도): {exc}",
+                    symbol=piece.position.symbol,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+    async def _submit_position_exit(self, piece: position_exit.ExitSlice, as_of: datetime) -> None:
+        """한 몫을 내보낸다 — 반대매매 방향 결정은 `KillSwitch.liquidate()` 한 곳에만 둔다
+        (`observe_eod_flatten_tick()`이 세운 선례 그대로).
+
+        **부호만 물려받은 가짜 포지션**을 만들어 넘긴다. 지금은 `piece.qty`가 언제나
+        전량이라 원 포지션을 그대로 넘겨도 같지만, 나중에 부분 청산이 생기면 그때
+        조용히 전량이 나간다 — 그 경로를 지금 막아 둔다.
+        """
+        sliced = BrokerPosition(
+            symbol=piece.position.symbol,
+            qty=piece.qty if piece.position.qty > 0 else -piece.qty,
+            avg_price_ticks=piece.position.avg_price_ticks,
+        )
+        adverse = piece.detail.get("adverse_ticks")
+        for request in self._kill_switch.liquidate([sliced]):
+            log(
+                "PositionExitLiquidating",
+                # **"불리"라고 적는다.** 종전 문구는 `+11.0틱`이었는데 그 부호는 손실
+                # 방향인데도 이익처럼 읽힌다 — 2026-09-22 스모크에서 실제로 그렇게 읽혔다.
+                f"{request.symbol} {request.qty}계약 장중 청산({piece.reason.value}) — "
+                f"진입가 {piece.detail.get('entry_price_ticks')}틱 · "
+                f"현재 {piece.detail.get('last_price_ticks')}틱 · "
+                f"불리 {adverse:+.1f}틱(손절선 {piece.detail.get('stop_ticks'):.1f}틱) · "
+                f"보유 {_minutes_text(piece.detail.get('minutes_held'))}, Holding Policy §4",
+                symbol=request.symbol,
+                qty=request.qty,
+                exit_reason=piece.reason.value,
+                **piece.detail,
+            )
+            ack = await self._gateway.submit(request)
+            if ack is None:
+                # 게이트웨이가 거부했다 — **쿨다운을 걸지 않는다.** 거부를 「보냈다」로
+                # 세면 그 포지션이 쿨다운 동안 손절 없이 남는다(EOD 청산이 배운 함정).
+                continue
+            self._exit_tracker.mark_submitted(request.symbol, as_of)
 
     async def handle_futures_view(self, view: FuturesView) -> None:
         if view.symbol != self._symbol:
             return
         if self._daily_start_equity is None:
             await self.start_day()
+
+        # 구동 Horizon 길이 — 시간배리어를 `models/labeling.BARRIER_PARAMS`에서 끌어오는
+        # 유일한 입력이다(2026-09-22 F-119). 뷰가 올 때마다 갱신하되, 이미 서 있는
+        # 포지션의 배리어는 바뀌지 않는다(진입 시점 값을 `ExitStateTracker`가 든다).
+        if view.cadence_seconds is not None:
+            self._last_cadence_seconds = view.cadence_seconds
+
+        # R10(연속손실 3회) 공급 (2026-09-22 F-120). **리스크 게이트가 돌기 전에** 먹인다 —
+        # 오늘 두 번 잃고 세 번째 진입을 심사하는 순간에 그 사실이 반영돼 있어야 한다.
+        self._feed_consecutive_loss_streak()
 
         account = await self._broker.account()
         positions = await self._broker.positions()

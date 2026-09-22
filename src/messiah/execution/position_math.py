@@ -66,6 +66,19 @@ def signed_fill_qty(*, side: Side, kind: OrderKind, qty: int, current_qty: int) 
     return qty if side == Side.LONG else -qty
 
 
+def closes_position(*, current_qty: int, signed_qty: int) -> bool:
+    """이 체결이 **무언가를 닫는가** (2026-09-22 F-120).
+
+    `apply_fill()`의 분기 조건 그 자체다 — 여기 한 줄로 두고 양쪽이 같이 쓴다. 따로
+    적어 두면 조용히 어긋나고, 그때 「닫혔는데 안 센 체결」이 생긴다.
+
+    이 술어가 따로 필요해진 이유: `apply_fill()`이 돌려주는 실현손익 `0.0`은 **"닫은 게
+    없다"와 "본전에 닫았다" 둘 다**를 뜻한다. R10(연속손실 3회)은 그 둘을 반드시 갈라야
+    한다 — 본전 청산은 스트릭을 끊고, 미청산은 아무 일도 아니다.
+    """
+    return current_qty != 0 and (current_qty > 0) != (signed_qty > 0)
+
+
 def apply_fill(
     current: PositionState | None, *, signed_qty: int, price_ticks: int
 ) -> tuple[PositionState, float]:
@@ -81,7 +94,7 @@ def apply_fill(
     new_qty = q0 + signed_qty
     realized = 0.0
 
-    if q0 == 0 or (q0 > 0) == (signed_qty > 0):
+    if not closes_position(current_qty=q0, signed_qty=signed_qty):
         # 신규 진입 또는 같은 방향 물타기 — 실현 없음, 평균단가만 갱신.
         if q0 == 0:
             avg = price_ticks

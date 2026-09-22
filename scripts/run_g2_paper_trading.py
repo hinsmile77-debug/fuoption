@@ -102,7 +102,11 @@ from messiah.core import crash_forensics  # noqa: E402
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core import universe as universe_vocab  # noqa: E402
 from messiah.core.bus import MessageBus  # noqa: E402
-from messiah.core.config import InstanceConfig, load_instance  # noqa: E402
+from messiah.core.config import (  # noqa: E402
+    InstanceConfig,
+    load_holding_policy,
+    load_instance,
+)
 from messiah.core.contract_spec import ContractSpec, spec_for  # noqa: E402
 from messiah.core.docker_bootstrap import (  # noqa: E402
     DEFAULT_DOCKER_DESKTOP_EXE,
@@ -904,6 +908,9 @@ async def main(cfg: InstanceConfig) -> None:
         bus,
         event_calendar=EventCalendar.from_file(),
         circuit_breaker_monitor=CircuitBreakerMonitor(),
+        # 장중 청산 (2026-09-22 F-119). 수치·무장 여부는 `configs/holding_policy.yaml`이
+        # 정한다 — 파일이 없으면 비무장이 기본이라 이 줄이 기존 동작을 바꾸지 않는다.
+        futures_exit=load_holding_policy().futures_exit,
         # pass 사이클 스냅샷에 **판단을 만든 입력**까지 실린다 (2026-08-18 G-0818P-3).
         # 파이프라인은 서비스를 모르지만 이 스크립트는 둘을 같은 프로세스에 배선하므로
         # 여기서만 이어줄 수 있다 — 콜러블로 넘겨 파이프라인이 서비스에 의존하지 않게 한다.

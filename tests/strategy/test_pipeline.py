@@ -9,6 +9,7 @@ import pytest
 
 from messiah.broker.base import BrokerPosition
 from messiah.broker.simulator.adapter import SimBroker
+from messiah.core.config import FuturesExitConfig
 from messiah.core.event_calendar import EventCalendar
 from messiah.core.health import COLLECTOR_COMPONENT, staleness_status
 from messiah.core.messages import (
@@ -19,12 +20,15 @@ from messiah.core.messages import (
     Health,
     HealthLevel,
     Horizon,
+    OrderKind,
+    OrderRequest,
     Regime,
     Side,
     bar_confirm_time,
 )
 from messiah.core.timeutil import KST, now_utc
 from messiah.execution.order_gateway import OrderGateway
+from messiah.execution.position_reconciler import PositionReconciler
 from messiah.risk.circuit_breaker_monitor import CircuitBreakerMonitor, CircuitBreakerPhase
 from messiah.risk.cost_model import CostEstimate, CostModel
 from messiah.risk.kill_switch import KillSwitch, KillSwitchConfig
@@ -1134,3 +1138,331 @@ async def test_eod_flatten_survives_a_broker_failure():
     await pipeline.observe_eod_flatten_tick()
 
     assert gateway.accepted_orders == before + 1, "실패한 틱이 그날 청산을 영구히 막으면 안 된다"
+
+
+# ---------------------------------------------------------------- 장중 청산 (F-119)
+#
+# 판정 자체는 `tests/strategy/test_position_exit.py`가 잰다. 여기서 재는 것은 **결선**이다 —
+# 완성봉이 판정을 부르는가, 무장 여부가 주문을 가르는가, 거부가 쿨다운을 걸지 않는가.
+
+
+async def _exit_pipeline(*, armed: bool, cadence_seconds: float | None = 1800.0):
+    """장중 청산만 보는 최소 구성. 워밍업 뒤 ATR이 서 있고, 뷰 한 장으로 구동 Horizon을 알린다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(armed=armed)
+    )
+    bars = await _warm_up(pipeline, broker)
+    if cadence_seconds is not None:
+        pipeline._last_cadence_seconds = cadence_seconds
+    return bus, broker, gateway, pipeline, bars
+
+
+@pytest.mark.asyncio
+async def test_position_exit_fires_on_a_completed_bar_when_armed():
+    """**핵심 회귀** — 손절선을 넘긴 포지션이 완성봉 한 장에 실제로 나간다.
+
+    09-16·09-17·09-22 세 거래일 실거래 전부가 EOD 강제청산으로만 나갔다. 손절로 나간
+    포지션은 F-119 이전에 **한 건도 없었다**.
+    """
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=True)
+    _hold(broker, qty=1)  # avg 41,000틱 — 워밍업 봉(약 100틱)보다 압도적으로 높다 = 손실 중
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before + 1, "손절 주문이 실제로 제출돼야 한다"
+    assert (await broker.positions()) == [], "전량이 한 번에 빠져야 한다 — 손절은 분할 안 한다"
+
+
+@pytest.mark.asyncio
+async def test_handle_bar_is_what_drives_it():
+    """`handle_bar()`가 판정을 부른다 — 별도 워치독이 아니라 완성봉이 구동원이다."""
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=True)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.handle_bar(bars[-1])
+
+    assert gateway.accepted_orders == before + 1
+
+
+@pytest.mark.asyncio
+async def test_unarmed_pipeline_judges_but_never_submits():
+    """기본값은 비무장이다 — 설정을 못 읽었는데 주문이 나가는 경로를 만들지 않는다."""
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=False)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before, "비무장이면 주문이 나가면 안 된다"
+    assert len(await broker.positions()) == 1, "포지션은 그대로 남는다"
+
+
+@pytest.mark.asyncio
+async def test_default_construction_is_unarmed():
+    """`futures_exit`를 안 넘긴 기존 호출자(재생·스모크)는 종전 동작 그대로여야 한다."""
+    _bus, broker, gateway, pipeline = await _make_pipeline()
+    bars = await _warm_up(pipeline, broker)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before
+
+
+@pytest.mark.asyncio
+async def test_winning_position_is_left_alone():
+    """이기고 있는 포지션은 건드리지 않는다 — 익절은 이번 스코프에 없다."""
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=True)
+    # 진입가를 0틱 근처로 두면 현재가(약 100틱)가 압도적으로 유리하다.
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=1, avg_price_ticks=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before
+    assert len(await broker.positions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cooldown_blocks_a_second_order_for_the_same_position():
+    """**중복 청산은 미청산보다 고치기 어렵다** — 체결이 늦어도 두 번 쏘지 않는다.
+
+    브로커 포지션을 강제로 되돌려 "주문은 나갔는데 아직 안 잡혔다"를 재현한다.
+    """
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=True)
+    _hold(broker, qty=1)
+    await pipeline.observe_position_exit(bars[-1])
+    assert (await broker.positions()) == []
+    before = gateway.accepted_orders
+
+    _hold(broker, qty=1)  # 체결이 아직 반영 안 된 것처럼 보이게 되돌린다
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before, "쿨다운 안에서는 같은 심볼을 또 쏘지 않는다"
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_exit_order_is_retried_on_the_next_bar():
+    """거부를 「보냈다」로 세면 그 포지션이 쿨다운 동안 손절 없이 남는다 — EOD가 배운 함정."""
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=True)
+    _hold(broker, qty=1)
+
+    async def _reject(_req):
+        return None
+
+    real_submit = gateway.submit
+    gateway.submit = _reject  # type: ignore[method-assign]
+    await pipeline.observe_position_exit(bars[-1])
+
+    gateway.submit = real_submit  # type: ignore[method-assign]
+    before = gateway.accepted_orders
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before + 1, "거부된 주문은 쿨다운을 걸지 않는다"
+
+
+@pytest.mark.asyncio
+async def test_broker_failure_does_not_kill_the_path():
+    """이 경로가 조용히 죽으면 손절 없는 포지션이 마감까지 간다 = F-119 이전 상태."""
+    _bus, broker, gateway, pipeline, bars = await _exit_pipeline(armed=True)
+
+    async def _boom():
+        raise RuntimeError("broker down")
+
+    broker.positions = _boom  # type: ignore[method-assign]
+    await pipeline.observe_position_exit(bars[-1])  # 예외가 새면 이 줄에서 실패한다
+
+    del broker.positions
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before + 1, "실패한 봉이 그 뒤를 영구히 막으면 안 된다"
+
+
+@pytest.mark.asyncio
+async def test_the_view_teaches_the_pipeline_its_driving_horizon():
+    """구동 Horizon은 `FuturesView.cadence_seconds`가 알린다 — 그 값이 시간배리어를 정한다."""
+    _bus, broker, _gateway, pipeline, _bars = await _exit_pipeline(armed=True, cadence_seconds=None)
+    assert pipeline._last_cadence_seconds is None, "뷰 전에는 구동 Horizon을 모른다"
+
+    view = _view(score=0.05, agg_p_up=0.5, agg_p_down=0.5).model_copy(
+        update={"cadence_seconds": 1800.0}
+    )
+    await pipeline.handle_futures_view(view)
+
+    assert pipeline._last_cadence_seconds == 1800.0
+
+
+@pytest.mark.asyncio
+async def test_time_barrier_liquidates_a_quiet_but_stale_position():
+    """가격이 조용해도 90분이 지나면 나간다 — 신호 유효기간을 넘겨 들고 있지 않는다."""
+    clock = {"t": _DEFAULT_VIEW_TS}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"], futures_exit=FuturesExitConfig(armed=True)
+    )
+    bars = await _warm_up(pipeline, broker)
+    pipeline._last_cadence_seconds = 1800.0  # 30분 주기 → 3봉 × 30분 = 90분
+    # 현재가와 같은 진입가 = 손절선과 무관하게 조용한 포지션.
+    broker._positions[_SYMBOL] = BrokerPosition(
+        symbol=_SYMBOL, qty=1, avg_price_ticks=bars[-1].c_ticks
+    )
+
+    await pipeline.observe_position_exit(bars[-1])  # 시계 시작
+    assert len(await broker.positions()) == 1, "방금 잡은 포지션은 아직 안 나간다"
+
+    clock["t"] = clock["t"] + timedelta(minutes=90)
+    before = gateway.accepted_orders
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before + 1
+    assert (await broker.positions()) == []
+
+
+@pytest.mark.asyncio
+async def test_eod_window_belongs_to_the_flatten_path_alone():
+    """**핵심 회귀** — 두 경로가 같은 포지션을 겹쳐 내보내면 반대 포지션이 새로 생긴다.
+
+    15:25:00 EOD가 1계약을 내보내고(미체결), 15:26:00 완성봉이 여전히 1계약인 브로커
+    포지션을 보고 또 내보내는 형태다. 창이 열린 뒤에는 이 경로가 아예 돌지 않는다.
+    """
+    clock = {"t": datetime(2026, 9, 22, 15, 27, tzinfo=KST)}  # 마감 8분 전 — 창 안
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"],
+        event_calendar=EventCalendar(frozenset(), years=frozenset({2026})),
+        futures_exit=FuturesExitConfig(armed=True),
+    )
+    bars = await _warm_up(pipeline, broker)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before, "청산 창 안에서는 이 경로가 돌지 않는다"
+    assert len(await broker.positions()) == 1, "EOD 경로가 내보낼 몫으로 남는다"
+
+
+@pytest.mark.asyncio
+async def test_premarket_does_not_liquidate_either():
+    """장전 정책은 "진입도 청산도 없이 시스템만 데워 놓는다" — 그 문장에서 청산만 빼지 않는다."""
+    clock = {"t": datetime(2026, 9, 22, 8, 50, tzinfo=KST)}  # 개장 10분 전
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"],
+        event_calendar=EventCalendar(frozenset(), years=frozenset({2026})),
+        futures_exit=FuturesExitConfig(armed=True),
+    )
+    bars = await _warm_up(pipeline, broker)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before
+    assert len(await broker.positions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_mid_session_still_fires_with_a_calendar_attached():
+    """게이트 둘을 달고도 **장중에는 그대로 돈다** — 막는 것이 목적이 아니다."""
+    clock = {"t": datetime(2026, 9, 22, 11, 0, tzinfo=KST)}
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"],
+        event_calendar=EventCalendar(frozenset(), years=frozenset({2026})),
+        futures_exit=FuturesExitConfig(armed=True),
+    )
+    bars = await _warm_up(pipeline, broker)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before + 1
+    assert (await broker.positions()) == []
+
+
+@pytest.mark.asyncio
+async def test_warmup_without_atr_does_not_liquidate_everything():
+    """ATR을 못 잡은 상태를 0으로 대신하면 **보유 전량이 즉시 손절**된다 — 그 경로를 막는다."""
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(armed=True)
+    )
+    bar = _m1_bars(1)[0]
+    broker.on_bar(bar)
+    _hold(broker, qty=1)
+    before = gateway.accepted_orders
+
+    await pipeline.handle_bar(bar)  # 봉 1장 — ATR(14) 워밍업 미달
+
+    assert gateway.accepted_orders == before
+    assert len(await broker.positions()) == 1
+
+
+# ---------------------------------------------------------------- R10 결선 (F-120)
+
+
+@pytest.mark.asyncio
+async def test_closed_trades_feed_the_consecutive_loss_streak():
+    """**핵심 회귀** — `record_trade_result()`는 2026-07-27부터 있었지만 호출자가 없었다.
+
+    F-114(Position Reconciler)가 선행 조건을 해소했고, 이 테스트가 그 배선을 고정한다.
+    """
+    bus = InProcessBus()
+    broker = SimBroker(cash=50_000_000)
+    await broker.connect()
+    reconciler = PositionReconciler()
+    gateway = OrderGateway(broker, reconciler)
+    pipeline = TradingPipeline(
+        _SYMBOL,
+        broker,
+        gateway,
+        bus,
+        now=lambda: _NOW["t"],
+        pass_cycle_dir=Path(tempfile.mkdtemp()) / "pass_cycles",
+    )
+    bars = _m1_bars(_WARMUP_BARS)
+    for bar in bars:
+        broker.on_bar(bar)
+        await pipeline.handle_bar(bar)
+
+    entry_price = bars[-1].c_ticks
+    await gateway.submit(_order(OrderKind.ENTRY, Side.LONG, 1))
+
+    # 진입가보다 낮은 봉을 먹인 뒤 되판다 → 실현손실.
+    down = bars[-1].model_copy(update={"c_ticks": entry_price - 30, "o_ticks": entry_price - 30})
+    broker.on_bar(down)
+    await gateway.submit(_order(OrderKind.EXIT_FULL, Side.SHORT, 1))
+
+    assert reconciler.realized_pnl_ticks < 0, "먼저 실제로 손실이 실현돼야 한다"
+    assert pipeline._risk_engine.consecutive_losses == 0, "아직 안 먹였다"
+
+    await pipeline.handle_futures_view(_view(score=0.05, agg_p_up=0.5, agg_p_down=0.5))
+
+    assert pipeline._risk_engine.consecutive_losses == 1
+    assert reconciler.drain_closed_trades() == [], "먹인 사건을 두 번 먹이지 않는다"
+
+
+def _order(kind: OrderKind, side: Side, qty: int) -> OrderRequest:
+    return OrderRequest(
+        intent_id="test",
+        symbol=_SYMBOL,
+        kind=kind,
+        side=side,
+        qty=qty,
+        limit_price_ticks=None,
+        ttl_ms=5_000,
+        risk_approved_by="test",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_without_a_ledger_still_runs():
+    """장부가 안 붙은 경로(재생·스모크)는 조용히 아무것도 안 한다 — 기존 동작 그대로."""
+    _bus, broker, _gateway, pipeline = await _make_pipeline()
+    await _warm_up(pipeline, broker)
+
+    await pipeline.handle_futures_view(_view(score=0.05, agg_p_up=0.5, agg_p_down=0.5))
+
+    assert pipeline._risk_engine.consecutive_losses == 0

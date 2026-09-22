@@ -127,6 +127,44 @@ class InstanceConfig(BaseModel):
         return v
 
 
+class FuturesExitConfig(BaseModel):
+    """장중 청산 엔진 수치 (2026-09-22 F-119) — `strategy/position_exit.py`.
+
+    기본값은 **그 모듈의 상수를 그대로 다시 적지 않는다** — 여기서 복사하면 두 곳이
+    조용히 어긋난다. `None`으로 두고, 파이프라인이 `None`인 항목만 모듈 기본값으로
+    떨어뜨린다(`holding_policy.yaml`이 통째로 없을 때와 같은 동작).
+
+    예외는 `armed` 하나다. 이 값은 "주문을 낼 것인가"라 **모르는 상태로 둘 수 없고**,
+    안전 기본값은 언제나 "안 낸다"이다 — 설정 파일을 못 읽었는데 주문이 나가는 경로를
+    만들지 않는다. 실제 운영값은 `configs/holding_policy.yaml`이 `true`로 켠다.
+    """
+
+    armed: bool = False
+    stop_atr_mult: float | None = None
+    take_profit_atr_mult: float | None = None
+    resubmit_cooldown_seconds: float | None = None
+
+
+class HoldingPolicyConfig(BaseModel):
+    """Holding Policy Ver1.0 §5-4 — 보유·청산 수치의 단일 출처."""
+
+    futures_exit: FuturesExitConfig = Field(default_factory=FuturesExitConfig)
+
+
+def load_holding_policy(config_dir: str | Path = "configs") -> HoldingPolicyConfig:
+    """holding_policy.yaml 로드. **없으면 기본값**(= 청산 엔진 비무장).
+
+    `load_instance()`와 같은 취급이다 — 없는 파일이 기동을 막으면 재생·스모크 경로가
+    전부 깨진다. 다만 기본값의 방향은 반대로 잡았다: 인스턴스 설정은 "없으면 dev로
+    돈다"가 안전하지만, 청산 엔진은 "없으면 주문을 낸다"가 안전할 수 없다.
+    """
+    path = Path(config_dir) / "holding_policy.yaml"
+    if not path.exists():
+        return HoldingPolicyConfig()
+    raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return HoldingPolicyConfig.model_validate(raw)
+
+
 def resolve_secret(ref: str, *, required: bool = True) -> str:
     """'env:KEY' 참조를 .env/환경변수에서 해석. 실제 시크릿은 로그·설정에 남기지 않는다.
 

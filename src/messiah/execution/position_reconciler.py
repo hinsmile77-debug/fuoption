@@ -51,7 +51,12 @@ from messiah.broker.base import BrokerAdapter, BrokerPosition
 from messiah.core import logging as mlog
 from messiah.core.messages import Fill, OrderAck, OrderRequest
 from messiah.core.timeutil import now_utc
-from messiah.execution.position_math import PositionState, apply_fill, signed_fill_qty
+from messiah.execution.position_math import (
+    PositionState,
+    apply_fill,
+    closes_position,
+    signed_fill_qty,
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,10 @@ class PositionReconciler:
         # (`on_fill()` 미매칭 경로), 장부 쪽에서도 **반영 못 한 체결의 수**를 남겨야
         # `n_fills`를 믿어도 되는지가 리포트에서 판정된다.
         self._unattributed_fills = 0
+        # 닫힌 거래의 실현손익(틱) — R10(연속손실 3회) 공급원 (2026-09-22 F-120).
+        # 누계(`_realized_pnl_ticks`)와 **따로 든다**: R10이 필요한 것은 총액이 아니라
+        # "직전 거래가 손실이었나"의 순서열이고, 누계 하나로는 그걸 되돌릴 수 없다.
+        self._closed_trades: list[float] = []
         self._last: Reconciliation | None = None
 
     # ---- 게이트웨이가 먹인다 -------------------------------------------
@@ -131,9 +140,15 @@ class PositionReconciler:
             qty=fill.qty,
             current_qty=current.qty if current else 0,
         )
+        closed = closes_position(current_qty=current.qty if current else 0, signed_qty=signed)
         updated, realized = apply_fill(current, signed_qty=signed, price_ticks=fill.price_ticks)
         self._realized_pnl_ticks += realized
         self._positions[fill.symbol] = updated
+        if closed:
+            # **닫힌 것만** 쌓는다. 본전 청산(realized == 0.0)도 여기 들어온다 — R10은
+            # 그것을 "손실이 아니다"로 읽어 스트릭을 끊어야 하고, 미청산과 섞이면 못 읽는다
+            # (`execution/position_math.closes_position()` docstring).
+            self._closed_trades.append(realized)
 
     # ---- 읽기 ----------------------------------------------------------
     @property
@@ -163,6 +178,19 @@ class PositionReconciler:
     def realized_pnl_ticks(self) -> float:
         """오늘 **닫은 만큼**의 손익(틱). 열려 있는 포지션은 안 들어간다."""
         return self._realized_pnl_ticks
+
+    def drain_closed_trades(self) -> list[float]:
+        """마지막 호출 이후 **새로 닫힌** 거래의 실현손익(틱)을 반환하고 비운다.
+
+        `models/shadow_manager.py`의 `drain_fills()`와 같은 꼴이다 — 같은 사건을 두 번
+        먹이지 않으려면 읽은 쪽이 비워야 하고, 그 규약이 이름에 있어야 한다.
+
+        R10(연속손실 3회)이 유일한 소비자다. 누계 `realized_pnl_ticks`를 대신 쓰면
+        안 되는 이유는 `_closed_trades` 선언부 주석에 있다.
+        """
+        drained = self._closed_trades
+        self._closed_trades = []
+        return drained
 
     @property
     def positions(self) -> dict[str, PositionState]:

@@ -77,6 +77,7 @@ DEFAULT_WINDOW_DAYS = 5
 #: 만들면 여기에 한 줄 더하면 된다.
 _EXIT_EVIDENCE_TAGS = (
     "EodFlattenLiquidating",  # 2026-09-15 F-104 — 장마감 강제청산, 이 축이 기다리던 태그
+    "PositionExitLiquidating",  # 2026-09-22 F-119 — 장중 손절·시간배리어
     "KillSwitchLiquidating",
     "CircuitBreakerLiquidating",
 )
