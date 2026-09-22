@@ -351,8 +351,7 @@ def _promote(registry: ModelRegistry, bundle_id: str, horizon: Horizon, args) ->
         bundle_id,
         operator=args.operator,
         reason=(
-            f"입력 계약 변경: {args.supersede_reason}"
-            f" (구 챔피언 {champion.bundle_id} 자동 강등)"
+            f"입력 계약 변경: {args.supersede_reason} (구 챔피언 {champion.bundle_id} 자동 강등)"
         ),
     )
     print(

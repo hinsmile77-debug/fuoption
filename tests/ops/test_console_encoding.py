@@ -51,10 +51,9 @@ def test_guard_has_console_reconfigure():
     s = _src(GUARD)
     assert "def _ensure_utf8_console(" in s, "재구성 헬퍼가 없다"
     assert 'encoding="utf-8"' in s, "utf-8 로 재구성하지 않는다"
-    assert 'errors="replace"' in s, (
-        "errors=replace 가 없다 — 재구성이 부분적으로만 먹는 환경에서 "
-        "판정 결과가 통째로 사라진다"
-    )
+    assert (
+        'errors="replace"' in s
+    ), "errors=replace 가 없다 — 재구성이 부분적으로만 먹는 환경에서 판정 결과가 통째로 사라진다"
     assert (
         'hasattr(stream, "reconfigure")' in s
     ), "hasattr 가드가 없다 — reconfigure() 없는 스트림(py3.6 · 파이프)에서 터진다"
@@ -103,8 +102,10 @@ def _cp949_offenders(text):
         lambda: "git 프로세스 **미측정**(0으로 간주하지 않는다)",
         lambda: "git 프로세스 %d개 실행 중" % 2,
         lambda: "판정보류 - " + " / ".join(["a", "b"]),
-        lambda: "스테일 확정 - 0바이트 · %.1f시간 · git 프로세스 0개 "
-        "-> 이 저장소는 커밋 불가 상태다" % 7.1,
+        lambda: (
+            "스테일 확정 - 0바이트 · %.1f시간 · git 프로세스 0개 "
+            "-> 이 저장소는 커밋 불가 상태다" % 7.1
+        ),
         lambda: "회수 취소 - 판정 직후 크기가 %s바이트로 변했다" % 40,
         lambda: "회수 실패: %s" % OSError("boom"),
         lambda: "회수 완료 - " + "스테일 확정 - 0바이트",
