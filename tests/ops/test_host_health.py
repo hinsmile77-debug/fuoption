@@ -285,6 +285,92 @@ def test_non_windows_is_skipped_not_failed(monkeypatch):
     assert "Windows 전용" in check.detail
 
 
+# 2026-09-23 G-1 — "무장 2개"만 찍혀서 나머지 작업이 빠진 게 설계인지 누락인지 모른다는 관측.
+# 대상은 그대로 두고, 정본이 at_boot=false로 둔 작업을 **판정 불변**으로 설명에만 덧붙인다.
+
+
+def _canon(tmp_path: Path) -> Path:
+    tasks = [
+        {"name": "Messiah", "bat": "a.bat", "weekly": "08:20", "at_boot": True,
+         "restart": True, "collection": True},
+        {"name": "Messiah-G2", "bat": "b.bat", "weekly": "08:25", "at_boot": True,
+         "restart": True, "collection": True},
+        {"name": "Messiah-Shutdown", "bat": "c.bat", "weekly": "15:40", "at_boot": False,
+         "restart": False, "collection": False},
+        {"name": "Messiah-Postmarket", "bat": "d.bat", "weekly": "15:45", "at_boot": False,
+         "restart": False, "collection": False},
+    ]  # fmt: skip
+    path = tmp_path / "scheduled_tasks.json"
+    path.write_text(json.dumps({"tasks": tasks}), encoding="utf-8")
+    return path
+
+
+def test_boot_exempt_tasks_follow_the_repo_canon():
+    """저장소 정본에서 비대상을 읽는다 — 대상(판정 집합)은 정본과 무관하게 고정이다."""
+    exempt = host_health._boot_exempt_tasks(host_health.task_schedule.DEFAULT_SCHEDULE_PATH)
+
+    assert "Messiah-Shutdown" in exempt and "Messiah-Postmarket" in exempt
+    assert not set(exempt) & set(host_health.BOOT_RECOVERY_TASKS)
+    assert host_health.BOOT_RECOVERY_TASKS == ("Messiah", "Messiah-G2")
+
+
+def test_exempt_tasks_are_named_in_the_detail(monkeypatch, tmp_path):
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    out = "Messiah=boot\nMessiah-G2=boot\nMessiah-Postmarket=none\nMessiah-Shutdown=none\n"
+
+    check = host_health.check_boot_recovery(runner=_boot_run(out), schedule_path=_canon(tmp_path))
+
+    assert check.available and check.ok
+    assert "무장 2개" in check.detail
+    assert "비대상 2개(정본 at_boot=false: Messiah-Postmarket, Messiah-Shutdown)" in check.detail
+    assert "정본과 다름" not in check.detail
+
+
+def test_exempt_task_with_boot_trigger_is_noted_but_verdict_unchanged(monkeypatch, tmp_path):
+    """판정 불변 — 비대상의 부팅 트리거는 적기만 한다(R18)."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    out = "Messiah=boot\nMessiah-G2=boot\nMessiah-Postmarket=none\nMessiah-Shutdown=boot\n"
+
+    check = host_health.check_boot_recovery(runner=_boot_run(out), schedule_path=_canon(tmp_path))
+
+    assert check.available and check.ok
+    assert "정본과 다름: Messiah-Shutdown에 부팅 트리거 있음" in check.detail
+
+
+def test_exempt_state_never_flips_an_unarmed_target(monkeypatch, tmp_path):
+    """판정 불변 — 대상이 무장 안 됐으면 비대상 상태와 무관하게 여전히 finding이다."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+    out = "Messiah=boot\nMessiah-G2=none\nMessiah-Postmarket=boot\nMessiah-Shutdown=boot\n"
+
+    check = host_health.check_boot_recovery(runner=_boot_run(out), schedule_path=_canon(tmp_path))
+
+    assert check.available and not check.ok
+    assert check.detail.startswith("Messiah-G2에 부팅 트리거 없음")
+
+
+def test_missing_exempt_lines_are_not_a_measurement_failure(monkeypatch, tmp_path):
+    """비대상 줄은 설명용 — 빠져도 대상 판정은 종전 그대로다."""
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_boot_recovery(
+        runner=_boot_run("Messiah=boot\nMessiah-G2=boot\n"), schedule_path=_canon(tmp_path)
+    )
+
+    assert check.available and check.ok
+
+
+def test_unreadable_canon_keeps_the_legacy_verdict(monkeypatch, tmp_path):
+    monkeypatch.setattr(host_health.sys, "platform", "win32")
+
+    check = host_health.check_boot_recovery(
+        runner=_boot_run("Messiah=boot\nMessiah-G2=boot\n"),
+        schedule_path=tmp_path / "없음.json",
+    )
+
+    assert check.available and check.ok
+    assert check.detail == "부팅 트리거 무장 2개(Messiah, Messiah-G2)"
+
+
 # ------------------------- 등록 시각 드리프트 (2026-08-10 P0 검증용)
 #
 # 그날 아침 08:20/08:25 트리거가 정시에 떴고, self-check도 PASS였고, 두 프로세스 모두 그 자리에서

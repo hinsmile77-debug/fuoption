@@ -394,18 +394,38 @@ def check_cpu_contention(*, runner=subprocess.run, project_root: Path | str = ".
 # 필요 없으므로 대상이 아니다(그쪽은 뜰 이유가 재부팅과 무관하다).
 BOOT_RECOVERY_TASKS = ("Messiah", "Messiah-G2")
 
-_BOOT_TRIGGER_QUERY = (
-    "$ErrorActionPreference='SilentlyContinue';"
-    "foreach ($n in @('Messiah','Messiah-G2')) {"
-    "  $t = Get-ScheduledTask -TaskName $n;"
-    '  if (-not $t) { "$n=missing"; continue }'
-    "  $b = @($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' });"
-    '  if ($b.Count -gt 0) { "$n=boot" } else { "$n=none" }'
-    "}"
-)
+
+def _boot_trigger_query(names: Sequence[str]) -> str:
+    listed = ", ".join(f"'{name}'" for name in names)
+    return (
+        "$ErrorActionPreference='SilentlyContinue';"
+        f"foreach ($n in @({listed})) {{"
+        "  $t = Get-ScheduledTask -TaskName $n;"
+        '  if (-not $t) { "$n=missing"; continue }'
+        "  $b = @($t.Triggers"
+        "    | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' });"
+        '  if ($b.Count -gt 0) { "$n=boot" } else { "$n=none" }'
+        "}"
+    )
 
 
-def check_boot_recovery(*, runner=subprocess.run) -> HostCheck:
+def _boot_exempt_tasks(schedule_path: Path | str) -> list[str]:
+    """정본이 `at_boot: false`로 둔 작업 — 판정 대상이 아니라 **왜 안 셌는지** 밝히는 용도.
+
+    2026-09-23 G-1. "무장 2개(Messiah, Messiah-G2)" 한 줄만으로는 나머지 작업이 빠진 게 설계인지
+    누락인지 점검 세션이 구분하지 못했다(09-23 장전 "확인 필요"). 정본을 못 읽으면 빈 목록 —
+    이 보조 정보 때문에 판정이 흔들리면 안 된다.
+    """
+    try:
+        tasks = task_schedule.all_tasks(schedule_path)
+    except task_schedule.ScheduleUnreadable:
+        return []
+    return sorted(t.name for t in tasks if not t.at_boot and t.name not in BOOT_RECOVERY_TASKS)
+
+
+def check_boot_recovery(
+    *, runner=subprocess.run, schedule_path: Path | str = task_schedule.DEFAULT_SCHEDULE_PATH
+) -> HostCheck:
     """수집 작업에 **부팅 트리거가 걸려 있는가** (2026-08-06 신설).
 
     ## 왜 호스트 위생 항목인가
@@ -425,9 +445,11 @@ def check_boot_recovery(*, runner=subprocess.run) -> HostCheck:
     """
     if sys.platform != "win32":
         return HostCheck("boot_recovery", available=False, ok=True, detail="Windows 전용 — 건너뜀")
+    exempt = _boot_exempt_tasks(schedule_path)
+    query = _boot_trigger_query([*BOOT_RECOVERY_TASKS, *exempt])
     try:
         result = runner(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _BOOT_TRIGGER_QUERY],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", query],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -444,12 +466,21 @@ def check_boot_recovery(*, runner=subprocess.run) -> HostCheck:
         name, _, state = line.strip().partition("=")
         if name and state:
             states[name] = state
-    if result.returncode != 0 or set(states) != set(BOOT_RECOVERY_TASKS):
+    # 판정은 BOOT_RECOVERY_TASKS만으로 한다 — 비대상 줄은 설명용이라 빠져도 측정 실패가 아니다.
+    targets = {name: states.get(name) for name in BOOT_RECOVERY_TASKS}
+    if result.returncode != 0 or None in targets.values():
         return HostCheck(
             "boot_recovery", available=False, ok=True, detail="측정 실패(작업 조회 출력 불일치)"
         )
+    exempt_note = ""
+    if exempt:
+        exempt_note = f" · 비대상 {len(exempt)}개(정본 at_boot=false: {', '.join(exempt)})"
+        # 비대상에 부팅 트리거가 붙은 것은 정본과 다르다는 뜻 — 적어만 두고 판정은 안 뒤집는다(R18).
+        booted = [name for name in exempt if states.get(name) == "boot"]
+        if booted:
+            exempt_note += f" · 정본과 다름: {', '.join(booted)}에 부팅 트리거 있음"
 
-    unarmed = sorted(name for name, state in states.items() if state != "boot")
+    unarmed = sorted(name for name, state in targets.items() if state != "boot")
     if unarmed:
         return HostCheck(
             "boot_recovery",
@@ -457,14 +488,14 @@ def check_boot_recovery(*, runner=subprocess.run) -> HostCheck:
             ok=False,
             detail=(
                 f"{', '.join(unarmed)}에 부팅 트리거 없음 — 장중 재부팅이 나면 사람이 "
-                "손으로 띄울 때까지 관측이 죽는다(2026-08-06에 21분)"
+                "손으로 띄울 때까지 관측이 죽는다(2026-08-06에 21분)" + exempt_note
             ),
         )
     return HostCheck(
         "boot_recovery",
         available=True,
         ok=True,
-        detail=f"부팅 트리거 무장 {len(states)}개({', '.join(sorted(states))})",
+        detail=f"부팅 트리거 무장 {len(targets)}개({', '.join(sorted(targets))}){exempt_note}",
     )
 
 
