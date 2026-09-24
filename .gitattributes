@@ -1,0 +1,51 @@
+# 줄바꿈 정규화 — 저장소가 자기 규칙을 스스로 들고 다닌다 (2026-09-24, options 2026-08-19 규칙 이식)
+#
+# ## 왜 필요한가
+#
+# 이 PC의 `core.autocrlf=true`는 **시스템 gitconfig**(`C:/Program Files/Git/etc/gitconfig`)에서
+# 온다. 저장소 것도 사용자 것도 아니다. 그래서 같은 작업 트리를 두 git 이 다르게 읽었다 —
+#
+#     Windows git (autocrlf=true)   CRLF 를 LF 로 환산해 비교 → 「깨끗하다」
+#     코웍 마운트 git (미설정)        날것 그대로 비교        → 「수백 개 바뀌었다」
+#
+# 2026-09-24 실측(마운트 관점 재현): futures 617 · pykrx 661 · fuoption 482 · auto_trader_kiwoom 264
+# 개가 줄끝만으로 「수정됨」이었다. 같은 날 이 파일을 이미 가진 options 는 0 이었다.
+# 반대로 **위험한 파일은 Windows 에서 깨끗하게 보였다** — 스케줄러가 매일 돌리는 `.bat` 14개가
+# LF 로 앉아 있었는데 autocrlf 가 그 차이를 가려 줬다.
+#
+# ## 규칙
+#
+# 파이썬·pytest·에이전트의 파일 쓰기는 전부 LF 다 → 기본은 LF.
+# cmd.exe·PowerShell 은 우리가 안 짜는 파서다 → `.bat`/`.cmd`/`.ps1` 은 CRLF 로 못 박는다.
+# (LF `.bat` 에서 `goto :레이블`은 512바이트 경계에 걸리면 레이블을 못 찾는다.)
+# `.ps1` 의 BOM 은 여기서 강제할 수 없다 — 한글이 든 `.ps1` 은 **UTF-8 BOM 으로 저장**할 것
+# (PowerShell 5.1 은 BOM 없는 파일을 CP949 로 읽는다).
+#
+# 이 파일은 인덱스 규칙이다. 이미 디스크에 있는 파일은 다시 체크아웃하거나 고쳐 써야 바뀐다.
+
+# 기본: 텍스트로 판정되는 모든 파일은 인덱스·워킹트리 모두 LF.
+* text=auto eol=lf
+
+# Windows 셸 스크립트 — CRLF 강제.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 바이너리 — 변환 금지. 자동 판정은 파일 앞부분만 보므로 드물게 텍스트로 오판한다.
+*.xls  binary
+*.xlsx binary
+*.pdf  binary
+*.pptx binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.gz   binary
+*.pkl  binary
+*.joblib binary
+*.parquet binary
+*.db   binary
+*.sqlite binary
+*.sqlite3 binary
