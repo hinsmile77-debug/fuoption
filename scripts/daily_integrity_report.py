@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from messiah.core import logging as mlog  # noqa: E402
 from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.timeutil import now_kst  # noqa: E402
+from messiah.ops import meta_gate_shadow_rolling  # noqa: E402
 from messiah.ops.integrity_report import generate_and_write  # noqa: E402
 
 _DEFAULT_SYMBOL = "A05608"
@@ -51,7 +52,24 @@ def main() -> int:
     report = generate_and_write(
         day=day, symbol=args.symbol or _DEFAULT_SYMBOL, instance_id=instance_id
     )
+    _write_shadow_rolling(day)
     return 1 if report.breaches else 0
+
+
+def _write_shadow_rolling(day: date) -> None:
+    """섀도 메타게이트 20거래일 요약 (2026-09-29 G-8).
+
+    **오늘 확정본을 쓴 뒤에** 부른다 — 요약은 일별 리포트를 다시 읽어 만들기 때문이다.
+    관측 축일 뿐이라 여기서 무엇이 실패해도 종료 코드(임계 초과 여부)는 바뀌지 않는다.
+    """
+    try:
+        rolling = meta_gate_shadow_rolling.judge(day=day)
+        written = meta_gate_shadow_rolling.write(rolling, day=day)
+    except Exception as exc:  # noqa: BLE001 — 관측 축 실패가 리포트 종료 코드를 흔들면 안 된다
+        print(f"섀도 메타게이트 롤링: 실패 — {exc!r}", file=sys.stderr)
+        return
+    tail = "" if written else " (파일 쓰기 실패)"
+    print(rolling.summary_line() + tail)
 
 
 if __name__ == "__main__":
