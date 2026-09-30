@@ -1,0 +1,16 @@
+{
+  "date": "2026-09-30",
+  "symbol": "A05610",
+  "ratio": 0.9945931332792647,
+  "common_minutes": 409,
+  "archived_volume": 125086,
+  "official_volume": 125766,
+  "missing_minutes": 1,
+  "head_missing_minutes": 0,
+  "middle_missing_minutes": 1,
+  "tail_missing_minutes": 0,
+  "warn_ratio": 0.95,
+  "missing_minutes_limit": 20,
+  "head_missing_minutes_limit": 0,
+  "ok": true
+}
