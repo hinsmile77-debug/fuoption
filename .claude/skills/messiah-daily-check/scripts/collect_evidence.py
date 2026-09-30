@@ -865,6 +865,38 @@ def summarize_json(path: Path, max_chars=2200) -> str:
     return truncate(json.dumps(fold(obj), ensure_ascii=False, indent=1), max_chars)
 
 
+# ---------------------------------------------------------------- R18 판단 가능 게이트
+# 2026-09-30 G-8-B. 섀도 메타게이트 20거래일 창이 찬 날 `postmarket_*.log` 에 비-JSON 한
+# 줄("창 충족 — R18 판단 가능")이 나올 뿐이라, 다음 점검이 그 줄을 못 보면 승격 검토 시점이
+# 조용히 지나간다. §9 적신호 목록에는 넣지 않는다 — 결함이 아니라 **사람 결정의 재료**이고,
+# 매일 적신호 한 줄을 늘리면 진짜 신호를 밀어낸다(G-9). 대신 결정 전까지 **매일** 보인다.
+def shadow_gate_r18_lines(root: Path, day: _date) -> list[str]:
+    """`logs/meta_gate_shadow_rolling.json` 을 사람용 한 줄로. 판정·차단에는 쓰이지 않는다."""
+    path = root / "logs" / "meta_gate_shadow_rolling.json"
+    if not path.exists():
+        return ["섀도 메타게이트 20거래일 요약 파일 없음 — **미측정**(0이 아니다)"]
+    try:
+        obj = json.loads(read_text(path))
+    except Exception as e:  # noqa: BLE001
+        return [f"`{path.name}` 해석 실패: {e} — **미측정**"]
+    window = obj.get("window_days")
+    measured_days = obj.get("days_measured")
+    rate = obj.get("shadow_pass_rate")
+    rate_text = "미측정" if rate is None else f"{rate:.1%}"
+    as_of = obj.get("as_of")
+    stale = "" if as_of == day.strftime("%Y-%m-%d") else f" · ⚠ 기준일 {as_of}(오늘 것 아님)"
+    body = (
+        f"잰 {measured_days}/{window}일 · 판단 {obj.get('shadow_measured')}건 중 "
+        f"통과 {obj.get('shadow_passes')}건({rate_text}){stale}"
+    )
+    if obj.get("window_complete"):
+        return [
+            f"🟢 **R18 판단 가능** — 섀도 메타게이트 창 충족({body}). 승격 여부는 **사람 결정**이며"
+            " 이 점검은 판단하지 않는다 — 결정 전까지 매일 이 줄이 남는다"
+        ]
+    return [f"섀도 메타게이트 창 미충족({body}) — R18 판단 불가"]
+
+
 # ---------------------------------------------------------------- dev_memory
 def devmemory_section(root: Path, day: _date) -> list[str]:
     out = ["", "## 6. dev_memory", ""]
@@ -1513,6 +1545,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         for i, f in enumerate(dict.fromkeys(deferred), 1):
             A(f"{i}. {f}")
         A("")
+    A("### R18 판단 가능 게이트 (적신호 아님 — 사람 결정의 재료)")
+    A("")
+    for line in shadow_gate_r18_lines(root, day):
+        A(f"- {line}")
+    A("")
     A("---")
     A("")
     A(
