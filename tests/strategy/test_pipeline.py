@@ -16,6 +16,7 @@ from messiah.core.messages import (
     CIRCUIT_BREAKER_PHASE_WARMUP,
     BarClosed,
     CircuitBreakerStatus,
+    DecisionIntent,
     FuturesView,
     Health,
     HealthLevel,
@@ -1466,3 +1467,312 @@ async def test_pipeline_without_a_ledger_still_runs():
     await pipeline.handle_futures_view(_view(score=0.05, agg_p_up=0.5, agg_p_down=0.5))
 
     assert pipeline._risk_engine.consecutive_losses == 0
+
+
+# ---------------------------------------------------- 익절·논지 소멸 결선 (2026-10-01, §4 ③④)
+#
+# 판정은 `test_position_exit.py`가 잰다. 여기서 재는 것은 결선 넷이다 — 사유별 스위치가
+# 주문을 가르는가, 섀도가 포지션당 한 번인가, 논지 청산 사이클에 진입이 안 겹치는가,
+# 섀도일 때 진입 경로가 종전과 똑같이 흐르는가.
+
+
+async def _thesis_pipeline(**exit_kwargs):
+    """보유 1계약(현재가 진입 = 손절과 무관)을 추적기에 등록해 둔 구성. 진입 국면은 TREND_UP."""
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(armed=True, **exit_kwargs)
+    )
+    bars = await _warm_up(pipeline, broker)
+    pipeline._last_cadence_seconds = 1800.0
+    pipeline._last_view_regime = Regime.TREND_UP
+    broker._positions[_SYMBOL] = BrokerPosition(
+        symbol=_SYMBOL, qty=1, avg_price_ticks=bars[-1].c_ticks
+    )
+    await pipeline.observe_position_exit(bars[-1])  # 추적 시작 — 진입 국면 TREND_UP 기억
+    assert len(await broker.positions()) == 1, "조용한 포지션은 완성봉 경로가 건드리지 않는다"
+    return bus, broker, gateway, pipeline, bars
+
+
+def _short_view(regime: Regime = Regime.TREND_UP):
+    return _view(score=-0.5, agg_p_up=0.05, agg_p_down=0.9).model_copy(update={"regime": regime})
+
+
+def _spy_exits(pipeline) -> list:
+    """`_submit_position_exit` 호출을 가로채 사유를 모은다(실제 제출은 그대로 한다)."""
+    seen: list = []
+    real = pipeline._submit_position_exit
+
+    async def _spy(piece, as_of):
+        seen.append(piece.reason.value)
+        return await real(piece, as_of)
+
+    pipeline._submit_position_exit = _spy  # type: ignore[method-assign]
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_reversal_view_liquidates_and_does_not_flip_in_the_same_cycle():
+    """**핵심 회귀** — LONG 보유 중 SHORT 판단: 청산 1건만 나가고 그 사이클엔 진입하지 않는다.
+
+    뒤집기는 다음 판단의 **새 진입 심사**를 다시 통과해야 한다(Holding Policy §4).
+    """
+    _bus, broker, gateway, pipeline, _bars = await _thesis_pipeline(thesis_reversal_armed=True)
+    seen = _spy_exits(pipeline)
+    before = gateway.accepted_orders
+
+    await pipeline.handle_futures_view(_short_view())
+
+    assert seen == ["THESIS_REVERSAL"]
+    assert gateway.accepted_orders == before + 1, "청산 한 건뿐 — SHORT 진입이 겹치면 안 된다"
+    assert (await broker.positions()) == [], "평탄이어야 한다 — 숏으로 뒤집히면 안 된다"
+
+
+@pytest.mark.asyncio
+async def test_reversal_shadow_leaves_the_entry_path_exactly_as_before():
+    """섀도면 판정만 남기고, 진입 경로는 F-119 시절과 똑같이 흐른다."""
+    _bus, broker, gateway, pipeline, _bars = await _thesis_pipeline(thesis_reversal_armed=False)
+    seen = _spy_exits(pipeline)
+    called: list = []
+    real_thesis = pipeline.observe_thesis_exit
+
+    async def _probe(*args, **kwargs):
+        result = await real_thesis(*args, **kwargs)
+        called.append(result)
+        return result
+
+    pipeline.observe_thesis_exit = _probe  # type: ignore[method-assign]
+
+    await pipeline.handle_futures_view(_short_view())
+
+    assert seen == [], "섀도는 주문을 내지 않는다"
+    assert called == [False], "판정은 돌았고, 진입을 막지 않았다"
+    # 종전 경로 그대로: SHORT 진입 주문이 나가 LONG 1계약과 상계된다. 이 단언이 있어야
+    # 위 「같은 사이클 진입 금지」 테스트가 실제로 무언가를 막고 있다는 게 증명된다.
+    assert gateway.accepted_orders > 0
+    assert [p.qty for p in await broker.positions()] != [1], "진입 경로가 실제로 돌았다"
+
+
+@pytest.mark.asyncio
+async def test_weakening_view_keeps_the_position():
+    """09-22 회귀 — 같은 방향 약화(NO_TRADE) + 방향 무관 국면 변화는 청산 사유가 아니다."""
+    _bus, broker, gateway, pipeline, _bars = await _thesis_pipeline(
+        thesis_reversal_armed=True, thesis_regime_armed=True
+    )
+    before = gateway.accepted_orders
+
+    view = _view(score=0.05, agg_p_up=0.5, agg_p_down=0.45).model_copy(
+        update={"regime": Regime.RANGE}
+    )
+    await pipeline.handle_futures_view(view)
+
+    assert gateway.accepted_orders == before
+    assert len(await broker.positions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_adverse_regime_exits_only_when_its_own_switch_is_on():
+    """ⓑ는 스위치가 따로다 — 반전 스위치만 켜져 있으면 국면 전환으로는 안 나간다."""
+    _bus, broker, gateway, pipeline, _bars = await _thesis_pipeline(
+        thesis_reversal_armed=True, thesis_regime_armed=False
+    )
+    turned = _view(score=0.05, agg_p_up=0.5, agg_p_down=0.45).model_copy(
+        update={"regime": Regime.TREND_DOWN}
+    )
+    await pipeline.handle_futures_view(turned)
+    assert len(await broker.positions()) == 1, "국면 스위치가 꺼져 있으면 섀도뿐이다"
+
+    _bus, broker, gateway, pipeline, _bars = await _thesis_pipeline(thesis_regime_armed=True)
+    seen = _spy_exits(pipeline)
+    await pipeline.handle_futures_view(turned)
+
+    assert seen == ["THESIS_REGIME"]
+    assert (await broker.positions()) == []
+
+
+@pytest.mark.asyncio
+async def test_thesis_exit_stays_out_of_the_eod_window():
+    """EOD 창의 주인은 `eod_flatten` 하나다 — 뷰 경로도 완성봉 경로와 같은 창을 비킨다."""
+    clock = {"t": datetime(2026, 7, 30, 15, 27, tzinfo=KST)}
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"],
+        event_calendar=EventCalendar(frozenset(), years=frozenset({2026})),
+        futures_exit=FuturesExitConfig(armed=True, thesis_reversal_armed=True),
+    )
+    _hold(broker, qty=1)
+    seen = _spy_exits(pipeline)
+
+    entered = await pipeline.observe_thesis_exit(
+        _short_view(), _intent(Side.SHORT), await broker.positions(), clock["t"]
+    )
+
+    assert entered is False
+    assert seen == []
+
+
+def _intent(side: Side) -> DecisionIntent:
+    return DecisionIntent(symbol=_SYMBOL, side=side, confidence=0.9, uncertainty=0.0)
+
+
+@pytest.mark.asyncio
+async def test_take_profit_shadow_never_submits_and_logs_once(monkeypatch):
+    """③ 섀도 — 익절선을 넘겨도 주문은 없고, 섀도 로그는 포지션당 한 번이다."""
+    from messiah.strategy import pipeline as pipeline_module
+
+    logged: list = []
+    real_log = pipeline_module.log
+
+    def _capture(tag, msg, **fields):
+        if tag == "PositionExitShadow":
+            logged.append(fields.get("exit_reason"))
+        return real_log(tag, msg, **fields)
+
+    monkeypatch.setattr(pipeline_module, "log", _capture)
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(armed=True, take_profit_atr_mult=1.0)
+    )
+    bars = await _warm_up(pipeline, broker)
+    # 진입가 1틱 = 현재가(약 100틱)가 압도적으로 유리하다 → 익절선 위.
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=1, avg_price_ticks=1)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bars[-1])
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert gateway.accepted_orders == before
+    assert len(await broker.positions()) == 1
+    assert logged == ["TAKE_PROFIT"], "두 봉 연속 도달해도 섀도는 한 번"
+
+
+@pytest.mark.asyncio
+async def test_take_profit_submits_when_its_switch_is_on():
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(armed=True, take_profit_atr_mult=1.0, take_profit_armed=True)
+    )
+    bars = await _warm_up(pipeline, broker)
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=1, avg_price_ticks=1)
+    seen = _spy_exits(pipeline)
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert seen == ["TAKE_PROFIT"]
+    assert (await broker.positions()) == []
+
+
+@pytest.mark.asyncio
+async def test_reason_switches_do_nothing_while_the_engine_is_unarmed():
+    """사유별 스위치는 `armed` **아래**의 추가 스위치다 — 엔진이 꺼져 있으면 아무것도 안 낸다."""
+    _bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(
+            armed=False,
+            take_profit_atr_mult=1.0,
+            take_profit_armed=True,
+            thesis_reversal_armed=True,
+        )
+    )
+    bars = await _warm_up(pipeline, broker)
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=1, avg_price_ticks=1)
+    seen = _spy_exits(pipeline)
+
+    await pipeline.observe_position_exit(bars[-1])
+
+    assert seen == []
+    assert len(await broker.positions()) == 1
+
+
+# ------------------------------------------------------------ 트레일링 결선 (2026-10-02)
+
+
+async def _trailing_pipeline(**exit_kwargs):
+    """진입가 = 마지막 워밍업 종가. ATR을 재 두고, 고점 봉·되밀림 봉을 직접 만든다."""
+    from messiah.features.px_core import atr as compute_atr
+
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        futures_exit=FuturesExitConfig(armed=True, **exit_kwargs)
+    )
+    bars = await _warm_up(pipeline, broker)
+    atr = compute_atr(bars, 14)
+    entry = bars[-1].c_ticks
+    broker._positions[_SYMBOL] = BrokerPosition(symbol=_SYMBOL, qty=1, avg_price_ticks=entry)
+
+    def bar_at(close: int, minutes: int) -> BarClosed:
+        return bars[-1].model_copy(
+            update={
+                "bar_open_kst": bars[-1].bar_open_kst + timedelta(minutes=minutes),
+                "o_ticks": close,
+                "h_ticks": close + 1,
+                "l_ticks": close - 1,
+                "c_ticks": close,
+            }
+        )
+
+    return broker, gateway, pipeline, entry, atr, bar_at
+
+
+@pytest.mark.asyncio
+async def test_trailing_shadow_logs_once_and_never_submits(monkeypatch):
+    from messiah.strategy import pipeline as pipeline_module
+
+    logged: list = []
+    real_log = pipeline_module.log
+
+    def _capture(tag, msg, **fields):
+        if tag == "PositionExitShadow":
+            logged.append(fields.get("exit_reason"))
+        return real_log(tag, msg, **fields)
+
+    monkeypatch.setattr(pipeline_module, "log", _capture)
+    broker, gateway, pipeline, entry, atr, bar_at = await _trailing_pipeline(trailing_atr_mult=1.0)
+    peak = entry + round(3 * atr)
+    before = gateway.accepted_orders
+
+    await pipeline.observe_position_exit(bar_at(peak, 1))  # 고점 — 아직 되밀림 0
+    assert logged == []
+    await pipeline.observe_position_exit(bar_at(peak - round(1.5 * atr), 2))
+    await pipeline.observe_position_exit(bar_at(peak - round(1.6 * atr), 3))
+
+    assert gateway.accepted_orders == before, "섀도는 주문을 내지 않는다"
+    assert len(await broker.positions()) == 1
+    assert logged == ["TRAILING_STOP"], "되밀림이 이어져도 섀도는 한 번"
+
+
+@pytest.mark.asyncio
+async def test_trailing_submits_when_its_switch_is_on():
+    broker, gateway, pipeline, entry, atr, bar_at = await _trailing_pipeline(
+        trailing_atr_mult=1.0, trailing_armed=True
+    )
+    seen = _spy_exits(pipeline)
+    peak = entry + round(3 * atr)
+    for minutes in (1, 2):
+        broker.on_bar(bar_at(peak, minutes))
+    await pipeline.observe_position_exit(bar_at(peak, 2))
+    retrace = bar_at(peak - round(1.5 * atr), 3)
+    broker.on_bar(retrace)
+
+    await pipeline.observe_position_exit(retrace)
+
+    assert seen == ["TRAILING_STOP"]
+    assert (await broker.positions()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_shadow_reason_does_not_mask_an_armed_one():
+    """**핵심 회귀** — `decide()`는 포지션당 사유 하나만 준다. 섀도 트레일링(우선순위 높음)과
+    무장 익절이 같은 봉에 걸려도 **익절 주문은 나가야 한다**(실주문 패스를 따로 돌리는 이유)."""
+    broker, gateway, pipeline, entry, atr, bar_at = await _trailing_pipeline(
+        trailing_atr_mult=1.0, take_profit_atr_mult=1.0, take_profit_armed=True
+    )
+    # 익절을 바로 쏘지 않도록 고점 봉은 직접 추적기에만 먹인다.
+    pipeline._exit_tracker.observe(
+        await broker.positions(),
+        as_of=pipeline._now(),
+        atr_ticks=atr,
+        cadence_seconds=None,
+        last_price_ticks=entry + round(5 * atr),
+    )
+    seen = _spy_exits(pipeline)
+    retrace = bar_at(entry + round(3 * atr), 3)  # 되밀림 2×ATR(트레일 ✓) · 이익 3×ATR(익절 ✓)
+    broker.on_bar(retrace)
+
+    await pipeline.observe_position_exit(retrace)
+
+    assert seen == ["TAKE_PROFIT"], "섀도 트레일링이 무장 익절을 가로채면 안 된다"
+    assert (await broker.positions()) == []

@@ -7,6 +7,8 @@
   ④ 시간배리어 숫자는 **라벨에서 온다** — 여기 복사돼 있지 않다
   ⑤ 모르는 것(ATR 워밍업·구동 Horizon 미상)으로는 청산하지 않는다
   ⑥ 방금 보낸 것을 또 보내지 않는다 — 중복 청산은 미청산보다 고치기 어렵다
+  ⑦ 논지 소멸(2026-10-01)은 **뒤집힘**만 센다 — 약화·방향 무관한 국면 변화는 아니다
+  ⑧ 트레일링(2026-10-02)은 **지킬 이익이 생긴 뒤의 되밀림**에만 걸린다
 """
 
 from datetime import timedelta
@@ -14,7 +16,7 @@ from datetime import timedelta
 import pytest
 
 from messiah.broker.base import BrokerPosition
-from messiah.core.messages import Horizon
+from messiah.core.messages import Horizon, Regime, Side
 from messiah.core.timeutil import KST, now_utc
 from messiah.models.labeling import BARRIER_PARAMS
 from messiah.strategy.position_exit import (
@@ -22,7 +24,9 @@ from messiah.strategy.position_exit import (
     ExitReason,
     ExitStateTracker,
     HeldFutures,
+    HeldThesis,
     decide,
+    decide_thesis,
     time_barrier_minutes,
 )
 
@@ -137,7 +141,8 @@ def test_stop_loss_wins_over_time_barrier():
 
 
 def test_take_profit_is_off_by_default():
-    """익절은 이번 스코프에 없다 — 2.4×ATR을 이기고 있어도 기본값으로는 안 자른다."""
+    """모듈 기본값은 익절 판정 없음 — 2.4×ATR을 이기고 있어도 안 자른다. 운영값(2.0배·섀도)은
+    `configs/holding_policy.yaml`이 넣는다."""
     plan = decide(last_price_ticks=_ENTRY + 120, held=[_held()])
 
     assert plan.should_exit is False
@@ -363,3 +368,355 @@ def test_cooldown_lifts_as_soon_as_the_position_shrinks():
     tracker.observe([_pos(qty=1)], as_of=t1, atr_ticks=_ATR, cadence_seconds=1800.0)
 
     assert tracker.cooling(t1)[_SYMBOL] is False
+
+
+# --- ⑦ 논지 소멸 (2026-10-01, Holding Policy §4 ④) ---------------------------
+
+
+def _thesis(qty: int = 1, entry_regime: Regime | None = Regime.TREND_UP) -> HeldThesis:
+    return HeldThesis(position=_pos(qty), entry_regime=entry_regime, minutes_held=30.0)
+
+
+def test_opposite_intent_is_a_reversal():
+    """ⓐ 진입시킨 판단 엔진이 반대 방향을 냈다 — LONG 보유 중 SHORT."""
+    plan = decide_thesis(held=[_thesis()], intent_side=Side.SHORT, current_regime=Regime.TREND_UP)
+
+    assert [s.reason for s in plan.slices] == [ExitReason.THESIS_REVERSAL]
+    assert plan.slices[0].qty == 1
+
+
+def test_reversal_is_symmetric_for_shorts():
+    plan = decide_thesis(
+        held=[_thesis(qty=-2, entry_regime=Regime.TREND_DOWN)],
+        intent_side=Side.LONG,
+        current_regime=Regime.TREND_DOWN,
+    )
+
+    assert plan.slices[0].reason is ExitReason.THESIS_REVERSAL
+    assert plan.slices[0].qty == 2, "전량이다 — 논지가 무너졌는데 절반만 남길 근거가 없다"
+
+
+def test_weakening_is_not_a_reversal():
+    """**핵심 회귀 — 2026-09-22.** 14:30 LONG(S=0.31) 뒤 15:00 S=0.19로 임계 미달(NO_TRADE),
+    국면 판정은 RANGE. 그 포지션은 EOD +113틱으로 끝났다. 약해진 것과 뒤집힌 것은 다르다."""
+    plan = decide_thesis(
+        held=[_thesis(entry_regime=Regime.HIGH_VOL)],
+        intent_side=Side.NO_TRADE,
+        current_regime=Regime.RANGE,
+    )
+
+    assert plan.should_exit is False
+
+
+def test_same_direction_intent_keeps_the_thesis():
+    plan = decide_thesis(held=[_thesis()], intent_side=Side.LONG, current_regime=Regime.TREND_UP)
+
+    assert plan.should_exit is False
+
+
+def test_adverse_trend_after_entry_is_a_regime_exit():
+    """ⓑ 진입 때 TREND_UP → 지금 TREND_DOWN. LONG의 국면 근거가 돌아섰다."""
+    plan = decide_thesis(
+        held=[_thesis(entry_regime=Regime.TREND_UP)],
+        intent_side=Side.NO_TRADE,
+        current_regime=Regime.TREND_DOWN,
+    )
+
+    assert plan.slices[0].reason is ExitReason.THESIS_REGIME
+    assert plan.slices[0].detail["entry_regime"] == "TREND_UP"
+    assert plan.slices[0].detail["current_regime"] == "TREND_DOWN"
+
+
+def test_entering_against_the_trend_is_not_a_transition():
+    """**핵심 회귀 — 2026-09-16.** TREND_DOWN 안에서 LONG 진입, 30분 뒤에도 TREND_DOWN.
+    "전환"이 없었다 — 그 포지션은 +346틱(6.9×ATR)으로 끝났다."""
+    plan = decide_thesis(
+        held=[_thesis(entry_regime=Regime.TREND_DOWN)],
+        intent_side=Side.LONG,
+        current_regime=Regime.TREND_DOWN,
+    )
+
+    assert plan.should_exit is False
+
+
+def test_direction_neutral_regime_change_is_not_an_exit():
+    """HIGH_VOL·RANGE·EVENT·UNKNOWN은 방향을 말하지 않는다 — LONG의 논지를 무너뜨리지 않는다."""
+    for regime in (Regime.RANGE, Regime.HIGH_VOL, Regime.EVENT, Regime.UNKNOWN):
+        plan = decide_thesis(
+            held=[_thesis(entry_regime=Regime.TREND_UP)],
+            intent_side=Side.NO_TRADE,
+            current_regime=regime,
+        )
+        assert plan.should_exit is False, regime
+
+
+def test_unknown_entry_regime_disables_only_the_regime_rule():
+    """기준이 없으면 "전환"을 말할 수 없다 — 그러나 반전(ⓐ)은 기준 없이도 성립한다."""
+    regime_only = decide_thesis(
+        held=[_thesis(entry_regime=None)],
+        intent_side=Side.NO_TRADE,
+        current_regime=Regime.TREND_DOWN,
+    )
+    reversal = decide_thesis(
+        held=[_thesis(entry_regime=None)],
+        intent_side=Side.SHORT,
+        current_regime=Regime.TREND_DOWN,
+    )
+
+    assert regime_only.should_exit is False
+    assert reversal.slices[0].reason is ExitReason.THESIS_REVERSAL
+
+
+def test_reversal_wins_over_regime_when_both_fire():
+    """둘 다 걸리면 더 강한 근거(최종 판단의 반전)를 사유로 남긴다."""
+    plan = decide_thesis(
+        held=[_thesis(entry_regime=Regime.TREND_UP)],
+        intent_side=Side.SHORT,
+        current_regime=Regime.TREND_DOWN,
+    )
+
+    assert [s.reason for s in plan.slices] == [ExitReason.THESIS_REVERSAL]
+
+
+def test_thesis_respects_cooling():
+    """⑥과 같은 규율 — 방금 낸 청산이 아직 안 잡혔으면 또 내지 않는다."""
+    plan = decide_thesis(
+        held=[_thesis()],
+        intent_side=Side.SHORT,
+        current_regime=Regime.TREND_UP,
+        cooling={_SYMBOL: True},
+    )
+
+    assert plan.should_exit is False
+
+
+def test_thesis_detail_reports_adverse_ticks_when_price_is_known():
+    plan = decide_thesis(
+        held=[_thesis()],
+        intent_side=Side.SHORT,
+        current_regime=Regime.TREND_UP,
+        last_price_ticks=_ENTRY - 10,
+    )
+
+    assert plan.slices[0].detail["adverse_ticks"] == pytest.approx(10.0)
+    assert plan.slices[0].detail["intent_side"] == "SHORT"
+
+
+def test_tracker_remembers_the_regime_at_first_sight():
+    """진입 국면 = 포지션을 **처음 본 순간**의 마지막 뷰 국면. 뒤에 국면이 바뀌어도 안 바뀐다."""
+    tracker = ExitStateTracker()
+    t0 = _t0()
+    tracker.observe(
+        [_pos()], as_of=t0, atr_ticks=_ATR, cadence_seconds=1800.0, regime=Regime.TREND_UP
+    )
+    tracker.observe(
+        [_pos()],
+        as_of=t0 + timedelta(minutes=5),
+        atr_ticks=_ATR,
+        cadence_seconds=1800.0,
+        regime=Regime.TREND_DOWN,
+    )
+
+    [held] = tracker.thesis_inputs([_pos()], as_of=t0 + timedelta(minutes=30))
+
+    assert held.entry_regime is Regime.TREND_UP
+    assert held.minutes_held == pytest.approx(30.0)
+
+
+def test_tracker_fills_the_regime_late_if_the_bar_beat_the_view():
+    tracker = ExitStateTracker()
+    t0 = _t0()
+    tracker.observe([_pos()], as_of=t0, atr_ticks=_ATR, cadence_seconds=None, regime=None)
+    tracker.observe(
+        [_pos()],
+        as_of=t0 + timedelta(minutes=1),
+        atr_ticks=_ATR,
+        cadence_seconds=None,
+        regime=Regime.RANGE,
+    )
+
+    [held] = tracker.thesis_inputs([_pos()], as_of=t0 + timedelta(minutes=2))
+
+    assert held.entry_regime is Regime.RANGE
+
+
+def test_thesis_inputs_do_not_trust_a_flipped_position():
+    """부호가 바뀐 포지션은 새 포지션이다 — 옛 진입 국면을 물려주지 않는다."""
+    tracker = ExitStateTracker()
+    t0 = _t0()
+    tracker.observe(
+        [_pos(1)], as_of=t0, atr_ticks=_ATR, cadence_seconds=1800.0, regime=Regime.TREND_UP
+    )
+
+    [held] = tracker.thesis_inputs([_pos(-1)], as_of=t0 + timedelta(minutes=1))
+
+    assert held.entry_regime is None
+    assert held.minutes_held is None
+
+
+def test_shadow_is_logged_once_per_reason():
+    tracker = ExitStateTracker()
+    tracker.observe([_pos()], as_of=_t0(), atr_ticks=_ATR, cadence_seconds=1800.0)
+
+    assert tracker.first_shadow(_SYMBOL, ExitReason.TAKE_PROFIT) is True
+    assert tracker.first_shadow(_SYMBOL, ExitReason.TAKE_PROFIT) is False
+    assert tracker.first_shadow(_SYMBOL, ExitReason.THESIS_REGIME) is True, "사유는 따로 센다"
+
+
+# --- ⑧ 트레일링 스톱 (2026-10-02) ---------------------------------------------
+
+
+def _trail(*, qty: int = 1, best: int | None, minutes_held: float = 10.0) -> HeldFutures:
+    return HeldFutures(
+        position=_pos(qty),
+        entry_price_ticks=_ENTRY,
+        stop_distance_ticks=_ATR,
+        minutes_held=minutes_held,
+        time_barrier_minutes=90.0,
+        best_price_ticks=best,
+    )
+
+
+def _decide_trail(last: int, held: HeldFutures, **kw):
+    return decide(last_price_ticks=last, held=[held], trailing_atr_mult=2.0, **kw)
+
+
+def test_trailing_is_off_by_default():
+    plan = decide(last_price_ticks=_ENTRY + 10, held=[_trail(best=_ENTRY + 300)])
+
+    assert plan.should_exit is False
+
+
+def test_trailing_fires_on_a_retrace_after_a_real_gain():
+    """+4×ATR까지 갔다가 2×ATR 되밀림 → 나간다(이익 +2×ATR을 지킨다)."""
+    plan = _decide_trail(_ENTRY + 100, _trail(best=_ENTRY + 200))
+
+    [piece] = plan.slices
+    assert piece.reason is ExitReason.TRAILING_STOP
+    assert piece.detail["peak_gain_ticks"] == pytest.approx(200.0)
+    assert piece.detail["retrace_ticks"] == pytest.approx(100.0)
+    assert piece.detail["trail_ticks"] == pytest.approx(100.0)
+
+
+def test_retrace_one_tick_short_of_the_trail_does_not_fire():
+    plan = _decide_trail(_ENTRY + 101, _trail(best=_ENTRY + 200))
+
+    assert plan.should_exit is False
+
+
+def test_trailing_is_not_armed_before_the_activation_gain():
+    """**핵심** — 진입 직후 잔물결에는 걸리지 않는다. 그 전엔 원래 손절이 지킨다.
+
+    최고 이익 0.9×ATR(45틱)에서 되밀림 — 활성 문턱(1.0×ATR) 미달이라 트레일이 아니다.
+    """
+    plan = decide(
+        last_price_ticks=_ENTRY + 45 - 30,
+        held=[_trail(best=_ENTRY + 45)],
+        trailing_atr_mult=0.5,
+    )
+
+    assert plan.should_exit is False
+
+
+def test_activation_multiple_is_honoured():
+    held = _trail(best=_ENTRY + 60)  # 최고 이익 1.2×ATR
+    off = decide(
+        last_price_ticks=_ENTRY + 10,
+        held=[held],
+        trailing_atr_mult=1.0,
+        trailing_activation_atr_mult=1.5,
+    )
+    on = decide(
+        last_price_ticks=_ENTRY + 10,
+        held=[held],
+        trailing_atr_mult=1.0,
+        trailing_activation_atr_mult=1.0,
+    )
+
+    assert off.should_exit is False
+    assert on.slices[0].reason is ExitReason.TRAILING_STOP
+
+
+def test_trailing_is_symmetric_for_shorts():
+    """SHORT의 최고점은 **최저가**다 — 내려갔다가 다시 오르면 나간다."""
+    plan = _decide_trail(_ENTRY - 100, _trail(qty=-1, best=_ENTRY - 200))
+
+    assert plan.slices[0].reason is ExitReason.TRAILING_STOP
+
+
+def test_unknown_peak_never_trails():
+    plan = _decide_trail(_ENTRY + 100, _trail(best=None))
+
+    assert plan.should_exit is False
+
+
+def test_stop_loss_wins_over_trailing():
+    """되밀림이 진입가 아래 손절선까지 내려왔으면 사유는 손절이다(§4 ①)."""
+    plan = _decide_trail(_ENTRY - 60, _trail(best=_ENTRY + 60))
+
+    assert plan.slices[0].reason is ExitReason.STOP_LOSS
+
+
+def test_trailing_wins_over_take_profit():
+    """같은 봉에 둘 다 걸리면 되밀림(이미 내려오는 중)이 더 급하다."""
+    plan = _decide_trail(_ENTRY + 150, _trail(best=_ENTRY + 300), take_profit_atr_mult=2.0)
+
+    assert [s.reason for s in plan.slices] == [ExitReason.TRAILING_STOP]
+
+
+def test_tracker_follows_the_best_close_for_longs():
+    tracker = ExitStateTracker()
+    t0 = _t0()
+    for i, close in enumerate((_ENTRY + 20, _ENTRY + 90, _ENTRY + 40)):
+        held, _ = tracker.observe(
+            [_pos()],
+            as_of=t0 + timedelta(minutes=i),
+            atr_ticks=_ATR,
+            cadence_seconds=1800.0,
+            last_price_ticks=close,
+        )
+
+    assert held[0].best_price_ticks == _ENTRY + 90, "내려와도 최고점은 그대로다"
+
+
+def test_tracker_follows_the_lowest_close_for_shorts():
+    tracker = ExitStateTracker()
+    t0 = _t0()
+    for i, close in enumerate((_ENTRY - 20, _ENTRY - 90, _ENTRY - 40)):
+        held, _ = tracker.observe(
+            [_pos(-1)],
+            as_of=t0 + timedelta(minutes=i),
+            atr_ticks=_ATR,
+            cadence_seconds=1800.0,
+            last_price_ticks=close,
+        )
+
+    assert held[0].best_price_ticks == _ENTRY - 90
+
+
+def test_tracker_peak_starts_at_entry_not_at_a_losing_close():
+    """첫 종가가 손실 쪽이어도 최고점은 진입가다 — 손실 구간을 「고점」으로 세지 않는다."""
+    tracker = ExitStateTracker()
+    held, _ = tracker.observe(
+        [_pos()], as_of=_t0(), atr_ticks=_ATR, cadence_seconds=1800.0, last_price_ticks=_ENTRY - 30
+    )
+
+    assert held[0].best_price_ticks == _ENTRY
+
+
+def test_flipping_direction_resets_the_peak():
+    """뒤집힌 포지션은 새 포지션이다 — LONG의 최고점을 SHORT가 물려받으면 즉시 트레일이 걸린다."""
+    tracker = ExitStateTracker()
+    t0 = _t0()
+    tracker.observe(
+        [_pos(1)], as_of=t0, atr_ticks=_ATR, cadence_seconds=1800.0, last_price_ticks=_ENTRY + 300
+    )
+    held, _ = tracker.observe(
+        [_pos(-1)],
+        as_of=t0 + timedelta(minutes=1),
+        atr_ticks=_ATR,
+        cadence_seconds=1800.0,
+        last_price_ticks=_ENTRY,
+    )
+
+    assert held[0].best_price_ticks == _ENTRY

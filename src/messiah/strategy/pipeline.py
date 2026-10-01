@@ -159,6 +159,7 @@ from messiah.core.messages import (
     HealthLevel,
     Horizon,
     KillSignal,
+    Regime,
     ResumeSignal,
     Side,
     bar_confirm_time,
@@ -191,6 +192,31 @@ def _minutes_text(minutes: object) -> str:
     (`strategy/position_exit.py` 모듈 docstring "재기동하면 시계가 다시 시작한다").
     """
     return f"{minutes:.0f}분" if isinstance(minutes, (int, float)) else "미상"
+
+
+def _ticks_text(ticks: object) -> str:
+    return f"{ticks}틱" if isinstance(ticks, (int, float)) else "미상"
+
+
+def _exit_basis_text(piece: position_exit.ExitSlice) -> str:
+    """청산 사유별 근거 한 토막. **"불리"라고 적는다** — 종전 문구는 `+11.0틱`이었는데
+    그 부호는 손실 방향인데도 이익처럼 읽혔다(2026-09-22 스모크)."""
+    d = piece.detail
+    adverse = d.get("adverse_ticks")
+    adverse_text = f"불리 {adverse:+.1f}틱" if isinstance(adverse, (int, float)) else "불리 미상"
+    reason = piece.reason
+    if reason == position_exit.ExitReason.TAKE_PROFIT:
+        return f"{adverse_text}(익절선 {d.get('target_ticks', 0.0):.1f}틱)"
+    if reason == position_exit.ExitReason.TRAILING_STOP:
+        return (
+            f"최고 {d.get('best_price_ticks')}틱 대비 되밀림 {d.get('retrace_ticks', 0.0):.1f}틱"
+            f"(추적폭 {d.get('trail_ticks', 0.0):.1f}틱) · {adverse_text}"
+        )
+    if reason == position_exit.ExitReason.THESIS_REVERSAL:
+        return f"{adverse_text} · 판단이 {d.get('intent_side')}로 반전"
+    if reason == position_exit.ExitReason.THESIS_REGIME:
+        return f"{adverse_text} · 국면 {d.get('entry_regime')}→{d.get('current_regime')}"
+    return f"{adverse_text}(손절선 {d.get('stop_ticks', 0.0):.1f}틱)"
 
 
 def _directional_edge(view: FuturesView, side: Side) -> float:
@@ -349,6 +375,22 @@ class TradingPipeline:
             else position_exit.DEFAULT_STOP_ATR_MULT
         )
         self._exit_take_profit_atr_mult = self._futures_exit.take_profit_atr_mult
+        # 트레일링 (2026-10-02) — None이면 판정 안 함. 활성 문턱은 모듈 기본값으로 떨어뜨린다.
+        self._exit_trailing_atr_mult = self._futures_exit.trailing_atr_mult
+        self._exit_trailing_activation_atr_mult = (
+            self._futures_exit.trailing_activation_atr_mult
+            if self._futures_exit.trailing_activation_atr_mult is not None
+            else position_exit.DEFAULT_TRAILING_ACTIVATION_ATR_MULT
+        )
+        # 사유별 무장 (2026-10-01, §4 ③④) — 엔진 무장(`armed`) 아래의 추가 스위치다.
+        self._exit_reason_armed: dict[position_exit.ExitReason, bool] = {
+            position_exit.ExitReason.STOP_LOSS: True,
+            position_exit.ExitReason.TIME_BARRIER: True,
+            position_exit.ExitReason.TAKE_PROFIT: self._futures_exit.take_profit_armed,
+            position_exit.ExitReason.TRAILING_STOP: self._futures_exit.trailing_armed,
+            position_exit.ExitReason.THESIS_REVERSAL: self._futures_exit.thesis_reversal_armed,
+            position_exit.ExitReason.THESIS_REGIME: self._futures_exit.thesis_regime_armed,
+        }
         self._exit_tracker = position_exit.ExitStateTracker(
             cooldown_seconds=(
                 self._futures_exit.resubmit_cooldown_seconds
@@ -360,6 +402,9 @@ class TradingPipeline:
         # `FuturesView`가 실어 오므로 **첫 뷰가 오기 전까지는 None**이고, 그동안 들어간
         # 포지션에는 시간배리어가 안 걸린다(손절과 EOD 청산은 그대로 — 모듈 docstring).
         self._last_cadence_seconds: float | None = None
+        # 마지막 뷰의 국면 — 새로 잡힌 포지션의 **진입 국면**이 된다(논지 소멸 ⓑ의 기준,
+        # `strategy/position_exit.py` 모듈 docstring). 첫 뷰 전에는 None이다.
+        self._last_view_regime: Regime | None = None
 
     @property
     def sizer(self) -> PositionSizer:
@@ -444,12 +489,8 @@ class TradingPipeline:
         옵션 패턴이고, 그 경로엔 KRX 세션 개념 자체가 없다.
         """
         as_of = self._now()
-        if self._event_calendar is not None:
-            minutes_to_close = self._event_calendar.minutes_to_close(as_of)
-            if minutes_to_close is None:
-                return  # ① 정규장 밖
-            if minutes_to_close <= self._risk_engine.overnight_flatten_lead_minutes:
-                return  # ② 장마감 청산 창 — 주인은 eod_flatten이다
+        if not self._intraday_exit_allowed(as_of):
+            return
         try:
             positions = await self._broker.positions()
             atr_ticks = compute_atr(list(self._bars), self._atr_window) if self._bars else None
@@ -459,6 +500,8 @@ class TradingPipeline:
                 atr_ticks=atr_ticks,
                 cadence_seconds=self._last_cadence_seconds,
                 stop_atr_mult=self._exit_stop_atr_mult,
+                regime=self._last_view_regime,
+                last_price_ticks=bar.c_ticks,
             )
             for notice in armed:
                 log(
@@ -468,21 +511,27 @@ class TradingPipeline:
                         f" · 시간배리어 {notice.time_barrier_minutes:.0f}분"
                         if notice.time_barrier_minutes is not None
                         else " · 시간배리어 미적용(구동 Horizon 미상)"
-                    ),
+                    )
+                    + self._armed_extras_text(notice),
                     symbol=notice.symbol,
                     entry_price_ticks=notice.entry_price_ticks,
                     stop_ticks=notice.stop_ticks,
                     time_barrier_minutes=notice.time_barrier_minutes,
                     armed=self._futures_exit.armed,
+                    take_profit_ticks=self._take_profit_ticks(notice),
+                    take_profit_armed=self._futures_exit.take_profit_armed,
+                    trailing_ticks=self._atr_multiple_ticks(notice, self._exit_trailing_atr_mult),
+                    trailing_armed=self._futures_exit.trailing_armed,
+                    entry_regime=(
+                        self._last_view_regime.value if self._last_view_regime is not None else None
+                    ),
+                    thesis_reversal_armed=self._futures_exit.thesis_reversal_armed,
+                    thesis_regime_armed=self._futures_exit.thesis_regime_armed,
                 )
             if not held:
                 return
-            plan = position_exit.decide(
-                last_price_ticks=bar.c_ticks,
-                held=held,
-                stop_atr_mult=self._exit_stop_atr_mult,
-                take_profit_atr_mult=self._exit_take_profit_atr_mult,
-                cooling=self._exit_tracker.cooling(as_of),
+            plan = self._plan_position_exit(
+                last_price_ticks=bar.c_ticks, held=held, cooling=self._exit_tracker.cooling(as_of)
             )
         except Exception as exc:  # noqa: BLE001 — 죽으면 그 포지션이 손절 없이 남는다
             log(
@@ -493,33 +542,174 @@ class TradingPipeline:
             )
             return
 
-        if not plan.should_exit:
-            return
+        await self._execute_exit_plan(plan, as_of)
 
+    def _plan_position_exit(
+        self,
+        *,
+        last_price_ticks: int,
+        held: list[position_exit.HeldFutures],
+        cooling: dict[str, bool],
+    ) -> position_exit.PositionExitPlan:
+        """완성봉 한 장의 판정 — **실주문 패스 1번 + 섀도 사유별 패스**를 합친다 (2026-10-02).
+
+        `decide()`는 포지션당 사유 하나(우선순위 첫 번째)만 돌려준다. 그래서 무장 여부가 다른
+        사유를 한 번에 판정하면 서로를 가린다 — 섀도 트레일링이 같은 봉의 무장 익절을 가로채
+        주문이 안 나가거나, 섀도 둘(트레일링·익절)이 서로의 첫 도달 기록을 지운다. 그래서:
+
+          ① 실주문 패스 — 무장된 사유만 켜고 판정한다(엔진이 비무장이면 이 패스는 없다).
+          ② 섀도 패스 — 값은 있는데 무장 안 된 선택 사유(익절·트레일링)를 **하나씩만** 켜고
+             판정해 그 사유의 몫만 남긴다. 엔진 자체가 비무장이면 손절·시간배리어도 여기로 온다.
+
+        ①에서 이미 나가는 심볼은 ②에서 뺀다 — 나가는 포지션의 「여기서 나갔을 것」은 반사실이
+        아니라 소음이다.
+        """
+        engine = self._futures_exit.armed
+        tp = self._exit_take_profit_atr_mult
+        trail = self._exit_trailing_atr_mult
+        tp_live = engine and self._futures_exit.take_profit_armed
+        trail_live = engine and self._futures_exit.trailing_armed
+
+        def run(*, take_profit: float | None, trailing: float | None):
+            return position_exit.decide(
+                last_price_ticks=last_price_ticks,
+                held=held,
+                stop_atr_mult=self._exit_stop_atr_mult,
+                take_profit_atr_mult=take_profit,
+                trailing_atr_mult=trailing,
+                trailing_activation_atr_mult=self._exit_trailing_activation_atr_mult,
+                cooling=cooling,
+            ).slices
+
+        live: tuple[position_exit.ExitSlice, ...] = ()
+        if engine:
+            live = run(take_profit=tp if tp_live else None, trailing=trail if trail_live else None)
+
+        shadow_runs: list[tuple[set[position_exit.ExitReason] | None, float | None, float | None]]
+        shadow_runs = []
+        if not engine:
+            stop_and_time = {
+                position_exit.ExitReason.STOP_LOSS,
+                position_exit.ExitReason.TIME_BARRIER,
+            }
+            shadow_runs.append((stop_and_time, None, None))
+        if tp is not None and not tp_live:
+            shadow_runs.append(({position_exit.ExitReason.TAKE_PROFIT}, tp, None))
+        if trail is not None and not trail_live:
+            shadow_runs.append(({position_exit.ExitReason.TRAILING_STOP}, None, trail))
+
+        leaving = {piece.position.symbol for piece in live}
+        shadow: list[position_exit.ExitSlice] = []
+        for reasons, take_profit, trailing in shadow_runs:
+            shadow.extend(
+                piece
+                for piece in run(take_profit=take_profit, trailing=trailing)
+                if piece.reason in (reasons or set()) and piece.position.symbol not in leaving
+            )
+
+        slices = (*live, *shadow)
+        if not slices:
+            return position_exit.PositionExitPlan((), f"보유 {len(held)}건 — 청산 조건 미도달")
+        how = " · ".join(f"{s.position.symbol} {s.qty}계약 {s.reason.value}" for s in slices)
+        return position_exit.PositionExitPlan(slices, f"Holding Policy §4 — {how}")
+
+    def _atr_multiple_ticks(
+        self, notice: position_exit.ArmedNotice, mult: float | None
+    ) -> float | None:
+        """손절선과 같은 ATR 축의 거리(틱). 배수가 없으면 None — 판정 자체가 없다."""
+        if mult is None or self._exit_stop_atr_mult <= 0:
+            return None
+        atr_ticks = notice.stop_ticks / self._exit_stop_atr_mult
+        return atr_ticks * mult
+
+    def _take_profit_ticks(self, notice: position_exit.ArmedNotice) -> float | None:
+        """익절선(틱) — `_atr_multiple_ticks()`의 익절 배수판."""
+        return self._atr_multiple_ticks(notice, self._exit_take_profit_atr_mult)
+
+    def _armed_extras_text(self, notice: position_exit.ArmedNotice) -> str:
+        """`PositionExitArmed` 문구의 ③④ 토막 — **섀도인지 실주문인지**를 같이 적는다.
+
+        "익절이 안 났다"가 「조건에 안 닿았다」인지 「애초에 꺼져 있었다」인지는 이 한 줄이
+        없으면 로그에서 갈리지 않는다(같은 줄의 손절선 표기가 생긴 이유와 같다).
+        """
+
+        def _mode(on: bool) -> str:
+            return "실주문" if on else "섀도"
+
+        tp = self._take_profit_ticks(notice)
+        tp_text = (
+            " · 익절 미적용"
+            if tp is None
+            else f" · 익절선 {tp:.1f}틱({_mode(self._futures_exit.take_profit_armed)})"
+        )
+
+        trail = self._atr_multiple_ticks(notice, self._exit_trailing_atr_mult)
+        trail_text = (
+            ""
+            if trail is None
+            else f" · 트레일링 {trail:.1f}틱({_mode(self._futures_exit.trailing_armed)})"
+        )
+
+        thesis_text = (
+            f" · 논지소멸 반전 {_mode(self._futures_exit.thesis_reversal_armed)}"
+            f"/국면 {_mode(self._futures_exit.thesis_regime_armed)}"
+        )
+        return tp_text + trail_text + thesis_text
+
+    def _intraday_exit_allowed(self, as_of: datetime) -> bool:
+        """장중 청산(손절·시간배리어·익절·논지 소멸)이 돌아도 되는 시각인가.
+
+        `observe_position_exit()` docstring의 두 구간(① 정규장 밖 ② 장마감 청산 창)을
+        한 곳에 둔다 — 완성봉 경로와 뷰 경로(논지 소멸)가 **같은 창**을 봐야 한다. 한쪽만
+        EOD 창을 비키면 그쪽이 `eod_flatten`의 미체결 잔량과 겹쳐 반대 포지션을 만든다.
+        """
+        if self._event_calendar is None:
+            return True
+        minutes_to_close = self._event_calendar.minutes_to_close(as_of)
+        if minutes_to_close is None:
+            return False  # ① 정규장 밖
+        # ② 장마감 청산 창 — 주인은 eod_flatten이다
+        return minutes_to_close > self._risk_engine.overnight_flatten_lead_minutes
+
+    async def _execute_exit_plan(
+        self, plan: position_exit.PositionExitPlan, as_of: datetime
+    ) -> int:
+        """판정을 실행한다 — 무장된 사유는 제출, 아니면 섀도. **접수된 몫의 수**를 돌려준다.
+
+        무장 = `armed`(엔진) **and** 사유별 스위치(`take_profit_armed`·`trailing_armed`·
+        `thesis_reversal_armed`·`thesis_regime_armed`).
+        섀도는 포지션당 사유별 첫 도달 한 번만 남긴다 — 반사실에 필요한 건 첫 시각·가격이고,
+        종전처럼 매 봉 남기면 같은 사실이 하루 수십 줄이 된다.
+        """
+        submitted = 0
         for piece in plan.slices:
-            if not self._futures_exit.armed:
+            symbol = piece.position.symbol
+            if not (self._futures_exit.armed and self._exit_reason_armed[piece.reason]):
                 # R18 섀도 계측 — 판정만 남기고 주문은 안 낸다(`configs/holding_policy.yaml`).
-                log(
-                    "PositionExitShadow",
-                    f"{piece.position.symbol} {piece.qty}계약 {piece.reason.value} "
-                    f"조건 도달 — 비무장이라 주문 없음",
-                    symbol=piece.position.symbol,
-                    qty=piece.qty,
-                    exit_reason=piece.reason.value,
-                    **piece.detail,
-                )
+                if self._exit_tracker.first_shadow(symbol, piece.reason):
+                    log(
+                        "PositionExitShadow",
+                        f"{symbol} {piece.qty}계약 {piece.reason.value} "
+                        f"조건 도달 — 비무장이라 주문 없음",
+                        symbol=symbol,
+                        qty=piece.qty,
+                        exit_reason=piece.reason.value,
+                        **piece.detail,
+                    )
                 continue
             try:
-                await self._submit_position_exit(piece, as_of)
-            except Exception as exc:  # noqa: BLE001 — 위와 같은 이유
+                if await self._submit_position_exit(piece, as_of):
+                    submitted += 1
+            except Exception as exc:  # noqa: BLE001 — 죽으면 그 포지션이 청산 없이 남는다
                 log(
                     "PositionExitFailed",
-                    f"청산 주문 제출 실패 — 포지션이 남았다(다음 완성봉 재시도): {exc}",
-                    symbol=piece.position.symbol,
+                    f"청산 주문 제출 실패 — 포지션이 남았다(다음 판정에 재시도): {exc}",
+                    symbol=symbol,
                     error=f"{type(exc).__name__}: {exc}",
                 )
+        return submitted
 
-    async def _submit_position_exit(self, piece: position_exit.ExitSlice, as_of: datetime) -> None:
+    async def _submit_position_exit(self, piece: position_exit.ExitSlice, as_of: datetime) -> bool:
         """한 몫을 내보낸다 — 반대매매 방향 결정은 `KillSwitch.liquidate()` 한 곳에만 둔다
         (`observe_eod_flatten_tick()`이 세운 선례 그대로).
 
@@ -532,16 +722,14 @@ class TradingPipeline:
             qty=piece.qty if piece.position.qty > 0 else -piece.qty,
             avg_price_ticks=piece.position.avg_price_ticks,
         )
-        adverse = piece.detail.get("adverse_ticks")
+        accepted = False
         for request in self._kill_switch.liquidate([sliced]):
             log(
                 "PositionExitLiquidating",
-                # **"불리"라고 적는다.** 종전 문구는 `+11.0틱`이었는데 그 부호는 손실
-                # 방향인데도 이익처럼 읽힌다 — 2026-09-22 스모크에서 실제로 그렇게 읽혔다.
                 f"{request.symbol} {request.qty}계약 장중 청산({piece.reason.value}) — "
                 f"진입가 {piece.detail.get('entry_price_ticks')}틱 · "
-                f"현재 {piece.detail.get('last_price_ticks')}틱 · "
-                f"불리 {adverse:+.1f}틱(손절선 {piece.detail.get('stop_ticks'):.1f}틱) · "
+                f"현재 {_ticks_text(piece.detail.get('last_price_ticks'))} · "
+                f"{_exit_basis_text(piece)} · "
                 f"보유 {_minutes_text(piece.detail.get('minutes_held'))}, Holding Policy §4",
                 symbol=request.symbol,
                 qty=request.qty,
@@ -554,6 +742,50 @@ class TradingPipeline:
                 # 세면 그 포지션이 쿨다운 동안 손절 없이 남는다(EOD 청산이 배운 함정).
                 continue
             self._exit_tracker.mark_submitted(request.symbol, as_of)
+            accepted = True
+        return accepted
+
+    async def observe_thesis_exit(
+        self,
+        view: FuturesView,
+        intent: DecisionIntent,
+        positions: list,
+        as_of: datetime,
+    ) -> bool:
+        """새 판단 한 장에 대한 논지 소멸 판정 1회 (§4 ④). **실제로 접수된 청산이 있으면 True.**
+
+        해당 사유가 섀도(`thesis_*_armed: false`)면 로그만 남기고 False — 진입 경로는 종전과
+        똑같이 흐른다.
+        판정 규칙은 `position_exit.decide_thesis()`, 창(정규장·EOD)은 완성봉 경로와 같다
+        (`_intraday_exit_allowed()`). 예외는 남기고 삼킨다 — 이 경로의 실패가 진입 판단까지
+        죽이면 안 되고, 다음 뷰가 재시도한다.
+        """
+        if not self._intraday_exit_allowed(as_of):
+            return False
+        try:
+            held = self._exit_tracker.thesis_inputs(
+                [p for p in positions if p.symbol == self._symbol], as_of=as_of
+            )
+            if not held:
+                return False
+            plan = position_exit.decide_thesis(
+                held=held,
+                intent_side=intent.side,
+                current_regime=view.regime,
+                last_price_ticks=self._bars[-1].c_ticks if self._bars else None,
+                cooling=self._exit_tracker.cooling(as_of),
+            )
+        except Exception as exc:  # noqa: BLE001 — 진입 판단까지 끌고 죽으면 안 된다
+            log(
+                "PositionExitFailed",
+                f"논지 소멸 판정 실패 — 다음 판단에 재시도: {exc}",
+                symbol=self._symbol,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        if not plan.should_exit:
+            return False
+        return await self._execute_exit_plan(plan, as_of) > 0
 
     async def handle_futures_view(self, view: FuturesView) -> None:
         if view.symbol != self._symbol:
@@ -566,6 +798,7 @@ class TradingPipeline:
         # 포지션의 배리어는 바뀌지 않는다(진입 시점 값을 `ExitStateTracker`가 든다).
         if view.cadence_seconds is not None:
             self._last_cadence_seconds = view.cadence_seconds
+        self._last_view_regime = view.regime
 
         # R10(연속손실 3회) 공급 (2026-09-22 F-120). **리스크 게이트가 돌기 전에** 먹인다 —
         # 오늘 두 번 잃고 세 번째 진입을 심사하는 순간에 그 사실이 반영돼 있어야 한다.
@@ -617,6 +850,18 @@ class TradingPipeline:
         # 사실이 "번들이 하나도 안 붙었다"는 진단의 근거였다.
         self._decisions_emitted += 1
         await self._bus.publish(TOPIC_INTENT, intent)
+
+        # ④ 논지 소멸 (2026-10-01). **진입 심사보다 먼저** 본다 — 들고 있는 포지션의 근거가
+        # 무너졌는지가 새 포지션을 열지보다 앞선 질문이다. KillSwitch가 방금 전량을 내보냈으면
+        # 볼 것이 없다(같은 스냅샷을 또 청산하면 반대 포지션이 생긴다).
+        if not kill_triggered and await self.observe_thesis_exit(view, intent, positions, as_of):
+            # 청산을 낸 사이클에는 진입하지 않는다 — 반대 판단이면 "닫고 뒤집기"를 한 번에
+            # 하게 되는데, 그 뒤집기는 **새 진입 심사**를 다음 판단에서 다시 통과해야 한다
+            # (Holding Policy §4 "연장하려면 새 진입 심사"). 같은 순간 두 주문이 같은 심볼에
+            # 엇갈려 나가 체결 순서에 결과가 갈리는 경로도 이걸로 닫힌다.
+            if intent.side != Side.NO_TRADE:
+                self._record_pass_cycle(as_of, view, intent, outcome="thesis_exit")
+            return
         if intent.side == Side.NO_TRADE:
             return
 

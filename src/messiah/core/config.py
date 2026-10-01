@@ -143,6 +143,20 @@ class FuturesExitConfig(BaseModel):
     stop_atr_mult: float | None = None
     take_profit_atr_mult: float | None = None
     resubmit_cooldown_seconds: float | None = None
+    # 사유별 무장 (2026-10-01, Holding Policy §4 ③④). `armed`가 엔진 전체 스위치라면 이 둘은
+    # 그 아래의 **추가** 스위치다 — 실주문은 `armed and <사유별>`일 때만 나간다. 손절·
+    # 시간배리어(①②)는 §4가 "협상 불가"라 적어 사유별 스위치를 두지 않는다. 기본값이
+    # False인 이유는 `armed`와 같다 — 설정을 못 읽었는데 이기는 포지션이 잘리면 안 된다.
+    take_profit_armed: bool = False
+    # ④ⓐ 신호 반전 / ④ⓑ 불리한 국면 전환 — 근거의 신뢰도가 달라 스위치도 둘이다
+    # (`strategy/position_exit.py` 모듈 docstring "논지 소멸(④)은 좁게 정의한다").
+    thesis_reversal_armed: bool = False
+    thesis_regime_armed: bool = False
+    # 트레일링 스톱 (2026-10-02) — 고정 익절의 대안. 수치는 None이면 모듈 기본값(판정 안 함 /
+    # 활성 1.0), 무장은 다른 사유별 스위치와 같은 이유로 기본 False.
+    trailing_atr_mult: float | None = None
+    trailing_activation_atr_mult: float | None = None
+    trailing_armed: bool = False
 
 
 class HoldingPolicyConfig(BaseModel):

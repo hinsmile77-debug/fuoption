@@ -203,8 +203,10 @@ TAG_LEVELS: dict[str, int] = {
     # 이 줄이 없으면 청산이 안 난 날 "조건에 안 닿았다"와 "조건 자체가 안 잡혔다"가
     # 구별되지 않는다. 09-14가 가르쳐 준 혼동(침묵 하나가 두 사실을 뜻하는 것)과 같은 형태다.
     "PositionExitArmed": logging.INFO,
-    # 비무장(`holding_policy.yaml`의 `armed: false`) 상태에서 조건이 닿았다 — 주문은 안 냈다.
-    # R18 섀도 계측의 유일한 산출물이라 **판정 근거 수치를 통째로 싣는다**.
+    # 비무장(`holding_policy.yaml`의 `armed: false`, 또는 사유별 스위치 `take_profit_armed`·
+    # `thesis_reversal_armed`·`thesis_regime_armed`가 false) 상태에서 조건이 닿았다 — 주문은
+    # 안 냈다. 포지션당 사유별 첫 도달 한 번만 남긴다(2026-10-01). R18 섀도 계측의 유일한
+    # 산출물이라 **판정 근거 수치를 통째로 싣는다**.
     "PositionExitShadow": logging.INFO,
     # 판정·제출이 실패했다. **ERROR다** — 이 경로가 조용히 죽으면 손절 없는 포지션이
     # 마감까지 간다(= F-119 이전 상태로 되돌아간다). 다음 완성봉이 재시도한다.

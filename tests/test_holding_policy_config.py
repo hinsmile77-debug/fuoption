@@ -44,8 +44,43 @@ def test_the_repo_file_parses_and_says_what_it_means():
 
     assert cfg.futures_exit.armed is True
     assert cfg.futures_exit.stop_atr_mult == 1.0
-    assert cfg.futures_exit.take_profit_atr_mult is None, "익절은 이번 스코프에 없다"
     assert cfg.futures_exit.resubmit_cooldown_seconds == 120.0
+
+
+def test_the_repo_file_arms_only_what_the_evidence_supports():
+    """③ (2026-10-01, §4 ③④) — 익절은 **판정만**(섀도), 논지 소멸은 반전만 실주문.
+
+    익절 섀도의 근거는 실측이다: 실거래 8건에 어느 고정 익절을 씌워도 EOD 그대로보다
+    나빴다(+37.1 → 2.0배 +15.6 ATR). 국면 전환 섀도의 근거는 09-16 — TREND_DOWN 안의
+    LONG이 +6.9×ATR로 끝났다. 이 값이 바뀌면 그건 사람이 표본을 보고 내린 결정이어야 한다.
+    """
+    cfg = load_holding_policy(_REPO_CONFIGS).futures_exit
+
+    assert cfg.take_profit_atr_mult == 2.0, "섀도라도 판정은 해야 반사실이 쌓인다"
+    assert cfg.take_profit_armed is False
+    assert cfg.thesis_reversal_armed is True
+    assert cfg.thesis_regime_armed is False
+
+
+def test_the_repo_file_runs_the_trailing_stop_in_shadow():
+    """트레일링(2026-10-02)은 활성 1.0 / 추적폭 2.0 섀도 — 8건으로는 EOD를 이긴 근거가 없다."""
+    cfg = load_holding_policy(_REPO_CONFIGS).futures_exit
+
+    assert cfg.trailing_atr_mult == 2.0
+    assert cfg.trailing_activation_atr_mult == 1.0
+    assert cfg.trailing_armed is False
+
+
+def test_missing_file_arms_no_reason_switch(tmp_path: Path):
+    """② 의 연장 — 사유별 스위치도 기본은 꺼짐이다. 설정을 못 읽었는데 이기는 포지션이
+    잘리면 안 된다."""
+    cfg = load_holding_policy(tmp_path).futures_exit
+
+    assert cfg.take_profit_armed is False
+    assert cfg.trailing_armed is False
+    assert cfg.trailing_atr_mult is None, "모듈 상수를 여기 복사하지 않는다"
+    assert cfg.thesis_reversal_armed is False
+    assert cfg.thesis_regime_armed is False
 
 
 def test_the_repo_stop_multiple_matches_the_module_default():
