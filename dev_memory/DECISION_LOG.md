@@ -18223,3 +18223,176 @@ S-1(신규, C등급): 섀도 메타게이트 20거래일 통과율(65.5%)을 사
 
 ### 검증
 `tests/test_collect_evidence_shadow_gate.py` 6건 통과. 오늘 날짜로 수집기 실제 실행 — 다이제스트에 "🟢 R18 판단 가능 — 잰 20/20일 · 판단 278건 중 통과 182건(65.5%)" 출력 확인. 전체 스위트 2912 통과 / 3 실패(`test_champion_sample` 라이브 파일 1·`test_rollover_day` 2 — 09-29와 동일한 기존 실패, 이번 변경 무관).
+
+## [MW0601] 2026-10-01 08:50 — 장전 점검: 점검 세션 git 직접실행 재발(이틀 무재현 후) · 나머지 이월 항목 전부 변경 없음
+
+### 증상
+2026-10-01(목) 장전 점검(Cowork 원격 세션). 기동 자가점검 3프로세스(`l1_daily`·`g2_daily`·`ui`) 전부 PASS(경고 1건: bundle, 기존 K-6), HEAD `b9789b9`=실행 중 3프로세스 전부 동일, `src/`+`scripts/` 실변경 0파일, 당일 커밋 0건, 매매 파이프라인 자체는 이상 없음. 다만 이 점검 세션 자신이 `collect_evidence.py` 실행 이전 탐색 단계에서 `git log --oneline -15`·`git status --short`를 원격 셸(`device_bash`)로 직접 실행했다 — SKILL.md §1·F-78·F-124 위반. 09-30 장중·장후 두 세션이 연속으로 무위반을 지킨 직후 오늘 장전에서 재발했다. 위반 직후 `git_lock_guard.py --check` 결과 `rc=0`(`index.lock 없음`) — 이번에도 파일 잠금으로 이어지지는 않았다.
+
+### 원인
+`scripts/hooks/session_git_guard.py`의 PreToolUse 훅이 `tool_name in {"Bash","PowerShell"}`만 검사하고, Cowork 원격 세션이 쓰는 도구 이름 `mcp__remote-devices__device_bash`는 이 목록에 없어 무조건 통과한다(2026-09-29 최초 관측, 2026-09-30 코드 열람으로 확정 — F-124). 이 근본원인은 오늘도 전혀 수정되지 않았다.
+
+### 결정
+F-124를 신규 번호 없이 동일 티켓으로 유지하고 오늘 재발을 기록한다(대응 이상점 1-1, `logs/dailycheck/2026-10-01_report.md` 참조). 전일 보고서 제4부가 예고한 나머지 6건(F-89·C-2·C-3·1-1구/F-90·K-6·S-1)은 전부 변경 없이 지속 처분 — 1-1구/F-90만 미추적 파일 수가 43건→37건으로 줄었으나 이는 09-28~09-30 리포트가 어젯밤 자동조치 커밋에 포함됐기 때문이며 백로그 처리 승인 여부와는 무관하다. 코드 변경은 하지 않는다(08:50 KST 기동, 09:00 개장 임박 — SYSTEM.md R11 · 금지계명 3·4).
+
+### Why
+"불확실한 것과 확정된 결함을 섞지 않는다"는 규율에 따라 오늘 신규 관측(F-124 재발)과 기존 이월 항목(전부 변경 없음)을 명확히 구분해 기록한다. 이틀 연속 무재현 이후 처음 재발한 것을 굳이 남기는 이유는, "여러 번 조심하면 저절로 좋아진다"는 잘못된 인상을 막기 위해서다 — 근본원인(훅이 `device_bash` 경로를 못 봄)이 고쳐지지 않는 한 이 위반은 세션이 의식적으로 조심하느냐에만 의존하는 취약한 상태로 계속 남는다.
+
+### How to apply
+`logs/dailycheck/2026-10-01_report.md` 장전 절 F-124 참조 — `scripts/hooks/session_git_guard.py`의 `tool_name` 판별에 `device_bash`류 MCP 도구 이름 접두어 매칭 추가(훅이 MCP 호출을 가로챌 수 있는지 선행 확인 필요), 안 되면 SKILL.md §1 문서 보강을 차선책으로. 사용자 "F-124 구현해" 지시 후 다음 장후에 적용.
+
+### 검증
+라이브 미검증 항목: F-124(계획 단계, 코드 변경 없음). 이 세션은 `collect_evidence.py`와 `git_lock_guard.py --check`(git 자체가 아닌 프로젝트 점검 스크립트) 실행, 그리고 오늘 위반으로 확인된 `git log`/`git status` 직접 실행 외에는 추가로 git을 호출하지 않았다. F-89는 오늘이 3거래일 재검증 마지막 날 — 검증 기한: 오늘 장후 배치.
+
+## [MW0601] 2026-10-01 12:44 — 장중 점검: 신규 이상점 없음 · 전일 장전 이월 7건 전부 변경 없이 지속 · 이번 세션은 git 직접실행 무위반
+
+### 증상
+2026-10-01(목) 장중 점검(Cowork 원격 세션, 관측구간 09:00~12:44). `status_snapshot.json`(12:40:08) 기준 파이프라인 4개 구성요소(l1.collector/l1.feature_engine/l1.composer/g2.pipeline) 전부 OK, `code_version.stale: false`(전 프로세스 b9789b9=HEAD), `circuit_breaker.phase: normal`/`gateway_halted: false`, `irrecoverable_loss.clean: true`/`lost_items: 0`. l1_daily·g2_daily 합산 ERROR 로그 0건, `AggregatorLateTickDropped` 0건, `bar_to_publish_ms` p99 171ms(예산 1,000ms의 17.1%). `DecisionEmitted` 8건(09:00~12:30, 30분 간격) — 09:00 1건만 LONG(S=0.262, 임계 ±0.2 초과)이었으나 `SizerZeroQty`(raw=0.616 < min_qty 1)로 주문 미생성, 나머지 7건 전부 NO_TRADE(우위 부족). 주문·리스크·사이징·게이트웨이 태그 0건(오늘도 주문 없음), `UnmatchedFill` 0건. SessionStart 3프로세스 전부 1회(재기동 없음), 학습/재훈련 관련 태그 0건. `g2_daily` 08:25~08:50 25분 로그 공백(자동 적신호)은 2026-09-10 장후 확정 K-25 패턴(옵션판단 서비스는 완성 5분봉 이벤트로만 구동, 체결 없는 개장 전 버킷은 이벤트 자체가 없음)의 반복으로 원본 로그 대조 재확인, 09:00 이후는 30분 간격 공백 없이 완전. `OptionChainStaleSpot` 3건(08:21:40~08:30:00)도 08:48:20~08:51:40 전량 장 시작 전 해소, 08-28 이후 매일 반복 패턴과 일치. 화면(ui) 로그는 08:20:50 이후 추가 JSON 기록 없음 — 2026-08-26 F-56이 이미 확정한 구조적 한계(화면 프로그램은 평시에도 조용한 것이 정상, 포트 응답만으로 생사 판정 가능)의 재확인, 신규 아님. 세 프로세스 로그 전부 "Windows fatal exception"/access violation 0건(F-89 3거래일 재검증 3일차, 09:00~12:44 구간 무재현 — 최종판정은 오늘 장후). **이번 장중 점검 세션 자신은 저장소 상태 확인에 `collect_evidence.py` 출력과 로그 파일 읽기만 사용했고 git 명령을 직접 실행하지 않았다** — 오늘 장전(08:50)에 재발했던 F-124(점검 세션의 git 직접실행 금지 위반, `session_git_guard.py`가 `mcp__remote-devices__device_bash` 경로를 못 봄)가 이번 장중 세션에서는 재현되지 않았다.
+
+### 원인
+해당 없음 — 신규 이상점이 없어 원인 분석 대상 없음. F-124는 오늘 장전 항목과 동일 티켓, 근본원인 미해결 상태 변화 없음(위 증상 참조).
+
+### 결정
+전일(오늘) 장전 보고서 「다음 거래일 관측 예정」 7건(F-89·F-124·C-2·C-3·1-1구/F-90·K-6·S-1)을 전부 처분 — 전건 🔄 지속(변경 없음), F-124만 "오늘 장전 재발·이번 장중 세션 무위반"으로 세분. 1-1구/F-90(추적 안 되는 파일 백로그)는 37건→39건(+2, 이 점검 절차 자신의 산출물)로 소폭 증가했으나 처분 자체는 지속. 신규 Fix/고도화 항목 없음 — 코드 변경은 하지 않는다(09:00~15:35 정규장 중 — SYSTEM.md R11·금지계명 3·4).
+
+### Why
+장중 국면의 질문("지금 설계대로 돌고 있는가")에 대해 오늘은 "예"라고 답할 수 있는 근거가 충분했다(파이프라인 4개 구성요소 전부 OK, 완성봉 규율 준수, 판단·주문 경로 설계대로, 금지사항 위반 없음). 자동 적신호 1건(g2_daily 25분 공백)은 이미 다건 확정된 정상 패턴이라 신규 이상점으로 보지 않았다 — "불확실한 것과 확정된 결함을 섞지 않는다"는 규율에 따라 "확인됨(정상 패턴)"으로만 표에 올렸다. F-124에 대해 "이번 세션은 무위반"이라는 긍정적 관측을 명시적으로 남기는 이유는, 장전 절이 이미 경고했듯 여러 번 조심한다고 근본원인이 저절로 없어지는 것은 아니기 때문에, 하루 안에서도 세션별로 구분해 추적해야 "운이 좋았다"와 "고쳐졌다"를 혼동하지 않는다.
+
+### How to apply
+해당 없음(신규 코드 변경 없음). F-124 적용 방안은 오늘 장전 DECISION_LOG 항목(장전 08:50) 및 `logs/dailycheck/2026-10-01_report.md` 장전 절 Fix 계획을 참조 — 변경 없이 그대로 유효, 사용자 "F-124 구현해" 지시 후 다음 장후 적용 권고.
+
+### 검증
+이 세션은 `collect_evidence.py --phase intra`(1회) 실행과 `logs/l1_daily_20261001.log`·`logs/g2_daily_20261001.log`·`logs/ui_20261001.log`·`dev_memory/DECISION_LOG.md`·`dev_memory/NEXT_TODO.md`에 대한 좁은 grep/cat 조회 외에는 git을 포함한 어떤 상태 변경 명령도 실행하지 않았다. F-89는 오늘이 3거래일 재검증 마지막 날 — 최종 검증은 오늘 장후 배치 이후.
+
+
+## [MW0601] 2026-10-01 15:5x — 장후 점검: 신규 확정 결함 0건 · F-89 3거래일 재검증 완료(해소) · F-124 근본원인 미해결(장중·장후 무위반) · 실거래 1왕복 +77,000원
+
+### 증상
+장후 점검(Cowork 원격 세션, `messiah-daily-check` phase=post). 장후 배치(`logs/postmarket_20261001.log`) 먼저 완주 여부부터 확인 — 15:45:02~15:47:02, "=== 장후 절차 요약 ===" 블록 7/7단계 전부 ✅·발견 0(`SessionEnd` 정상 종료). 오늘 하루 전체(`l1_daily`·`g2_daily`·`ui`·`postmarket` 로그, `status_snapshot.json`, `daily_integrity_20261001.json`) 재검토 결과: `l1_daily`·`g2_daily`·`postmarket` 각 `SessionEnd`(정상 종료) 확인, ERROR 로그 0건, 당일 커밋 0건(HEAD `b9789b9` 종일 유지, 코드버전 불일치 없음), `irrecoverable_loss.clean: true`. 수정검증등록부(`FixVerificationScoreboard`, 15:47:02) — 등록 22건 중 오늘 위반 0·회복 중 0·검증 완료 22·판정 불가 0·기한 0(어제 09-30은 기한 초과 1건=`ui-crash-isolation`이었음). `FixVerificationRecurred`(재발) 0건. 오늘 WARNING 태그(`OptionChainStaleSpot`×3·`DailyCloseBarHandedOff`×1·`PublishGraceBreached`×1·`MetaGateEvaluated`×6·`KillSwitchLiquidating`×1·`EodFlattenLiquidating`×1·`SizerZeroQtyStreak`×1·`RollBasisUnmeasured`×1) 전부 dev_memory 과거 기록과 대조해 기존 확정 정상 패턴으로 판정, 신규 이상점 등재 없음. `PublishGraceBreached`의 "전일 대비 -1,176ms 급변" 표시는 최근 4거래일(09-28 -4226.4ms·09-29 -6093.0ms·09-30 -1907.6ms·오늘 -3083.1ms) 대조 결과 정상 변동 범위 안으로 확인(급변 판정 자체는 `_HEADROOM_SURGE_RATIO=0.5` 설계대로 정상 작동, 다만 이 지표는 원래 변동폭이 커서 매번 급변으로 뜰 수 있음 — G-9 보강 제안). `KillSwitchLiquidating`+`EodFlattenLiquidating` 동시발생(15:25:00.022~024)은 2026-09-23 이상점 2-4에서 이미 규명된 설계(`pipeline.py:1036-1046`, `EodFlatten`이 `KillSwitch.liquidate()` 재사용)이며 오늘도 실제 `KillSwitch` 자체 발동 태그 0건으로 재확인. 오늘 실거래(모의) 1왕복(15:00:00 LONG 진입 1계약 `SIM00000001`→15:25:00 장마감 10분전 규정청산 1계약 `SIM00000002`) 전부 `OrderGateway` 경로로 체결(`FillMatched`), `UnmatchedFill` 0건, 대사(`PositionReconciled`) 일치 — 실현손익 +77.0틱(+77,000원, 자본 대비 +0.154%), 장마감 시점 순보유 0계약. **가장 중요한 관측은 F-89(ui-crash-isolation) 3거래일 재검증 완료** — 09-29(1일차)·09-30(2일차)·오늘(3일차) 세 로그 전부에서 "Windows fatal exception"/"access violation" 0건을 재확인했고, 오늘 장후 등록부가 공식적으로 "검증 완료"로 전환했다(어제까지는 "기한 초과"였음). F-124(점검 세션의 git 직접실행 금지)는 오늘 장전(08:50)에 재발했으나 이번 장중·장후 두 세션은 무위반 — 다만 `session_git_guard.py`의 근본원인은 오늘도 수정되지 않았다.
+
+### 원인
+해당 없음 — 신규 확정 결함이 없어 원인 분석 대상 없음. F-89는 원인(Windows `asyncio` 셀렉터 추정)이 밝혀진 것이 아니라 "재발 감시 기간(3거래일)을 통과"한 절차적 판정이다 — 원인 규명 자체는 여전히 미착수 상태로, 이를 계속 조사할지는 F-124와 같은 우선순위 결정 대상이다.
+
+### 결정
+오늘 장전 보고서 「다음 거래일 관측 예정」 7건(F-89·F-124·C-2·C-3·1-1구/F-90·K-6·S-1)을 전부 최종 처분 — F-89만 ✅ 해소로 전환, 나머지 6건은 🔄 지속(변경 없음). F-124는 오늘 하루 3회 점검 중 1회(장전) 위반·2회(장중·장후) 무위반으로 세분 기록했으나 근본원인 미해결이라 이상점 번호(1-1)는 그대로 유지. 1-1구/F-90(미추적 파일 백로그)는 39건→46건(+7, 점검 절차 자신의 산출물 2건 + 오늘 거래로 생긴 `pass_cycles` 5건)으로 증가했으나 처분 자체는 지속. G-9(기존 제안)를 오늘 관측(`PublishGraceBreached` 급변 판정의 수작업 대조 비용)으로 보강해 재확인. 신규 Fix 항목 없음 — 코드 변경은 하지 않는다(이 예약 실행 세션은 보고까지만 수행, 사용자 "구현해" 지시 대기).
+
+### Why
+장후 국면의 질문("오늘 하루가 설계대로였는가")에 대해 오늘은 "예"라고 답할 수 있는 근거가 충분했다 — 장후 배치 7/7 완주, 등록부 22건 전부 검증 완료, `FixVerificationRecurred` 0건, 실거래 1왕복이 진입부터 청산·대사까지 전부 설계대로 관통했다. F-89를 ✅ 해소로 처분하면서도 "원인은 안 밝혀졌다"를 명시한 이유는, "재발 감시 기간 통과"와 "원인 해결"을 혼동하면 다음에 같은 크래시가 다시 나타났을 때 "이미 고친 것의 재발"(`FixVerificationRecurred`)로 격상해서 봐야 할 사안을 "그냥 흔한 일"로 가볍게 넘길 위험이 있기 때문이다. `PublishGraceBreached` 급변 표시를 "확인된 기존 패턴"으로 처분하면서도 신규 이상점으로 번호를 매기지 않은 이유는, 4거래일치 실측 비교 결과 오늘 값이 그 범위 안에 있었고 근본 메커니즘(`DailyCloseBarHandedOff`)이 이미 2026-08-25부터 설계로 확정된 상시 동작이기 때문이다 — 다만 이 대조 작업 자체가 매번 반복되는 수작업 비용이라는 점은 G-9 제안으로 별도 기록했다.
+
+### How to apply
+해당 없음(신규 코드 변경 없음). F-124 적용 방안은 오늘 장전 DECISION_LOG 항목(08:50) 및 `logs/dailycheck/2026-10-01_report.md` 장전 절 Fix 계획·장후 절 Fix 계획을 참조 — 변경 없이 그대로 유효, 사용자 "F-124 구현해" 지시 후 적용. G-9(자동 적신호 화이트리스트 + `PublishGraceBreached` 급변기준 보강)도 사용자 결정 대기.
+
+### 검증
+이 세션은 `collect_evidence.py --phase post`(1회) 실행과 `logs/l1_daily_20261001.log`·`logs/g2_daily_20261001.log`·`logs/postmarket_20261001.log`·`logs/shutdown_watchdog.log`·`logs/daily_integrity_20261001.json`·`logs/g2_daily_returns.jsonl`·`logs/status_snapshot.json`·`dev_memory/DECISION_LOG.md`·`dev_memory/NEXT_TODO.md`·`src/messiah/features/engine.py`(헤드룸 급변 판정 로직 확인)에 대한 좁은 grep/cat/python 읽기 조회 외에는 git을 포함한 어떤 상태 변경 명령도 실행하지 않았다(F-124 재발 없음). 보고서는 `logs/dailycheck/2026-10-01_report.md` 하나에 장전·장중 본문을 고치지 않고 장후 절부터 append했다. F-89 "검증 완료" 판정은 15:47:02 `FixVerificationScoreboard`의 `today_violating: 0, overdue: 0, clean: 22` 집계와 `FixVerificationPassed`(`ui-crash-isolation`, `clean_streak_before_recurrence_days: 20`) 개별 로그 줄로 직접 확인했다 — **라이브 미검증 사항 없음(관찰 판정이며 코드 변경이 없어 별도 검증 기한 불필요)**.
+
+
+## [MW0601] 2026-10-01 16:3x — F-125 청산 우선순위 ③익절·④논지 소멸 구현(익절·국면전환은 섀도, 신호반전만 실주문)
+
+### 증상
+Holding Policy §4 청산 우선순위 넷 중 ①손절·②시간배리어는 F-119(09-22)로 가동 중이었으나
+③익절은 코드만 있고 기본값 null(판정 자체 없음), ④논지 소멸(신호 반전·Regime 전환)은
+**한 줄도 없었다**. 실거래 8건(09-16 2건·09-17·09-22·09-23·09-29·09-30·10-01) 전부가
+15:25 EOD 강제청산으로만 나갔다.
+
+### 원인
+F-119가 의도적으로 스코프에서 뺐다 — 익절은 "이기고 있는 포지션을 자르는 새 정책이라 표본을
+보고 사람이 정할 일"(position_exit.py docstring). 사용자가 오늘 ③④ 구현을 지시.
+
+### 결정
+1. **③ 익절**: `take_profit_atr_mult: 2.0`(손절 1.0과 2:1, 30m 라벨 폭 배수와 같은 숫자)으로
+   판정은 켜되 `take_profit_armed: false` **섀도**. 근거는 실측(M1 봉 재구성, 진입 시점
+   ATR 단위) — 8건 EOD 합 **+37.1** vs 고정 익절 1.0배 +8.0 · 2.0배 +15.6 · 3.0배 +22.6.
+   어느 배수도 그대로 둔 것보다 나빴다(마감 직전 한 방향 표류를 먹는 표본).
+2. **④ⓐ 신호 반전**(`THESIS_REVERSAL`): 보유 방향의 **반대** `DecisionIntent`가 나오면
+   FuturesView 도착 시점에 전량 청산, 그 사이클엔 진입하지 않는다. **실주문**
+   (`thesis_reversal_armed: true`). 약화(같은 방향 NO_TRADE)는 제외 — 09-22(15:00 S
+   0.31→0.19, EOD +113틱)가 반례. 8건 중 이 조건에 닿은 건 0건.
+3. **④ⓑ 불리한 국면 전환**(`THESIS_REGIME`): 진입 국면과 달라졌고 새 국면이 반대 추세일 때.
+   **섀도**(`thesis_regime_armed: false`). 09-16 국면은 30분마다 TREND_UP→RANGE→
+   TREND_DOWN(확신도 0.44)→HIGH_VOL로 바뀌었고, TREND_DOWN 안에서 들어간 LONG이
+   +346틱(6.9×ATR)으로 끝났다 — 국면 라벨이 청산 근거로 낫다는 증거가 없다.
+4. 섀도 로그(`PositionExitShadow`)는 포지션당 사유별 **첫 도달 1회**로 바꿨다(종전엔 매 봉).
+
+### Why
+"구현했다"와 "켰다"를 분리했다. 판정은 전부 돌아 반사실이 쌓이고, 실주문은 근거가 있는
+사유(판단 엔진 자신의 반전)만 낸다. 고정 익절은 현 표본에서 명백히 손해라 켜는 것이 곧
+성과 훼손이다.
+
+### How to apply
+- 변경: `strategy/position_exit.py`(ExitReason 2종·`HeldThesis`·`decide_thesis()`·추적기
+  진입국면/섀도 1회), `strategy/pipeline.py`(`observe_thesis_exit()`·`_execute_exit_plan()`·
+  `_intraday_exit_allowed()` 공통 창·사유별 무장·로그 문구), `core/config.py`(스위치 3개,
+  기본 전부 false), `configs/holding_policy.yaml`, `core/logging.py`(주석).
+- 켜기/끄기는 yaml 한 줄씩: `take_profit_armed` · `thesis_reversal_armed` · `thesis_regime_armed`.
+- **실효 범위 주의**: 지금 진입은 전부 14:30·15:00이라 다음 뷰(15:00)가 오는 건 14:30 진입뿐,
+  15:00 진입은 15:25 EOD 창 전에 다음 판단이 없다. ④의 실발동 기회는 당분간 드물다.
+
+### 검증
+신규 테스트 25건(판정 15 · 결선 8 · 설정 2) + 기존 1건 갱신 — 09-22 약화·09-16 역추세
+진입 회귀 고정, 섀도 시 진입 경로 불변을 단언으로 증명. `test_position_exit`·`test_pipeline`·
+`test_holding_policy_config` 전부 통과, 전체 2,937 통과 / 3 실패(`test_champion_sample`·
+`test_rollover_day` — 라이브 데이터 파일 의존, 이번 변경과 무관). ruff check 통과.
+
+## [MW0601] 2026-10-01 18:15 — 장후 자동조치: 구현 0건(F-124·G-9 사람 결정) · F-125 수동 작업 미커밋 발견
+
+### 증상
+- 장후 리포트의 대상 항목 F-124·G-9가 모두 "사람 결정" 표식. S 절 없음.
+- 가드 7: `src/messiah/strategy/position_exit.py`·`pipeline.py`·`core/config.py`·`core/logging.py`·`configs/holding_policy.yaml`·테스트 3파일이 미커밋(16:27–16:36 수정, 위 F-125 항목의 작업).
+
+### 원인
+- F-124·G-9는 리포트 스스로 "예약 세션 미적용 · 사용자 지시 선행"으로 적었다.
+- F-125는 수동 지시 세션이 구현만 하고 커밋하지 않은 상태로 끝났다.
+
+### 결정
+- F-124·G-9 C등급 보류. F-125 변경은 손대지 않음(청산 경로 = 주문 실행 경로).
+- `dev_memory` 2파일은 F-125 기록이 섞여 있어 이번 커밋에서 제외. 리포트·당일 JSON 5종만 커밋 `a932de0`, 푸시 완료.
+
+### Why
+- 기록과 코드가 다른 커밋으로 갈라지면 "구현됐다"는 기록만 다른 PC로 넘어가 어긋난다.
+
+### How to apply
+- F-125를 커밋하는 사람이 `dev_memory/DECISION_LOG.md`·`NEXT_TODO.md`를 함께 add한다(오늘 점검 3회분 + 이 항목 포함).
+
+### 검증
+- 코드 변경 0건이라 pytest 미실행. 커밋 후 F-125 미커밋 변경 그대로 보존 확인, `.git/index.lock` 부재 확인.
+
+
+## [MW0601] 2026-10-02 — F-126 트레일링 스톱(이익 보호) 섀도 등록 — 고정 익절의 대안
+
+### 증상
+F-125(10-01) 실측에서 고정 익절은 어느 배수도 EOD 그대로보다 나빴다(+37.1 vs 2.0배 +15.6 ATR).
+고정 상단은 마감 직전 한 방향 표류의 꼬리를 자른다. 사용자가 대안인 트레일링 스톱을 섀도로
+등록하라고 지시.
+
+### 원인
+해당 없음(신규 기능).
+
+### 결정
+- `ExitReason.TRAILING_STOP` 신설. 최고 이익이 `trailing_activation_atr_mult × ATR`(1.0) 이상
+  난 뒤, **최고 완성봉 종가** 대비 `trailing_atr_mult × ATR`(2.0) 되밀리면 전량 청산.
+  `trailing_armed: false` **섀도**.
+- 실측(같은 8건, M1 종가 판정, 활성 1.0): 추적폭 1.0배 +26.2 · 1.5배 +26.9 · **2.0배 +32.4**
+  (4/8 발동) · 3.0배 +37.3 vs EOD +37.1. 고정 익절의 두 배지만 EOD를 확실히 이긴 배수는
+  없어 섀도로 시작한다.
+- 우선순위 손절 > 시간배리어 > 트레일링 > 익절. 최고점 기준은 고가가 아니라 종가(판정과 같은 축).
+- **사유 가림 수정**: `decide()`는 포지션당 사유 하나만 돌려주므로, 무장 여부가 다른 사유를 한
+  번에 판정하면 섀도 트레일링이 같은 봉의 무장 익절을 가로챈다. 파이프라인
+  `_plan_position_exit()`가 실주문 패스(무장 사유만) + 섀도 사유별 단독 패스로 나눠 판정한다.
+
+### Why
+트레일링은 「지킬 이익이 생긴 뒤에만」 걸려 고정 익절보다 추세 꼬리를 덜 자르고, 09-22처럼
++4.9×ATR까지 갔다가 +1.4로 밀린 거래를 지킨다(2.0배 → +2.7). 다만 8건·단일 국면이다.
+
+### How to apply
+- 변경: `strategy/position_exit.py`(사유·`HeldFutures.best_price_ticks`·추적기 최고점 갱신·
+  `decide(trailing_*)`), `strategy/pipeline.py`(`_plan_position_exit()`·로그 문구),
+  `core/config.py`(`trailing_atr_mult`·`trailing_activation_atr_mult`·`trailing_armed`),
+  `configs/holding_policy.yaml`.
+- `PositionExitArmed`에 `트레일링 …틱(섀도)` 토막이 붙는다. 켜려면 `trailing_armed: true` 한 줄.
+- 재기동하면 최고점을 진입가부터 다시 잰다(알려진 갭 — 트레일이 늦게 걸리는 쪽).
+
+### 검증
+신규 테스트 17건(판정 13 · 결선 3 · 설정 1) — 활성 문턱 미달 무발동, 1틱 차 경계, SHORT 대칭,
+손절 우선, 뒤집기 시 최고점 초기화, **섀도가 무장 사유를 가리지 않음** 회귀 포함.
+청산 관련 3개 파일 141건 통과, 전체 2,954 통과 / 3 실패(`test_champion_sample`·
+`test_rollover_day` — 라이브 데이터 의존, 무관, F-125 때와 동일). ruff check·format 통과.
