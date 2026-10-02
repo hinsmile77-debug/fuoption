@@ -18396,3 +18396,77 @@ F-125(10-01) 실측에서 고정 익절은 어느 배수도 EOD 그대로보다 
 손절 우선, 뒤집기 시 최고점 초기화, **섀도가 무장 사유를 가리지 않음** 회귀 포함.
 청산 관련 3개 파일 141건 통과, 전체 2,954 통과 / 3 실패(`test_champion_sample`·
 `test_rollover_day` — 라이브 데이터 의존, 무관, F-125 때와 동일). ruff check·format 통과.
+
+
+## [MW0601] 2026-10-02 08:5x — 장전 점검: 신규 결함 0건 · 전략/모델 코드 7파일 미커밋+기록 없음(P2) · F-125·F-126 오늘 아침 커밋 완료(해소)
+
+### 증상
+장전 점검(Cowork 원격 세션, `messiah-daily-check` phase=pre). 기동 자가점검 3프로세스(`l1_daily`·`g2_daily`·`ui`) 전부 PASS(경고 2건: git·bundle), HEAD `f9c1fd6`=실행 중 3프로세스 전부 동일 sha. 어젯밤 미커밋이었던 F-125(청산 ③④)·F-126(트레일링 스톱)은 오늘 08:00~08:01 `19f9d8d`·`f9c1fd6`로 이미 커밋돼 해소됐다. 그런데 그와는 별도로 `src/`+`scripts/` 7개 파일(`backtest/harness.py`·`broker/simulator/adapter.py`·`models/labeling.py`·`models/trainer.py`·`strategy/decision/meta_decision.py`·`strategy/pipeline.py`·`scripts/run_g1_walk_forward.py`, +421/-24줄)이 새로 미커밋 상태다. `pipeline.py`만 위 커밋에도 포함됐던 파일이고 나머지 6개는 오늘자 DECISION_LOG 어디에도 연결되지 않는다(파일명 grep 0건). `code_version.stale: true (worktree_dirty)`.
+
+### 원인
+불명확 — 이 점검 세션은 원격(Cowork)이라 로컬 에디터 히스토리를 볼 수 없다. 가장 가능성 높은 가설은 로컬 세션이 전략/모델 관련 작업(NEXT_TODO F-117 HIGH_VOL 게이트 또는 F-118 국면별 재학습 착수분으로 추정)을 진행하다 2026-10-01 F-125와 같은 패턴으로 기록·커밋 없이 세션을 마친 것.
+
+### 결정
+- 신규 이상점 1-1(P2)로 등재, 장전 리포트(`logs/dailycheck/2026-10-02_report.md`)에 Fix 계획(F-1)·확인 필요(C-1) 기재. 코드는 건드리지 않음(장전, R11·금지계명 3·4).
+- C-1로 다음 장중/장후에 재확인 예정 — 그때도 미커밋+무기록이면 "방치"로 격상 검토.
+- S-1(섀도 메타게이트 65.5%)·K-6(번들 미승격)은 오늘도 변경 없음, 그대로 지속.
+
+### Why
+파이썬 프로세스는 git 커밋이 아니라 디스크 파일을 그대로 import하므로, `SessionStart.git_sha`가 HEAD와 같아도 작업트리가 dirty하면 "실행 중인 코드=HEAD"를 보장하지 못한다. 특히 `meta_decision.py`·`pipeline.py`는 매일 모의매매 판단이 지나가는 경로라, 기록 없는 미커밋 변경은 오늘 모의매매 결과의 재현성을 떨어뜨린다. SYSTEM.md §7 "커밋 안 된 수정을 실전 PC에 남기지 않는다"의 정신과 어긋난다(다만 phases.md A-2상 dev 모드 dirty는 자동 기동 관문 통과 기준으로는 허용).
+
+### How to apply
+사용자가 로컬에서 7파일 diff를 확인 → 의도된 작업이면 테스트(`tests/backtest/test_harness.py`·`tests/models/test_labeling.py`·`tests/models/test_trainer.py`·`tests/strategy/decision/test_meta_decision.py`·`tests/strategy/test_pipeline.py`·`tests/test_regime_and_bundle_paths.py`) 통과 후 dev_memory 기록과 함께 커밋, 폐기 대상이면 되돌리고 그 사실을 기록. 적용 시점은 장후 이후(장전·장중 금지).
+
+### 검증
+코드 변경 0줄(장전 점검, 예약 실행 규칙 준수). `FixVerificationRecurred` 0건(오늘 자가점검·태그 집계 전체 확인 — ERROR 0건, WARNING은 `OptionChainStaleSpot`(08-28 이후 매일 반복되는 정상 패턴)·git(위 1-1)·bundle(기존 K-6)뿐). 이 세션은 `collect_evidence.py` 실행 외 `git` 명령을 직접 호출하지 않았다(F-78·F-124 무위반 — 이 세션의 명령 이력 자체 대조로 확인). 라이브 미검증 — F-1(7파일 기록·커밋)은 사용자 확인 후 다음 장중/장후 점검에서 재확인(검증 기한: 2026-10-02 장후).
+
+
+## [MW0601] 2026-10-02 — F-127 진입이 14:30·15:00에만 나는 원인 수정(P0–P2 코드) · 재학습·워크포워드는 장후
+
+### 증상
+실거래 8건이 전부 14:30·15:00 진입이었다. 30거래일 판단 413회를 시각별로 묶으면 평균 S가
+14:00 −0.03 → 14:30 +0.15(양수 비율 30% → 77%)로 계단을 이룬다. 판단의 83%가 점수 임계(0.2)에서
+접혔고, 한낮 S의 표준편차는 0.03–0.07이라 임계에 닿을 수 없었다. 상위 피처는 `ev_close_remain`·
+`ev_tod_cos`·`ev_open_elapsed`, 셋 다 시계 피처였다.
+
+### 원인 (학습 경로 재현 실측, 2025-12-12 – 2026-08-03)
+1. `backtest/harness.aggregate_to_horizon()`이 1분봉을 **개수로** 30개씩 묶었다. 하루 410분이라
+   격자가 매일 20분 밀려, 30m 학습봉 2,103개 중 서빙 격자(:00/:30)와 맞는 봉은 6.0%뿐이었다.
+   6.8%(142개)는 장 마감과 다음 날 아침을 한 봉에 섞었다(고가–저가 3.6배).
+2. 삼중장벽 레이블의 앞 3봉이 날짜를 넘었다. 14:30 이후 진입 레이블의 43–54%가 다음 날 봉에서
+   판정돼 밤사이 갭(8개월 상승장)을 +1로 셌다. 한낮 레이블은 부풀려진 ATR 때문에 88–93%가 FLAT.
+3. 그래서 모델이 배운 가장 확실한 규칙이 「마감이 가까우면 LONG」이었다. 그 일부는 실전이 15:25
+   강제청산으로 가질 수 없는 갭이다.
+4. 워크포워드 재생에도 캘린더·청산 엔진·장마감 청산이 없어 포지션이 밤을 넘겼다. 실전과 다른
+   게임을 채점하고 있었다. `--feature-set`도 없어 `v2026.07`로 고정돼 있었다.
+
+### 결정 (코드 — 이번 커밋)
+- P0-1 `aggregate_to_horizon()` → `data/bar_composer.compose_offline()`(실시간과 같은 시계 격자,
+  하루를 넘는 봉 없음). 옛 방식은 `aggregate_to_horizon_legacy()`로 비교 전용 보존.
+- P0-2 실행 가능한 레이블: 앞 구간은 같은 거래일·봉 시작 15:25(`EXECUTABLE_EXIT_CUTOFF_KST`) 이전까지.
+  잘린 레이블은 `session_truncated=True`. 15:25 이후 확정 진입봉은 레이블 없음.
+  `train_formal_expert(label_session_cutoff=...)` 배선. 근사: 컷오프를 걸치는 봉은 통째로 들어간다(최대 5분).
+- P0-3 워크포워드 실전 조건: 캘린더(R6·정규장), `holding_policy.yaml` 청산 엔진, 1분봉마다
+  `observe_eod_flatten_tick()`, 날짜마다 `start_day()`. 옵션 `--legacy-bars`·`--legacy-labels`·
+  `--legacy-execution`·`--feature-set`(기본 운영값).
+- P1 `SimBroker.fill_log` → `round_trips_from_fills()` → 진입 시각별 건수·승률·손익 출력.
+- P2-6 장마감 청산 창(마감 10분 전부터)에서는 판단 엔진이 `gate=eod_window` NO_TRADE — 실행 불가
+  판단(30일간 15:30 LONG 14·SHORT 1)이 신호 통계에 섞이지 않게 한다.
+
+### Why
+실전 서빙봉과 같은 분포로 학습하고, 실전이 실현할 수 있는 손익만 레이블로 삼아야 진입 신호가
+「시계」가 아니라 시장에서 나온다. 재생 조건이 실전과 다르면 그 차이를 잴 방법도 없다.
+
+### How to apply
+- 실전 서빙 경로는 바뀌지 않는다(국면 웜스타트는 아카이브의 정렬된 30m봉을 읽는다). 실전에서 달라지는
+  것은 P2-6 하나 — 15:25 이후 판단이 NO_TRADE(eod_window).
+- 국면 AI 모델도 옛 집계로 학습돼 있다. `train_regime_ai.py`는 실전 모델 파일을 덮을 수 있어
+  이번엔 돌리지 않았다(별도 결정 필요).
+- 장후 실험(A 옛 방식 · B 새 방식 · C 시계 피처 제외 · D 옛 재생, 15m·5m)은 결과가 나오면 이 항목에
+  이어 적는다. 새 번들은 섀도 등록까지만, 챔피언 교체는 사람 승인.
+
+### 검증
+신규·갱신 테스트: 집계 격자·날짜 경계·옛 방식 재현, 레이블 컷오프(두 정본 일치·갭 차단·15:25 절단·
+진입 불가 칸·한낮 무변경·꼬리 트림), 왕복 복원 3건, 재생 루프 EOD 틱·일자 리셋, 판단 게이트
+eod_window(엔진 3·파이프라인 1). 합성 픽스처 2곳(24시간 연속 봉)을 정규장 시각으로 교정.
+전체 2,969 통과 / 0 실패(라이브 데이터 의존 기존 실패 3건 제외). ruff 통과.
