@@ -122,7 +122,22 @@ GATE_REGIME = "regime"  # ② 이벤트/미판정 국면
 GATE_DISPERSION = "dispersion"  # ③ 전문가 의견 분산
 GATE_SCORE = "score"  # ④ |S| 미달
 GATE_PASS = "pass"  # ⑤ 통과 — 여기까지 와야 Risk·Sizer·OrderGateway가 돈다
-DECISION_GATES = (GATE_KILL, GATE_NO_EXPERT, GATE_REGIME, GATE_DISPERSION, GATE_SCORE, GATE_PASS)
+# ①″ 장마감 청산 창(마감 10분 전부터) — **진입이 구조적으로 불가능한 칸** (2026-10-02 P2-6).
+#
+# 그 창에서는 R6가 모든 신규 진입을 막고 장중 청산도 `eod_flatten`에 넘어간다. 그런데
+# 종전엔 엔진이 거기서도 끝까지 판정해 15:30에 LONG 14건·SHORT 1건(30거래일)을 냈고, 그
+# 판단이 `score`/`pass` 칸에 섞여 「신호가 마감 근처에서 강하다」는 통계를 부풀렸다. 그 칸의
+# 판단은 행동으로 이어질 수 없으므로 신호 통계에 들어가면 안 된다 — 따로 센다.
+GATE_EOD_WINDOW = "eod_window"
+DECISION_GATES = (
+    GATE_KILL,
+    GATE_EOD_WINDOW,
+    GATE_NO_EXPERT,
+    GATE_REGIME,
+    GATE_DISPERSION,
+    GATE_SCORE,
+    GATE_PASS,
+)
 
 
 @dataclass(frozen=True)
@@ -161,7 +176,11 @@ class MetaDecisionEngine:
     def __init__(self, config: MetaDecisionConfig | None = None) -> None:
         self._config = config or MetaDecisionConfig()
 
-    def decide(self, view: FuturesView, *, kill_active: bool) -> DecisionIntent:
+    def decide(
+        self, view: FuturesView, *, kill_active: bool, entry_window_closed: bool = False
+    ) -> DecisionIntent:
+        """`entry_window_closed`: 장마감 청산 창 안인가(호출자가 캘린더로 판정 — 엔진은
+        시계를 모른다). True면 게이트 ①″에서 접는다(`GATE_EOD_WINDOW` 주석)."""
         cfg = self._config
         # 어느 갈래로 접히든 **그 사이클에 적용됐을 게이트**를 로그에 싣는다 — 국면별 표를
         # 도입한 뒤로는 "임계가 얼마였나"가 사이클마다 다를 수 있고, 사후에 재구성할 수
@@ -171,6 +190,13 @@ class MetaDecisionEngine:
         if kill_active:
             return self._no_trade(
                 view, "① sys.kill 활성 — 무조건 NO TRADE", gate=GATE_KILL, threshold=threshold
+            )
+        if entry_window_closed:
+            return self._no_trade(
+                view,
+                "①″ 장마감 청산 창 — 신규 진입 불가(R6), 판단 생략",
+                gate=GATE_EOD_WINDOW,
+                threshold=threshold,
             )
         if view.n_experts == 0:
             return self._no_trade(

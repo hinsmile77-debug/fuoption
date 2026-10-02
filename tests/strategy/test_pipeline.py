@@ -1776,3 +1776,34 @@ async def test_a_shadow_reason_does_not_mask_an_armed_one():
 
     assert seen == ["TAKE_PROFIT"], "섀도 트레일링이 무장 익절을 가로채면 안 된다"
     assert (await broker.positions()) == []
+
+
+# ------------------------------------------------------- 장마감 창 판단 생략 (2026-10-02 P2-6)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_folds_decisions_inside_the_eod_window():
+    """15:28(마감 7분 전) 강한 LONG 뷰 → 판단 자체가 NO_TRADE(gate=eod_window), 주문 없음."""
+    published: list = []
+    clock = {"t": datetime(2026, 7, 30, 15, 28, tzinfo=KST)}
+    bus, broker, gateway, pipeline = await _make_pipeline(
+        now=lambda: clock["t"],
+        event_calendar=EventCalendar(frozenset(), years=frozenset({2026})),
+    )
+    await _warm_up(pipeline, broker, start=_NEAR_CLOSE_START)
+
+    real_publish = bus.publish
+
+    async def _capture(topic, msg):
+        if isinstance(msg, DecisionIntent):
+            published.append(msg)
+        return await real_publish(topic, msg)
+
+    bus.publish = _capture  # type: ignore[method-assign]
+    view = _view(score=0.9, agg_p_up=0.95, agg_p_down=0.02, ts=clock["t"])
+    clock["t"] = view.ts_utc
+    await pipeline.handle_futures_view(view)
+
+    assert [i.side for i in published] == [Side.NO_TRADE]
+    assert "장마감 청산 창" in published[0].rationale
+    assert gateway.accepted_orders == 0

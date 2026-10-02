@@ -24,6 +24,19 @@ Trainer 파이프라인(Ver 1.6 §7.1) 2단계 "레이블 생성"에 해당한�
 원래 터치 정보를 그대로 보존하고 `cost_demoted=True`로만 표시한다 — 실제 시간배리어 도달과
 구분해 진단 가능.
 
+**실행 가능한 레이블**(2026-10-02 P0-2): 앞을 보는 구간은 **같은 거래일**, 그리고 봉 시작이
+`EXECUTABLE_EXIT_CUTOFF_KST`(15:25) **이전**인 봉까지만이다. 실전 선물 포지션은 15:25에
+강제청산되고(`strategy/eod_flatten.py`, Holding Policy §2.2 A) 밤을 넘기지 않으므로,
+그 뒤의 가격 — 특히 **다음 날 아침의 갭** — 은 실전이 가질 수 없는 손익이다. 종전엔
+`bars[i+1 : i+1+H]`가 날짜를 그대로 넘었고, 14:30 이후 진입 레이블의 43–54%가 다음 날
+봉에서 판정됐다(2026-10-02 실측, F-127). 잘린 구간의 끝은 시간배리어와 같이 그 마지막 봉
+종가로 판정하고 `session_truncated=True`로 표시한다. 잘린 결과 구간이 비면(진입봉이 이미
+15:25를 넘겨 확정) 레이블을 만들지 않는다 — 실전도 그 시각엔 진입하지 못한다(R6).
+
+**근사 하나**: 컷오프를 걸치는 봉(30m이면 15:00–15:30)은 통째로 들어간다 — 15:25–15:30의
+5분이 고가·저가·종가에 섞인다. 1분 해상도로 판정하려면 학습 경로 전체에 1분봉을 따로
+넘겨야 해서, 이 근사를 문서로 남기고 받아들였다(봉 하나의 1/6, 5m·15m·10m도 최대 5분).
+
 **워밍업·꼬리 트림**: ATR 계산에 필요한 만큼의 과거봉이 없는 진입, 또는 시간배리어까지의
 미래봉이 시계열 끝에서 부족한 진입은 레이블을 만들지 않고 건너뛴다(결과를 끝까지 확정할 수
 없는 표본은 애초에 만들지 않는다 — 결측치로 채우지 않음).
@@ -49,11 +62,19 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, time
 from typing import Literal, Mapping, Sequence
 
 from messiah.core.messages import BarClosed, Horizon, bar_confirm_time
+from messiah.core.timeutil import to_kst
 from messiah.features.px_core import atr as compute_atr
+
+#: 실전 선물 포지션이 **반드시 닫히는** 시각(KST) — 레이블이 그 뒤의 가격을 보면 안 된다.
+#: 정규장 마감(`core/event_calendar.SessionHours.close_time` 15:35) − R6 강제청산 선행시간
+#: (`risk/risk_engine.RiskEngineConfig.overnight_flatten_lead_minutes` 10분). 두 정본을 여기서
+#: 임포트하면 models → risk 의존이 생겨, 값으로 적고 `tests/models/test_labeling.py`가
+#: 두 정본과의 일치를 잡는다.
+EXECUTABLE_EXIT_CUTOFF_KST = time(15, 25)
 
 BarrierSide = Literal["upper", "lower", "time"]
 
@@ -120,6 +141,8 @@ class TripleBarrierLabel:
     ret_ticks: int  # 판정가 - 진입가 (부호 있음)
     cost_demoted: bool = False
     weight: float = 1.0  # compute_uniqueness()가 채우기 전엔 1.0(= 미가중)
+    #: 앞 구간이 장마감 컷오프(같은 날·15:25)로 잘렸는가 — 진단용(2026-10-02 P0-2).
+    session_truncated: bool = False
 
 
 def triple_barrier_labels(
@@ -128,8 +151,11 @@ def triple_barrier_labels(
     atr_window: int = DEFAULT_ATR_WINDOW,
     cost_ticks: float = 0.0,
     barrier_params: Mapping[Horizon, BarrierParams] | None = None,
+    session_cutoff: time | None = EXECUTABLE_EXIT_CUTOFF_KST,
 ) -> list[TripleBarrierLabel]:
     """
+    session_cutoff: 실행 가능한 레이블의 컷오프(모듈 docstring "실행 가능한 레이블"). None이면
+         2026-10-02 이전 동작 — 날짜를 넘어 H봉을 본다. 비교 실험(`--legacy-labels`) 전용.
     입력: 단일 심볼·단일 Horizon의 완성봉 시퀀스(오래된 것 → 최신 순, FeatureEngine의 `bars`
          관례와 동일). 다른 심볼/Horizon이 섞여 있으면 ValueError.
     계산: 매 봉을 진입 후보로 훑으며 진입가(종가)·ATR 기반 배리어를 세우고, 그 Horizon의
@@ -153,9 +179,17 @@ def triple_barrier_labels(
         if window_atr is None:
             continue  # ATR 워밍업 부족
 
-        forward = bars[i + 1 : i + 1 + h_bars]
-        if len(forward) < h_bars:
-            continue  # 시간배리어까지 판정할 미래봉 부족(꼬리 트림)
+        raw_forward = bars[i + 1 : i + 1 + h_bars]
+        forward = (
+            _executable_prefix(entry, raw_forward, session_cutoff)
+            if session_cutoff is not None
+            else list(raw_forward)
+        )
+        truncated = len(forward) < len(raw_forward)
+        if not forward:
+            continue  # 진입봉이 이미 컷오프를 넘겨 확정 — 실전도 이때 진입 못 한다(R6)
+        if not truncated and len(forward) < h_bars:
+            continue  # 시간배리어까지 판정할 미래봉 부족(꼬리 트림) — 세션이 아니라 데이터 끝
 
         entry_price = entry.c_ticks
         width = round(params.width_atr_mult * window_atr)
@@ -178,9 +212,29 @@ def triple_barrier_labels(
                 barrier=barrier,
                 ret_ticks=ret_ticks,
                 cost_demoted=cost_demoted,
+                session_truncated=truncated,
             )
         )
     return labels
+
+
+def _executable_prefix(
+    entry: BarClosed, forward: Sequence[BarClosed], cutoff: time
+) -> list[BarClosed]:
+    """`forward` 중 실전이 들고 있을 수 있는 앞부분 — 진입봉과 **같은 날**이고 봉 시작이
+    `cutoff` **이전**인 봉이 끊기지 않고 이어지는 데까지.
+
+    중간에 한 봉이라도 조건을 벗어나면 거기서 끊는다(그 뒤에 같은 날 봉이 또 있을 수 없다 —
+    시간순 시퀀스이므로). 날짜는 KST로 비교한다 — UTC로 비교하면 09:00 KST가 전날이 된다.
+    """
+    entry_day = to_kst(entry.bar_open_kst).date()
+    out: list[BarClosed] = []
+    for bar in forward:
+        opened = to_kst(bar.bar_open_kst)
+        if opened.date() != entry_day or opened.time() >= cutoff:
+            break
+        out.append(bar)
+    return out
 
 
 def _resolve_barrier(
@@ -233,6 +287,7 @@ def label_and_weight(
     atr_window: int = DEFAULT_ATR_WINDOW,
     cost_ticks: float = 0.0,
     barrier_params: Mapping[Horizon, BarrierParams] | None = None,
+    session_cutoff: time | None = EXECUTABLE_EXIT_CUTOFF_KST,
 ) -> list[TripleBarrierLabel]:
     """Trainer 파이프라인 2단계 전체(Ver 1.6 §7.1) — 레이블 생성 + 고유도 가중치 반영까지
     한 번에. `triple_barrier_labels()` + `compute_uniqueness()`를 그대로 합성한 편의 함수.
@@ -241,7 +296,11 @@ def label_and_weight(
     주는 이전 방식은 CostModel이 없던 W12~13 임시 상태였다(models/trainer.py가 실제
     연결부)."""
     labels = triple_barrier_labels(
-        bars, atr_window=atr_window, cost_ticks=cost_ticks, barrier_params=barrier_params
+        bars,
+        atr_window=atr_window,
+        cost_ticks=cost_ticks,
+        barrier_params=barrier_params,
+        session_cutoff=session_cutoff,
     )
     weights = compute_uniqueness(labels)
     return [replace(label, weight=w) for label, w in zip(labels, weights)]

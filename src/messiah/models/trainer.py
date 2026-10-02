@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import time
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -50,7 +51,12 @@ from messiah.core.messages import BarClosed, FeatureVector, Horizon, bar_confirm
 from messiah.features.engine import FeatureEngine
 from messiah.models.calibration import ProbabilityCalibrator
 from messiah.models.cv import PurgedKFold
-from messiah.models.labeling import DEFAULT_ATR_WINDOW, TripleBarrierLabel, label_and_weight
+from messiah.models.labeling import (
+    DEFAULT_ATR_WINDOW,
+    EXECUTABLE_EXIT_CUTOFF_KST,
+    TripleBarrierLabel,
+    label_and_weight,
+)
 from messiah.models.search import search_hyperparameters
 from messiah.risk.cost_model import CostModel
 from messiah.simulator.inprocess_bus import InProcessBus
@@ -291,6 +297,7 @@ async def train_formal_expert(
     n_members: int = DEFAULT_ENSEMBLE_SIZE,
     meta_num_boost_round: int = 50,
     search_seed: int = 0,
+    label_session_cutoff: time | None = EXECUTABLE_EXIT_CUTOFF_KST,
 ) -> ExpertTrainingResult:
     """
     Ver 1.6 §7.1 [3]~[4]단계 전체(정식 경로, 모듈 docstring 다이어그램 참고).
@@ -305,6 +312,8 @@ async def train_formal_expert(
          수 있으므로 재현·비교 목적으로만 쓸 것.
     `meta_min_support_fraction`: 임계값 후보가 남겨야 할 최소 신호 비율
          (`meta_labeler.DEFAULT_MIN_SUPPORT_FRACTION`) — 표본 몇 개짜리 극단 임계값을 막는다.
+    `label_session_cutoff`: 실행 가능한 레이블의 컷오프(`labeling` 모듈 docstring, 2026-10-02
+         P0-2). None은 옛 레이블(날짜를 넘어 본다) — 비교 실험 전용이다.
     """
     if not bars:
         raise ValueError("bars가 비어 있음")
@@ -313,7 +322,9 @@ async def train_formal_expert(
 
     feature_vectors = await build_feature_vectors(bars, feature_set=feature_set, sidecars=sidecars)
     cost_ticks = cost_model.estimate_round_trip_from_bars(bars, qty=qty).total_ticks
-    labels = label_and_weight(bars, atr_window=atr_window, cost_ticks=cost_ticks)
+    labels = label_and_weight(
+        bars, atr_window=atr_window, cost_ticks=cost_ticks, session_cutoff=label_session_cutoff
+    )
     aligned = _align(bars, feature_vectors, labels)
     if not aligned:
         raise ValueError(

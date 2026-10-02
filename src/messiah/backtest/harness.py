@@ -22,6 +22,22 @@ Digital Twin(W9~11)·Expert(W14~19)·Cost Model(W14~16)·Validator(W14~16)가 �
 4. 전체 창을 모은 `equity_curve`/`window_returns`가 `Validator.validate_performance()`에
    처음으로 실제(비록 합성 데이터지만 최소한 walk-forward 구조를 갖춘) 시계열을 준다.
 
+## 실전과 같은 조건으로 재생한다 (2026-10-02 P0-3)
+
+종전 재생 파이프라인은 `TradingPipeline(symbol, broker, gateway, bus, now=...)`뿐이었다 —
+이벤트 캘린더가 없어 **R6(마감 10분 전 진입 금지)·정규장 게이트·장마감 강제청산이 전부
+꺼져 있었고**, 장중 청산 엔진(F-119·F-125)도 비무장이었다. 그래서 백테스트 포지션은 밤을
+넘겨 며칠씩 들고 갔다 — 실전(15:25 전량 청산)과 다른 게임을 채점하고 있었다.
+
+이제 기본값(`realistic_execution=True`)은:
+  ① `EventCalendar` 주입 — R6·정규장 게이트·장중 청산 창이 실전과 같다
+  ② `holding_policy.yaml`의 `futures_exit` 주입 — 손절·시간배리어·논지 소멸이 실전 설정대로
+  ③ 1분봉마다 `observe_eod_flatten_tick()` — 실전 30초 워치독을 재생 시계 1분 틱으로
+  ④ 날짜가 바뀔 때마다 `start_day()` — R2 일일손실 기준선·R10 연속손실이 하루 단위로 리셋
+
+그리고 체결을 하나씩 남겨(`SimBroker.fill_log`) **왕복 거래 단위**로 복원한다
+(`round_trips_from_fills()`) — "몇 시 진입이 얼마를 벌었나"가 이번 진단(F-127)의 질문이다.
+
 ## 스코프 경계·근사
 
 - **일별(daily) granularity 없음**: `sharpe_ratio()`가 기대하는 "기간별 수익률"을 창
@@ -45,23 +61,25 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
-from messiah.broker.simulator.adapter import SimBroker
+from messiah.broker.simulator.adapter import SimBroker, SimFillRecord
 from messiah.core.bus import TOPIC_BAR
+from messiah.core.config import FuturesExitConfig, load_holding_policy
+from messiah.core.event_calendar import EventCalendar
 from messiah.core.messages import BarClosed, Horizon, bar_confirm_time
-from messiah.core.timeutil import now_utc
+from messiah.core.timeutil import now_utc, to_kst
 from messiah.data.archiver import ParquetArchiver
-from messiah.data.bar_composer import MultiHorizonBarComposer
+from messiah.data.bar_composer import MultiHorizonBarComposer, compose_offline
 from messiah.execution.order_gateway import OrderGateway
 from messiah.features import sidecar
 from messiah.features import spec as feature_spec
 from messiah.features.engine import FeatureEngine
 from messiah.models.cv import WalkForwardSplitter
-from messiah.models.labeling import triple_barrier_labels
+from messiah.models.labeling import EXECUTABLE_EXIT_CUTOFF_KST, triple_barrier_labels
 from messiah.models.trainer import train_formal_expert
 from messiah.simulator.inprocess_bus import InProcessBus
 from messiah.strategy.futures.meta_labeler import DEFAULT_MIN_SUPPORT_FRACTION
@@ -104,6 +122,8 @@ class WindowResult:
     realized_pnl_ticks: float = 0.0
     # 창이 끝날 때 열려 있던 포지션의 평가손익(틱). 못 재면 None(0이 아니다 — L18).
     unrealized_pnl_ticks: float | None = None
+    # 왕복 거래(진입 → 평탄) 목록 — `round_trips_from_fills()`. 진입 시각별 손익 분해 재료.
+    round_trips: tuple["RoundTrip", ...] = ()
 
     @property
     def total_pnl_ticks(self) -> float | None:
@@ -125,10 +145,45 @@ class WindowResult:
 
 
 def aggregate_to_horizon(m1_bars: Sequence[BarClosed], horizon: Horizon) -> list[BarClosed]:
-    """M1봉을 굵은 Horizon으로 OHLCV 롤업하는 순수 함수 — 학습용 봉 준비 전용(검증 구간
-    재생은 `MultiHorizonBarComposer`를 실제로 통과시켜 라이브 경로와 동일 로직을 쓴다,
-    이 함수는 그 비동기 배선 없이 학습 데이터를 빠르게 준비하기 위한 오프라인 지름길).
-    Ver 1.2 §2.2 완성봉 규율과 동일하게 마지막 미완성 묶음은 버린다."""
+    """M1봉 → 굵은 Horizon 봉 — **실시간 경로와 같은 시계 격자**로 (2026-10-02 P0-1).
+
+    `data/bar_composer.compose_offline()`에 그대로 맡긴다. 그 함수가 실시간
+    `MultiHorizonBarComposer`와 같은 `floor_to_horizon()`·`compose_composite_bar()`를 쓰므로
+    학습봉과 서빙봉이 **같은 규칙으로 만들어진다**. 버킷은 KST 시계 경계(30m이면 :00/:30)에
+    서고, 경계가 epoch 기준 Horizon 배수라 **하루를 넘는 봉이 생길 수 없다**.
+
+    ## 왜 바꿨나 — 종전 구현은 개수로 잘랐다
+
+    종전 본체(`aggregate_to_horizon_legacy()`)는 1분봉을 30개씩 기계적으로 묶었다.
+    2025-12-12 – 2026-08-03 실측(학습 경로 그대로):
+
+        하루 1분봉            410개(136/155일) — 410 mod 30 = 20, 격자가 매일 20분 밀린다
+        :00/:30 정렬 30m봉    127/2,103개(6.0%) — 서빙봉과 같은 격자는 6%뿐
+        두 날짜에 걸친 봉     142개(6.8%) — 고가–저가 중앙값 1,331틱(같은 날 봉의 3.6배)
+
+    날짜를 넘는 봉은 밤사이 갭을 봉 하나 안에 품는다. 그 봉이 ATR을 부풀려 한낮 레이블을
+    88–93% FLAT으로 눕혔고, 14:30 이후 진입의 레이블 43–54%가 **다음 날 봉**에서 판정됐다.
+    모델이 배운 "마감이 가까우면 LONG"의 상당 부분이 실전(15:25 강제청산)이 가질 수 없는
+    밤사이 갭이었다 — 실전 판단 413회의 평균 S가 14:00 −0.03 → 14:30 +0.15로 계단을 이룬
+    이유다(`dev_memory/DECISION_LOG.md` F-127).
+
+    차이 하나: 종전엔 "마지막 미완성 묶음은 버린다"였지만 이제 실시간과 같이 **세션 끝의
+    짧은 버킷(08:30 장전 15분, 15:30 마감 5분)도 봉으로 남는다**(`quality_ok=False`). 실전
+    FeatureEngine이 그 봉을 받으므로 학습도 받아야 같은 분포다.
+    """
+    if not m1_bars or int(horizon.value.rstrip("m")) <= 1:
+        return list(m1_bars)
+    return compose_offline(m1_bars[0].symbol, horizon, m1_bars)
+
+
+def aggregate_to_horizon_legacy(m1_bars: Sequence[BarClosed], horizon: Horizon) -> list[BarClosed]:
+    """**2026-10-02 이전의 학습용 집계 — 비교 실험 전용으로만 남긴다.** 쓰지 말 것.
+
+    1분봉을 **시계와 무관하게 개수로** N개씩 묶는다. 하루 1분봉이 410개(30의 배수가
+    아니다)라 격자가 매일 20분씩 밀리고, 장 마감 봉과 다음 날 아침 봉이 한 봉에 섞인다
+    (`aggregate_to_horizon()` docstring의 실측). 그 결함이 모델에 무엇을 가르쳤는지 재려면
+    옛 방식을 그대로 재현할 수 있어야 해서 지우지 않는다(`run_g1_walk_forward.py
+    --legacy-bars`)."""
     minutes = int(horizon.value.rstrip("m"))
     if minutes <= 1 or not m1_bars:
         return list(m1_bars)
@@ -148,6 +203,73 @@ def aggregate_to_horizon(m1_bars: Sequence[BarClosed], horizon: Horizon) -> list
                 quality_ok=all(b.quality_ok for b in chunk),
             )
         )
+    return out
+
+
+@dataclass(frozen=True)
+class RoundTrip:
+    """평탄 → 보유 → 평탄 한 바퀴. `pnl_ticks`는 계약 수가 곱해진 총 틱(현금흐름 합)이다."""
+
+    entry_ts: datetime
+    exit_ts: datetime
+    direction: int  # +1 LONG / −1 SHORT (첫 체결의 부호)
+    max_abs_qty: int
+    pnl_ticks: float
+
+    @property
+    def entry_hhmm(self) -> str:
+        return to_kst(self.entry_ts).strftime("%H:%M")
+
+    @property
+    def holding_minutes(self) -> float:
+        return (self.exit_ts - self.entry_ts).total_seconds() / 60.0
+
+
+def round_trips_from_fills(fills: Sequence[SimFillRecord]) -> list[RoundTrip]:
+    """체결 기록 → 왕복 거래. 심볼별로 순포지션이 0에서 떠났다가 0으로 돌아오는 구간 하나가
+    한 바퀴다. 손익은 그 구간 체결의 현금흐름 합(−부호수량 × 가격)이라 분할 청산도 맞는다.
+
+    한 체결이 포지션을 **뒤집으면**(+1 → −1) 거기서 바퀴를 끊는다 — 닫힌 쪽 손익을 그 바퀴에
+    주고, 남은 수량은 같은 시각·같은 가격에 새 바퀴로 연다. 창 끝까지 안 닫힌 바퀴는 버린다
+    (평가손익은 `WindowResult.unrealized_pnl_ticks`가 따로 답한다).
+    """
+    out: list[RoundTrip] = []
+    state: dict[str, dict] = {}
+    for fill in sorted(fills, key=lambda f: f.ts):
+        cur = state.get(fill.symbol)
+        qty = fill.signed_qty
+        if cur is None:
+            state[fill.symbol] = {
+                "entry_ts": fill.ts,
+                "pos": qty,
+                "cash": -qty * fill.price_ticks,
+                "dir": 1 if qty > 0 else -1,
+                "max": abs(qty),
+            }
+            continue
+        new_pos = cur["pos"] + qty
+        if new_pos != 0 and (new_pos > 0) != (cur["pos"] > 0):  # 뒤집기
+            closing = -cur["pos"]
+            cur["cash"] += -closing * fill.price_ticks
+            out.append(
+                RoundTrip(cur["entry_ts"], fill.ts, cur["dir"], cur["max"], float(cur["cash"]))
+            )
+            state[fill.symbol] = {
+                "entry_ts": fill.ts,
+                "pos": new_pos,
+                "cash": -new_pos * fill.price_ticks,
+                "dir": 1 if new_pos > 0 else -1,
+                "max": abs(new_pos),
+            }
+            continue
+        cur["cash"] += -qty * fill.price_ticks
+        cur["pos"] = new_pos
+        cur["max"] = max(cur["max"], abs(new_pos))
+        if new_pos == 0:
+            out.append(
+                RoundTrip(cur["entry_ts"], fill.ts, cur["dir"], cur["max"], float(cur["cash"]))
+            )
+            del state[fill.symbol]
     return out
 
 
@@ -196,15 +318,23 @@ async def _feed_m1_bars(
     broker: SimBroker,
     bus,
     clock: ReplayClock | None = None,
+    pipeline: TradingPipeline | None = None,
 ) -> None:
     """M1봉을 순서대로 투입 — 재생 시계 전진, 브로커 시계 진행, `bar.1m` 발행, Horizon
     경계마다 합성봉 flush. `scripts/run_full_path_smoke.py`의 `_feed_bars`와 동일 로직(봉
     간격이 항상 정확히 1분이라 "N분마다 한 번" 카운팅으로 성립) — 하니스 전용으로 별도 보유."""
+    day: date | None = None
     for i, bar in enumerate(bars):
         # 시계를 **먼저** 옮긴다 — 이 봉이 유발하는 판단이 이 봉의 시각을 "지금"으로 봐야 한다.
         if clock is not None:
             clock.advance_to(bar)
         broker.on_bar(bar)
+        # 실전은 매일 아침 `start_day()`를 부른다(R2 기준선·R10 리셋) — 재생도 날짜마다.
+        bar_day = to_kst(bar.bar_open_kst).date()
+        if pipeline is not None and bar_day != day:
+            if day is not None:
+                await pipeline.start_day()
+            day = bar_day
         await composer.handle_one_minute_bar(bar)
         await bus.publish(f"{TOPIC_BAR}.{Horizon.M1.value}.{bar.symbol}", bar)
         for horizon in Horizon:
@@ -216,6 +346,9 @@ async def _feed_m1_bars(
                 # 도착하는 일이 성립하지 않는다. 실시간 경로의 겹④(마지막 구성봉 대기,
                 # 2026-08-05)를 여기서 타면 오지 않을 봉을 매 버킷 상한까지 기다린다.
                 await composer.flush_due_horizon(horizon, force=True)
+        if pipeline is not None:
+            # 실전 30초 워치독(`watch_eod_flatten_forever`)의 재생판 — 봉 확정마다 1틱.
+            await pipeline.observe_eod_flatten_tick()
 
 
 async def run_walk_forward_backtest(
@@ -239,6 +372,11 @@ async def run_walk_forward_backtest(
     meta_min_support_fraction: float = DEFAULT_MIN_SUPPORT_FRACTION,
     starting_cash: int = 50_000_000,
     regime_ai: "RegimeAI | None" = None,
+    legacy_bars: bool = False,
+    label_session_cutoff: time | None = EXECUTABLE_EXIT_CUTOFF_KST,
+    realistic_execution: bool = True,
+    event_calendar: EventCalendar | None = None,
+    futures_exit: FuturesExitConfig | None = None,
 ) -> list[WindowResult]:
     """전체 M1봉 이력을 Walk-Forward 창으로 굴리며 창마다 재학습+검증재생한다.
 
@@ -246,9 +384,21 @@ async def run_walk_forward_backtest(
     작음) `train_formal_expert()`가 던지는 `ValueError`가 그대로 전파된다(정직한 실패,
     다른 모든 W17~ 스크립트와 동일 원칙). 호출자가 `train_days`/`test_days`를 데이터
     규모에 맞게 고를 책임이 있다.
+
+    비교 실험 축(2026-10-02, 모듈 docstring "실전과 같은 조건으로 재생한다"):
+      legacy_bars           True면 옛 개수-자르기 집계(`aggregate_to_horizon_legacy`)로 학습
+      label_session_cutoff  None이면 옛 레이블(날짜를 넘어 본다)
+      realistic_execution   False면 옛 재생(캘린더·청산 엔진·EOD 청산 없음)
+      event_calendar·futures_exit  realistic일 때의 주입값. None이면 저장소 파일에서 읽는다.
     """
-    horizon_bars = aggregate_to_horizon(m1_bars, train_horizon)
-    boundary_labels = triple_barrier_labels(horizon_bars, atr_window=atr_window)
+    aggregate = aggregate_to_horizon_legacy if legacy_bars else aggregate_to_horizon
+    horizon_bars = aggregate(m1_bars, train_horizon)
+    boundary_labels = triple_barrier_labels(
+        horizon_bars, atr_window=atr_window, session_cutoff=label_session_cutoff
+    )
+    if realistic_execution:
+        event_calendar = event_calendar or EventCalendar.from_file()
+        futures_exit = futures_exit or load_holding_policy().futures_exit
     event_times = [(lbl.t_start, lbl.t_end) for lbl in boundary_labels]
 
     splitter = WalkForwardSplitter(train_days, test_days, embargo_days, step_days)
@@ -281,6 +431,7 @@ async def run_walk_forward_backtest(
             meta_num_boost_round=meta_num_boost_round,
             meta_threshold_splits=meta_threshold_splits,
             meta_min_support_fraction=meta_min_support_fraction,
+            label_session_cutoff=label_session_cutoff,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,7 +457,19 @@ async def run_walk_forward_backtest(
             await broker.connect()
             gateway = OrderGateway(broker)
             replay_clock = ReplayClock()
-            pipeline = TradingPipeline(symbol, broker, gateway, bus, now=replay_clock)
+            pipeline = (
+                TradingPipeline(
+                    symbol,
+                    broker,
+                    gateway,
+                    bus,
+                    now=replay_clock,
+                    event_calendar=event_calendar,
+                    futures_exit=futures_exit,
+                )
+                if realistic_execution
+                else TradingPipeline(symbol, broker, gateway, bus, now=replay_clock)
+            )
             # Regime 결선 (2026-08-04). 미주입이면 `intel.regime`이 아예 발행되지 않아
             # `FuturesAIService`가 항상 `Regime.UNKNOWN`으로 집계한다 — 그 경우 가중치표는
             # 전 Horizon 0.5 고정이라 국면별 가중(0.5~1.5)이 통째로 죽는다.
@@ -320,7 +483,15 @@ async def run_walk_forward_backtest(
             await pipeline.start_day()
 
             start_equity = (await broker.account()).total_equity
-            await _feed_m1_bars(test_m1_bars, composer, broker, bus, replay_clock)
+            await _feed_m1_bars(
+                test_m1_bars,
+                composer,
+                broker,
+                bus,
+                replay_clock,
+                pipeline=pipeline if realistic_execution else None,
+            )
+            trips = tuple(round_trips_from_fills(broker.fill_log))
             end_equity = (await broker.account()).total_equity
             n_orders = broker.n_accepted_orders
             n_fills = broker.n_fills
@@ -347,6 +518,7 @@ async def run_walk_forward_backtest(
                 pnl_unit=pnl_unit,
                 realized_pnl_ticks=realized_ticks,
                 unrealized_pnl_ticks=unrealized,
+                round_trips=trips,
             )
         )
 

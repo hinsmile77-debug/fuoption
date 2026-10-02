@@ -171,3 +171,34 @@ def test_every_decision_log_carries_the_judged_values(monkeypatch):
     for _tag, fields in entries:
         for key in ("n_experts", "score", "dispersion", "uncertainty", "gate"):
             assert key in fields, f"{fields.get('gate')} 경로에 {key}가 없다"
+
+
+# ---------------------------------------------------- ①″ 장마감 청산 창 (2026-10-02 P2-6)
+
+
+def test_eod_window_folds_even_a_strong_signal():
+    """창 안에서는 |S|가 아무리 커도 NO_TRADE다 — R6가 막을 진입을 판단으로 세지 않는다.
+
+    30거래일 실측: 15:30 판단이 LONG 14 · SHORT 1건이었고 전부 실행 불가였다.
+    """
+    intent = MetaDecisionEngine().decide(
+        _view(score=0.9, agg_p_up=0.9, agg_p_down=0.05), kill_active=False, entry_window_closed=True
+    )
+
+    assert intent.side == Side.NO_TRADE
+    assert "장마감 청산 창" in intent.rationale
+
+
+def test_eod_window_gate_is_off_by_default():
+    """기존 호출자(재생·스모크·테스트)는 종전 동작 그대로다."""
+    intent = MetaDecisionEngine().decide(
+        _view(score=0.9, agg_p_up=0.9, agg_p_down=0.05), kill_active=False
+    )
+
+    assert intent.side == Side.LONG
+
+
+def test_eod_window_is_a_registered_gate():
+    from messiah.strategy.decision.meta_decision import DECISION_GATES, GATE_EOD_WINDOW
+
+    assert GATE_EOD_WINDOW in DECISION_GATES

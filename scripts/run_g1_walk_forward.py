@@ -36,6 +36,18 @@ F-14가 매니페스트에서 없앤 것과 같은 계열이다.
 백테스트도 0건이면 모델의 성질이고, 백테스트만 활발하면 train/serve 불일치다.
 처방이 정반대라 이 갈래를 먼저 본다.
 
+## 비교 실험 축 (2026-10-02 F-127)
+
+학습 데이터 결함(개수-자르기 집계·날짜를 넘는 레이블)과 재생 결함(캘린더·청산 없음)을
+**하나씩 켜고 끌 수 있게** 했다. 기본값은 전부 「고친 쪽」이다:
+
+    --legacy-bars        옛 집계(1분봉 30개씩 개수로 자름 — 날짜를 넘는 봉이 생긴다)
+    --legacy-labels      옛 레이블(앞 3봉이 다음 날까지 본다)
+    --legacy-execution   옛 재생(R6·정규장·장중 청산·EOD 청산 없음 — 포지션이 밤을 넘긴다)
+    --feature-set        기본은 운영값(configs/instance.yaml). 시계 피처 제외 비교는 v2026.07
+
+진입 시각별 왕복 거래 분해(건수·승률·손익)를 같이 찍는다 — "몇 시 진입이 벌었나"가 질문이다.
+
 사용:
     python scripts/run_g1_walk_forward.py --train-days 180 --test-days 30   # 프로덕션 기본값
     python scripts/run_g1_walk_forward.py --train-days 120 --test-days 20   # 창을 더 얻고 싶을 때
@@ -57,13 +69,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from messiah.backtest.harness import (  # noqa: E402
     aggregate_to_horizon,
+    aggregate_to_horizon_legacy,
     equity_curve_from_windows,
     run_walk_forward_backtest,
     window_pnl_ticks,
 )
+from messiah.core.config import load_instance  # noqa: E402
 from messiah.core.messages import Horizon  # noqa: E402
 from messiah.data import backfill  # noqa: E402
 from messiah.data.archiver import ParquetArchiver  # noqa: E402
+from messiah.models.labeling import EXECUTABLE_EXIT_CUTOFF_KST  # noqa: E402
 from messiah.models.validator import Validator  # noqa: E402
 from messiah.ops import session_guard  # noqa: E402
 from messiah.strategy.regime.service import RegimeAI  # noqa: E402
@@ -80,6 +95,30 @@ _TRADING_DAYS_PER_YEAR = 245.0
 
 def _parse_day(text: str) -> date:
     return datetime.strptime(text, "%Y-%m-%d").date()  # noqa: DTZ007 — 날짜만 다루는 CLI 인자
+
+
+def entry_time_breakdown(trips) -> list[dict]:
+    """왕복 거래를 진입 시각(HH:MM)별로 묶는다 — 판단 격자가 30분이라 칸이 많지 않다."""
+    groups: dict[str, list] = {}
+    for trip in trips:
+        groups.setdefault(trip.entry_hhmm, []).append(trip)
+    rows = []
+    for hhmm in sorted(groups):
+        group = groups[hhmm]
+        n = len(group)
+        rows.append(
+            {
+                "entry_hhmm": hhmm,
+                "n": n,
+                "long": sum(1 for t in group if t.direction > 0),
+                "short": sum(1 for t in group if t.direction < 0),
+                "win_rate": sum(1 for t in group if t.pnl_ticks > 0) / n,
+                "pnl_ticks": sum(t.pnl_ticks for t in group),
+                "mean_pnl_ticks": sum(t.pnl_ticks for t in group) / n,
+                "mean_holding_min": sum(t.holding_minutes for t in group) / n,
+            }
+        )
+    return rows
 
 
 def _parse_args() -> argparse.Namespace:
@@ -118,6 +157,18 @@ def _parse_args() -> argparse.Namespace:
         "'항상 UNKNOWN(가중치 0.5 고정)'이라는 특정 가정이다.",
     )
     p.add_argument("--out", default=None, help="결과 JSON 저장 경로")
+    p.add_argument(
+        "--feature-set",
+        default=None,
+        help="피처셋 이름. 기본 = configs/instance.yaml의 운영값(종전엔 v2026.07로 고정돼 있었다)",
+    )
+    p.add_argument("--legacy-bars", action="store_true", help="옛 개수-자르기 집계로 학습")
+    p.add_argument("--legacy-labels", action="store_true", help="옛 레이블(날짜를 넘어 본다)")
+    p.add_argument(
+        "--legacy-execution",
+        action="store_true",
+        help="옛 재생 — 캘린더·청산 엔진·장마감 청산 없이(포지션이 밤을 넘긴다)",
+    )
     session_guard.add_force_intraday_argument(p)
     return p.parse_args()
 
@@ -187,7 +238,11 @@ async def main() -> int:
         # 그러면 창마다 RegimeAI를 다시 학습해야 해 런타임이 배로 든다 — 지금은 전 구간으로
         # 한 번 학습하고 그 사실을 여기 남긴다. 국면 판정에 검증 구간 정보가 새어 들어가는
         # 약한 look-ahead이며, 성과를 주장할 때 반드시 함께 언급해야 하는 한계다.
-        regime_bars = aggregate_to_horizon(bars, Horizon.M30)
+        regime_bars = (
+            aggregate_to_horizon_legacy(bars, Horizon.M30)
+            if args.legacy_bars
+            else aggregate_to_horizon(bars, Horizon.M30)
+        )
         print(f"\nRegimeAI 학습 — 30m {len(regime_bars)}봉 (알려진 한계: 전 구간 학습)")
         regime_ai = RegimeAI.fit(regime_bars)
         print(f"  상태 수 {regime_ai.n_states} · 명명 {regime_ai.labels}")
@@ -200,6 +255,15 @@ async def main() -> int:
             "  UNKNOWN을 100% 차단하므로 **이 실행은 주문 0건이 보장된다.** 배관 확인용이며\n"
             "  「모델이 거래하는가」를 물으려면 --regime on 으로 돌릴 것."
         )
+    feature_set = args.feature_set or load_instance("configs").feature_set
+    label_cutoff = None if args.legacy_labels else EXECUTABLE_EXIT_CUTOFF_KST
+    bars_text = "옛(개수)" if args.legacy_bars else "시계 격자"
+    label_text = "옛(날짜 넘음)" if args.legacy_labels else f"실행가능(컷오프 {label_cutoff})"
+    exec_text = "옛(청산 없음)" if args.legacy_execution else "실전 조건"
+    print(
+        f"\n실험 조건: 피처셋 {feature_set} · 집계 {bars_text} · 레이블 {label_text}"
+        f" · 재생 {exec_text}"
+    )
     print("\n백테스트 시작 (창마다 재학습 — 수 분 걸린다)")
     results = await run_walk_forward_backtest(
         bars,
@@ -218,6 +282,10 @@ async def main() -> int:
         meta_min_support_fraction=args.meta_min_support,
         starting_cash=args.cash,
         regime_ai=regime_ai,
+        feature_set=feature_set,
+        legacy_bars=args.legacy_bars,
+        label_session_cutoff=label_cutoff,
+        realistic_execution=not args.legacy_execution,
     )
     if not results:
         print("창이 0개 — train/test 일수를 데이터 규모에 맞게 줄일 것", file=sys.stderr)
@@ -235,6 +303,17 @@ async def main() -> int:
                 else f"손익 {r.total_pnl_ticks:+.1f}틱"
                 f"(실현 {r.realized_pnl_ticks:+.1f} · 평가 {r.unrealized_pnl_ticks:+.1f})"
             )
+        )
+
+    trips = [t for r in results for t in r.round_trips]
+    by_entry = entry_time_breakdown(trips)
+    print(f"\n진입 시각별 왕복 거래 (총 {len(trips)}건, 손익 = 계약수 곱한 틱):")
+    for row in by_entry:
+        print(
+            f"  {row['entry_hhmm']}  {row['n']:3d}건"
+            f"  LONG {row['long']:3d} · SHORT {row['short']:3d}"
+            f"  승률 {row['win_rate']:5.1%}  합계 {row['pnl_ticks']:+9.1f}틱"
+            f"  평균 {row['mean_pnl_ticks']:+7.1f}  보유 {row['mean_holding_min']:5.1f}분"
         )
 
     # **거래를 하긴 하는가** — 손익을 못 재도 답할 수 있는 질문이고, 지금 가장 급한 질문이다.
@@ -412,6 +491,18 @@ async def main() -> int:
                 "windows": len(results),
             },
             "passed": passed,
+            "experiment": {
+                "feature_set": feature_set,
+                "train_horizon": args.train_horizon,
+                "legacy_bars": args.legacy_bars,
+                "legacy_labels": args.legacy_labels,
+                "legacy_execution": args.legacy_execution,
+            },
+            "round_trips": {
+                "n": len(trips),
+                "pnl_ticks": sum(t.pnl_ticks for t in trips),
+                "by_entry_time": by_entry,
+            },
         }
         Path(args.out).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

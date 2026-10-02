@@ -844,7 +844,18 @@ class TradingPipeline:
             for request in self._kill_switch.liquidate(positions):
                 await self._gateway.submit(request)
 
-        intent = self._decision_engine.decide(view, kill_active=kill_triggered)
+        # 장마감 청산 창이면 판단을 접는다(2026-10-02 P2-6) — R6가 어차피 진입을 막는 칸이라
+        # 그 판단이 신호 통계에 섞이지 않게 한다(`meta_decision.GATE_EOD_WINDOW`).
+        minutes_left = (
+            self._event_calendar.minutes_to_close(as_of) if self._event_calendar else None
+        )
+        entry_window_closed = (
+            minutes_left is not None
+            and minutes_left <= self._risk_engine.overnight_flatten_lead_minutes
+        )
+        intent = self._decision_engine.decide(
+            view, kill_active=kill_triggered, entry_window_closed=entry_window_closed
+        )
         # NO_TRADE도 센다 — "판단이 나왔나"와 "거래가 나왔나"는 다른 질문이고, 결선 완성도가
         # 보려는 건 전자다(`models/wiring_completeness.py`). 2026-08-03에 이 값이 0이었다는
         # 사실이 "번들이 하나도 안 붙었다"는 진단의 근거였다.

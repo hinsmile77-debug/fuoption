@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import random
+import tempfile
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,7 @@ from messiah.backtest.harness import (
     WindowResult,
     _slice_by_date,
     aggregate_to_horizon,
+    aggregate_to_horizon_legacy,
     equity_curve_from_windows,
     run_walk_forward_backtest,
     window_returns_from_windows,
@@ -65,10 +68,87 @@ def test_aggregate_to_horizon_rolls_up_ohlcv_correctly():
     assert m5[0].volume == sum(b.volume for b in first_chunk)
 
 
-def test_aggregate_to_horizon_drops_incomplete_trailing_chunk():
-    bars = _m1_bars(n_days=1, bars_per_day=12)  # 12분 -> 5분봉 2개, 나머지 2분은 버림
+def test_aggregate_to_horizon_keeps_a_short_trailing_bucket_like_live():
+    """2026-10-02 P0-1 — 실시간 조립기처럼 짧은 버킷도 봉으로 남되 `quality_ok=False`다.
+
+    종전엔 "나머지 2분은 버림"이었다. 실전 FeatureEngine은 15:30–15:35 같은 짧은 버킷을
+    받으므로, 학습이 그 봉을 버리면 같은 분포가 아니다.
+    """
+    bars = _m1_bars(n_days=1, bars_per_day=12)  # 12분 -> 5분봉 2개 + 2분짜리 1개
     m5 = aggregate_to_horizon(bars, Horizon.M5)
-    assert len(m5) == 2
+    assert len(m5) == 3
+    assert [b.quality_ok for b in m5] == [True, True, False]
+
+
+def _session_m1(day: date, start_hhmm: tuple[int, int], n: int) -> list[BarClosed]:
+    start = datetime(day.year, day.month, day.day, *start_hhmm, tzinfo=KST)
+    return [
+        BarClosed(
+            symbol=_SYMBOL,
+            horizon=Horizon.M1,
+            bar_open_kst=start + timedelta(minutes=i),
+            o_ticks=1000 + i,
+            h_ticks=1001 + i,
+            l_ticks=999 + i,
+            c_ticks=1000 + i,
+            volume=10,
+        )
+        for i in range(n)
+    ]
+
+
+def test_buckets_sit_on_the_live_clock_grid():
+    """**핵심 회귀** — 08:45 시작·410분 세션이어도 30m 봉은 :00/:30에 선다(서빙봉과 같은 격자).
+
+    종전(개수 자르기)은 08:45·09:15·…로 시작해 실시간의 08:30·09:00·…과 어긋났고, 하루
+    410분이 30의 배수가 아니라 다음 날엔 또 20분 밀렸다.
+    """
+    bars = _session_m1(date(2026, 9, 22), (8, 45), 410) + _session_m1(
+        date(2026, 9, 23), (8, 45), 410
+    )
+    m30 = aggregate_to_horizon(bars, Horizon.M30)
+
+    assert all(b.bar_open_kst.astimezone(KST).minute in (0, 30) for b in m30)
+    assert m30[0].bar_open_kst.astimezone(KST).strftime("%H:%M") == "08:30"
+
+
+def test_no_bucket_straddles_two_trading_days():
+    """**핵심 회귀** — 장 마감 봉과 다음 날 아침 봉을 한 봉에 섞지 않는다(밤사이 갭 차단)."""
+    bars = _session_m1(date(2026, 9, 22), (8, 45), 410) + _session_m1(
+        date(2026, 9, 23), (8, 45), 410
+    )
+    m30 = aggregate_to_horizon(bars, Horizon.M30)
+
+    day_one = [b for b in bars if b.bar_open_kst.astimezone(KST).date() == date(2026, 9, 22)]
+    last_of_day_one = [
+        b for b in m30 if b.bar_open_kst.astimezone(KST).date() == date(2026, 9, 22)
+    ][-1]
+    assert last_of_day_one.c_ticks == day_one[-1].c_ticks, "다음 날 봉이 섞이면 종가가 바뀐다"
+    assert last_of_day_one.volume == sum(
+        b.volume for b in day_one if b.bar_open_kst >= last_of_day_one.bar_open_kst
+    )
+
+    # 옛 방식은 실제로 섞었다 — 첫날에 시작한 마지막 봉의 종가가 **다음 날** 1분봉의 것이다.
+    legacy = aggregate_to_horizon_legacy(bars, Horizon.M30)
+    straddling = [b for b in legacy if b.bar_open_kst.astimezone(KST).date() == date(2026, 9, 22)][
+        -1
+    ]
+    assert straddling.c_ticks != day_one[-1].c_ticks
+
+
+def test_legacy_aggregation_reproduces_the_old_count_based_grid():
+    """비교 실험(`--legacy-bars`)용 — 옛 방식이 정말로 개수로 잘랐음을 고정해 둔다."""
+    bars = _session_m1(date(2026, 9, 22), (8, 45), 410) + _session_m1(
+        date(2026, 9, 23), (8, 45), 410
+    )
+    legacy = aggregate_to_horizon_legacy(bars, Horizon.M30)
+
+    assert len(legacy) == 820 // 30
+    assert legacy[0].bar_open_kst.astimezone(KST).strftime("%H:%M") == "08:45"
+    day_two_first = [
+        b for b in legacy if b.bar_open_kst.astimezone(KST).date() == date(2026, 9, 23)
+    ][0]
+    assert day_two_first.bar_open_kst.astimezone(KST).minute not in (0, 30, 45)
 
 
 def test_aggregate_to_horizon_m1_is_identity():
@@ -244,3 +324,82 @@ async def test_replayed_bars_do_not_look_stale_to_the_pipeline():
 
     assert data_age == 0
     assert data_age < KillSwitchConfig().data_disconnect_limit_seconds
+
+
+# ---------------------------------------------------------------- 왕복 거래 복원 (2026-10-02 P1)
+
+
+def _fill(minute: int, qty: int, price: int):
+    from messiah.broker.simulator.adapter import SimFillRecord
+
+    return SimFillRecord(
+        ts=datetime(2026, 9, 22, 14, 30, tzinfo=KST) + timedelta(minutes=minute),
+        symbol=_SYMBOL,
+        signed_qty=qty,
+        price_ticks=price,
+        kind="ENTRY",
+    )
+
+
+def test_round_trip_pnl_is_the_cash_flow_of_the_cycle():
+    """LONG 2계약 100 → 1계약씩 110·120에 분할 청산 = (110−100)+(120−100) = +30틱."""
+    from messiah.backtest.harness import round_trips_from_fills
+
+    [trip] = round_trips_from_fills([_fill(0, 2, 100), _fill(55, -1, 110), _fill(56, -1, 120)])
+
+    assert trip.pnl_ticks == 30.0
+    assert trip.direction == 1 and trip.max_abs_qty == 2
+    assert trip.entry_hhmm == "14:30"
+    assert trip.holding_minutes == 56.0
+
+
+def test_a_flip_closes_one_trip_and_opens_the_next():
+    """+1 → −1 한 번에 뒤집으면 바퀴가 둘이다 — 닫힌 쪽 손익은 앞 바퀴의 것이다."""
+    from messiah.backtest.harness import round_trips_from_fills
+
+    trips = round_trips_from_fills([_fill(0, 1, 100), _fill(30, -2, 90), _fill(40, 1, 80)])
+
+    assert [t.direction for t in trips] == [1, -1]
+    assert [t.pnl_ticks for t in trips] == [-10.0, 10.0]
+
+
+def test_an_unclosed_trip_is_not_counted():
+    from messiah.backtest.harness import round_trips_from_fills
+
+    assert round_trips_from_fills([_fill(0, 1, 100)]) == []
+
+
+@pytest.mark.asyncio
+async def test_replay_drives_the_eod_watchdog_and_the_daily_reset():
+    """실전 조건 재생(2026-10-02 P0-3): 1분봉마다 EOD 틱 1번, 날짜가 바뀔 때마다 `start_day()`.
+
+    종전엔 둘 다 없었다 — 백테스트 포지션이 15:25에 닫히지 않고 밤을 넘겼다.
+    """
+    from messiah.backtest.harness import _feed_m1_bars
+    from messiah.broker.simulator.adapter import SimBroker
+    from messiah.data.archiver import ParquetArchiver
+    from messiah.data.bar_composer import MultiHorizonBarComposer
+    from messiah.simulator.inprocess_bus import InProcessBus
+
+    class _Probe:
+        def __init__(self):
+            self.ticks = 0
+            self.days = 0
+
+        async def observe_eod_flatten_tick(self):
+            self.ticks += 1
+
+        async def start_day(self):
+            self.days += 1
+
+    bars = _m1_bars(n_days=3, bars_per_day=10)
+    bus = InProcessBus()
+    broker = SimBroker()
+    await broker.connect()
+    probe = _Probe()
+    with tempfile.TemporaryDirectory() as tmp:
+        composer = MultiHorizonBarComposer(_SYMBOL, ParquetArchiver(Path(tmp)), bus)
+        await _feed_m1_bars(bars, composer, broker, bus, pipeline=probe)
+
+    assert probe.ticks == len(bars)
+    assert probe.days == 2, "첫날은 호출자가 이미 start_day()를 불렀다 — 날짜가 바뀐 두 번만"

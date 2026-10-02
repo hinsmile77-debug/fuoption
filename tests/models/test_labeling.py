@@ -265,3 +265,127 @@ def test_forward_realized_volatility_window_matches_the_direction_barrier():
 def test_forward_realized_volatility_rejects_a_nonsensical_window():
     with pytest.raises(ValueError, match="horizon_bars"):
         labeling.forward_realized_volatility(_closes([100, 101]), horizon_bars=0)
+
+
+# --- 실행 가능한 레이블 (2026-10-02 P0-2) -------------------------------------
+#
+# 레이블은 실전이 **실제로 가질 수 있는 손익**만 센다: 같은 거래일, 봉 시작 15:25 이전.
+
+
+def _day_bars(day, hhmm_list, closes, *, horizon=Horizon.M30, spread=3):
+    from datetime import datetime as _dt
+
+    from messiah.core.timeutil import KST as _KST
+
+    return [
+        BarClosed(
+            symbol="TEST",
+            horizon=horizon,
+            bar_open_kst=_dt(day.year, day.month, day.day, h, m, tzinfo=_KST),
+            o_ticks=c,
+            h_ticks=c + spread,
+            l_ticks=c - spread,
+            c_ticks=c,
+            volume=10,
+        )
+        for (h, m), c in zip(hhmm_list, closes)
+    ]
+
+
+def _two_sessions():
+    from datetime import date as _date
+
+    grid = [(9 + (i // 2), 30 * (i % 2)) for i in range(14)]  # 09:00 … 15:30
+    day1 = _day_bars(_date(2026, 9, 22), grid, [1000 + (i % 3) for i in range(14)])
+    # 다음 날 아침 **큰 갭 상승** — 옛 레이블은 이걸 전날 오후 진입의 +1로 셌다.
+    day2 = _day_bars(_date(2026, 9, 23), grid, [1500 + (i % 3) for i in range(14)])
+    return day1 + day2
+
+
+def test_cutoff_matches_the_two_sources_of_truth():
+    """15:25 = 정규장 마감(15:35) − R6 선행 10분. 한쪽이 바뀌면 여기서 잡힌다."""
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from messiah.core.event_calendar import SessionHours
+    from messiah.models.labeling import EXECUTABLE_EXIT_CUTOFF_KST
+    from messiah.risk.risk_engine import RiskEngineConfig
+
+    close = _dt.combine(_dt(2026, 1, 1, tzinfo=KST).date(), SessionHours().close_time)
+    lead = _td(minutes=RiskEngineConfig().overnight_flatten_lead_minutes)
+    assert (close - lead).time() == EXECUTABLE_EXIT_CUTOFF_KST
+
+
+def test_afternoon_entries_never_see_the_next_morning():
+    """**핵심 회귀** — 다음 날 갭 상승(+500틱)이 전날 오후 진입의 레이블이 되면 안 된다."""
+    from messiah.core.timeutil import to_kst
+
+    labels = triple_barrier_labels(_two_sessions(), atr_window=3)
+
+    for lb in labels:
+        assert to_kst(lb.t_start).date() == to_kst(lb.t_end).date(), "판정은 진입한 그날 안에서"
+    day1_afternoon = [
+        lb for lb in labels if to_kst(lb.t_start).strftime("%m-%d %H:%M") >= "09-22 14:00"
+    ]
+    day1_afternoon = [lb for lb in day1_afternoon if to_kst(lb.t_start).day == 22]
+    assert day1_afternoon, "오후 진입에도 레이블은 붙는다(잘린 구간으로)"
+    assert all(lb.label != 1 for lb in day1_afternoon), "갭을 +1로 세지 않는다"
+
+
+def test_legacy_labels_did_cross_the_night():
+    """비교 실험(`--legacy-labels`)이 옛 결함을 그대로 재현하는지 — 갭이 +1로 새어 들어간다."""
+    from messiah.core.timeutil import to_kst
+
+    labels = triple_barrier_labels(_two_sessions(), atr_window=3, session_cutoff=None)
+
+    crossed = [lb for lb in labels if to_kst(lb.t_start).date() != to_kst(lb.t_end).date()]
+    assert crossed and all(lb.label == 1 for lb in crossed)
+
+
+def test_window_is_cut_at_1525_and_marked():
+    """15:00 확정(14:30 시작봉) 진입의 앞 구간은 15:00 시작봉 하나뿐이다.
+
+    15:30 시작봉은 실전이 들고 있을 수 없다(15:25 강제청산)."""
+    from messiah.core.timeutil import to_kst
+
+    labels = triple_barrier_labels(_two_sessions(), atr_window=3)
+    [lb] = [x for x in labels if to_kst(x.t_start).strftime("%m-%d %H:%M") == "09-22 15:00"]
+
+    assert lb.session_truncated is True
+    assert to_kst(lb.t_end).strftime("%H:%M") == "15:30"  # 15:00–15:30 봉의 확정 시각
+
+
+def test_entries_confirmed_after_the_cutoff_get_no_label():
+    """15:30 확정(15:00 시작봉) 진입은 레이블이 없다 — 실전도 그 시각엔 진입 못 한다(R6)."""
+    from messiah.core.timeutil import to_kst
+
+    labels = triple_barrier_labels(_two_sessions(), atr_window=3)
+    starts = {to_kst(lb.t_start).strftime("%m-%d %H:%M") for lb in labels}
+
+    assert "09-22 15:30" not in starts
+    assert "09-22 16:00" not in starts
+
+
+def test_midday_windows_are_untouched():
+    """한낮 진입은 3봉을 다 본다 — 컷오프는 마감 근처만 건드린다."""
+    from messiah.core.timeutil import to_kst
+
+    labels = triple_barrier_labels(_two_sessions(), atr_window=3)
+    [lb] = [x for x in labels if to_kst(x.t_start).strftime("%m-%d %H:%M") == "09-22 11:00"]
+
+    assert lb.session_truncated is False
+    assert to_kst(lb.t_end).strftime("%H:%M") == "12:30"
+
+
+def test_series_tail_is_still_trimmed_not_truncated():
+    """데이터 끝에서 미래봉이 모자란 것은 세션 컷오프가 아니다 — 종전대로 레이블을 안 만든다."""
+    from datetime import date as _date
+
+    grid = [(9, 0), (9, 30), (10, 0), (10, 30), (11, 0), (11, 30)]
+    bars = _day_bars(_date(2026, 9, 22), grid, [1000, 1001, 1002, 1001, 1000, 1001])
+    labels = triple_barrier_labels(bars, atr_window=1)
+
+    from messiah.core.timeutil import to_kst
+
+    starts = {to_kst(lb.t_start).strftime("%H:%M") for lb in labels}
+    assert "11:30" not in starts and "12:00" not in starts, "마지막 두 진입은 미래봉 부족"

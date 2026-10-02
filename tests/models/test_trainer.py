@@ -24,6 +24,24 @@ _FEATURE_SET = "v-trainer-test"
 _START = datetime(2026, 7, 27, 9, 0, tzinfo=KST)
 
 
+def _session_times(n: int, minutes: int) -> list[datetime]:
+    """봉 시작 시각 n개 — **정규장(09:00–15:30 시작) 안에서만**, 넘치면 다음 날 09:00으로.
+
+    2026-10-02 P0-2 이전엔 24시간 연속 시각을 썼다. 레이블이 장마감 컷오프(15:25)와 날짜
+    경계를 보게 되면서 밤 시각 봉은 레이블이 안 붙는다 — 실제 시장에 없는 시각이라 맞는
+    결과이고, 픽스처가 실제 시장 모양을 따라야 한다.
+    """
+    out: list[datetime] = []
+    t = _START
+    while len(out) < n:
+        if t.hour * 60 + t.minute >= 15 * 60 + 30:
+            t = (t + timedelta(days=1)).replace(hour=9, minute=0)
+            continue
+        out.append(t)
+        t += timedelta(minutes=minutes)
+    return out
+
+
 def _bars(n: int, horizon: Horizon = Horizon.M5) -> list[BarClosed]:
     """가격이 오르내리며 ATR>0을 보장하는 합성 봉 시퀀스(사인파 + 정수 반올림) — 봉 간격은
     `horizon`의 실제 길이를 그대로 씀(예전엔 M5가 아니면 무조건 1분 간격으로 고정돼 있었는데,
@@ -32,13 +50,13 @@ def _bars(n: int, horizon: Horizon = Horizon.M5) -> list[BarClosed]:
     15m/30m Expert 테스트 추가하며 발견·수정)."""
     minutes = HORIZON_SECONDS[horizon] // 60
     out = []
-    for i in range(n):
+    for i, opened in enumerate(_session_times(n, minutes)):
         close = round(100 + 10 * math.sin(i / 3))
         out.append(
             BarClosed(
                 symbol=_SYMBOL,
                 horizon=horizon,
-                bar_open_kst=_START + timedelta(minutes=minutes * i),
+                bar_open_kst=opened,
                 o_ticks=close,
                 h_ticks=close + 3,
                 l_ticks=close - 3,

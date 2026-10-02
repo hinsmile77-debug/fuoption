@@ -44,12 +44,25 @@ _SYMBOL = "TEST"
 _START = datetime(2026, 7, 27, 9, 0, tzinfo=KST)
 
 
-def _bars(n: int, horizon: Horizon = Horizon.M30) -> list[BarClosed]:
+def _bars(n: int, horizon: Horizon = Horizon.M30, *, session_only: bool = False) -> list[BarClosed]:
     """`tests/strategy/regime/test_service.py`와 같은 모양의 합성 시계열 — HMM이 상태를
-    나눌 만큼의 구조(사인파 + 결정적 잡음)는 있고 재현 가능하다."""
+    나눌 만큼의 구조(사인파 + 결정적 잡음)는 있고 재현 가능하다.
+
+    `session_only`: 봉 시각을 정규장(09:00–15:30 시작) 안에만 둔다(넘치면 다음 날 09:00).
+    2026-10-02 P0-2부터 레이블이 장마감 컷오프(15:25)와 날짜 경계를 보므로, **학습까지
+    가는 테스트**는 실제 시장에 있는 시각을 써야 한다(밤 시각 봉엔 레이블이 안 붙는다).
+    """
     out = []
     price = 100.0
     step = {Horizon.M30: 30, Horizon.M5: 5, Horizon.M1: 1}[horizon]
+    times: list[datetime] = []
+    t = _START
+    while len(times) < n:
+        if session_only and t.hour * 60 + t.minute >= 15 * 60 + 30:
+            t = (t + timedelta(days=1)).replace(hour=9, minute=0)
+            continue
+        times.append(t)
+        t += timedelta(minutes=step)
     for i in range(n):
         price += math.sin(i / 4) * 2 + ((i * 53) % 7 - 3) * 0.2
         price = max(price, 10.0)
@@ -57,7 +70,7 @@ def _bars(n: int, horizon: Horizon = Horizon.M30) -> list[BarClosed]:
             BarClosed(
                 symbol=_SYMBOL,
                 horizon=horizon,
-                bar_open_kst=_START + timedelta(minutes=step * i),
+                bar_open_kst=times[i],
                 o_ticks=round(price),
                 h_ticks=round(price) + 2,
                 l_ticks=round(price) - 2,
@@ -273,7 +286,7 @@ async def test_build_one_produces_a_loadable_bundle(tmp_path):
     """
     built = await build_one(
         horizon=Horizon.M5,
-        bars=_bars(140, Horizon.M5),
+        bars=_bars(140, Horizon.M5, session_only=True),
         holdout_fraction=0.25,
         feature_set="v2026.07",
         sidecars=None,

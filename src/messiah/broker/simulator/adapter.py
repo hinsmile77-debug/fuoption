@@ -74,6 +74,22 @@ from messiah.core.messages import (
 from messiah.execution.position_math import PositionState, apply_fill, signed_fill_qty
 
 
+@dataclass(frozen=True)
+class SimFillRecord:
+    """체결 1건의 기록 — 백테스트가 **진입 시각별 손익**을 복원하는 재료 (2026-10-02 P1).
+
+    `n_fills`·`realized_pnl_ticks`는 합계만 답한다. "14:30 진입이 벌었나, 한낮 진입이
+    벌었나"는 합계로는 못 묻는다 — 그 질문이 이번 진단의 핵심이라 체결을 하나씩 남긴다.
+    `signed_qty`는 포지션 관점 부호(매수 +, 매도 −)다.
+    """
+
+    ts: datetime
+    symbol: str
+    signed_qty: int
+    price_ticks: int
+    kind: str
+
+
 @dataclass
 class _PendingOrder:
     """limit_price_ticks: req와 별개로 non-null 고정 — pending은 항상 지정가라 Optional이 없다."""
@@ -114,6 +130,8 @@ class SimBroker(BrokerAdapter):
         # 실현손익(틱) — 포지션을 줄이거나 닫은 만큼만 쌓인다. 미실현은 여기 안 들어간다
         # (`unrealized_pnl_ticks()`가 따로 답한다).
         self._realized_pnl_ticks = 0.0
+        #: 체결 기록(시간순) — `SimFillRecord` docstring.
+        self.fill_log: list[SimFillRecord] = []
 
     @property
     def n_accepted_orders(self) -> int:
@@ -262,6 +280,15 @@ class SimBroker(BrokerAdapter):
         # 하나에만 두면 두 경로가 갈릴 수 없다.
         self._n_fills += 1
         self._apply(req, price_ticks)
+        self.fill_log.append(
+            SimFillRecord(
+                ts=ts,
+                symbol=req.symbol,
+                signed_qty=req.qty if req.side == Side.LONG else -req.qty,
+                price_ticks=price_ticks,
+                kind=req.kind.value,
+            )
+        )
         return Fill(
             broker_order_no=order_no,
             symbol=req.symbol,
