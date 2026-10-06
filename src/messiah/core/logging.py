@@ -53,6 +53,8 @@ TAG_LEVELS: dict[str, int] = {
     #   (없음)               거래일 정상 종료
     #   non_trading_day      주말·KRX 휴장일이라 아무것도 안 했다
     #                        (`ops/session_guard.NON_TRADING_DAY_REASON`)
+    #   market_not_closed    장후 배치가 오늘·정규장 마감 전에 떠서 아무것도 안 했다
+    #                        (`ops/session_guard.MARKET_NOT_CLOSED_REASON`, 2026-10-06 F-130)
     # 새 태그를 만들지 않는 이유: "이 프로세스가 끝났다"를 세는 소비처가 여럿이고
     # (`ops/integrity_report._abnormal_exits`, `ops/task_exit_codes`, 일일점검 다이제스트 §2),
     # 새 태그는 그 전부가 알아야만 맞는다. 하나만 모르면 그 소비처에서 그날은 **비정상

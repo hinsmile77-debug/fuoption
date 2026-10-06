@@ -182,6 +182,38 @@ def announce_non_trading_day(process: str, reason: str) -> None:
     )
 
 
+# `SessionEnd`의 `reason` 값 — 「오늘 장이 아직 안 끝나서 채점할 것이 없다」 (2026-10-06 F-130).
+MARKET_NOT_CLOSED_REASON = "market_not_closed"
+
+
+def market_not_yet_closed_reason(day: date, *, now: datetime | None = None) -> str | None:
+    """`day`가 오늘이고 아직 정규장 마감 전이면 사람이 읽을 사유, 아니면 None (2026-10-06 F-130).
+
+    ## 왜 필요했나 — 2026-10-06 07:24 실측
+
+    `Messiah-Postmarket`은 `StartWhenAvailable`이라 15:45에 PC가 꺼져 있으면 다음 부팅에
+    캐치업된다. 그 캐치업은 「밀린 날」이 아니라 **실행된 날**(벽시계 날짜)을 대상으로 돌았고,
+    개장 전이라 1분봉이 없는 것이 당연한데 `SymbolResolutionMismatch`(ERROR)+exit 3으로
+    끝났다. 그 종료 코드가 수정검증 `exit-code-matches-log`를 33거래일 만에 「재발」로 뒤집었다.
+    같은 시각 캐치업된 `Messiah-Shutdown`(`scripts/stop_l1_daily.bat`)은 15:35 이전이면
+    아무것도 안 하는 가드가 있어 무사했다 — 같은 방어가 한쪽에만 있었던 것이다.
+
+    마감 시각은 새로 정하지 않는다 — `LAUNCH_WINDOW_END`와 같은 `DEFAULT_SESSION.close_time`.
+    과거·미래 날짜(`--date` 소급)는 이 함수가 판정하지 않는다(None).
+    """
+    moment = now or now_kst()
+    if day != moment.date():
+        return None
+    clock = moment.timetz().replace(tzinfo=None)
+    close = DEFAULT_SESSION.close_time
+    if clock >= close:
+        return None
+    return (
+        f"{day.isoformat()} 정규장 마감({close:%H:%M}) 전 {clock:%H:%M:%S} — "
+        "아직 장이 끝나지 않아 채점할 하루치 자료가 없다"
+    )
+
+
 # ------------------------------------------------ 기동 창 (2026-08-06 P0-2, 부팅 자동 복구)
 
 # 정시 기동보다 몇 분 이르다 — 부팅이 트리거 직전에 끝난 날 "곧 스케줄러가 부를 테니까" 하고

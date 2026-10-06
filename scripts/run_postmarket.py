@@ -515,6 +515,28 @@ def main() -> int:
         )
         print(f"  [비거래일] {skip_reason} — --force-non-trading-day로 진행", flush=True)
 
+    # **오늘인데 아직 장이 안 끝났으면 아무 단계도 돌지 않는다** (2026-10-06 F-130).
+    #
+    # 15:45 트리거를 놓친 캐치업이 이튿날 개장 전에 뜨면 대상 날짜가 **그날**(벽시계)이 되고,
+    # 1분봉이 없는 것을 아래 `_has_day()`가 오조회로 읽어 exit 3을 낸다(2026-10-06 07:24) —
+    # 그 종료 코드가 수정검증 `exit-code-matches-log`를 「재발」로 뒤집었다. 비거래일 가드와
+    # 같은 자리·같은 모양이다: 심볼 해석 **앞**, 종료 코드 0(안 뜨는 것이 설계된 동작).
+    not_closed = session_guard.market_not_yet_closed_reason(day)
+    if not_closed is not None:
+        print(f"{not_closed} — postmarket 운영 생략, 즉시 종료", flush=True)
+        print(
+            "     밀린 날의 장후 절차가 필요하면 그날을 지정해 다시 돌릴 것: --date YYYY-MM-DD",
+            flush=True,
+        )
+        mlog.log(
+            "SessionEnd",
+            f"{not_closed} — 운영 생략",
+            process="postmarket",
+            date=day.isoformat(),
+            reason=session_guard.MARKET_NOT_CLOSED_REASON,
+        )
+        return 0
+
     symbol, origin = _resolve_symbol(args.symbol, day)
     print(f"=== MESSIAH 장후 절차 — {day.isoformat()} / {symbol} ({origin}) ===", flush=True)
     mlog.log(
