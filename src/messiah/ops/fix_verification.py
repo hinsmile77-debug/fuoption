@@ -1722,6 +1722,69 @@ def run(
     return evaluate(load_registry(registry_path), load_daily_reports(log_dir), today=today)
 
 
+# ------------------------------------------------ 재발 원인 문구 (2026-10-06 G-70)
+#
+# 2026-10-06 `exit-code-matches-log`가 33거래일 만에 「재발」로 떴다. 원인(장후 캐치업의
+# exit 3)은 2026-08-11 최초 위반(G2 프로세스 크래시)과 전혀 달랐는데, 등록부 로그는
+# "위반 2회째"만 말했고 원인 문구는 `daily_integrity_*.json`에만 있었다 — 사람이 두 파일을
+# 대조해야 「같은 재발인가 새 원인인가」가 갈렸다. 판정(`evaluate()`)은 건드리지 않고,
+# 재발 로그 한 줄에 그날 그 지표를 올린 원본 상세만 싣는다.
+
+
+def _nonzero_exit_causes(report: dict[str, Any]) -> list[str]:
+    exits = (report.get("task_exit_codes") or {}).get("exits") or []
+    causes = []
+    for item in exits:
+        win32 = int(item.get("win32_code", 0))
+        if win32 == 0:
+            continue
+        code = int(item.get("code", win32))
+        raw = f"{code}" if code == win32 else f"{code}(=0x{code:X})"
+        causes.append(f"{item.get('task')} {item.get('at_kst')} 종료 코드 {raw} → Win32 {win32}")
+    return causes
+
+
+# 지표 → 그날 리포트에서 원인 문구를 뽑는 함수. 등재 안 된 지표는 문구 없이(None) 간다 —
+# 넓은 `breaches`에서 문자열을 추측해 엉뚱한 줄을 원인이라 말하는 것보다 낫다.
+_CAUSE_EXTRACTORS: dict[str, Callable[[dict[str, Any]], list[str]]] = {
+    "nonzero_task_exits": _nonzero_exit_causes,
+    "breaches": lambda r: [str(item) for item in (r.get("breaches") or [])],
+}
+
+
+def recurrence_causes(
+    verdicts: Sequence[VerificationVerdict],
+    *,
+    today: date,
+    registry_path: Path = DEFAULT_REGISTRY_PATH,
+    log_dir: Path = DEFAULT_LOG_DIR,
+) -> dict[str, str]:
+    """오늘 「재발」 판정 항목별 원인 문구 — {fix_id: 문구}. 못 뽑으면 그 항목은 빠진다.
+
+    실패 조건: 없다. 등록부·리포트를 못 읽으면 빈 dict — 로그 보강이 장후 절차를 막지 않는다.
+    """
+    recurred = [
+        v.id for v in verdicts if v.status == VerificationStatus.RECURRED and v.violated_today
+    ]
+    if not recurred:
+        return {}
+    try:
+        metrics = {item.id: item.metric for item in load_registry(registry_path)}
+        path = log_dir / f"daily_integrity_{today:%Y%m%d}.json"
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 로그 보강이 장후 절차를 막지 않는다
+        return {}
+    causes: dict[str, str] = {}
+    for fix_id in recurred:
+        extract = _CAUSE_EXTRACTORS.get(metrics.get(fix_id, ""))
+        if extract is None:
+            continue
+        lines = extract(report)
+        if lines:
+            causes[fix_id] = " / ".join(lines)
+    return causes
+
+
 def main() -> int:
     """수시 확인용 CLI — `python -m messiah.ops.fix_verification`."""
     import sys

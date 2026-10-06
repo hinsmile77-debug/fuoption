@@ -3968,13 +3968,17 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
         # 2026-08-20 G-H — 「고친 적이 없으므로 재발이 아니다」. WARNING이다.
         fv.VerificationStatus.UNDIAGNOSED: "FixVerificationUndiagnosed",
     }
+    # 재발 원인 문구 (2026-10-06 G-70) — 「같은 재발인가 새 원인인가」를 로그 한 줄로 가른다.
+    causes = fv.recurrence_causes(verdicts, today=day, log_dir=log_dir)
     for verdict in verdicts:
         tag = tags.get(verdict.status)
         if tag is None:
             continue  # 검증 대기는 정상 진행 상태 — 매일 로그를 채울 이유가 없다
+        cause = causes.get(verdict.id)
+        extra = {"cause_detail": cause} if cause else {}
         mlog.log(
             tag,
-            f"{verdict.id}: {verdict.detail}",
+            f"{verdict.id}: {verdict.detail}" + (f" · 원인: {cause}" if cause else ""),
             date=day.isoformat(),
             fix_id=verdict.id,
             status=verdict.status,
@@ -3982,6 +3986,7 @@ def _report_fix_verifications(day: date, log_dir: Path) -> None:
             # 이 값으로 갈린다(연속 재발이면 최근 변경 대조, 오랜만이면 국소 사건 조사).
             # 위반 이력이 없는 판정에서는 0이다.
             clean_streak_before_recurrence_days=verdict.clean_streak_before_violation,
+            **extra,
         )
 
     # **오늘 몇 개가 회복됐나를 한 줄로** (2026-08-18 G-0818P-1). 항목별 판정은 위 23줄이
