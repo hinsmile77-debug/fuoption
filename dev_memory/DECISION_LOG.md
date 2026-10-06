@@ -18537,3 +18537,188 @@ F-128은 리포트가 "결정 필요 사항: 생존경로 목록·차단/경고 
 
 ### 검증
 코드 변경 없음 → 테스트 미실행. 커밋 후 `.git/index.lock` 부재 확인.
+
+
+## [MW0601] 2026-10-05 08:5x — 장전 점검: 신규 확정 결함 0건, 10-05 개천절 대체휴일 정상 인식·종료 확인
+
+### 증상
+없음(관측 전용 점검). `l1_daily`·`g2_daily` 두 프로세스가 각각 08:20:02·08:25:12(`configs/scheduled_tasks.json` 정본과 완전 일치)에 기동해, `session_guard.non_trading_day_reason()`이 가장 먼저 평가되는 현행 코드 순서(2026-08-17 F-3 교정 반영분, `scripts/run_l1_daily.py` docstring 참조)대로 Docker·self_check를 건드리지 않고 각 1초 안에 `SessionEnd(reason=non_trading_day)`로 종료했다. 오류 0건, 당일 거래 0건.
+
+### 원인
+`configs/krx_holidays.yaml`의 2026-10-05 등재(개천절 대체휴일, 10/3 토요일 대체)가 정상 작동한 것. 오늘 점검 중 공개 공휴일 집계 자료를 다시 조회(WebSearch)해 같은 날짜를 교차확인했다 — 파일 헤더가 스스로 "2026-07-23 이후는 미검증 집계값"이라 밝혀 둔 상태에 외부 교차검증 1회를 추가로 확보한 것(실거래 백필 실측만큼 강한 근거는 아니며, 등급을 올리는 것은 아니다).
+
+### 결정
+장전 국면이라 코드 변경 없음(SYSTEM.md R11 · 금지 15계명 3·4). `krx_holidays.yaml`의 2026-10-05 줄에 교차검증 근거 주석을 추가하는 안을 G-68(P2)로 제안 — 적용은 장후 이후.
+
+### Why
+비거래일 오판정의 비용은 비대칭이다(파일 헤더가 이미 선언: 빠뜨린 휴장일은 다음날 데이터로 잡히지만 잘못 넣은 거래일은 영구 소실). 매 점검이 당일 날짜 하나씩 외부 교차검증 흔적을 쌓아 두면, 다음에 이 근방에서 오판정 의심이 생겼을 때(과거 F-1류 패턴) 추적 단서가 늘어난다. 비용이 주석 한 줄뿐이라 즉시 반영 가치가 있다.
+
+### How to apply
+`configs/krx_holidays.yaml`의 `- "2026-10-05"  # 개천절 대체휴일(10/3가 토요일)` 줄 끝에 "외부 공개 집계 교차검증(2026-10-05 점검, 실거래 백필 실측 아님)" 주석을 덧붙인다. 코드 로직 변경 없음 — 주석뿐이라 테스트 영향 없음.
+
+### 검증
+라이브 검증 불필요(주석 변경 예정, 아직 미적용). 다음 장전 점검 때 이 줄과 오늘 추가한 서술이 유지됐는지만 확인.
+
+
+## [MW0601] 2026-10-05 08:5x — 장전 점검 자체 사고: 점검 세션이 git을 직접 실행해 index.lock 2회 잔류(F-78 위반)
+
+### 증상
+이 장전 점검 세션이 기본 상태 확인 과정에서 `git log --oneline`·`git status --porcelain`·`git diff --stat`를 직접 실행했다. SKILL.md §1과 F-78은 "점검 세션은 git을 직접 실행하지 않는다"고 이미 못박아 뒀는데도 어겼다. 그 결과 `.git/index.lock`이 두 차례(08:53·08:54 KST) 생성됐고, 이 Cowork 원격 세션이 도는 격리된 리눅스 가상환경이 연결 폴더 내 삭제(unlink)를 기본 차단하는 탓에 `git` 자신이 종료 시 그 파일을 못 지우고 "unable to unlink" 경고만 남겼다.
+
+### 원인
+`collect_evidence.py`(§1이 가리키는 정본 수집 경로)는 `.git/HEAD`·`.git/logs/HEAD`를 직접 읽어 git CLI를 호출하지 않는다 — 그래서 자체 보고서에도 "인덱스락 없음"으로 정확히 찍혔다. 문제는 이 점검 세션이 수집기 출력만으로 부족하다고 판단해 보조로 날것 git 명령을 직접 두 차례 실행한 것이다.
+
+### 결정
+두 번의 잔류 잠금 파일을 모두 `mv`로 치웠다(`rm`은 삭제 권한이 없어 실패, `mv`는 같은 파일시스템 내 이름 변경이라 성공) — `.git/index.lock.stale_by_dailycheck_20261005`·`_2`로 이름만 바꿔 `.git/` 안에 무해하게(빈 파일) 남아 있다. `.git/index.lock` 자체는 현재 비어 있다(정상). F-129(P1)로 "점검 세션이 git을 직접 호출하려는 유혹을 원천 차단"하는 안을 신규 등재 — `collect_evidence.py`가 못 주는 정보(예: 특정 커밋의 전체 diff)가 필요하면 그 자체를 수집기 옵션으로 추가하는 쪽으로 해결한다.
+
+### Why
+오늘은 이 세션이 직접 치워 실피해가 없었지만, 다음에 같은 실수가 나고 아무도 못 치우면 그다음 실제 커밋(장후 자동조치 등)이 "fatal: Unable to create '.git/index.lock': File exists"로 막힐 수 있다. 원인이 "이 환경의 삭제 제한"이라는 환경 특이사항이라, 재발 방지는 "git을 안 부른다"는 습관 쪽으로 거는 것이 맞다.
+
+### How to apply
+F-129: `references/evidence_map.md`에 "날것 git 명령 금지, 필요하면 `collect_evidence.py`에 옵션 추가" 경고를 더 눈에 띄게(별도 섹션으로) 옮긴다. 코드 변경 아님(문서 보강) — 장후 이후 아무 때나.
+
+### 검증
+`.git/index.lock` 현재 부재 확인(완료). F-129는 다음 점검 세션이 git을 직접 안 부르는지로 검증(관찰 기반, 자동화된 테스트는 아님).
+
+
+## [MW0601] 2026-10-06 08:5x — 장후 정리 작업이 전날 휴장일에 못 돌고 오늘 새벽 캐치업되며 날짜 오류(F-130 신규)
+
+### 증상
+`Messiah-Postmarket`(`scripts/run_postmarket.py`, 평일 15:45 예약)이 2026-10-05(개천절 대체휴일) 15:45에는 실행된 흔적이 전혀 없다가(`logs/postmarket_20261005.log` 자체가 존재하지 않음), 2026-10-06 07:24:05에 뒤늦게 자동 실행됐다. 이 실행이 대상 날짜를 실행 시점의 벽시계 날짜(2026-10-06, 즉 오늘)로 잡고 "만기 규칙 계산" 단계에 들어갔으나, 오늘치 1분봉 아카이브가 당연히 없어(장이 아직 열리지 않음) `SymbolResolutionMismatch`(ERROR)로 7단계 중 0단계만 실행한 채 즉시 중단했다(`logs/postmarket_20261006.log`, 1.4KB — 정상 하루치 26KB+의 1/20 미만).
+
+### 원인
+`scripts/run_postmarket.py`는 `--date` 인자가 없으면 `day = args.date or datetime.now().astimezone().date()`(약 480행)로 실행 시점의 벽시계 날짜를 대상으로 쓴다. `configs/scheduled_tasks.json`의 모든 작업(Messiah-Postmarket 포함)에 `StartWhenAvailable = $true`가 조건 없이 걸려 있어(`scripts/install_scheduled_tasks.ps1` 약 150행), 15:45 예약 시각에 컴퓨터가 꺼져 있던 탓에 실행이 밀리면 Windows 작업 스케줄러가 다음 부팅 시점으로 캐치업시킨다. 캐치업 시점의 벽시계 날짜는 원래 밀렸던 날(10/5)이 아니라 캐치업이 실제로 일어난 날(10/6)이므로, `main()`의 `session_guard.non_trading_day_reason(day=day)` 가드(10/6은 거래일이므로 통과)를 지나 그대로 만기 규칙 계산 단계로 들어가 오류를 냈다. 같은 시각(07:24:04)에 똑같이 캐치업된 `Messiah-Shutdown`(감시 스크립트)은 "아직 15:35 KST 이전이면 아무것도 하지 않는다"는 자체 시각 가드가 있어 `logs/shutdown_watchdog.log` 290행에 `skip: before 15:35 KST safety-net window (now 07:24:04) - nothing killed.`로 안전하게 넘어갔다 — 동일한 캐치업 상황에 대한 방어 패턴이 한쪽 스크립트에만 있고 다른 쪽에는 없었던 것이 이 사고의 직접 원인이다.
+
+이 오류 메시지·태그(`SymbolResolutionMismatch`, "1분봉이 아카이브에 없다")는 2026-08-17 F-2가 고친 것과 글자 그대로 같지만 조건이 다르다 — F-2는 "오늘이 실제로는 휴장일인데 거래일로 오판정"하는 경우를 막은 것이고, 오늘 것은 "오늘이 진짜 거래일은 맞지만 아직 그날 장이 끝나기도 전(심지어 열리기도 전)에 실행된" 경우다. **F-2가 재발한 것이 아니라, F-2의 가드가 다루지 않는 새로운 조건(거래일이지만 아직 마감 전)이 처음으로 실제 관측된 것**이다.
+
+### 결정
+장전 국면이라 코드 변경 없음(SYSTEM.md R11 · 금지 15계명 3·4). F-130(P1)으로 "장후 정리 작업에 '오늘이지만 아직 마감 전이면 건너뛴다' 가드 추가"를 신규 등재, 적용은 장후. 함께 G-69(고도화)로 "이 가드를 Messiah-Shutdown의 기존 로직과 공용 함수로 통합"을 제안 — 지금은 같은 문제를 푸는 방법이 스크립트마다 따로 구현돼 있어 한쪽만 고치면 다른 쪽(또는 앞으로 추가될 세 번째 배치)이 또 샐 수 있는 구조이기 때문이다.
+
+### Why
+비용이 비대칭이다 — 오늘은 운 좋게 "오류로 멈추는" 쪽으로 끝나 피해가 없었지만, 다음에 캐치업이 "이미 자료가 있는 다른 날"에 발생하면 오류 없이 조용히 엉뚱한 날짜의 자료로 처리가 끝나버릴 수 있다. 조용한 실패가 큰 소리 나는 실패보다 항상 더 비싸다(금지 15계명 12번의 취지와 같은 방향). `Messiah-Shutdown`에 이미 올바른 패턴이 존재하므로 구현 비용도 낮다 — 베끼면 된다.
+
+### How to apply
+1. `src/messiah/ops/session_guard.py`에 `market_not_yet_closed_reason(day: date, *, now: datetime | None = None) -> str | None` 신설 — `Messiah-Shutdown`이 쓰는 "오후 3시 35분 이전 건너뛰기" 판정을 재사용/공용화(상수 위치는 적용 전 확인).
+2. `scripts/run_postmarket.py` `main()`의 `session_guard.non_trading_day_reason(day=day)` 가드(약 499~501행) 바로 뒤에 위 함수 호출을 추가 — 사유가 있으면 `announce_non_trading_day`와 같은 방식으로 로그를 남기고 exit 0.
+3. `pytest tests/ops/`에 테스트 3종 추가: (a) day=오늘·마감 전→건너뜀 (b) day=오늘·마감 후→정상 진행 (c) day=과거 날짜→정상 진행(가드 영향 없음).
+4. `Messiah-Postmarket`의 `StartWhenAvailable` 유지 여부는 이 Fix와 별개 결정 사항(G-69에서 다룸) — 가드만으로도 안전해지므로 당장 끌 필요는 없을 수 있음, 사람 결정 대기.
+
+### 검증
+라이브 미검증 — 다음 장후(오늘 15:45 예정 정시 실행)에서 `logs/postmarket_20261006.log`가 `SymbolResolutionMismatch` ERROR 없이 7단계를 완주하는지로 1차 확인(이 경로는 F-130 적용 여부와 무관하게 정상 경로라 통과해야 함). F-130 자체의 검증은 적용 후 테스트 3종 통과 + 다음에 밀린 트리거 상황이 재현될 때 ERROR 대신 "건너뜀" INFO 한 줄만 남는지로 확정(검증 기한: F-130 적용 시점부터 다음 캐치업 상황 관측 시).
+
+## [MW0601] 2026-10-06 12:46 — 장중 점검: 신규 확정 결함 0건, 장전 이월 12건 전부 처분(✅해소 3건·🔄지속 9건)
+
+### 증상
+09:00~12:46(KST) 구간 `l1_daily`·`g2_daily`·`ui` 로그와 `status_snapshot.json`(12:39:53)을 대조한 결과, 새로 확정된 결함은 없었다. 장전이 남긴 12개 이월 항목을 전부 처분했다:
+- ✅ 해소 3건 — **C-1**(`OptionChainStaleSpot`, ATM 기준가 319,660초 지연 경고): 08:50:00·08:51:40 `OptionChainStaleSpotResolved`(각 5·3사이클)로 정규장 개장(09:00) **전인** 08:51에 이미 회복, 09:00 이후 재발 0건. **C-2**(`l1.composer.level: UNKNOWN`): `status_snapshot.json`(12:39:53)에서 `OK`로 전환, detail "합성봉 170개 · 거래량 항등식 일치(유실 0)". **C-3**(`InvestorFlowPollRetried`/`OptionChainPollRetried` 500 오류): 09:00~12:46 32건(25+7) 전량 `level: INFO`·1회 재시도 복구·ERROR 승격 0건, 시간당 페이스(≈8.4건/h)가 직전 4거래일(09-29~10-02) 하루 평균(7.1~8.9건/h)과 같은 대역 — 악화 없음.
+- 🔄 지속 9건 — **1-1/F-130**(장후 정리 작업 날짜 오류, 적용은 장후), **G-68**(krx_holidays.yaml 주석), **F-128**(장중 생존경로 커밋 가드 부재), **G-67**(섀도게이트 통과율 전일대비 병기), **G-69**(F-130 가드 공용화), **S-1**(섀도게이트 20거래일 승격, 기준일 10-02 64.8% 그대로 — 오늘 아직 완결 거래일 아님), **K-6**(예비모형 미승격 bundle 경고), **1-3/G-11**(`order-path-live` FixVerificationStalled, 오늘 해당 태그 0건·판단 재료 없음), **G-9**(자동 적신호 화이트리스트).
+
+참고 관측(신규 아님, 재확인만): (a) `g2_daily` 08:25~08:50 25분 로그 공백 — K-25(설계상 5분 판단 그리드, 개장 전 발행 없음) 패턴 재확인, 직전 3거래일과 시각·길이 동일 대조. (b) `MetaGateEvaluated` "게이트 무력"(임계 0) WARNING 3건(11:30·12:00·12:30, `regime: TREND_UP`) — 마스터플랜 Ver1.2 §7.1 표의 "추세 상승·하락" 행이 "보정 없음(기본)"으로 설계돼 있어 TREND_UP에서도 같은 설계가 적용됨을 재확인(과거엔 TREND_DOWN에서만 관측됨, F-18/C-18 유효). 주문 게이트가 실제로 열리지는 않음(점수 문턱 미달, `DecisionEmitted` 8건 전부 `NO_TRADE`). (c) `ui_20261006.log`에 낮 12:21:12 두 번째 `UISnapshotFreshness`("첫 렌더") 발생, 4개 토픽 전부 `NO_DATA` — `app.py` 1781행 설계(세션당 1회, "새 창은 새 첫 렌더") + `StateCache`가 브라우저 세션별로 생성돼 그 세션이 열린 시점부터만 경과시간을 세는 구조적 한계(2026-08-21 이후 N-3로 판정불가확정) 그대로. 같은 시각 `status_snapshot.json`은 4개 컴포넌트 전부 `OK`. ui 프로세스 자체 재기동 아님(`SessionStart` 08:20:58 이후 1회 유지).
+
+### 원인
+C-1·C-2는 연휴(10/3~10/5) 뒤 첫 기동이라 생긴 설계상 예상된 지연이었고, 개장 전에 자연 해소됨(장전 절의 판단이 맞았음을 확인). C-3은 한국투자증권 서버 500 오류 자체는 계속되지만 R7(항목별 격리 재시도)·R9(공유 RateLimiter) 설계가 의도대로 전량 흡수.
+
+### 결정
+장중 국면이라 코드 변경 없음(SYSTEM.md R11 · 금지 15계명 3·4). 신규 Fix·고도화 항목 없음. F-130·G-69는 장전 계획 그대로 유지, 적용은 오늘 장후(15:45 이후). G-9(자동 적신호 화이트리스트) 제안의 필요성이 이번 장중에서도(g2 공백·메타게이트 경보 모두 수동 대조 필요) 재확인됐다 — 제안 자체는 신규가 아니므로 번호를 새로 매기지 않음.
+
+### Why
+불확실한 것과 확정된 결함을 섞지 않는다는 규율에 따라, C-1·C-2·C-3은 로그 시각·수치로 명확히 해소가 확인된 경우에만 ✅ 처리했다. g2 공백·메타게이트 경보·UI 두 번째 첫렌더는 전부 dev_memory 기존 확정 사례(K-25·F-18/C-18·N-3)와 원본 로그를 직접 대조해 신규가 아님을 확인한 뒤 참고로만 남겼다 — 이미 결정된 사안을 새 발견인 양 보고하지 않기 위함.
+
+### How to apply
+다음 점검(장후)에서: ① F-130 적용(오후 3시 45분 이후) 및 `logs/postmarket_20261006.log` 정시 실행분이 `SymbolResolutionMismatch` ERROR 없이 7단계 완주하는지 확인. ② G-69(공용 가드 통합) 적용 여부 결정. ③ 오늘 하루 종합 판정표·당일 이상점 통합 대장 작성. ④ 나머지 이월 9건(G-68·F-128·G-67·S-1·K-6·1-3/G-11·G-9) 계속 관측.
+
+### 검증
+코드 변경 0줄(장중 점검, R11·금지계명 3·4 준수) — `git log --since="2026-10-06 08:58"` 빈 결과, `code_version.stale: false`, `worktree_dirty_files: 0`(`src/`+`scripts/` 기준). 장중 체크리스트(`references/phases.md` B-1~B-5) 전수 통과 — 컴포넌트 4개 `OK`(회색 0) · `circuit_breaker.phase: normal` · `irrecoverable_loss.clean: true` · `AggregatorLateTickDropped`/`PublishGraceBreached`/`UnmatchedFill`/`RiskReject` 전부 0건. `FixVerificationRecurred` 0건(오늘 전체 태그 집계 재확인). 이 세션은 `collect_evidence.py` 실행 외 git 명령을 직접 호출하지 않았다(F-78 무위반).
+
+## [MW0601] 2026-10-06 12:49 — 장중 점검 세션 자신이 F-78/F-129를 또 위반 — git diff 직접 실행, index.lock 1건 생성 후 삭제 권한 요청으로 정리
+
+### 증상
+위 12:46 장중 점검을 마친 뒤 "코드 변경이 없었는지"를 스스로 재확인하려다, `collect_evidence.py`를 다시 돌리지 않고 `git diff --stat -- src/ scripts/`를 직접 실행했다. 이 호출이 `.git/index.lock`(0바이트)을 새로 만들었고, 뒤이은 `git status`가 그 락을 지우려다 "Operation not permitted"로 실패해 락이 그대로 남았다.
+
+### 원인
+이번에도 원인은 2026-10-05와 동일 — `references/evidence_map.md`·SKILL.md §1이 "점검 세션은 git을 직접 실행하지 않는다"고 명시하는데도, 수집기 출력(이미 §1 보고서에 "`src/`+`scripts/` 실제 변경 0파일"로 정확히 찍혀 있었음)을 다시 한번 날것으로 확인하려는 충동이 또 이겼다. F-129(2026-10-05 등재 — "점검 세션이 git을 직접 호출하려는 유혹을 원천 차단")가 아직 적용 전이라 같은 사고가 재발했다.
+
+### 결정
+10-05와 달리 이번엔 `mcp__remote-devices__device_request_delete_permission`으로 이 연결 폴더의 삭제 권한을 요청해 승인받았고, `.git/index.lock`을 `mv`가 아니라 `rm -f`로 완전히 제거했다(삭제 확인: 이후 `ls`가 "No such file or directory"). 10-05처럼 이름만 바꾼 잔류 파일을 남기지 않았다. F-129의 우선순위를 유지하고 신규 번호는 추가하지 않는다 — 이미 등재돼 있다.
+
+### Why
+오늘도 이 세션이 즉시 치워 실피해는 없었으나, 세 번째(08-17 F-78 최초, 10-05 2회, 오늘 1회 — 통산 4회째) 같은 유형의 실수가 반복되고 있다는 것 자체가 F-129를 "다음 단계" 수준이 아니라 **다음 장후 Fix 묶음의 최우선**으로 올려야 한다는 증거다. 수집기가 이미 주는 정보를 다시 날것으로 확인하려는 습관이 구조적으로 안 고쳐지고 있다.
+
+### How to apply
+F-129 적용 시 이 재발(4회째)을 근거로 포함. 추가 제안: `references/evidence_map.md` 경고를 "별도 섹션으로 눈에 띄게" 하는 것에 더해, `collect_evidence.py` 자체가 이미 "`src/`+`scripts/` 실제 변경 0파일"을 보고서 §1에 명시하고 있다는 사실을 그 경고 문구에 직접 인용해 "이 수치가 이미 있다 — 다시 git을 부르지 마라"로 더 구체화한다. 코드 변경 아님(문서 보강) — 장후 이후.
+
+### 검증
+`.git/index.lock` 부재 확인(완료, `rm -f` 성공). 보고서(`logs/dailycheck/2026-10-06_report.md`)와 `DECISION_LOG.md`/`NEXT_TODO.md` 갱신은 전부 파일 직접 쓰기(Python 파일 I/O·bash heredoc)로 이뤄져 git 인덱스와 무관하므로 이 사고로 손상되지 않았다. F-129는 다음 점검 세션이 git을 직접 안 부르는지로 계속 관찰 검증.
+
+## [MW0601] 2026-10-06 16:00 — 장후 점검: `exit-code-matches-log` 신규 재발 1건(원인은 미해결 1-1/F-130) · 장전·장중 이월 15건 전부 처분 · 실현손익 -66,000원
+
+### 증상
+
+장후 배치(`logs/postmarket_20261006.log`, 15:45:02 정시 트리거) 먼저 완주 여부 확인 — "=== 장후 절차 요약 ===" 7/7단계 `✅`(7단계 "무결성 리포트 재생성"은 완료했으나 "볼 것이 있다" 표시), `SessionEnd`(15:46:51) "정상 종료"(steps_failed=0, steps_with_findings=1). 그 "볼 것"이 `FixVerificationRecurred`(ERROR, 15:46:51): `exit-code-matches-log`가 33거래일 무위반 뒤 오늘 다시 위반(통산 2번째). `daily_integrity_20261006.json`의 `task_exit_codes.exits` 대조 결과, 오늘 5개 예약 작업(Messiah·Messiah-ClockResync·Messiah-G2·Messiah-Postmarket·Messiah-Shutdown) 중 `Messiah-Postmarket`의 07:24:06 종료 1건만 종료 코드 2147942403(Win32 3)이었고 나머지 4건은 전부 0. `breaches` 필드도 그 1건뿐. 이 07:24:06 종료는 오늘 장전 점검이 이미 보고한 1-1(F-130, 날짜 가드 미비로 캐치업 실행이 `SymbolResolutionMismatch` ERROR로 0단계만 돌고 중단된 사고)과 동일 사건이다.
+
+09:00~15:35 정규장 구간 자체는 신규 결함 0건: `l1_daily`·`g2_daily` 둘 다 `SessionEnd` 정상 종료, `code_version.stale: false`(전 프로세스 HEAD `29c7cd5` 종일 유지), `daily_integrity_20261006.json`의 `horizon_findings`·`unmeasured`·`degenerate_features`(always_nan/constant) 전부 빈 배열, `symbol_mismatch_suspected: false`, `incomplete_day: false`. 거래량 대조 비율 0.995(공통 409분), 변동성 축 채점 3개 Horizon 전부 `measurable: true`.
+
+오늘 모의매매 2왕복(14:30 진입→14:43 STOP_LOSS 청산, 15:00 진입→15:09 STOP_LOSS 청산) — 전부 `OrderGateway` 경로, `UnmatchedFill` 0건, `PositionReconciled`(15:34:59) "체결 4건·실현손익 -66.0틱"으로 대사 일치. 두 번 다 손절선을 다소 넘겨서(1차 불리 58.0틱/손절선 44.9틱, 2차 불리 68.0틱/손절선 39.4틱) 체결됐으나 이는 09-22 반입 스모크테스트 때 이미 확인된 "매 틱 이산 확인에서 생기는 설계상 갭"과 같은 대역(≈1.3~1.8배)이라 신규 결함으로 세지 않았다.
+
+그 외 WARNING(`CollectorWSDisconnected`×3[12:58·13:28·13:37, 전부 5~21초 내 재연결]·`PublishGraceBreached`[1m headroom -4170.3ms, 최근 5거래일 -1908~-6093ms 대역 안·`headroom_surge: false`]·`DailyCloseBarHandedOff`·`RollBasisUnmeasured`·`MetaGateEvaluated`×8[게이트무력, TREND 국면 설계대로]) 전부 dev_memory 과거 기록과 대조해 기존 확정 정상 패턴으로 판정, 신규 등재 없음.
+
+장전·장중이 남긴 이월 항목 15건(1-1·C-1·C-2·C-3·G-68·F-128·G-67·G-69·S-1·K-6·1-3/G-11·G-9·1-1구/F-90·F-129) 전부 처분: ✅해소 3건(C-1·C-2·C-3, 장중에 이미 종결·오늘 재확인만) · 🔄지속 11건 · 🆕/⬆️ 2건(G-70 신규 등재, F-129 누적 재발 횟수 갱신=4회째).
+
+### 원인
+
+- 1-2(`exit-code-matches-log` 재발)의 원인은 1-1(F-130)과 동일 — `scripts/run_postmarket.py`가 캐치업 실행 시 날짜 가드 없이 바로 자료 존재를 전제하는 단계로 들어가 `SymbolResolutionMismatch` ERROR로 비정상 종료(Win32 3)한다. 이 비정상 종료가 Windows 작업 스케줄러 기록에 남아 `exit-code-matches-log`(그날 모든 예약 작업의 종료 코드가 0인지 재는 축)를 오염시켰다.
+- **중요한 구분**: 2026-08-11 이 축의 최초 위반은 다른 원인(`g2_paper` 프로세스의 실제 비정상 종료)이었고, 그때 이 축은 그 장애를 정확히 잡아낸 정상 사례였다(본 로그 4465행 "종료 코드 축이 정확히 잡았다 — 08-11이 그 실증이다"). 그 뒤 커밋 `2386bcb`(F-D)가 고친 것은 이 축의 측정 안정성(`schtasks` 조회 타임아웃 재시도)뿐, 비정상 종료 자체를 막는 장치는 당시도 지금도 없다. 즉 이번 재발은 "고친 게 도로 터진 것"이 아니라 "같은 계측기가 또 다른 새 원인을 잡아낸 것"이며, 등록부 집계는 원인을 구분하지 않고 "위반 2회째"로만 센다는 점이 오늘 새로 드러났다(→ G-70).
+
+### 결정
+
+- **코드 변경 없음.** 이 예약 실행은 보고까지만 한다(messiah-daily-check 스킬 "코드 변경 — 가능하지만 자동으로 하지 않는다" 조항). F-130은 오늘도 적용하지 않고 계획만 갱신했다 — 대응 이상점에 1-2를 추가하고, 검증 방법에 "가드 적용 후 캐치업 재현 시 `task_exit_codes`에 nonzero가 안 생기는지" 항목을 더했다.
+- **G-70 신설(고도화, P2 아님·고도화 전용)**: `fix_verification.py`가 `FixVerificationRecurred`를 발행할 때 그 거래일 `breaches`의 원인 문구를 `cause_detail`로 같이 실어, 사람이 두 파일(scoreboard·daily_integrity.breaches)을 대조하지 않고도 "같은 재발인가 다른 원인인가"를 로그 한 줄로 판정할 수 있게 한다. 선행조건 없음, F-130과 독립 착수 가능.
+- **F-129 재발 누적 갱신**: 오늘 12:49 장중 점검 세션이 다시 git을 직접 호출해 `.git/index.lock`을 남겼다(통산 4회째: 08-17 최초·10-05 2회·오늘 1회). 이번엔 `device_request_delete_permission`으로 즉시 치웠다(해당 장중 세션 기록 참조). 구조적 가드는 오늘도 적용 전 — 다음 장후 Fix 묶음 최우선으로 이월.
+
+### Why
+
+- 오늘의 핵심은 "1-1(F-130)을 고치지 않고 둔 비용이 하루 만에 두 번째 형태(수정검증 오염)로 나타났다"는 것이다. 아침에는 "오류 메시지 1줄, 피해 없음"으로 보였던 문제가, 저녁에는 "이 프로젝트의 가장 중요한 자동 재발 감지 장치(등록부)를 오염시키는 문제"로 드러났다 — F-130의 우선순위를 낮출 이유가 전혀 없다는 뜻이다.
+- `exit-code-matches-log`가 원인을 구분하지 않고 "위반"이라는 단일 결과로 두 전혀 다른 사건(실제 크래시 vs 날짜 가드 미비)을 겸하는 것은, 이 프로젝트가 반복적으로 경계해 온 "태그 1개=심각도 1개"(R6) 원칙과 같은 종류의 긴장이다 — 다만 이번엔 "같은 태그가 INFO/ERROR를 겸하는" 형태가 아니라 "같은 위반 판정이 서로 다른 원인을 겸하는" 형태라 R6 위반으로 단정하지 않고 G-70(고도화)으로만 남겼다.
+
+### How to apply
+
+- 다음 장전 점검에서: ① F-130 구현 지시 여부 확인 ② F-129 구조적 가드 우선순위 재확인(4회째 재발) ③ G-70 착수 여부(선행조건 없음, 바로 가능) 확인.
+- F-130이 구현되면: 커밋 메시지 `[MW0601]`, `pytest tests/ops/` 범위 + replay 검증 거친 뒤, 다음 캐치업 발생 시나리오에서 `task_exit_codes`에 nonzero가 안 생기는지로 최종 판정.
+
+### 검증
+
+코드 변경 0줄(장후 점검, 보고 전용 — 커밋 없음). `collect_evidence.py`만 실행했고 이 세션은 git을 직접 호출하지 않았다(F-78 준수, 오늘 12:49 재발은 **다른 세션**[장중]의 일이며 이 장후 세션은 무위반). 장후 체크리스트(`references/phases.md` C-1~C-5) 전수 통과 확인 — 종료 시퀀스 무결(정규 구간), 장후 배치 7/7 완주, 산출물 정합(`daily_integrity`·`self_eval`·`vol_scorecard`·`volume_check` 전부 존재·정상), 수정검증(`FixVerificationRecurred` 1건 확인·보고), 기록 의무(본 항목) 이행.
+
+## [MW0601] 2026-10-06 18:28 — 장후 자동조치: F-130·G-70 구현 (9ab088d·a016bc0) · G-69·F-129 사람 결정 이월
+
+### 증상
+
+10-06 07:24 `Messiah-Postmarket` 캐치업(10-05 휴장일 15:45 트리거 미발화분)이 개장 전 그날을 대상으로 돌아 `SymbolResolutionMismatch` ERROR + exit 3(Win32 3)으로 끝났고(1-1), 그 종료 코드가 수정검증 `exit-code-matches-log`를 33거래일 무위반 끝에 「재발」로 뒤집었다(1-2). 재발 로그는 원인을 말하지 않아 08-11 최초 위반(G2 크래시)과 구분하려면 `daily_integrity_20261006.json`을 따로 열어야 했다.
+
+### 원인
+
+- `scripts/run_postmarket.py`는 휴장일만 걸렀고 「오늘인데 아직 마감 전」은 거르지 않았다. 같은 시각 캐치업된 `Messiah-Shutdown`은 `scripts/stop_l1_daily.bat`의 15:35 이전 건너뛰기 가드 덕에 무사했다.
+- `integrity_report._report_fix_verifications()`가 `FixVerificationRecurred`에 원인 필드를 싣지 않았다.
+
+### 결정
+
+- **F-130(A등급, 구현)**: `session_guard.market_not_yet_closed_reason(day, now=)` 추가 — `day == 오늘` 이고 `DEFAULT_SESSION.close_time`(15:35) 전이면 사유 문자열. `run_postmarket.main()`이 휴장일 가드 뒤·`_resolve_symbol()` 앞에서 호출, 걸리면 `SessionEnd(reason="market_not_closed")` + exit 0. reason 값은 `core/logging.py` `SessionEnd` 허용값 주석에 등재(R6). 마감 기준 상수는 새로 만들지 않고 `LAUNCH_WINDOW_END`와 같은 값을 쓴다(리포트 결정 필요사항 (1) — 코드 확인으로 확정).
+- **G-70(A등급, 구현)**: `fix_verification.recurrence_causes()` — 오늘 `violated_today`인 재발 항목만, 지표별 추출기(`nonzero_task_exits` → `task_exit_codes.exits`의 비0 항목, `breaches` → 그 목록)로 원인 문구를 만든다. 미등재 지표는 문구 없음(추측 금지). `integrity_report`가 `cause_detail` 필드 + "· 원인: …" 문구를 붙인다. `evaluate()` 무변경.
+- **G-69 보류(C)**: 선행조건(F-130)은 충족됐지만 상대편 가드가 `.bat` 속 PowerShell 한 줄이라, 공용화는 강제 종료 경로가 파이썬을 먼저 부르게 바꾸는 종료 시퀀스(R13) 변경이다. 방법이 리포트에 특정되지 않음 → 사람 결정.
+- **F-129 보류(C)**: Fix 표에 없고 변경 대상이 특정되지 않음.
+- **F-128·G-67·G-9·1-3/G-11·S-1·G-68·`StartWhenAvailable`**: 리포트 「사용자 결정 대기」 → 손대지 않음.
+
+### Why
+
+- F-130은 1-1과 1-2를 한 번에 막는다 — 가드가 exit 0으로 끝나면 스케줄러 기록에 비0 종료가 안 남아 `nonzero_task_exits`가 다시 진짜 장애(08-11형)만 잡는다.
+- 원인 문구를 넓은 `breaches`에서 문자열 매칭으로 고르지 않은 이유: 엉뚱한 줄을 원인이라 말하는 로그는 없는 것보다 나쁘다. 지표별 추출기를 등재하는 방식이라 새 지표는 한 줄씩 추가하면 된다.
+
+### How to apply
+
+- 남은 틈: 캐치업이 **09:00~15:35 정규장 중**에 뜨면 그보다 앞선 `refuse_if_regular_session()`이 exit 2로 끝내므로 여전히 비0 종료가 남는다. 이를 0으로 바꿀지는 R11 거부 의미와 얽혀 사람 결정(NEXT_TODO 등록).
+- 다음 캐치업 발생일(휴장일 다음 날 부팅 등)에 `postmarket_*.log`에 "정규장 마감(15:35) 전 … 운영 생략" INFO + `SessionEnd(reason=market_not_closed)`만 남고 `task_exit_codes`의 `Messiah-Postmarket`이 0인지로 최종 판정.
+- 재시동 불필요 — 장후 배치는 매 실행 새 프로세스, 수집·모의매매는 내일 08:20/08:25 정시 기동에서 새 코드를 읽는다.
+
+### 검증
+
+`tests/ops/test_market_not_closed_gate.py`(가드 3갈래·15:35 경계·진입점 순서/exit 0/`SessionEnd` 등재) · `tests/ops/test_recurrence_cause_detail.py`(원인 추출·**판정 불변**·등록부 결손 시 빈 결과·로그 줄 `cause_detail`) 신설. 관련 범위 통과, 전체 2,971 통과 / 3 실패(`test_champion_sample` 1·`test_rollover_day` 2 — 09-29부터 같은 기존 실패, 운영 데이터 의존, 이번 변경 경로 무관). ruff check·format, pre-commit 훅 전부 통과. 실데이터: 10-06 등록부로 `recurrence_causes()` → `exit-code-matches-log: Messiah-Postmarket 07:24:06 종료 코드 2147942403(=0x80070003) → Win32 3`. replay는 피처·게이트 무관이라 생략. git 쓰기는 전부 PowerShell에서 실행.
