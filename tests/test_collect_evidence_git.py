@@ -118,3 +118,22 @@ def test_readonly_subcommands_are_still_allowed(tmp_path: Path, ce) -> None:
     out = ce.run_git(_fake_repo(tmp_path), ["status", "--porcelain"])
 
     assert "거절" not in out
+
+
+def test_section1_ends_with_the_no_regit_notice(ce) -> None:
+    """F-129 — 금지 문장은 문서가 아니라 **세션이 읽는 다이제스트 §1 끝**에 있어야 한다.
+
+    위반 통산 6회(2026-10-07 하루 2회)는 매번 §1 표를 읽은 직후 「눈으로 재확인」하려는
+    git 호출이었다. 그 자리에 문장이 없으면 규칙은 문서 속에서만 지켜진다.
+    """
+    import inspect
+
+    assert "다시 git으로 확인하지 말 것" in ce.SECTION1_NO_REGIT_NOTICE
+    assert "수집기에 옵션을 추가하라" in ce.SECTION1_NO_REGIT_NOTICE
+
+    src = inspect.getsource(ce.build)
+    sec1 = src.index('A("## 1. 코드·커밋 상태")')
+    last_table = src.index("**직전 커밋 10건**")
+    notice = src.index("A(SECTION1_NO_REGIT_NOTICE)")
+    sec2 = src.index('A("## 2. 프로세스 세션 경계')
+    assert sec1 < last_table < notice < sec2

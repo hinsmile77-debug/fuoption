@@ -45,3 +45,18 @@ def test_intraday_must_not_demand_a_commit() -> None:
     for text in (_read("references", "phases.md"), _read("references", "report_template.md")):
         assert "장중 국면은 커밋을 요구하지 않는다" in text
         assert "판정이 하루 늦는 편이 낫다" in text
+
+
+def test_no_regit_rule_is_written_where_sessions_look() -> None:
+    """F-129 — 「수집기가 준 수치를 git 으로 재확인하지 않는다」가 두 문서에 다 있다.
+
+    evidence_map.md 의 git 절은 종전에 `git log`·`git status` 예시를 나열했고, 점검 세션은
+    재확인하고 싶을 때 바로 그 예시를 집어 들었다. 예시가 되살아나면 이 테스트가 깨진다.
+    """
+    emap = _read("references", "evidence_map.md")
+    git_sec = emap.split("## git", 1)[1].split("\n## ", 1)[0]
+    assert "날것 git 명령 금지" in git_sec
+    assert "git status --porcelain" not in git_sec
+    assert "git log --oneline" not in git_sec
+
+    assert "다시 확인하려고 git을 직접 호출하지 않는다" in _read("SKILL.md")

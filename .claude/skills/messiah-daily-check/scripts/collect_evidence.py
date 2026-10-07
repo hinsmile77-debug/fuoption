@@ -341,6 +341,12 @@ _GIT_READONLY_SUBCOMMANDS = frozenset(
 #: 이 실행 중 `run_git` 이 스스로 만든 락 사건 — §9가 읽는다 (2026-08-31 F-78).
 GIT_SELF_LOCK_EVENTS: list[str] = []
 
+#: 다이제스트 §1 끝에 붙는 안내 — 세션이 이 표를 읽은 **바로 그 자리**에 둔다 (2026-10-07 F-129).
+SECTION1_NO_REGIT_NOTICE = (
+    "> 🔴 **이 수치를 다시 git으로 확인하지 말 것** — 더 필요하면 이 수집기에 옵션을 추가하라"
+    " (SKILL.md §1 · F-78/F-129)."
+)
+
 
 def run_git(root: Path, args, timeout=25):
     """[MW0601 483차 후속3 / P1-1·P1-2 · 2026-08-26 F-60] 읽기 전용 git 호출.
@@ -1125,6 +1131,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         or "(reflog 없음 — **미측정**)"
     )
     A("```")
+    A("")
+    # [MW0601 2026-10-07 F-129 · G-71] 금지 문장을 **세션이 실제로 읽는 출력** 안에 둔다.
+    # 문서(SKILL.md §1)에만 적힌 규칙은 통산 6회 깨졌다 — 위반은 매번 이 표를 읽은 직후
+    # 「눈으로 다시 확인」하려는 git 호출이었다.
+    A(SECTION1_NO_REGIT_NOTICE)
     A("")
 
     # ---- 2. 프로세스 로그 ----
