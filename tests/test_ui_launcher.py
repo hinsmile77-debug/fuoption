@@ -46,6 +46,7 @@ def _launch(tmp_path, **overrides):
         "project_root": tmp_path,
         "log_path": tmp_path / "ui.log",
         "marker_path": tmp_path / "marker.json",
+        "set_title": lambda title: None,  # 테스트 러너의 콘솔 제목을 건드리지 않는다
     }
     kwargs.update(overrides)
     return launch_command_center(**kwargs)
@@ -136,7 +137,15 @@ def test_launches_when_not_running_and_files_exist(tmp_path):
     assert result.status == "launched"
     assert len(calls) == 1
     args, kwargs = calls[0]
-    assert args[0] == [str(exe), "run", str(app_path), "--server.port", str(DEFAULT_PORT)]
+    assert args[0] == [
+        str(exe),
+        "run",
+        str(app_path),
+        "--server.port",
+        str(DEFAULT_PORT),
+        "--server.headless",
+        "true",
+    ]
     assert kwargs["cwd"] == str(tmp_path)
     assert (tmp_path / "logs" / "ui.log").exists()  # 로그 디렉터리까지 만들어짐
 
@@ -160,7 +169,8 @@ def test_a_foreign_holder_pushes_the_ui_to_a_fallback_port(tmp_path):
     assert result.status == "launched"
     assert result.port == DEFAULT_PORT + 1
     args, _kwargs = calls[0]
-    assert args[0][-1] == str(DEFAULT_PORT + 1)  # 실제로 그 포트로 띄웠다
+    cmd = args[0]
+    assert cmd[cmd.index("--server.port") + 1] == str(DEFAULT_PORT + 1)  # 실제로 그 포트로 띄웠다
 
 
 def test_all_ports_taken_reports_foreign_and_does_not_launch(tmp_path):
@@ -228,7 +238,45 @@ def test_launches_with_explicit_server_port_arg(tmp_path):
     )
 
     args, _ = calls[0]
-    assert args[0] == [str(exe), "run", str(app_path), "--server.port", "9999"]
+    assert args[0] == [
+        str(exe),
+        "run",
+        str(app_path),
+        "--server.port",
+        "9999",
+        "--server.headless",
+        "true",
+    ]
+
+
+def test_console_title_and_banner_carry_the_actual_port(tmp_path, capsys):
+    """cmd 창만 보고 주소를 복사할 수 있어야 한다 (2026-10-10) — 대체 포트로 뜨면 그 포트가
+    제목과 배너에 나와야 한다(8511을 적어 두면 남의 화면을 열게 된다)."""
+    exe, _app_path = _project(tmp_path)
+    popen, _calls = _fake_popen()
+    titles: list[str] = []
+
+    result = _launch(
+        tmp_path,
+        streamlit_exe=exe,
+        is_running=lambda port: port == DEFAULT_PORT,  # 8511만 남이 점유
+        popen=popen,
+        set_title=titles.append,
+    )
+
+    url = f"http://localhost:{DEFAULT_PORT + 1}"
+    assert result.port == DEFAULT_PORT + 1
+    assert titles == [f"MESSIAH [test]  UI {url}"]
+    assert url in capsys.readouterr().out
+
+
+def test_console_title_says_no_ui_when_skipped(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESSIAH_SKIP_UI", "1")
+    titles: list[str] = []
+
+    _launch(tmp_path, set_title=titles.append)
+
+    assert titles == ["MESSIAH [test]  UI 없음(skipped)"]
 
 
 def test_launch_failure_is_caught_and_reports_no_process(tmp_path):

@@ -19,6 +19,11 @@ REM gets its multi-byte sequences misparsed as bogus commands (confirmed by hand
 setlocal
 cd /d "%~dp0.."
 
+REM Window title (2026-10-10): the UI runs headless, so this console is where a human reads
+REM the address to paste into a browser. Python (core/ui_launcher.py) overwrites this with
+REM the actual port once the UI is up - fallback ports 8512-8514 included.
+title MESSIAH [run_l1_daily]  UI port pending
+
 REM Switch this console to UTF-8 so the script's Korean log lines render correctly live,
 REM not just when the log file is opened later in an editor.
 chcp 65001 >nul
@@ -61,7 +66,11 @@ REM 2026-08-10 the G2 entrypoint ended with code 255 while its own log said it e
 REM and the only place that fact existed was the Windows event log.
 REM src\messiah\ops\task_exit_codes.py reads that event log; this line makes the same fact
 REM greppable in the daily log too. (ASCII only here - see the header note.)
-echo [exit] run_l1_daily.py code=%EXITCODE%>>"%LOGFILE%"
+REM The redirect goes FIRST (2026-10-10 fix). Written as "...code=%EXITCODE%>>file", a
+REM single-digit code expands to "code=0>>file" and cmd parses "0>>" as a redirect of handle
+REM 0 (stdin): the digit vanished and the line went to the console, not the log - so this
+REM line had never actually landed in a log with its code (2 of 64 logs had "code=" empty).
+>>"%LOGFILE%" echo [exit] run_l1_daily.py code=%EXITCODE%
 
 if not %EXITCODE%==0 (
     echo [run_l1_daily.bat] exit code %EXITCODE% - check %LOGFILE% >&2

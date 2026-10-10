@@ -19,6 +19,11 @@ REM run_l1_daily.bat, 2026-07-24 - same class of bug applies here).
 setlocal
 cd /d "%~dp0.."
 
+REM Window title (2026-10-10): the UI runs headless, so this console is where a human reads
+REM the address to paste into a browser. Python (core/ui_launcher.py) overwrites this with
+REM the actual port once the UI is up - fallback ports 8512-8514 included.
+title MESSIAH [run_g2_paper_trading]  UI port pending
+
 REM Switch this console to UTF-8 so the script's Korean log lines render correctly live,
 REM not just when the log file is opened later in an editor.
 chcp 65001 >nul
@@ -50,7 +55,11 @@ REM Record the exit code IN THE LOG (2026-08-10 A-2) - see the same line in run_
 REM This entrypoint is the one that made the axis necessary: on 2026-08-10 it logged a clean
 REM SessionEnd at 15:35:00 and the scheduler recorded return code 2147942655 (= Win32 255)
 REM two seconds later. Nothing in the daily report read that number.
-echo [exit] run_g2_paper_trading.py code=%EXITCODE%>>"%LOGFILE%"
+REM The redirect goes FIRST (2026-10-10 fix). Written as "...code=%EXITCODE%>>file", a
+REM single-digit code expands to "code=0>>file" and cmd parses "0>>" as a redirect of handle
+REM 0 (stdin): the digit vanished and the line went to the console, not the log - so this
+REM line had never actually landed in a log with its code (2 of 64 logs had "code=" empty).
+>>"%LOGFILE%" echo [exit] run_g2_paper_trading.py code=%EXITCODE%
 
 if not %EXITCODE%==0 (
     echo [run_g2_paper_trading.bat] exit code %EXITCODE% - check %LOGFILE% >&2

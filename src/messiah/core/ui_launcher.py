@@ -171,6 +171,46 @@ def identify_port_holder(port: int, *, marker_path: Path, app_path: Path) -> boo
     return marker.get("port") == port and marker.get("app_path") == str(app_path)
 
 
+def set_console_title(title: str) -> None:
+    """이 프로세스가 붙어 있는 콘솔 창의 제목을 바꾼다 — Windows 전용, 그 밖에선 아무것도
+    안 한다. 콘솔이 없거나(스케줄러 숨김 실행·pytest 캡처) 실패해도 조용히 넘어간다 —
+    창 제목은 사람 편의용이지 판정 근거가 아니다(`stop_l1_daily.bat`이 제목이 아니라
+    명령줄로 프로세스를 찾는 이유와 같다)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleTitleW(title)
+    except Exception:  # noqa: BLE001 — 편의 기능이 본 작업을 막지 않는다
+        pass
+
+
+def _announce_ui_address(
+    caller_tag: str, launched: LaunchedUI, *, set_title: Callable[[str], None]
+) -> None:
+    """**cmd 창만 보고 화면 주소를 알 수 있게 한다** (2026-10-10 사용자 요청).
+
+    UI가 headless로 떠서 브라우저가 자동으로 안 열리므로, 사람은 이 창에서 주소를 복사해
+    브라우저에 붙여 넣는다. 창 제목에 「MESSIAH」와 포트를 박아 두면 작업표시줄에서 어느
+    창이 메시아이고 어느 포트로 떴는지 바로 보이고, 대체 포트(8512–8514)로 뜬 날이나 워치독
+    재기동으로 포트가 옮겨진 날에도 제목이 실제 포트를 따라간다(재기동도 이 함수를 거친다).
+    """
+    if launched.status in ("launched", "already-ours"):
+        url = f"http://localhost:{launched.port}"
+        set_title(f"MESSIAH [{caller_tag}]  UI {url}")
+        bar = "=" * 64
+        print(
+            f"{bar}\n"
+            f"  MESSIAH Command Center — 아래 주소를 복사해 브라우저에 붙여 넣기\n"
+            f"    {url}\n"
+            f"{bar}",
+            flush=True,
+        )
+    else:
+        set_title(f"MESSIAH [{caller_tag}]  UI 없음({launched.status})")
+
+
 def launch_command_center(
     *,
     caller_tag: str,
@@ -182,6 +222,35 @@ def launch_command_center(
     marker_path: Path = DEFAULT_MARKER_PATH,
     is_running: Callable[[int], bool] = is_ui_already_running,
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+    set_title: Callable[[str], None] = set_console_title,
+) -> LaunchedUI:
+    """기동 결과를 cmd 창 제목·배너로 알린다 — 실제 기동 판단은 `_launch_command_center()`."""
+    launched = _launch_command_center(
+        caller_tag=caller_tag,
+        project_root=project_root,
+        log_path=log_path,
+        port=port,
+        streamlit_exe=streamlit_exe,
+        skip_env_var=skip_env_var,
+        marker_path=marker_path,
+        is_running=is_running,
+        popen=popen,
+    )
+    _announce_ui_address(caller_tag, launched, set_title=set_title)
+    return launched
+
+
+def _launch_command_center(
+    *,
+    caller_tag: str,
+    project_root: Path,
+    log_path: Path,
+    port: int,
+    streamlit_exe: Path | None,
+    skip_env_var: str,
+    marker_path: Path,
+    is_running: Callable[[int], bool],
+    popen: Callable[..., subprocess.Popen],
 ) -> LaunchedUI:
     """`LaunchedUI.process is None`은 "새로 띄운 프로세스가 없다"는 뜻이다 — 생략(환경변수·
     이미 실행 중)과 실패(실행파일 없음·기동 예외)를 구분하지 않는다. 호출자 입장에서는 둘 다
@@ -268,10 +337,22 @@ def launch_command_center(
     # `locale.getpreferredencoding()` 자체를 UTF-8로 만든다 — 착수 전
     # `grep -rn "open(" src/messiah/`로 인코딩 미지정 텍스트 `open()`이 없음을 확인했다.
     child_env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    # **서버만 띄우고 브라우저는 열지 않는다** (2026-10-10 사용자 요청). Streamlit은
+    # headless가 아니면 기동할 때마다 기본 브라우저를 연다 — 08:20 자동기동은 물론 워치독
+    # 재기동 때마다 창이 튀어나왔다. 화면은 필요할 때 사람이 `scripts\open_ui.bat` 또는
+    # http://localhost:8511 로 직접 연다. 서버·수집·상태판은 브라우저 유무와 무관하게 돈다.
     try:
         with open(log_path, "a", encoding="utf-8") as log_file:
             process = popen(
-                [str(exe), "run", str(app_path), "--server.port", str(port)],
+                [
+                    str(exe),
+                    "run",
+                    str(app_path),
+                    "--server.port",
+                    str(port),
+                    "--server.headless",
+                    "true",
+                ],
                 cwd=str(project_root),
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
