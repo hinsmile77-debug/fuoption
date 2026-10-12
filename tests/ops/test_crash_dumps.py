@@ -329,3 +329,78 @@ def test_format_line_answers_when_what_died_and_where():
     assert "08:36:01 이후" in line
     assert "first-chance" in line
     assert "access violation" in line
+
+
+# [MW0601 2026-10-12 F-138] headless 전환(10-10) 뒤 첫 거래일의 UI 로그 그대로 — 서버 배너만 있고
+# 아무도 접속하지 않아 `app.py`가 한 줄도 돌지 않았다.
+_UI_NEVER_VISITED = textwrap.dedent(
+    """\
+    2026-10-12 08:20:29.542 Uvicorn server started on :::8511
+
+      You can now view your Streamlit app in your browser.
+
+      Local URL: http://localhost:8511
+      Network URL: http://192.168.0.70:8511
+    """
+)
+
+# 10-07처럼 누가 화면을 연 날 — 무장 마커와 SessionStart가 남는다.
+_UI_VISITED = _UI_NEVER_VISITED + textwrap.dedent(
+    """\
+    [crash_forensics] armed tag=ui target=stderr
+    {"ts": "2026-10-07T08:20:59+09:00", "level": "INFO", "tag": "SessionStart"}
+    """
+)
+
+
+def _collect_ui(tmp_path: Path, text: str, *, crashes: int = 0, available: bool = True):
+    (tmp_path / "ui_20261012.log").write_text(text, encoding="utf-8")
+    return collect_crash_forensics(
+        date(2026, 10, 12),
+        log_dir=tmp_path,
+        native_crash_count=crashes,
+        native_crashes_available=available,
+    )
+
+
+def test_ui_server_only_log_is_labelled_never_visited(tmp_path: Path):
+    """F-138 — 「아무도 안 열었다」와 「화면이 고장났다」를 리포트에서 가른다."""
+    forensics = _collect_ui(tmp_path, _UI_NEVER_VISITED)
+
+    assert forensics.ui_never_visited is True
+    (finding,) = forensics.findings
+    assert finding.startswith("ui 로그에 crash_forensics 무장 마커 없음")
+    assert "미접속 추정" in finding
+
+
+def test_ui_visited_log_is_not_labelled(tmp_path: Path):
+    forensics = _collect_ui(tmp_path, _UI_VISITED)
+
+    assert forensics.ui_never_visited is False
+    assert forensics.findings == []
+
+
+def test_ui_label_withheld_when_crash_happened_or_unmeasured(tmp_path: Path):
+    """크래시가 났거나 못 쟀으면 「안 열었다」고 단정하지 않는다 — 2026-08-03의 UI는 앱 흔적
+    없이 죽었다. 그날을 「미접속」으로 읽으면 진짜 고장이 묻힌다."""
+    crashed = _collect_ui(tmp_path, _UI_NEVER_VISITED, crashes=2)
+    unmeasured = _collect_ui(tmp_path, _UI_NEVER_VISITED, available=False)
+
+    for forensics in (crashed, unmeasured):
+        assert forensics.ui_never_visited is None
+        assert not any("미접속 추정" in f for f in forensics.findings)
+
+
+def test_never_visited_label_does_not_change_the_verdict(tmp_path: Path):
+    """판정 불변 — 라벨은 표시만 한다. `armed`·finding 건수·등록부 지표가 라벨 도입 전과 같아야
+    `crash-forensics-armed`가 미접속 날에도 그대로 울린다(조용한 면제 금지, 금지계명 12)."""
+    from dataclasses import asdict
+
+    from messiah.ops.fix_verification import METRIC_EXTRACTORS
+
+    forensics = _collect_ui(tmp_path, _UI_NEVER_VISITED)
+
+    assert forensics.armed == {"ui": False}
+    assert len(forensics.findings) == 1
+    unarmed = METRIC_EXTRACTORS["crash_forensics_unarmed"]({"crash_forensics": asdict(forensics)})
+    assert unarmed == 1.0

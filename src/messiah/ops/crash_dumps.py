@@ -173,11 +173,43 @@ class FaulthandlerDump:
         return "파이썬 스레드 아님 — Current thread 블록 없음(네이티브 스레드에서 폴트)"
 
 
+# [MW0601 2026-10-12 F-138] 화면 **앱 코드가 한 줄이라도 돌았다**는 흔적.
+# Streamlit은 서버(`Uvicorn server started`)가 떠도 누가 브라우저로 접속해야 `app.py`를
+# 실행한다 — 그 전까지 UI 로그에는 Streamlit 자신의 기동 배너만 있다. 앱이 돌면 무장 마커·
+# 구조화 JSON(`SessionStart`·`UISnapshotFreshness`)·Traceback·덤프 중 하나는 반드시 남는다.
+_UI_APP_ACTIVITY = re.compile(
+    r'"tag":\s*"|\[crash_forensics\] armed|^Traceback|^Windows fatal exception'
+)
+_UI_SERVER_STARTED = re.compile(r"Uvicorn server started")
+
+
 @dataclass
 class CrashForensics:
     armed: dict[str, bool]  # 프로세스 → 무장 마커가 로그에 있었나
     dumps: list[FaulthandlerDump] = field(default_factory=list)
     findings: list[str] = field(default_factory=list)
+    # [MW0601 2026-10-12 F-138] 화면 무장 공백이 「아무도 안 열었다」인지 가르는 **표시 라벨**.
+    # True — 서버는 떴는데 앱 코드 흔적 0건이고 네이티브 크래시도 0건(미접속 추정).
+    # False — 앱 코드가 돌았다. None — UI 로그 없음·서버 기동 흔적 없음·크래시 있음(판별 불가).
+    # `armed`는 건드리지 않는다 — `crash_forensics_unarmed` 집계와 `FixVerificationRecurred`는
+    # 그대로 울린다. 미접속으로 자동 면제하면 진짜 고장을 숨길 수 있다(금지계명 12).
+    ui_never_visited: bool | None = None
+
+
+def _ui_never_visited(
+    text: str, *, native_crash_count: int, native_crashes_available: bool
+) -> bool | None:
+    """UI 로그 본문으로 「서버만 뜨고 아무도 접속 안 함」을 추정한다 — 판별 못 하면 None."""
+    lines = text.splitlines()
+    if not any(_UI_SERVER_STARTED.search(line) for line in lines):
+        return None
+    if any(_UI_APP_ACTIVITY.search(line.strip()) for line in lines):
+        return False
+    # 크래시가 났거나 못 쟀으면 「안 열었다」고 단정하지 않는다 — 옛 UI는 앱 흔적 없이 죽었다
+    # (2026-08-03: 무장 마커도 SessionStart도 없이 네이티브 크래시 2건).
+    if not native_crashes_available or native_crash_count > 0:
+        return None
+    return True
 
 
 def forensics_log_paths(day: date, log_dir: Path) -> dict[str, Path]:
@@ -277,6 +309,7 @@ def collect_crash_forensics(
     armed: dict[str, bool] = {}
     dumps: list[FaulthandlerDump] = []
     findings: list[str] = []
+    ui_never_visited: bool | None = None
 
     for process, path in forensics_log_paths(day, log_dir).items():
         if not path.exists():
@@ -287,13 +320,26 @@ def collect_crash_forensics(
             _ARMED_MARKER.search(line.strip()) for line in text.splitlines()
         )
         dumps.extend(parse_dumps(process, text))
+        if process == "ui":
+            ui_never_visited = _ui_never_visited(
+                text,
+                native_crash_count=native_crash_count,
+                native_crashes_available=native_crashes_available,
+            )
 
     for process, is_armed in sorted(armed.items()):
         if not is_armed:
-            findings.append(
+            message = (
                 f"{process} 로그에 crash_forensics 무장 마커 없음 — "
                 f"그 세션은 네이티브 크래시가 나도 증거를 안 남긴다"
             )
+            if process == "ui" and ui_never_visited:
+                # 라벨만 붙인다 — finding 자체는 그대로 남아 사람이 매일 확인한다(F-138).
+                message += (
+                    " [미접속 추정: 서버는 떴으나 화면 앱 코드 흔적 0건 — 아무도 접속하지 않아 "
+                    "코드가 돌 기회가 없었다. 화면을 연 날도 이 줄이 나오면 코드 결함이다]"
+                )
+            findings.append(message)
 
     # [MW0601 2026-08-26 F-64] **덤프가 1건이라도 있으면 finding 1건.**
     #
@@ -332,7 +378,9 @@ def collect_crash_forensics(
             "관측 공백 원인과 대조할 것"
         )
 
-    return CrashForensics(armed=armed, dumps=dumps, findings=findings)
+    return CrashForensics(
+        armed=armed, dumps=dumps, findings=findings, ui_never_visited=ui_never_visited
+    )
 
 
 def format_dump_lines(forensics: CrashForensics) -> list[str]:
