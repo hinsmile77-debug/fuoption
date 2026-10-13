@@ -19222,3 +19222,141 @@ headless UI 전환(10-10) 뒤 첫 거래일, 아무도 화면에 접속하지 �
 
 ### 검증
 `tests/ops/test_crash_dumps.py` 신규 4건(판정 불변 포함) 통과. 관련 범위 196건 통과. 전체 2,994 통과 / 2 실패(`test_rollover_day` 실데이터 의존, 기존 실패). 라이브 검증: 다음 장후 배치의 `daily_integrity_*.json`에서 `ui_never_visited` 값과 finding 라벨 확인 — 기한 다음 거래일 장후. 커밋 `266094e`.
+
+## [MW0601] 2026-10-13 장전 점검
+
+### 증상
+
+장전 점검(Cowork 원격 세션, `messiah-daily-check` phase=pre, 점검 시각 08:47 KST). HEAD `1fd8c1f`(변경 없음, 실행 중 `l1_daily`·`g2_daily` 전부 동일 sha, `code_version.stale: false`) · 미커밋 67건(추적 안 되는 파일 65건 + 수정 2건, 전부 `dev_memory`/로그/산출물 — `src/`+`scripts/` 실변경 0파일, dev 모드 허용). 자가점검 3프로세스(`l1_daily`·`g2_daily`·`ui`) 전부 PASS(경고 1건: bundle, 기존 K-6 — `real-20260820-2053-30m` 미승격 관문 sharpe·max_drawdown·negative_window_ratio, 변경 없음). `SessionStart` 각 1회(`l1_daily` 08:20:48·`g2_daily` 08:25:40), `LaunchWindowRefused` 0건. 신규 결함 0건.
+
+오늘 자가점검 `deadlines` 줄에 **처음으로** "기한 도달 불가 1건 — crash-forensics-armed(남은 0일 < 필요 3일)"이 나타났다(10-07·10-08·10-12 evidence 대조 — 10-07은 `exit-code-matches-log`만 있었고, 10-08·10-12는 0건이었음). 어제(10-12) 장후 F-138(화면 "미접속 추정" 라벨 추가, 커밋 `266094e`)에도 불구하고 `crash_forensics.armed["ui"]`는 미접속이면 여전히 `false`로 집계되므로(F-138은 위반 집계 로직을 바꾸지 않음, 2026-10-12 장후 항목 참조), 3거래일 클린 스트릭 재검증 시계가 오늘(1일째)부터 다시 돌기 시작했다 — 이는 F-138 사안의 예정된 결과이며 신규 결함이 아니다. 오늘 장전 시점까지 `logs/ui_20261013.log`에 Streamlit 기동 배너 5줄 외 추가 기록 0건(= 오늘도 미접속 상태 지속 중).
+
+`CollectorWSDisconnected`가 08:45:54에 1건 발생("no close frame received or sent") → 08:45:59.824 `CollectorWSReconnected`(재연결 5.1초) → 08:45:59.895 `CollectorFirstTick` → 08:46:00부터 1분봉 FeaturePublish 정상 재개. 10-08 사고(F-132/F-133)의 선행 증상과 같은 태그이지만, 이번엔 `ApprovalKeyIssuer.issue()`의 `httpx.ConnectError` 경로를 타지 않아 프로세스가 죽지 않았다 — F-132의 수정 여부를 검증하는 사례는 아니다(해당 예외가 이번엔 발생하지 않았을 뿐).
+
+`OptionChainStaleSpot` 3건(08:21:40~08:25:00, 최대 지연 60,660초≈16.85시간, 전일 15:34 장마감 종가 이월)은 2026-08-28 이후 매일 반복되는 정상 패턴과 일치(10-12의 사상 최장 기록 112.9시간과는 무관한 평상시 수준). `FixVerificationRecurred` 0건. K-10(KIS API 500 재시도) 장전 구간만 6건(`OptionChainPollRetried` 1 + `InvestorFlowPollRetried` 5), 전건 1회 재시도 복구 — 하루 전체 기준 범위(28~57건) 대비 장전 분량으로 정상.
+
+### 원인
+
+- `crash-forensics-armed` 재검증 시계 리셋: F-138이 집계 로직(`crash_forensics_unarmed` breach 판정)을 보수적으로 유지한 설계 그대로의 결과(라벨만 "미접속 추정"으로 설명을 붙였을 뿐, armed=false 자체는 미접속이 계속되는 한 매일 재발한다). 근본적으로 "화면을 매일 챙겨볼지" 여부가 정해지지 않은 상태가 지속되는 것이 원인.
+- `CollectorWSDisconnected` 08:45:54: 네트워크 계층의 일시적 WS 연결 종료("no close frame received or sent") — 승인키 재발급 호출 없이 표준 재연결 경로로 정상 처리됨(F-132가 다루는 예외 유형과는 다른 경로를 탔다).
+
+### 결정
+
+- 코드 변경 없음(장전 점검, SYSTEM.md R11·금지 15계명 3·4 준수). F-132·F-133은 이월(사용자 "구현해" 지시 대기), F-138 라이브 확인은 오늘 화면 접속 여부로 장중/장후에 재확인.
+- `crash-forensics-armed` 기한 도달 불가 표시는 신규 이상점으로 등재하지 않는다 — F-138의 예정된 파생 결과로 판단(중복 보고 방지).
+- `CollectorWSDisconnected` 1건은 정상 복구 패턴(F-132/F-133과 무관한 성공 사례)으로 판정, 신규 이상점 미등재. 다만 F-132/F-133 추적 시 참고 사례로 기록.
+
+### Why
+
+- SKILL.md 지침("이미 결정된 사안을 새 발견인 양 보고하지 않는다")에 따라 F-138의 기계적 후속 효과를 신규 결함으로 중복 등재하지 않았다. 동시에 "재발은 항상 P0 보고 대상"이라는 원칙에 위배되지 않는지 확인했다 — `crash-forensics-armed`가 `deadlines` 줄에 뜬 것은 등록부의 "재검증 대기중" 표시일 뿐 `FixVerificationRecurred`(재발 ERROR 태그) 자체가 오늘 새로 뜬 것은 아니므로(그 ERROR는 어제 10-12에 1회 발생해 이미 보고됨) 재발 규칙과는 별개다.
+- `CollectorWSDisconnected`를 이상점으로 등재하지 않은 이유: 설계된 재시도 창(5초) 이내 복구, 데이터 유실 0건, 다운스트림(FeaturePublish) 영향 0 — dev_memory에 이미 여러 차례(2026-08-28 이후, 2026-09-21 1-5 등) "정상 복구 패턴"으로 확정된 것과 동일한 판정 기준 적용.
+
+### How to apply
+
+- F-132 적용 대상: `src/messiah/data/collector.py` 371~381행 — `await asyncio.to_thread(self._approval_issuer.issue)` 호출을 try/except로 감싸 `httpx.TransportError`를 `CollectorWSDisconnected` 경로로 합류(또는 93행 `_WS_DISCONNECT_ERRORS` 튜플에 직접 추가 — 트레이드오프는 2026-10-12 보고서 참조). 신규 테스트: `ApprovalKeyIssuer.issue`가 `httpx.ConnectError`를 던지는 경우 `run_forever()`가 프로세스를 안 죽이고 백오프 재시도하는지.
+- F-133 적용 대상: 신규 `scripts/watch_l1_daily.py`(가제) — 별도 프로세스, Windows 작업 스케줄러 1분 간격, PID 생존+로그 최종수정시각만 확인, 재기동은 하지 않고 알림만.
+- 적용 시점: 둘 다 사용자 "구현해" 지시 대기, 장후(15:35 이후)에만 적용 가능.
+
+### 검증
+
+- 라이브 미검증. F-132/F-133은 다음 실제 크래시(있다면) 발생 시 또는 사용자 지시에 따른 의도적 재현 테스트로만 판정 가능 — 검증 기한 미정(사용자 결정 대기).
+- F-138 라이브 확인은 오늘 화면 접속 여부로 판정 — 검증 기한: 오늘 장후.
+- 이 세션은 `collect_evidence.py` 실행 외 `git` 명령을 직접 호출하지 않았다(F-129 무위반). 소스코드 변경 0줄(F-78 전제대로, 금지 15계명 3·4 준수).
+
+## [MW0601] 2026-10-13 장중 점검
+
+### 증상
+
+- 관측구간 09:00~12:45(정규장 개장~점검 실행 시각). 신규 결함 0건. 자동 적신호 점검기(`collect_evidence.py`)가 `g2_daily` 08:25~08:50 25분 로그 공백을 잡았으나, 되짚어 보니 L1(`l1_daily`) 첫 1분봉 발행이 08:46:00이라 g2가 구독하는 첫 5분봉(M5) 확정이 08:50:00 전후일 수밖에 없었다(`logs/g2_daily_20261013.log` 첫 판단 로그가 정확히 08:50:00.539177 `OptionsNoCandidate`) — 08:15~09:00 장전 준비 구간 내의 정상 지연이며 결함이 아니다.
+- `CollectorWSDisconnected` 장중 신규 4건(09:16:13·09:53:25·10:08:32·12:18:23), 복구 소요 5.09~15.92초, 전건 설계된 경로로 정상 복구(데이터 유실·`FeaturePublish` 공백 0). 오전 1건(08:45:54)과 합쳐 오늘 총 5건 — 전부 10-08 사고 원인이었던 승인키 재발급 실패(`httpx.ConnectError`) 경로를 타지 않았다.
+- `DecisionEmitted`·`MetaGateEvaluated`·`RegimeClassified` 각 8건, 09:00~12:30 30분 그리드에 정확히 정렬. 전부 `side: NO_TRADE`(점수 우위 부족, `|S|` 0.016~0.107 < 임계 0.2). 섀도 메타게이트 통과 1/8(12.5%, 10:30 p=0.152) — C-2 사람 결정 재료 수치만 갱신.
+- F-133·F-132(P0), F-138 라이브 확인, C-1, C-2, order-path-live — 전부 변동 없이 지속. K-10(KIS API 재시도) 관측구간 합산 35건(옵션체인 9+수급 26), 전건 1회 재시도 복구로 정상 범위.
+
+### 원인
+
+- (신규 원인 분석 대상 없음.) 자동 적신호는 "원인 불명"이 아니라 "판단 재료(완성된 5분봉)가 아직 안 쌓여 첫 사이클이 늦게 시작했다"로 설명됨 — 위 증상 참조. `src/messiah/strategy/options/service.py`의 `handle_bar`가 M5 완성봉 수신 시에만 판단을 내는 설계이고, M5 완성에는 1분봉 5개가 필요하다(1분봉 자체가 08:46:00부터 시작).
+
+### 결정
+
+- 코드 변경 없음(장중 점검, SYSTEM.md R11·금지 15계명 3·4 준수).
+- `g2_daily` 25분 로그 공백 자동 적신호는 결함으로 등재하지 않는다 — 장전 준비 구간의 예정된 지연으로 판정, 신규 이상점 미등재.
+- 장중 WS 끊김 4건은 F-132/F-133 추적 시 참고 사례로만 누적한다(신규 이상점 미등재) — 2026-08-28 이후 여러 차례 확정된 "정상 복구 패턴"과 동일한 판정 기준을 오늘 장전 08:45:54건에 이어 그대로 적용.
+- C-2는 수치만 갱신한다(오늘 8건 중 1건 섀도 통과) — 승격 여부는 여전히 사람 결정 대기.
+- G-79(신규, 고도화) 제안을 등재한다 — 섀도 통과율 수작업 집계를 자동화하는 관측성 개선, 안전·판정 로직과는 무관.
+
+### Why
+
+- SKILL.md 지침("아직 일어날 차례가 아닌 것을 결함으로 적지 않는다")에 따라, `g2_daily` 공백을 기계적 임계(10분) 위반으로만 보지 않고 1분봉 발행 시작 시각(08:46:00)이라는 실제 설계 의존관계까지 되짚어 "데이터 재료 부족에 따른 정상 지연"으로 판정했다. 자동 적신호는 출발점일 뿐 결론이 아니라는 원칙을 그대로 지켰다.
+- WS 끊김 4건을 신규 이상점으로 등재하지 않은 이유: 설계된 재시도 창 이내 복구, 데이터 유실·다운스트림 영향 0 — 오늘 장전 08:45:54건과 동일한 판정 기준을 그대로 적용해 일관성을 유지했다.
+- G-79는 "사람이 매번 손으로 세고 있다"는 오늘 실제 관측(이번 점검 자체가 `grep -c`로 수작업 집계함)에서 나온 제안이라 일반론적 개선 목록이 아니다.
+
+### How to apply
+
+- 신규 적용 대상(F/K 코드) 없음. F-132·F-133 적용 계획은 제1부(장전 점검, `logs/dailycheck/2026-10-13_report.md`)에 이미 명시된 그대로이며 오늘 장중 관측으로 바뀐 것이 없다.
+- G-79 적용 대상: `src/messiah/ops/integrity_report.py`(상태 집계 지점) — `MetaGateEvaluated.passed_shadow` 수신 시 당일 분자/분모 카운터를 증가시키고, `status_snapshot.json`에 `shadow_gate.today_passed`/`shadow_gate.today_total` 필드를 추가한다. 수작업 `grep -c '"passed_shadow": true'` 대체 목적.
+- 적용 시점: 둘 다 장후(15:35 이후) — 사용자 "구현해" 지시 대기. 관측 전용 로직(G-79)이라도 장중에는 코드를 바꾸지 않는다.
+
+### 검증
+
+- 라이브 미검증(G-79는 아직 제안 단계). F-132·F-133은 여전히 다음 실제 크래시 또는 의도적 재현 테스트로만 판정 가능 — 검증 기한 미정(사용자 결정 대기).
+- F-138 라이브 확인은 오늘 장후(15:35 이후) 화면 접속 여부로 판정 — 검증 기한 오늘 장후, 변동 없음.
+- G-79는 장후 적용 뒤 다음 거래일 `grep -c` 수작업 결과와 `status_snapshot.json` 신규 필드 값을 대조해 검증한다.
+- 이 세션은 `collect_evidence.py` 실행과 `grep`/`sed`/`cat`만 사용했고 `git` 명령을 직접 호출하지 않았다(F-129 무위반). 소스코드 변경 0줄(장중 R11·금지 15계명 3·4 준수).
+
+## [MW0601] 2026-10-13 장후 점검
+
+### 증상
+
+- 장후 배치(`logs/postmarket_20261013.log`) 먼저 완주 여부 확인 — 15:45:02~15:46:02, "=== 장후 절차 요약 ===" 블록 7/7단계 전부 완료·실패 0·발견 1(`SessionEnd` 정상 종료, `steps_with_findings: 1`). 오늘 하루 전체(`l1_daily`·`g2_daily`·`ui`·`postmarket`·`shutdown_watchdog` 로그, `status_snapshot.json`, `daily_integrity_20261013.json`) 재검토 결과: `l1_daily`·`g2_daily`·`postmarket` 각 `SessionEnd`(정상 종료) 확인, ERROR 로그는 `postmarket`에만 2건(`FixVerificationRecurred`·`FixVerificationStalled`), `code_version.stale: false`(전 프로세스 종일 `1fd8c1f` 동일), `irrecoverable_loss.clean: true`, `restarts: 0`.
+- `FixVerificationRecurred`(재발) 1건 — `crash-forensics-armed`: "오늘(2026-10-13) 기준 위반 — 수정이 듣지 않았다(최초 위반 2026-10-12 이후 2회)". F-138(화면 Command Center 미접속 → `crash_forensics.armed.ui` 무장 실패)의 2일 연속 재발 확정 — `logs/ui_20261013.log`는 08:20:54 기동 배너 5줄뿐, 하루 종일(15:46까지) 추가 기록 0건.
+- `FixVerificationStalled`(정체) 1건 — `order-path-live`: "최근 2거래일 연속 판정 불가 — 계측이 고장 났을 수 있다(진행 중이 아니라 정체다)", 판정 불가 10일째. 오늘 `DecisionEmitted` 14건 전수 확인 — 13건 `gate=score`(`|S|` 0.016~0.133 < 임계 0.2) + 1건 `gate=eod_window`(15:30 장마감 청산창), 체결 0건.
+- `CollectorWSDisconnected` 오늘 총 7건(08:45:54·09:16:13·09:53:25·10:08:32·12:18:23·13:11:23·13:59:41) — 오후 신규 2건(13:11·13:59) 포함, 전건 5.07~15.92초 내 설계된 재시도 경로로 정상 복구, 데이터 유실·`FeaturePublish` 공백 0건. 최근 거래일 대비(10-06: 3건, 09-28: 2건) 2배 이상 많은 빈도.
+- 장마감 처리: `DailyCloseBarHandedOff`(15:35:06)·`PublishGraceBreached`(15:35:06, 1m headroom -1,259ms, 전일 10-12의 -1,299ms 대비 40ms 호전) — 2026-08-25부터 상시 반복되는 설계된 폴백, 오늘 수치도 최근 변동폭(-1,200~-6,093ms) 안. 종료 시퀀스(`l1_daily` 15:35:45·`g2_daily` 15:35:00 `SessionEnd`, `shutdown_watchdog` 15:40:00~15:40:01 UI 프로세스 3개 정상 정지) 전부 정상.
+- 오늘 실거래(모의) — 판단 14건 전부 `NO_TRADE`, 체결 0건, `PositionReconciled`(15:34:59) 실현손익 +0.0틱(0원, 자본대비 0.0%), 장마감 순보유 0계약. KIS API 500 재시도 종일 60건(옵션체인 13+수급 47), 전건 1회 재시도 복구. 섀도 메타게이트 20/20거래일 창 공식 종가 확정 — 판단 280건 중 183건 통과(65.4%).
+
+### 원인
+
+- `crash-forensics-armed` 재발의 원인은 이미 규명된 그대로(2026-10-12 항목) — 2026-10-10 headless UI 전환(커밋 `d04bd7d`) 이후 사람이 `http://localhost:8511`에 접속하지 않으면 화면 앱 코드 자체가 한 줄도 돌지 않아 `crash_forensics` 무장 마커가 찍히지 않는다. 오늘도 동일 원인 재확인(접속 기록 0건).
+- `order-path-live` 정체의 원인도 기존 규명 그대로(G-11 패턴, 2026-09-18 최초 관측) — 저빈도 전략 특성상 판단 점수가 임계(0.2)를 넘는 날이 드물어 "판정 불가"가 자연히 길게 이어진다. 계측 고장이 아니라 신호 자체가 드문 것 — 오늘 판단 로그 14건 전수 확인으로 재검증.
+- WS 끊김 빈도 증가(7건, 최근 대비 2배)의 원인은 미규명 — 네트워크 회선 품질 변화일 수 있으나 오늘 관측만으로는 단정할 근거 부족, 추이 관찰 필요(G-80).
+
+### 결정
+
+- 코드 변경 없음(이 예약 실행 세션은 보고까지만 수행, 사용자 "구현해" 지시 대기).
+- F-138(`crash-forensics-armed` 재발)을 이 점검 스킬의 보고 규율("재발은 항상 P0 보고 대상")에 따라 P1→P0로 격상해 보고한다 — 원인·실제 위험 성격은 변경 없음(관측 불능 위험, 오늘 거래 직접위험 아님).
+- `order-path-live`(`FixVerificationStalled`)는 신규 결함으로 등재하지 않는다 — G-11 기존 패턴 재확인, 원인 규명 완료(신호부족).
+- WS 끊김 빈도 증가를 신규 결함으로 등재하지 않되, 참고 관측으로 남기고 G-80(신규, 고도화: WS 끊김 빈도 일별 추이 계기화)을 제안한다.
+- C-2(섀도 메타게이트)는 오늘 20거래일 관측창이 완전히 채워져 "수치만 갱신"에서 "결정 재료 완성"으로 상태를 전환한다 — 판정 자체는 여전히 사람 결정.
+- 재시동 불필요로 권고 — `code_version.stale: false`가 오늘 종일 유지됐고(`1fd8c1f`), 새로 반영할 커밋이 없다.
+
+### Why
+
+- "재발은 항상 P0"라는 스킬 보고 규율을 따른 이유는, 같은 문제가 반복될 때마다 등급을 유지하면 "계속 같은 얘기"로 가볍게 넘어갈 위험이 있어서다 — 규율상 격상이 실제 위험도 변화를 의미하지 않는다는 점은 보고서 본문에 명시했다.
+- WS 끊김 빈도를 신규 결함으로 등재하지 않은 이유: 끊김 자체는 전부 설계된 재시도 경로로 정상 복구됐고 SYSTEM.md 어느 조항도 빈도 상한을 두지 않기 때문 — 다만 F-132/F-133 구현 우선순위 판단에 참고할 추세 데이터이므로 계기화를 제안했다.
+- C-2를 "결정 재료 완성"으로 명시한 이유: 20거래일 관측창이라는 R18의 요구조건이 오늘로 충족됐고, 더 기다려도 표본이 크게 달라지지 않을 단계이기 때문 — 사용자가 결정을 미룰 이유가 줄어들었음을 명확히 알리기 위함.
+
+### How to apply
+
+- F-132 적용 대상: `src/messiah/data/collector.py` 371~381행(try/except로 `httpx.TransportError` 합류) 또는 93행 `_WS_DISCONNECT_ERRORS` 튜플 확장 — 예외 처리 방식은 사람 결정 대기.
+- F-133 적용 대상: 신규 `scripts/watch_l1_daily.py` — Windows 작업 스케줄러 1분 간격, PID+로그 최종수정시각 확인, 알림만(재기동 없음) — 알림 수단은 사람 결정 대기.
+- G-79(이월, 변경 없음) 적용 대상: `src/messiah/ops/integrity_report.py` — `MetaGateEvaluated.passed_shadow` 당일 분자/분모 카운터, `status_snapshot.json`에 `shadow_gate.today_passed`/`today_total` 필드 추가.
+- G-80(신규) 적용 대상: `src/messiah/ops/integrity_report.py` — `CollectorWSDisconnected` 당일 카운터 + 최근 5거래일 평균을 `status_snapshot.json`에 노출.
+- 적용 시점: F-132·F-133·G-79·G-80 전부 즉시 가능(장후, 15:35 이후) — 사용자 "구현해" 지시 대기. 적용 후 `pytest`(해당 범위) + replay 검증 필수(금지계명 2), 커밋 메시지 첫 단어 `[MW0601]`.
+
+### 검증
+
+- 라이브 미검증: F-132·F-133·G-79·G-80 전부 제안/계획 단계, 코드 변경 없음.
+- F-138 재검증 시계: 오늘(2일차 위반)로 3거래일 연속 무위반 요건이 리셋됐다 — 내일부터 다시 0일째, 최소 10-16까지 3거래일 연속 무위반 확인 필요.
+- order-path-live: 다음 거래일 `DecisionEmitted`의 `|S|` ≥ 0.2 도달 + 실제 `OrderSubmit` 발생 여부로 계속 추적.
+- C-2: 사람 결정 시점에 즉시 반영(판정 기준 자체는 없음, 결정 사안).
+- 이 세션은 `collect_evidence.py` 실행과 `grep`/`sed`/`cat`/`python3`(읽기 전용)만 사용했고 `git` 명령을 직접 호출하지 않았다(F-78/F-129 무위반). 소스코드 변경 0줄(장후 보고 전용 세션, 구현은 사용자 지시 대기).
+
+
+## [MW0601] 2026-10-13 장후 자동조치 — G-79·G-80 수집기 자동 집계
+
+- **증상**: 섀도 메타게이트 당일 통과 수와 WS 끊김 수를 장전·장중 점검이 매번 `grep -c`로 손수 셌다(10-13 장중 보고 「1/8」도 수작업). WS 끊김 최근 평균 비교도 수작업.
+- **원인**: 두 값은 장후 배치의 `daily_integrity_*.json`(`meta_gate.shadow_*`·`tag_counts.CollectorWSDisconnected`)에만 있고 15:46 이후에야 생긴다. 증거 수집기는 20거래일 롤링(`meta_gate_shadow_rolling.json`)만 읽었다.
+- **결정**: 리포트 지목 대상(`integrity_report.py`·`status_snapshot.json`) 대신 `.claude/skills/messiah-daily-check/scripts/collect_evidence.py`에 `live_counts_lines()`를 추가 — 오늘 `g2_daily`·`l1_daily` 로그를 직접 세고, 직전 5개 `daily_integrity_*.json`의 끊김 평균을 붙인다. 적신호 절 끝 「오늘 자동 집계」 소절로 출력.
+- **Why**: 장후 값은 이미 있으므로 빈 곳은 장중 시점과 추세 비교뿐이다. `integrity_report.py`는 4,013줄(R5 상한 초과)이라 더 키우지 않는다. 실행 중 프로세스·버스를 건드리지 않아 재시동 불필요, A등급(도구).
+- **How to apply**: 점검 세션은 섀도 통과 수·WS 끊김 수를 손으로 세지 말고 다이제스트 「오늘 자동 집계」를 인용한다. 로그 부재는 0이 아니라 「미측정」.
+- **검증**: 신규 테스트 5건 포함 수집기 테스트 22건 통과. 10-13 실데이터 7/14·7건 — 무결성 파일과 일치. 전체 2,998 통과 / 3 실패(실데이터 의존: rollover_day 2 기존, champion_sample live 1 신규 — 원인 미확인, 이번 변경 무관). F-132·F-133·C-2는 사람 결정으로 보류.
