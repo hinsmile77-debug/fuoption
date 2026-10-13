@@ -903,6 +903,86 @@ def shadow_gate_r18_lines(root: Path, day: _date) -> list[str]:
     return [f"섀도 메타게이트 창 미충족({body}) — R18 판단 불가"]
 
 
+_WS_TREND_DAYS = 5
+
+
+def _iter_tag_records(path: Path, tag: str):
+    """JSON 로그 한 파일에서 `tag` 레코드만 꺼낸다. 깨진 줄은 건너뛴다(셀 대상이 아니다)."""
+    needle = f'"tag": "{tag}"'
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            if needle not in raw:
+                continue
+            try:
+                yield json.loads(raw)
+            except ValueError:
+                continue
+
+
+def live_counts_lines(root: Path, day: _date) -> list[str]:
+    """오늘 로그를 직접 세어 G-79·G-80 두 숫자를 사람용 줄로 (2026-10-13 장후 자동조치).
+
+    장후 배치의 `daily_integrity_*.json` 에도 같은 값(`meta_gate.shadow_*`·
+    `tag_counts.CollectorWSDisconnected`)이 있지만 15:46 이후에야 생긴다. 장전·장중 점검은
+    그동안 `grep -c` 로 손수 셌다 — 그 수작업을 여기로 옮긴다. 판정·차단에는 쓰이지 않는다.
+    로그 파일이 없으면 0이 아니라 **미측정**(L18).
+    """
+    d = day.strftime("%Y%m%d")
+    logs = root / "logs"
+    out: list[str] = []
+
+    g2 = logs / f"g2_daily_{d}.log"
+    if not g2.exists():
+        out.append(f"섀도 메타게이트 오늘 통과율 — `{g2.name}` 없음, **미측정**(0이 아니다)")
+    else:
+        seen = passes = 0
+        for rec in _iter_tag_records(g2, "MetaGateEvaluated"):
+            shadow = rec.get("passed_shadow")
+            if isinstance(shadow, bool):
+                seen += 1
+                passes += int(shadow)
+        if seen:
+            out.append(
+                f"섀도 메타게이트 오늘 통과 {passes}/{seen}건({passes / seen:.1%}) — 지금까지 로그 기준"
+            )
+        else:
+            out.append(
+                "섀도 메타게이트 오늘 판단 0건(`passed_shadow` 기록 없음) — 통과율 **미측정**"
+            )
+
+    l1 = logs / f"l1_daily_{d}.log"
+    if not l1.exists():
+        out.append(f"실시간 연결(WS) 끊김 — `{l1.name}` 없음, **미측정**(0이 아니다)")
+        return out
+    today = sum(1 for _ in _iter_tag_records(l1, "CollectorWSDisconnected"))
+    past: list[tuple[str, int]] = []
+    for path in sorted(logs.glob("daily_integrity_*.json"), reverse=True):
+        stem = path.stem.rsplit("_", 1)[-1]
+        if stem >= d:
+            continue
+        try:
+            obj = json.loads(read_text(path))
+        except Exception:  # noqa: BLE001 — 깨진 날은 평균에서 뺀다
+            continue
+        counts = obj.get("tag_counts")
+        if not isinstance(counts, dict):
+            continue
+        past.append((stem, int(counts.get("CollectorWSDisconnected", 0))))
+        if len(past) == _WS_TREND_DAYS:
+            break
+    if not past:
+        out.append(
+            f"실시간 연결(WS) 끊김 오늘 {today}건 · 과거 비교 재료 없음(`daily_integrity_*.json` 0개)"
+        )
+        return out
+    avg = sum(n for _, n in past) / len(past)
+    detail = ", ".join(f"{s[4:6]}-{s[6:]}: {n}" for s, n in past)
+    out.append(
+        f"실시간 연결(WS) 끊김 오늘 {today}건 · 직전 {len(past)}개 기록일 평균 {avg:.1f}건({detail})"
+    )
+    return out
+
+
 # ---------------------------------------------------------------- dev_memory
 def devmemory_section(root: Path, day: _date) -> list[str]:
     out = ["", "## 6. dev_memory", ""]
@@ -1032,9 +1112,7 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             else "git 프로세스 **미측정**"
         )
         _tail = " → **커밋 불가 상태**" if lk["stale"] else " (판정 보류 — 3중 조건 미충족)"
-        lock_txt = (
-            f" · 🔴 **인덱스락 잔존** {lk['size']}바이트 · {_age_h:.1f}시간 · " f"{_proc}{_tail}"
-        )
+        lock_txt = f" · 🔴 **인덱스락 잔존** {lk['size']}바이트 · {_age_h:.1f}시간 · {_proc}{_tail}"
     # [MW0601 2026-08-26 F-61] **마운트 관측임을 스스로 경고한다.**
     #
     # 2026-08-26 15:22 정정 ④ — 「CRLF 88파일」은 실재하는 변경이 아니라 관측 도구의 착시였다.
@@ -1559,6 +1637,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("### R18 판단 가능 게이트 (적신호 아님 — 사람 결정의 재료)")
     A("")
     for line in shadow_gate_r18_lines(root, day):
+        A(f"- {line}")
+    A("")
+    A("### 오늘 자동 집계 (적신호 아님 — 손으로 세지 말 것)")
+    A("")
+    for line in live_counts_lines(root, day):
         A(f"- {line}")
     A("")
     A("---")
