@@ -86,6 +86,19 @@ DEFAULT_CONFIG = {
     # 이 구간 안에서 로그가 끊기면 의심한다.
     "gap_scan_window": ["08:15", "15:40"],
     "gap_threshold_minutes": 10,
+    # 설계상 생기는 공백 — §9 적신호 본문에서 빼 「알려진 패턴」 절로 옮긴다 (2026-10-19 G-82).
+    # g2는 선물 AI 방향 뷰가 08:50 전에는 오지 않아 08:25 스마일 기동 뒤 25분을 그냥 기다린다
+    # (2026-09-21 이후 매 거래일 08:25~08:50 정확히 25분). 시작·끝 창과 길이 상한을 **셋 다**
+    # 맞아야만 면제한다 — 08:25~09:53(88분)처럼 뷰 수신이 늦어진 날은 그대로 적신호다.
+    "known_gaps": [
+        {
+            "proc": "g2_daily",
+            "start": ["08:20", "08:30"],
+            "end": ["08:45", "08:55"],
+            "max_minutes": 30,
+            "reason": "선물 AI 방향 뷰 수신 전 대기(08:50 첫 뷰)",
+        },
+    ],
     "market_hours": ["09:00", "15:35"],
     # 프로세스별 로그 파일 패턴 ({d}=YYYYMMDD, {D}=YYYY-MM-DD)
     "process_logs": {
@@ -302,6 +315,22 @@ _NON_TRADING_DEMOTABLE = (
     "status_snapshot",  # 마지막 거래일 것이 최신이다
     "기동 창 거절",
 )
+
+
+def known_gap_reason(cfg: dict, name: str, a: int, b: int) -> str | None:
+    """`name` 프로세스의 a~b(분) 공백이 `known_gaps`에 등재된 설계 공백이면 그 사유 (G-82).
+
+    지우지 않고 옮기기만 하는 이유: 면제 조건이 틀렸을 때 그 공백이 **사라지면** 아무도
+    못 본다. 그래서 §5 표에도 그대로 남고, §9에서는 별도 절에 사유와 함께 적힌다.
+    """
+    for k in cfg.get("known_gaps") or []:
+        if k.get("proc") != name:
+            continue
+        s_lo, s_hi = (hhmm_to_minutes(x) for x in k["start"])
+        e_lo, e_hi = (hhmm_to_minutes(x) for x in k["end"])
+        if s_lo <= a <= s_hi and e_lo <= b <= e_hi and b - a <= k["max_minutes"]:
+            return k.get("reason") or "알려진 패턴"
+    return None
 
 
 def fmt_bytes(n: int) -> str:
@@ -1419,10 +1448,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
             )
         if gaps:
             A("")
-            A("| 시작 | 재개 | 공백(분) |")
-            A("|---|---|---|")
+            A("| 시작 | 재개 | 공백(분) | 알려진 패턴 |")
+            A("|---|---|---|---|")
             for a, b, g in gaps[:20]:
-                A(f"| {m2hhmm(a)} | {m2hhmm(b)} | {g} |")
+                known = known_gap_reason(cfg, name, a, b)
+                A(f"| {m2hhmm(a)} | {m2hhmm(b)} | {g} | {known or '—'} |")
         A("")
         first = dg.records[0]
         last = dg.records[-1]
@@ -1478,6 +1508,7 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("## 9. 자동 적신호 (기계가 먼저 잡은 것 — 분석의 출발점이지 결론이 아니다)")
     A("")
     flags: list[str] = []
+    known_gaps: list[str] = []  # 설계 공백 — 본문 대신 아래 별도 절 (G-82)
     # [MW0601 483차 후속3 / P0-1] 스테일 인덱스락 — 무증상이라 여기서만 드러난다
     if lk["present"] is None:
         flags.append(
@@ -1588,7 +1619,12 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         # 여기서 다시 2배를 곱하지 않는다. 2026-08-14엔 이 줄이 g2의 정상 30분 격자를
         # 8건이나 적신호로 올려 진짜 신호를 목록 아래로 밀어냈다(F-13).
         for a, b, g in dg.gaps() if name in ("l1_daily", "g2_daily") else []:
-            flags.append(f"`{name}`: {m2hhmm(a)}~{m2hhmm(b)} {g}분 로그 공백")
+            line = f"`{name}`: {m2hhmm(a)}~{m2hhmm(b)} {g}분 로그 공백"
+            known = known_gap_reason(cfg, name, a, b)
+            if known:
+                known_gaps.append(f"{line} — {known}")
+            else:
+                flags.append(line)
 
     for ph in phases:
         for pat in cfg["expected_artifacts"].get(ph, []):
@@ -1632,6 +1668,17 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
         )
         A("")
         for i, f in enumerate(dict.fromkeys(deferred), 1):
+            A(f"{i}. {f}")
+        A("")
+    if known_gaps:
+        A(f"### 알려진 설계 공백이라 적신호에서 뺀 항목 ({len(known_gaps)}건)")
+        A("")
+        A(
+            "> `known_gaps` 등재 조건(시작·끝 창 + 길이 상한)을 전부 맞은 공백만 여기 온다. "
+            "창을 벗어나거나 더 길면 위 본문에 그대로 남는다."
+        )
+        A("")
+        for i, f in enumerate(dict.fromkeys(known_gaps), 1):
             A(f"{i}. {f}")
         A("")
     A("### R18 판단 가능 게이트 (적신호 아님 — 사람 결정의 재료)")
