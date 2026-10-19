@@ -19360,3 +19360,380 @@ headless UI 전환(10-10) 뒤 첫 거래일, 아무도 화면에 접속하지 �
 - **Why**: 장후 값은 이미 있으므로 빈 곳은 장중 시점과 추세 비교뿐이다. `integrity_report.py`는 4,013줄(R5 상한 초과)이라 더 키우지 않는다. 실행 중 프로세스·버스를 건드리지 않아 재시동 불필요, A등급(도구).
 - **How to apply**: 점검 세션은 섀도 통과 수·WS 끊김 수를 손으로 세지 말고 다이제스트 「오늘 자동 집계」를 인용한다. 로그 부재는 0이 아니라 「미측정」.
 - **검증**: 신규 테스트 5건 포함 수집기 테스트 22건 통과. 10-13 실데이터 7/14·7건 — 무결성 파일과 일치. 전체 2,998 통과 / 3 실패(실데이터 의존: rollover_day 2 기존, champion_sample live 1 신규 — 원인 미확인, 이번 변경 무관). F-132·F-133·C-2는 사람 결정으로 보류.
+
+## [MW0601] 2026-10-15 장중 점검 — L1 09:10 다운·12:20 재기동 재실패(종목마스터 zip 오류), G2 서킷브레이커 오판, 이틀 연속 점검 공백
+
+### 증상
+
+- 오늘(2026-10-15) 09:10:00경 `l1_daily`·`g2_daily` 두 프로세스가 동일 종료코드(1073807364, STATUS_CONTROL_C_EXIT 계열)로 4분 간격(09:10/09:14)으로 종료됨. 종료 직전 에러 메시지 없음 — 외부 종료 신호로 추정.
+- 12:20:24 자가점검 → 12:22:10 재기동(두 프로세스 모두 SessionStart, git_sha=66d6e94=HEAD 동일 — 코드 변경 없음). G2는 정상 기동(근월물 심볼 해석 성공, RegimeWarmStart 등 정상 진행). L1은 `_resolve_front_month_symbol()` → `symbol_master.load_index_derivatives_master()` → `extract_master_file()`의 `ZipFile(zip_path)`에서 `zipfile.BadZipFile: File is not a zip file`로 즉시 재크래시(exit code=1). 점검 시각(12:48) 기준 L1 미복구 — `status_snapshot.json`도 09:09:57 이후 갱신 정지.
+- 부수: G2는 09:12:30/09:14:00에 데이터단절(150s/240s)을 "거래소 서킷브레이커 의심/확정"으로 오판하고 자기 게이트웨이를 halt — 실제 원인은 L1 프로세스 사망이었음(거래소 이벤트 아님).
+- 부수2: 오늘·전일(10-14) 모두 `logs/dailycheck/` 에 장전/장후 점검 산출물이 전무 — 이틀 연속 점검 공백(원인 미상, 이 세션 범위 밖).
+
+### 원인
+
+- `src/messiah/broker/kis/symbol_master.py`의 `download_master_zip()`이 매 호출마다 재시도·검증 없이 네트워크 응답을 그대로 파일에 써서 바로 `ZipFile`로 연다 — 응답이 잘렸거나 서버가 비-zip 응답을 준 경우를 전혀 걸러내지 않는다. 호출부(`scripts/run_l1_daily.py:1150` 및 `:640`, `scripts/run_g2_paper_trading.py:877`, `src/messiah/broker/kis/adapter.py:198`)도 이 실패를 격리하지 않아 예외가 그대로 프로세스를 죽인다.
+- L1·G2가 같은 캐시 경로(`.cache/kis_symbol_master`)를 동시에 쓰면서 재기동 시 경합했을 가능성(확인 필요, 아래 검증 참조) — G2는 성공, L1은 실패한 비대칭이 이 가설과 부합하나 서버측 일시 오류와 구분 안 됨.
+- 09:10/09:14 최초 종료(동일 종료코드)의 트리거는 로그만으로 확정 불가 — 사람의 직접 종료 가능성과 PC/외부 요인 가능성 모두 열려 있음(사용자 확인 대기, C-1).
+- `scripts/self_check.py`의 기동 자가점검 항목에 "종목 마스터 로드 가능 여부"가 없어, 자가점검이 PASS를 내고도 바로 다음 순간 이 의존성 부재로 프로세스가 죽는 모순 발생(불변원칙 6의 취지 — "기동 허용 = 실제로 돈다" — 가 깨짐).
+
+### 결정
+
+- 장중 점검 규율(SYSTEM.md R11·금지계명 3·4)에 따라 코드·저장소는 건드리지 않음. Fix 3건(F-1 종목마스터 재시도·검증·캐시폴백, F-2 심볼해석 실패 격리, F-3 self_check 항목 추가)과 고도화 2건(G-1 L1 heartbeat 기반 CB오판 방지, G-2 status_snapshot 신선도 감시)을 계획만 세우고 적용은 장후로 미룸. 리포트 `logs/dailycheck/2026-10-15_report.md` 제2부.
+- 지금 당장은 사람이 L1을 수동으로 다시 켤지(F-1 미적용 상태라 재실패 가능성 있음, 그래도 G2는 같은 조건에서 성공했으므로 성공 확률이 낮지 않음) 그대로 둘지(손실 계속)를 판단하도록 리포트 "사용자 조치"에 손익과 함께 제시.
+
+### Why
+
+- 원인(zip 다운로드 실패)과 증상(프로세스 즉사)이 분리돼 있다 — 재시도/검증(F-1)만으로는 "프로세스가 이 예외 하나로 통째로 죽는" 구조적 문제(F-2)가 안 고쳐지고, F-2만으로는 애초에 왜 실패했는지(F-1)가 안 고쳐진다. 둘을 분리 등록(F-58 번호분리 규율과 같은 이유 — "지금 멈추게 하는 조치"와 "다시 안 나게 하는 조치"가 아니라 여기선 "증상 완화"와 "근본 원인 제거"가 서로 다른 파일을 건드리므로 별개 커밋 단위가 맞다).
+- self_check 보강(F-3)은 재발 자체를 막지는 못하지만(네트워크는 여전히 실패할 수 있음) 적어도 "자가점검 PASS 직후 즉사"라는 자기모순을 없앤다 — 불변원칙 6의 "기동 자가 점검 실패 시 거래 거부"가 실제로 뭘 점검해야 하는지의 공백을 메운다.
+
+### How to apply
+
+- F-1 적용 대상: `src/messiah/broker/kis/symbol_master.py` `download_master_zip()`(ZIP 시그니처 검증 + 재시도 지수백오프 최대 3회 + 전부 실패 시 캐시된 마지막 성공본 폴백 + R10 경보 배지) / `load_index_derivatives_master()`(폴백 사용 여부를 호출측에 알림).
+- F-2 적용 대상: `scripts/run_l1_daily.py` main() 내 `_resolve_front_month_symbol` 호출부(1150행 부근) / `scripts/run_g2_paper_trading.py`(877행 부근) — try/except로 감싸고 F-1 폴백 경로를 먼저 거친 뒤 그래도 실패하면 명확한 종료 로그(`CollectorStartupAborted`류)를 남기고 깨끗이 종료.
+- F-3 적용 대상: `scripts/self_check.py` — 종목 마스터 다운로드/파싱 가능 여부를 가볍게 시도하는 신규 점검 항목 추가. 실패 시 거래거부 vs 경고만 할지는 사람 결정 대기(캐시 폴백 보관기간 결정과 연동).
+- G-1 적용 대상: L1이 Redis 버스에 주기적 heartbeat 발행 + G2의 CB 판정 로직이 heartbeat 상태로 "내부 프로세스 다운"과 "진짜 거래소 CB"를 분기. R18(신규 게이트·차단 로직은 섀도 20거래일 후 승격) 해당 여부는 "기록 분류"에 가까워 경계선 — 사람 판단 필요.
+- G-2 적용 대상: UI 또는 별도 경량 체크가 `status_snapshot.json`의 mtime과 현재 시각 차이를 직접 비교해 신선도 자체를 표시(해당 파일 내용에 의존하지 않는 경로로).
+- 적용 시점: 전부 장후(15:35 이후) — 사용자 "구현해" 지시 대기.
+
+### 검증
+
+- 라이브 미검증 — F-1·F-2·F-3·G-1·G-2 전부 계획 단계, 코드 변경 0줄(장중 점검 전용 세션).
+- C-1(09:10/09:14/12:20 종료·재기동의 사람 개입 여부)·C-2(L1·G2 동시 마스터 다운로드 경합 여부)는 로그만으로 확정 불가 — C-1은 사용자 확인으로, C-2는 다음 재현 시 두 프로세스 기동 초 단위 로그 대조로 판정.
+- 이 세션은 `collect_evidence.py` 실행과 `grep`/`sed`/`cat`/`python3`(읽기 전용)만 사용했다. 단, 수집기 실행 **이전** 저장소 상태를 직접 보려고 `git log --oneline -15`와 `git status --porcelain`을 직접 호출한 절차 위반 1건이 있었다(SKILL.md §1·F-78/F-112 위반) — `.git/index.lock` 생성 여부 사후 확인 결과 락 없음, 실질 피해 없음. 이후로는 수집기 §1 출력만 인용. 다음 점검 세션은 이 세션의 수집기 출력(`evidence_20261015_intra.md`)을 재사용할 것.
+
+
+## [MW0601] 2026-10-15 12:51 KST — 지연 발화한 장전 점검 세션의 재확인
+
+### 증상
+- "Messiah premarket check" 예약(trigger_id: trig_01FA5jWaDkAkG6nH2XKEkreQ)이 2026-10-14 23:45:00 UTC(08:45 KST)에 돌도록 돼 있었으나 2026-10-15 03:50:40 UTC(12:50:40 KST)에야 발화 — 4시간 5분 지연. 발화 시점에 이미 장중 점검(12:48 KST)이 완료돼 있었다.
+
+### 원인
+- 지연 원인은 예약 스케줄러(이 저장소 바깥의 Claude 인프라) 쪽으로 추정되며, 이 세션의 로그 접근 범위로는 근본 원인을 확정할 수 없다.
+
+### 결정
+- 장전 점검을 새로 수행하지 않고(대상 시각이 이미 지났고, 제2부 장중 점검이 이미 끝난 뒤라 새 장전 절을 끼워 넣는 것이 하루 타임라인을 왜곡함), 대신 §0과 제2부에 "재확인" 보강만 덧붙였다. 1-2(L1 미복구)는 🔄지속으로 재확인(12:22 재기동 실패 이후 추가 시도 없음, 3시간 41분째 정지), 신규 이상점 1-5(장전 예약 지연 발화, P2)로 등재. 코드·설정 변경 없음(읽기 전용 확인만 수행) — SYSTEM.md R11/금지계명 3·4 준수.
+
+### Why
+- 하루 한 파일·국면 순서 원칙(messiah-daily-check 스킬 대원칙 B)상, 이미 작성된 장중 절 뒤에 새 "장전" 절을 끼워 넣으면 그날의 재구성이 불가능해진다. 실질 가치는 "아직도 맞는가"를 재확인하는 것이므로 보강 형태가 맞다.
+
+### How to apply
+- 해당 없음(코드 수정 대상이 아니라 예약 스케줄러 점검 대상). 사용자에게 예약 설정(스케줄 시각·큐 지연) 자체의 재점검 필요성을 보고서로 전달.
+
+### 검증
+- 라이브 미검증 — 재발 여부는 다음 장전 점검(2026-10-16 08:45 KST 예약)이 제때 발화하는지로 판정.
+
+## [MW0601] 2026-10-15 장후 점검 — 예약 오발화로 제3부 보류 (장후 배치 전 조기 기동)
+
+### 증상
+
+- 이 세션(trig_015K2VgTA2ffKAyp3W5Qxeu9, "Messiah postmarket check")은 cron이 `CRON_TZ=Asia/Seoul 50 15 * * 1-5`(15:50 KST)로 정확히 설정돼 있음에도 2026-10-15 03:50:36 UTC(=12:50 KST)에 발화했다 — 정상 발화 시각(06:50 UTC)보다 약 3시간 빠르다.
+- 같은 시간대(03:25~03:51 UTC, 12:25~12:51 KST)에 이 계정의 다른 예약(Messiah 장전·장중, Mireuk 장전·장중·장후, Mahdi 장전·장중 1·2차, 피터 사료 등)도 전부 몰려서 발화했다(`list_triggers` 조회로 확인). 장전·장중·장후 순서가 무너지고 각 예약이 자기 cron 시각과 전혀 다른 시각에 돌았다 — 계정 전체 스케줄러의 일괄 지연발화(catch-up)로 추정되며 이 세션 범위에서 원인 확정 불가.
+- 이 영향으로 `logs/postmarket_20261015.log`(정상 15:45 KST 기동)가 미존재함을 확인(12:53 KST 기준) — 장후 배치가 아직 돌 시각이 아니다. 장 마감(15:35)도 아직이다.
+
+### 원인
+
+- 계정 레벨 예약 스케줄러의 지연발화/일괄재생 현상으로 추정(이 리포 안에서는 원인 조사 불가 — 범위 밖).
+
+### 결정
+
+- 스킬 대원칙("장후 배치보다 먼저 결론 내지 않는다")에 따라 **제3부 장후 절을 쓰지 않고 보류**한다. `logs/dailycheck/2026-10-15_report.md`의 장전·장중 절(앞 세션이 이미 작성)은 한 글자도 손대지 않았다.
+- 대신 12:53 KST 기준 현재 상태만 확인: `logs/l1_daily_20261015.log` mtime이 03:22 UTC(=12:22 KST)에서 멈춰 있고 그 뒤 신규 로그가 없다 — 장중 절(12:48 KST 작성)이 보고한 "L1 미복구" 상태가 12:53 현재도 그대로 지속 중임을 재확인했을 뿐, 새 이상점은 없다.
+- 이 cron(`trig_015K2VgTA2ffKAyp3W5Qxeu9`)의 다음 정규 발화는 오늘 06:50 UTC(15:50 KST)로 예정돼 있다(`next_run_at` 확인). 그 발화가 실제 장후 점검(배치 완료 후)을 수행할 것이고, 이 세션은 그 발화를 대체하지 않는다.
+
+### Why
+
+- 15:35 마감·15:45 배치 전에 "장후" 결론을 내면 반드시 틀린다(그날이 아직 안 끝났다). 조기 발화를 그대로 밀어붙여 보고서를 완성하면 "하루 하나의 종합 완성본" 원칙이 거짓으로 닫힌다.
+
+### How to apply
+
+- 해당 없음(코드 변경 아님). 사용자에게 스케줄러 오발화 현상과 L1 미복구 지속 상태를 채팅/알림으로 별도 보고.
+
+### 검증
+
+- `list_triggers`로 7개 이상 예약의 `cron_expression` vs `last_fired_at`을 KST로 환산해 대조 — 전부 정규 시각과 불일치(12:25~12:51 KST에 집중). 오늘 15:50 KST 정규 발화 때 이 문제가 재발하는지 확인 필요(검증 기한: 오늘 15:50 KST).
+
+## [MW0601] 2026-10-15 15:52 — 장후 점검(종합 완성): L1 하루 종일 미복구(385분/94.8% 미수집) · 손실예산 초과 · 수정검증 재발 2건 · 실현손익 0원
+
+### 증상
+
+- 장후 배치(`logs/postmarket_20261015.log`, 15:45:02~15:46:09) 7/7단계 완주·실패 0·발견 2(3/7 거래량대조, 7/7 무결성리포트). 이 배치가 끝난 뒤(15:52) 점검 시작 — 12:53경 조기발화 세션이 이미 배치 미완료를 확인하고 올바르게 결론 보류한 바 있음(그 세션 기록 참조).
+- 장중 점검(12:48)이 보고한 L1(`l1_daily`) 09:10 다운·12:22 재기동 실패가, 장후 집계 결과 **하루 끝까지(15:35) 복구되지 않았음**이 확정됨 — `shutdown_watchdog.log` 15:40 항목에 l1_daily·g2_daily 프로세스가 전혀 안 잡힘(둘 다 이미 자체 종료 상태). `daily_integrity_20261015.json`의 `bar_continuity`(1m): rows=25, tail_gap_minutes=385(공식 381분 중 94.8% 결손).
+- 그 결과 신규로 뜬 게이트 위반 4건: (1) `IrrecoverableLossBudgetExceeded` — 5거래일 누적 소급불가손실 200분(예산 20분) 중 오늘 197분(99%). (2) `volume_check_20261015.json` ok=false — missing_minutes 356(한도 20의 17.8배). (3)(4) `FixVerificationRecurred` ×2 — `daily-axes-measured`(18거래일만에 재발, unmeasured 3종: TickDeliveryLatency·FeaturePublishOffset·FeatureHealth 전부 장마감 로그 부재), `exit-code-matches-log`(3회째 재발, Messiah 12:22:18 종료코드 2147942401=0x80070001→Win32 1).
+- `FixVerificationRecurred` 3번째 항목 `crash-forensics-armed`은 `crash_forensics.armed={"ui": false, ...}` — 2026-10-12·10-13에 이미 규명된 F-138 패턴(UI headless 전환 후 미접속 시 화면 앱 코드가 안 돎)의 반복, 신규 아님.
+- G2(`g2_paper`)는 12:22:10 재기동 후 15:35:00까지 정상 종료(`SessionEnd`)했으나, L1 데이터 부재로 09:14:00 이후 신규 판단 0건 — 종가 `PositionReconciled`: 포지션 0종목·체결 0건·실현손익 +0.0틱(0원).
+- `data_flow_findings`: "G2 CB 확정 1회인데 L1 단절 흔적 0건"·"CB 확정 1회 대 해제 0회 — 해제 없이 남음(주문 게이트 잔류 정지 의심)" — 09:14:00 halt가 하루 끝까지 안 풀린 채 마감.
+- C-2(L1·G2 동시 마스터 다운로드 경합 가설) 관련 물증: `.cache/kis_symbol_master/fo_idx_code_mts.mst`·`.mst.zip` 둘 다 최종수정 10-15 12:22(KST) — 경합 가능성에 무게가 실리나 확정 아님.
+
+### 원인
+
+- 근본 원인은 장중에 이미 규명된 그대로(2026-10-15 장중 항목 참조): `src/messiah/broker/kis/symbol_master.py:extract_master_file()`이 종목 마스터 zip 응답을 검증·재시도 없이 바로 여는데, 09:10과 12:22 두 차례 모두 `zipfile.BadZipFile`로 `scripts/run_l1_daily.py:1150`의 `_resolve_front_month_symbol` 호출이 격리 없이 `main()` 전체를 죽였다(R7 위반). 오늘 신규로 뜬 4개 게이트 위반(손실예산·거래량대조·daily-axes-measured·exit-code-matches-log)은 전부 이 단일 사건의 하류 파생이며 별도 코드 결함이 아니다.
+
+### 결정
+
+- 이 세션은 예약 지시("보고까지만 수행, 코드 변경은 사용자가 '구현해' 지시 시에만")에 따라 **보고만 수행**했다. F-1·F-2·F-3(장중에 이미 등재)은 적용하지 않았다.
+- `logs/dailycheck/2026-10-15_report.md`에 제3부(장후)·종합(판정표·통합대장·종가손익·절대원칙판정·재시동권고)·제4·5부·사용자조치를 append했다. 장전·장중 절 본문은 한 글자도 고치지 않았다(대원칙 B 준수). 앞 국면이 남긴 1-1~1-5·C-1·C-2를 전부 처분(✅1·🔄6)한 뒤 신규 1-6~1-9(전부 P1, 1-2 파생)를 등재했다.
+- 재시동 권고: **오늘 밤 재시동 불필요** — 당일 커밋 0건(전 프로세스 git_sha=66d6e94=HEAD로 교차확인)이라 재시동해도 새로 반영될 코드가 없고, F-1·F-2 미적용 상태라 재시동해도 같은 `BadZipFile`로 재크래시할 가능성이 높다. 대신 내일 08:15 기동창 전까지 F-1·F-2 적용 여부 결정이 더 급하다고 보고.
+
+### Why
+
+- SKILL.md 대원칙("이미 결정된 사안을 새 발견인 양 보고하지 않는다")에 따라 daily-axes-measured·exit-code-matches-log·crash-forensics-armed 3건의 `FixVerificationRecurred`를 각각 원인 규명과 함께 처리했다 — 앞 둘은 1-2의 신규 파생(별도 Fix 생성 안 함, 중복방지), crash-forensics-armed는 기존 F-138의 예정된 결과(신규 미등재). phases.md C-4("재발은 항상 P0")에 따라 격상을 검토했으나, 두 재발 모두 원인이 이미 P0로 집계된 1-2와 동일해 중복집계를 피하려 P1로 유지하고 그 판단을 리포트에 명기했다.
+
+### How to apply
+
+- 해당 없음(이 세션은 코드 변경을 하지 않음). F-1·F-2·F-3 적용은 사용자 "구현해" 지시 수신 시 별도 세션에서 수행 — `scripts/run_l1_daily.py:1150`·`scripts/run_g2_paper_trading.py:877`·`src/messiah/broker/kis/symbol_master.py`·`scripts/self_check.py` (상세는 리포트 제2부 F-1~F-3).
+
+### 검증
+
+- 라이브 미검증 — F-1·F-2 적용 및 효과는 2026-10-16 장전(L1 기동 성공 여부로 1차 판정) · 2026-10-16 장후(daily-axes-measured·exit-code-matches-log 자동 해소 여부로 2차 판정)로 확인한다. 1-5(장전 예약 지연)는 2026-10-16 08:45 KST 전후 발화 여부로 검증.
+
+## [MW0601] 2026-10-16 08:47 — 장전 점검: 신규 이상점 0건, 전일 미해결 항목 1건 안 재현·1건 해소
+
+### 증상
+
+- 오늘 08:20/08:25 기동에서 `l1_daily`·`g2_daily` 모두 `SessionStart` 1회, `git_sha`=HEAD(`66d6e94`) 일치, self-check PASS(경고 1건, 기존 bundle 경고). `status_snapshot.json`(08:47:17) 전 구성요소 OK, `circuit_breaker.gateway_halted=false`, `irrecoverable_loss.clean=true` — 어제(10-15) 09:14:00에 걸려 하루 종일 안 풀렸던 halt가 오늘 세션 경계에서 정상 리셋됨.
+- 전일 장후 점검(제4부 "다음 거래일 관측 예정")이 오늘 확인하라고 남긴 5건 중: 1-2/F-1/F-2(종목 마스터 `BadZipFile` 재발 여부) → **재발 없음**(캐시 `.cache/kis_symbol_master/fo_idx_code_mts.mst`.zip 08:25 KST 정상 갱신, 오류 0건). 1-5(장전 점검 예약 지연) → **정시권 복귀**(오늘 세션 08:47 시작, 예정 08:45 대비 2분 차 — 어제 4시간 5분 지연과 달리 정상). C-1(사람 조작 여부 확인)·C-2(동시 다운로드 경합) → 응답/확정 없이 이월.
+
+### 원인
+
+- 재발 없음의 원인은 불명확 — F-1·F-2(zip 검증·재시도·격리) 코드는 **아직 미반영**(`src/`+`scripts/` 변경 0파일, git status로 교차확인). 즉 "고쳐져서 안 터진 것"이 아니라 "오늘은 KIS 쪽 응답이 정상이어서 안 터진 것"이다 — 원인 자체는 코드에 그대로 남아 있다.
+- 1-5 정시권 복귀는 예약 스케줄러(Claude 인프라) 쪽 상태가 어제의 일시적 지연에서 복구된 것으로 추정 — 저장소 코드와는 무관.
+
+### 결정
+
+- 이 세션은 보고만 수행했다(예약 지시 — 장 시작 직전이라 코드 변경·배포·재기동 금지, SYSTEM.md R11·금지계명 3·4). F-1·F-2·F-3은 적용하지 않았다.
+- `logs/dailycheck/2026-10-16_report.md`를 신규 생성, 헤더+§0+제1부(+Fix 재확인+고도화 G-81)까지 작성. 오늘 장전 신규 이상점은 0건으로 판정 — 이미 알려진 사안(bundle 경고, OptionChainStaleSpot 웜업 패턴, 전일 데이터 무결성 미달)은 "통과 확인된 항목"·"확인 필요" 절에 참조만 하고 중복 번호를 매기지 않았다.
+- G-81(종목 마스터 다운로드 성공/실패에 구조화 로그 태그 추가, `SymbolMasterDownloaded`/`SymbolMasterDownloadFailed`) 신규 제안 — F-1·F-2 적용 시 같은 파일(`src/messiah/broker/kis/symbol_master.py`)에 동시 반영 권고.
+
+### Why
+
+- SKILL.md 대원칙("이미 결정된 사안을 새 발견인 양 보고하지 않는다")에 따라 전일 제4부가 지정한 "다음 거래일 관측 예정" 5건을 전수 판정했다. 1-2/F-1/F-2는 "재발 없음"이지 "해소"가 아니므로 F-1·F-2·F-3을 닫지 않고 그대로 열어 두었다(코드 미반영이 명확한 근거).
+- C-2(동시 다운로드 경합) 관련, 오늘 L1(08:21)·G2(08:25)가 비슷한 시간대에 같은 캐시에 접근했는데도 손상이 없었다는 점을 기록했으나, 어제 손상은 재기동 상황(09:10·12:22)이었고 오늘은 최초 기동이라 조건이 달라 가설을 확정도 반증도 하지 않았다 — 섣부른 종결을 피했다.
+
+### How to apply
+
+- F-1·F-2·F-3 적용은 사용자 "구현해" 지시 수신 시 별도 세션에서 수행(상세는 `logs/dailycheck/2026-10-15_report.md` 제2부). G-81은 F-1·F-2와 같은 파일을 건드리므로 그때 함께 반영.
+
+### 검증
+
+- 라이브 미검증 — G-81은 F-1·F-2 적용 시점에 코드 리뷰로 확인(구조화 태그 존재 여부). 오늘 장중·장후 점검에서 이상점 재발 여부를 계속 관측한다.
+
+## [MW0601] 2026-10-16 12:44 — 장중 점검: 신규 이상점 0건, 전일·장전 미해결 5건 전부 지속 처분, 수집기 적신호 1건 비이상 확정
+
+### 증상
+
+- 09:00~12:44 KST 구간 `status_snapshot.json` 전 구성요소 `OK`(12:40:17 생성, 전 컴포넌트 `age_seconds`≤10.0초) · `circuit_breaker.gateway_halted=false` · `irrecoverable_loss.clean=true` — 어제(10-15) 09:09:57 이후 3시간 38분 멈췄던 것과 대조적으로 오늘은 전 구간 신선.
+- `l1_daily_20261016.log`·`g2_daily_20261016.log` ERROR 0건, WARNING은 장전에 이미 보고한 `OptionChainStaleSpot` 3건(08:21~08:25)뿐 — 09:00 이후 신규 WARNING/ERROR 0건.
+- `MetaGateEvaluated`·`DecisionEmitted` 각 8/8 발행(09:00~12:30, 30분 간격), 전량 `gate=score`로 `NO_TRADE`(|S| 최대 0.063 < 임계 0.2) — 판단 사슬 정상, 단지 거래 신호가 약했음.
+- 수집기(§9) 자동 적신호 1건: `g2_daily` 08:25~08:50 25분 로그 공백 — 되짚은 결과 최근 5거래일(10-07·10-12·10-13·10-14·10-15) 전부 기동 직후부터 정확히 08:50:00에 첫 `OptionsNoCandidate`(사유 "Futures AI 방향 뷰 미수신")가 찍히는 동일 패턴. 신규 공백 아님.
+
+### 원인
+
+- 오늘 장중 구간은 코드·구성 변경 없이(`src/`+`scripts/` 변경 0파일 유지) 설계대로 작동한 것으로 판단 — 어제 사고(L1 하루 종일 미복구)의 재발 조건(종목마스터 BadZipFile, F-1·F-2 미반영)이 오늘은 KIS 응답이 정상이라 발현되지 않았을 뿐, 근본 원인은 그대로 남아 있음(장전 점검과 동일 결론 유지).
+- 25분 공백의 원인: G2가 기동 후 선물 쪽(Futures AI) 방향 뷰를 아직 못 받는 구간(정규장 개장 전)에서 평가 사이클 자체를 안 돌리는 설계 — 08:50:00이 고정된 첫 평가 시각으로 보임(5일 전수 일치, 코드 확인은 필요 시 별도).
+
+### 결정
+
+- 이 세션은 보고만 수행(예약 지시 — 장중이라 코드 변경·배포·재기동 금지, SYSTEM.md R11·금지계명 3·4). F-1·F-2·F-3·G-81 전부 미적용 유지, 사용자 "구현해" 지시 대기.
+- `logs/dailycheck/2026-10-16_report.md`에 `§0-B` 갱신 블록 + `제2부. 장중`(이월 처리표 → 자동 적신호 판독 → 1-5~1-8 체크리스트 → Fix 재확인 → 고도화 G-82) append. 장전 절 본문은 한 글자도 고치지 않음.
+- G-82(신규, 고도화) 제안 — 수집기(`collect_evidence.py`) §9에 "08:50:00±1분 전 OptionsNoCandidate 외 무활동"을 알려진 패턴으로 등록해 적신호 자동 제외. 거래 시스템 코드가 아니라 점검 도구 자체 수정이므로 R18 해당 없음.
+
+### Why
+
+- SKILL.md 대원칙("이미 알려진 사안을 새 발견인 양 보고하지 않는다")에 따라 장전이 남긴 F-1·F-2·F-3·C-1·C-2·G-81 전부를 처분표로 먼저 정리한 뒤 장중 신규를 썼다. C-1·C-2는 판정 재료가 늘지 않아(재기동 0회, 사용자 응답 없음) 지속 유지.
+- §9 자동 적신호를 결론으로 쓰지 않고 5거래일 원본 로그 대조로 재검증한 뒤 "이상점 아님"으로 명시적으로 처리했다(SKILL.md "기계가 못 잡는 이상이 진짜 수확" / "§9는 출발점이지 결론이 아니다" 원칙).
+
+### How to apply
+
+- F-1·F-2·F-3·G-81·G-82 전부 사용자 "구현해" 지시 수신 시 적용 — F-1·F-2·G-81은 `src/messiah/broker/kis/symbol_master.py` 동시 반영, G-82는 `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` 단독 반영(거래 코드 아님, 장중 금지 대상 아니지만 이 점검 세션 규율상 동일하게 장후로 미룸).
+
+### 검증
+
+- 라이브 미검증 — 오늘 장후 점검에서 종가까지 신규 이상점 재발 여부·`FixVerificationRecurred` 유무를 최종 확인한다.
+
+
+## [MW0601] 2026-10-16 15:52 — 장후 점검: 신규 확정 결함 0건 · F-1/F-2 하루 종일 무재발 첫 확인 · crash-forensics-armed 재발(보고규율 P0)의 원인은 기존 F-138, 라이브 확인 과제는 오늘 완결 · 신규 고도화 G-83 제안
+
+### 증상
+
+- 장후 배치(`logs/postmarket_20261016.log`, 15:45:02~15:46:10) 7/7단계 완주·실패 0·발견 1(`SessionEnd` 정상 종료, `steps_with_findings: 1`). 오늘 하루 전체(`l1_daily`·`g2_daily`·`ui`·`postmarket`·`shutdown_watchdog` 로그, `status_snapshot.json`, `daily_integrity_20261016.json`) 재검토 결과 — `l1_daily`·`g2_daily`·`postmarket` 각 `SessionEnd`(정상 종료) 확인, `l1_daily`·`g2_daily` ERROR 로그 0건(어제는 L1이 하루 종일 미복구였음), `code_version.stale: false`(전 프로세스 `66d6e94` 종일 유지), `irrecoverable_loss.clean: true`, `restarts: 0`, `BadZipFile` 0건(l1·g2 전수 grep) — 어제(2026-10-15) 사고 이후 **첫 완전한 무재발 하루**.
+- 1분봉 연속성 410행 결손 0분, `volume_check_20261016.json` ratio 0.998(ok:true), NaN 비율 전 Horizon 0.0%. 판단 사슬 `MetaGateEvaluated`·`DecisionEmitted` 14/14건 발행(09:00~15:30), 전량 `NO_TRADE`(13건 `gate=score` 최대 |S|=0.063<임계 0.2, 1건 `gate=eod_window`) — 체결 0건, 실현손익 +0.0틱.
+- 수정검증등록부(`FixVerificationScoreboard`, 15:46:09) — 등록 22건 중 오늘 위반 1(`crash-forensics-armed`, `FixVerificationRecurred`)·검증 완료 18·판정 불가 1(`order-path-live`, `FixVerificationStalled`, 12일째)·기한 초과 2(`daily-axes-measured`·`exit-code-matches-log`, 둘 다 "아직 1/3일")·대기 0.
+- `crash-forensics-armed` 재발 상세: `daily_integrity_20261016.json`의 `crash_forensics` = `{"armed": {"ui": false, "l1_daily": true, "g2_paper": true}, "ui_never_visited": true}`. `logs/ui_20261016.log`는 08:21:11 Streamlit 부트스트랩 배너 5줄 외 하루 종일 추가 기록 0건 — 아무도 `http://localhost:8511`에 접속하지 않음.
+- 그 외 WARNING — `PublishGraceBreached`(15:35:06, 1m headroom -1,581ms, 전일(10-14) -3,131ms 대비 +1,550ms 호전, `headroom_surge: false`)·`DailyCloseBarHandedOff`(15:35:06)·`CollectorWSDisconnected`(12:58:23, 5.08초 내 재연결)·`RollBasisUnmeasured`×2(A05608→A05609 08-13 · A05610→A05611 10-08, 둘 다 offset 0 설계)·`IrrecoverableLossBudgetExceeded`(5거래일 200.3분, 98%가 10-15 단일 사고분)·`FixVerificationOverdue`×2 — 전부 dev_memory 과거 기록과 대조해 기존 확정 정상 패턴으로 판정, 신규 등재 없음.
+
+### 원인
+
+- F-1·F-2(종목 마스터 `BadZipFile` 미방어)는 오늘도 미반영(`src/`+`scripts/` 변경 0파일) — 오늘 재발이 없었던 것은 KIS 쪽 응답이 종일 정상이었기 때문이고, 원인 코드(`src/messiah/broker/kis/symbol_master.py:extract_master_file()`)는 그대로다. 사용자 "구현해" 지시 대기 지속.
+- `crash-forensics-armed` 재발의 원인은 2026-10-12에 이미 규명되고 F-138(커밋 `266094e`)로 라벨만 붙인 기존 사안 그대로 — 2026-10-10 headless UI 전환(커밋 `d04bd7d`) 이후 아무도 화면에 접속하지 않으면 `app.py`의 `crash_forensics.enable(tag="ui")` 호출 자체가 한 줄도 실행되지 않는다. **다만 오늘 처음으로 F-138의 "라이브 확인" 조건(2026-10-12 NEXT_TODO에 등재: "화면 미접속이면 `ui_never_visited=true`+finding 라벨, 접속했는데 라벨이 붙으면 코드 결함으로 격상")이 정확히 성립하는 것을 확인했다** — 오늘 미접속 상태에서 라벨이 정확히 붙었다. F-138의 라벨 메커니즘 자체는 설계대로 작동 중임이 실측됐다.
+- 다만 F-138은 "라벨"만 추가했을 뿐 `FixVerificationScoreboard`/`FixVerificationRecurred`의 집계 로직(`breaches` 판정)은 바꾸지 않아서(2026-10-12 당시 이미 명시됨), 등록부는 오늘도 `ui_never_visited=true`를 모른 채 그냥 "위반 1건"으로만 집계한다 — 이것이 오늘 새로 발견한 공백(G-83).
+- `order-path-live` 정체(12일째)는 오늘도 14건 전수 재확인 결과 저빈도 전략의 신호부족(최대 |S|=0.063)이 원인 — 계측 고장이 아니다(G-11 기존 패턴, 2026-09-18 최초 관측과 동일).
+- `daily-axes-measured`·`exit-code-matches-log`는 어제(10-15) L1 하루 종일 미복구 사고로 재발했던 것이 이제 3거래일 재검증 시계의 1일째("아직 1/3일")로 들어간 것 — 오늘 자체의 재발은 아니다.
+
+### 결정
+
+- 이 세션은 보고만 수행(예약 지시 — 장후 국면이지만 Fix 구현은 사용자 "구현해" 지시 수신 시로 미룬다는 이 스킬 자신의 규율). F-1·F-2·F-3·G-81·G-82 전부 미적용 유지.
+- `crash-forensics-armed` 재발을 phases.md C-4("재발은 항상 P0 보고 대상") 규율에 따라 리포트에 P0로 기록했으나, 원인은 기존(F-138)이므로 신규 결함으로 별도 Fix를 세우지 않는다. 대신 F-138의 "라이브 확인" 과제(2026-10-12부터 미결)를 오늘 ✅ 해소로 종결하고, 등록부 집계 공백은 G-83(신규, P2)으로 별도 제안했다.
+- `logs/dailycheck/2026-10-16_report.md`에 `§0-C` 최종 갱신 블록 + `제3부. 장후`(이월 처리표 → 1-9 신규 이상점 → G-83 고도화 → Fix 계획 → 실거래 요약) + `종합 — 오늘`(판정표·통합대장·손익·절대원칙 판정) + `제4부`·`제5부`·`사용자 조치` append. 장전·장중 절 본문은 한 글자도 고치지 않았다.
+- 재시동 불필요 권고 — `status_snapshot.json.code_version.stale`이 오늘 15:34:51 기준 `false`(전 프로세스 `66d6e94`=HEAD, `src/`+`scripts/` 실변경 0파일)였고 당일 커밋도 0건이라, 재시동으로 얻을 새 코드가 없다. 재시동 없이 얻는 것(오늘 관측 연속성·프로세스 상태 보존)이 재시동으로 얻는 것(없음)보다 명백히 크다.
+
+### Why
+
+- SKILL.md 대원칙("이미 결정된 사안을 새 발견인 양 보고하지 않는다")에 따라 `crash-forensics-armed` 재발의 원인을 F-138로 재확인하면서도, phases.md C-4("재발은 항상 P0")를 회피하지 않고 리포트에는 P0로 명기한 뒤 "결함 아님"이라는 판단을 근거와 함께 남겼다 — 2026-10-13 세션이 썼던 동일한 처리 방식(P1→P0 보고규율 격상, 원인·위험 성격은 불변)을 오늘도 따른 것이다.
+- 동시에 "불확실한 것과 확정된 결함을 섞지 않는다"는 규율에 따라, F-138의 "라이브 확인" 조건이 오늘 실제로 성립했다는 사실(미접속+라벨 정확히 동반)을 "확정"으로 명시했다 — 이는 F-138 자체가 고쳐졌다는 뜻이 아니라 F-138이 설계한 구분 메커니즘이 실제로 작동한다는 뜻이며, 둘을 혼동하면 다음에 정말 화면 코드가 깨졌을 때도 "늘 그런 거겠지"로 가볍게 넘길 위험이 있다.
+- G-83은 "기계가 못 잡는 이상" 원칙에 따라, §9 자동 적신호가 아니라 `daily_integrity_*.json`과 `postmarket_*.log` 두 파일을 사람이 직접 대조해야만 보이는 공백을 오늘 점검 과정에서 직접 발견한 것이다.
+
+### How to apply
+
+- F-1·F-2·F-3·G-81·G-82·G-83 전부 사용자 "구현해" 지시 수신 시 적용 — F-1·F-2·G-81은 `src/messiah/broker/kis/symbol_master.py` 동시 반영, G-83은 `src/messiah/ops/fix_verification.py`(추정, F-91·C-4 당시 확인된 `deadline_pressure()`가 있는 모듈)에서 `crash-forensics-armed` 판정 직전 `daily_integrity_*.json`의 `crash_forensics.ui_never_visited`를 읽어 `true`일 때 `breaches`에서 제외하고 별도 상태로 분리 표시, G-82는 `.claude/skills/messiah-daily-check/scripts/collect_evidence.py` 단독 반영.
+- G-11(order-path-live 경보 완화 방식 ⓐ경고 유지/ⓑ2거래일 연속 시 오류 격상 택일)·C-1(어제 종료 사람조작 여부)·화면 상시 접속 여부(참고용, 결정 불요)는 사용자 결정/응답 대기 — 사용자 조치 절에 명기.
+
+### 검증
+
+- 라이브 미검증 — F-1·F-2 적용 및 효과는 다음 적용일 장전(L1 기동 성공 여부)·장후(daily-axes-measured·exit-code-matches-log 자동 해소 여부)로 1·2차 판정. G-83은 적용 시 코드 리뷰(등록부가 `ui_never_visited=true`인 날 `breaches`에서 실제로 빠지는지)로 확인.
+- `daily-axes-measured`·`exit-code-matches-log`: 2거래일 추가 무재발 시(2026-10-20 장후까지) 등록부가 "검증 완료"로 자동 전환되는지 관찰.
+- `order-path-live`: 매 거래일 `DecisionEmitted`의 |S| ≥ 0.2 도달 또는 실제 `OrderSubmit` 발생 여부로 계속 추적.
+
+
+## [MW0601] 2026-10-19 08:5x — 장전 점검: 신규 확정 결함 0건 · 주말 후 첫 거래일 정상 기동 확인 · 전일(10-16) 이월 항목 전부 상태 변화 없음
+
+### 증상
+
+예약 실행(Cowork 원격 세션, `messiah-daily-check` phase=pre). 전일(2026-10-16, 금) 장후 배치 종료 이후 주말(10-17·18) 비거래일을 거쳐 오늘(10-19, 월) 아침 08:15~08:48 구간을 점검했다. `l1_daily`·`g2_daily` 모두 `SessionStart` 2회(07:22대 부팅 트리거 — 기동 창 이전이라 `LaunchWindowRefused`, 08:20/08:25 정시 트리거 — 실제 기동) 패턴으로 2026-09-11 F-98이 확정한 "부팅 트리거+정시 트리거 이중 등록" 설계와 정확히 일치했다. 두 프로세스 모두 `git_sha=66d6e94`(HEAD 일치), `self-check: PASS`(경고 1건, bundle — 기존 K-6), `code_version.stale: false`. `OptionChainStaleSpot` 3건(08:21:40~08:29:59, 최대 지연 233,759초≈64.9시간)이 관측됐는데 이는 금요일 15:34 마감가가 주말을 거쳐 이월된 결과로, 2026-09-21(주말 2일 휴장 후 첫 거래일, 234,760초=65.2시간)과 거의 동일한 수치 — 2026-08-08 이후 매주 첫 거래일 반복되는 기존 패턴과 일치, 신규 아님. `src/`+`scripts/` 변경 0파일(네이티브 관측), 미커밋 92건(dev_memory·logs·tmp 파일 등, 전부 dev 모드 허용 범위). 전일(10-16) 제4부가 오늘 장전에 확인하라고 남긴 항목(F-1·F-2 재발 여부, C-1·C-2, 1-8·1-9 재검증 시계, order-path-live, G-11) 전부 재확인했으며 전부 상태 변화 없음(F-1·F-2는 오늘도 재발 없음이나 코드 미반영 그대로, C-1·C-2는 응답/물증 없음, 1-8·1-9는 장후에 2일째 여부 판정 예정, order-path-live는 개장 전이라 판단 불가, G-11은 사용자 결정 대기).
+
+### 원인
+
+해당 없음 — 오늘 장전 관측 범위에서 신규 결함 0건. `OptionChainStaleSpot`의 큰 지연값은 결함이 아니라 주말 비거래일 구조 자체의 결과(기존 메커니즘, 배수만 주말 길이에 비례).
+
+### 결정
+
+- 이 세션은 보고만 수행한다(예약 지시 — 09:00 개장 임박, SYSTEM.md R11·금지계명 3·4에 따라 코드 변경·커밋·배포·재기동 전부 금지). F-1·F-2·F-3·G-81·G-82·G-83 전부 미적용 유지, 신규 Fix·고도화 항목 수립 없음.
+- `logs/dailycheck/2026-10-19_report.md`를 신규 생성, 헤더+§0+제1부(통과 확인된 항목 포함)까지 작성. 오늘 장전 신규 이상점은 0건으로 판정 — 이미 알려진 사안(bundle 경고, OptionChainStaleSpot 주말 패턴, F-1·F-2 미반영)은 "통과 확인된 항목"·전일 이월 재확인 표에만 참조하고 중복 번호를 매기지 않았다.
+- A-4 웜업(옵션체인 기준가 회복)은 점검 시각(08:48) 기준 아직 `OptionChainStaleSpotResolved`가 관측되지 않아 "확인 필요(장중 재확인 예정)"로 명시했다 — 과거 해소창(08:45~08:53경)과 비교해 판단한다.
+
+### Why
+
+- SKILL.md 대원칙("이미 결정된 사안을 새 발견인 양 보고하지 않는다")에 따라 bundle 경고·OptionChainStaleSpot 주말 패턴·F-1/F-2 미반영 상태를 전부 기존 사안으로 분류하고 신규 번호를 매기지 않았다 — 2026-09-21·10-12·10-16 등 과거 보고서의 동일 처리 방식을 그대로 따른 것이다.
+- 2026-09-21 사례(주말 2일 휴장 후 234,760초)와 오늘(233,759초)의 수치가 거의 일치한다는 것을 직접 대조해 "결함 아님"을 확정으로 명시했다 — 수치만 보고 넘기지 않고 과거 레코드와 비교해야 "확정"과 "추정"을 구분할 수 있다는 SKILL.md 규율을 지킨 것.
+
+### How to apply
+
+- F-1·F-2·F-3·G-81·G-82·G-83 전부 사용자 "구현해" 지시 수신 시 적용 — 변경 대상 파일은 2026-10-16 장후 항목과 동일(`symbol_master.py`·`run_l1_daily.py`·`run_g2_paper_trading.py`·`self_check.py`·`collect_evidence.py`·`fix_verification.py` 추정).
+- G-11(order-path-live 경보 완화 방식 택일)·C-1(10-15 종료 사람조작 여부)·C-2(마스터 다운로드 경합 재현 시 판정)는 사용자 결정/응답 대기 그대로.
+
+### 검증
+
+- 라이브 미검증 — 1-8·1-9(daily-axes-measured·exit-code-matches-log) 3거래일 재검증 시계는 오늘(10-19)이 2일째인지 여부를 오늘 장후 배치(`FixVerificationScoreboard`)로 확인한다.
+- A-4 웜업 해소 여부(`OptionChainStaleSpotResolved`)는 오늘 장중 점검에서 원본 로그로 재확인한다.
+- `order-path-live`: 오늘 `DecisionEmitted`의 |S| ≥ 0.2 도달 또는 실제 `OrderSubmit` 발생 여부로 계속 추적.
+
+## [MW0601] 2026-10-19 12:43 — 장중 점검: 신규 확정 결함 0건 · A-4 웜업 해소 확인(09-21 패턴과 초 단위 일치) · 전일(10-16)·오늘 장전 이월 항목 전부 상태 변화 없음
+
+### 증상
+
+09:00~12:43(정규장 개장~점검 시각) 구간을 점검했다. `status_snapshot.json`(12:39:47 생성) 기준 `l1.collector`·`l1.feature_engine`·`l1.composer`·`g2.pipeline` 전부 `OK`, `code_version.stale=false`(전 프로세스 66d6e94=HEAD), `circuit_breaker.phase=normal`·`gateway_halted=false`, `irrecoverable_loss.clean=true`. ERROR/CRITICAL 로그 0건(l1_daily·g2_daily 둘 다). 오늘 장전이 "확인 필요(장중 재확인 예정)"로 남긴 A-4 웜업 항목을 `OptionChainStaleSpotResolved` 3건(08:46:40 weekly_mon 5사이클 최악 234460초 / 08:49:59 regular 2사이클 최악 234360초 / 08:53:19 weekly_thu 3사이클 최악 234560초)으로 확인 — 2026-09-21(동일 조건: 주말 2일 휴장 후 첫 거래일) 기록(08:46:40/08:50:00/08:53:19, 최악 234460/234360/234560초)과 초 단위까지 일치해 결함 아님을 재확인했다. `DecisionEmitted` 8건(09:00~12:30, 30분 간격) 전부 `side=NO_TRADE`(|S| 0.022~0.044 < score_threshold 0.2) — order-path-live 판정불가 정체가 13일째. `OptionChainPollRetried` 15건·`InvestorFlowPollRetried` 7건 전부 1회 재시도로 복구(KIS 500 오류, 직전 기록일 범위 안). `g2_daily` 08:25:45~08:50:00 25분 로그 공백은 G-82가 이미 등록한 "선물 AI 방향 뷰 수신 전 대기" 패턴과 재차 일치(09-21·10-07·10-12·10-13·10-16에 이어 6회차). `src/`+`scripts/` 변경 0파일, 당일 커밋 0건 — 장중 코드 변경 없음 확인.
+
+### 원인
+
+해당 없음 — 장중 관측 범위에서 신규 결함 0건. A-4 웜업 지연은 결함이 아니라 주말 비거래일 구조 자체의 결과(장전과 동일 결론, 장중에 실제 해소 로그로 재확인만 완료).
+
+### 결정
+
+- 이 세션은 보고만 수행한다(예약 지시 — 장중, SYSTEM.md R11·금지계명 3·4에 따라 코드 변경·커밋·배포·재기동 전부 금지). F-1·F-2·F-3·G-81·G-82·G-83 전부 미적용 유지, 신규 Fix·고도화 항목 수립 없음(G-82는 오늘 관측으로 근거만 추가).
+- `logs/dailycheck/2026-10-19_report.md`에 `## 0-B. 12:43 갱신`·`## 제2부. 장중`을 append. 장전 절(헤더 표 "장중" 행 제외) 본문은 전혀 고치지 않았다. 장전이 남긴 이월 항목(A-4, F-1·F-2, F-3, C-1, C-2, 1-8·1-9, G-11, G-81, G-82, G-83) 전부를 ✅해소(A-4 1건)/🔄지속(나머지)으로 처분했다.
+- 오늘 장중 신규 이상점 0건으로 판정 — "이상점 정리보고"에 새 번호(1-5 이후)를 매기지 않았다(매길 신규 항목이 없었음).
+
+### Why
+
+- SKILL.md 대원칙 B(이어 붙이기, 앞 절 본문 불변)에 따라 장전 절은 한 글자도 고치지 않고 헤더 표의 "장중" 행만 갱신했다 — 정정 사유가 없었으므로 포인터(↩️)도 필요 없었다.
+- A-4를 "확인 필요"에서 "✅ 해소"로 처분한 근거는 추정이 아니라 2026-09-21 레코드와의 초 단위 직접 대조다 — SKILL.md의 "확정된 결함과 확인 필요를 섞지 않는다" 규율을 닫는 쪽에도 그대로 적용했다.
+- G-82에 "근거 추가"만 달고 신규 번호를 만들지 않은 이유: 오늘 관측이 기존 가설을 강화했을 뿐 새로운 현상이 아니기 때문(이미 결정된 사안을 새 발견인 양 보고하지 않는다).
+
+### How to apply
+
+- F-1·F-2·F-3·G-81·G-82·G-83 전부 사용자 "구현해" 지시 수신 시 적용 — 변경 대상 파일은 2026-10-16 장후·2026-10-19 장전 항목과 동일.
+- G-11(order-path-live 경보 완화 방식 택일)·C-1(10-15 종료 사람조작 여부)·C-2(마스터 다운로드 경합 재현 시 판정)는 사용자 결정/응답 대기 그대로 — 오늘 장중에도 응답 없음.
+
+### 검증
+
+- 라이브 미검증 — 1-8·1-9(daily-axes-measured·exit-code-matches-log) 3거래일 재검증 시계가 오늘(10-19)로 2일째가 되는지는 오늘 장후 배치(`FixVerificationScoreboard`)로 확정한다(판정 예정일 2026-10-20 장후, 3거래일째).
+- `order-path-live`: 오늘 남은 장중 구간의 `DecisionEmitted`에서 |S| ≥ 0.2 도달 또는 실제 `OrderSubmit` 발생 여부로 계속 추적, 장후 종합에서 13일째 결과를 확정한다.
+- G-82(수집기 화이트리스트 제안)의 "최소 6거래일 연속 재현" 주장은 09-21·10-07·10-12·10-13·10-16·10-19 evidence 파일의 로그 공백 구간 직접 대조로 확인됨(본 세션 grep 검증 완료).
+
+## [MW0601] 2026-10-19 16:00 — 장후 점검: 신규 확정 결함 0건 · 매매 0건(손익 0원) · crash-forensics-armed 6거래일째 재발(원인 기존 F-138) · 1-8/1-9 2/3일 진행 · 신규 고도화 G-84 제안
+
+### 증상
+
+장후 점검(Cowork 원격 세션, `messiah-daily-check` phase=post). 장후 배치(`logs/postmarket_20261019.log`) 먼저 완료 여부부터 확인 — 15:45:03~15:46:05, "=== 장후 절차 요약 ===" 블록 7/7단계 전부 완료·실패 0·발견 1(무결성 리포트 재생성 단계, `SessionEnd` 정상 종료, `steps_with_findings: 1`). 오늘 하루 전체(`l1_daily`·`g2_daily`·`ui`·`postmarket`·`shutdown_watchdog` 로그, `status_snapshot.json`, `daily_integrity_20261019.json`) 재검토 결과: `l1_daily`(08:20:50~15:35:37)·`g2_daily`(08:25:40~15:34:59)·`postmarket`(15:45:03~15:46:05) 각 `SessionEnd`(정상 종료) 확인, `code_version.stale: false`(전 프로세스 66d6e94=HEAD 종일 유지), 당일 커밋 0건·`src/`+`scripts/` 변경 0파일, `irrecoverable_loss.clean: true`, `restarts: 0`·`ui_restarts: 0`. ERROR 로그는 `postmarket`에만 1건(`FixVerificationRecurred`, crash-forensics-armed, 아래 상세). 수정검증등록부(`FixVerificationScoreboard`, 15:46:05) — 등록 22건 중 오늘 위반 2(`crash-forensics-armed` RECURRED·`order-path-live` UNDIAGNOSED)·검증 완료 18·기한 초과 2(`daily-axes-measured`·`exit-code-matches-log`, 둘 다 "아직 2/3일"로 갱신, 어제까지 1/3일)·판정 불가 0·대기 0.
+
+`crash-forensics-armed` 재발 상세: `daily_integrity_20261019.json`의 `crash_forensics` = `{"armed": {"ui": false, "l1_daily": true, "g2_paper": true}, "ui_never_visited": true}`. `logs/ui_20261019.log`는 08:20:57 Streamlit 부트스트랩 배너 5줄 외 하루 종일(15:46까지) 추가 기록 0건 — 아무도 `http://localhost:8511`에 접속하지 않았다. `clean_streak_before_recurrence_days: 0`(이 재발 직전 단 하루의 무위반도 없음) — 2026-10-12 이후 거래일(10-12·13·14·15·16·19) 전부 동일 상태로 6거래일 연속. 원인은 2026-10-12에 이미 규명되고 F-138(커밋 `266094e`)로 라벨만 붙인 기존 사안 — 2026-10-10 headless UI 전환(커밋 `d04bd7d`) 이후 아무도 화면에 접속하지 않으면 `app.py`의 `crash_forensics.enable(tag="ui")` 호출 자체가 한 줄도 실행되지 않는다. 등록부(`configs/pending_verifications.yaml`)의 `crash-forensics-armed` 항목에는 2026-08-03 등록 당시의 관행대로 `fix_committed` 키 자체가 없어(2026-09-02 F-FIX_STATE_REQUIRED_FROM 규칙 이전 등록분), 위반 시 기본적으로 "재발"(ERROR)로 집계된다 — G-83(라벨을 등록부 판정에 반영) 미적용 상태 그대로.
+
+`order-path-live`: 14:30:00 `DecisionEmitted` — 국면 TREND_UP(오전~오후 2시까지는 RANGE였다가 14:00~14:30 사이 전환), S=0.260(임계 ±0.2 초과, 최초로 LONG 판정) → Risk 통과 → `SizerZeroQty`(raw_qty=0.4219758338710795, edge=0.19650528178008472, edge_needed_for_min_qty=0.46567899393053935, min_qty=1, shortfall_ratio=0.422) — 주문 생성 안 됨. Sizer 단계까지 경로가 살아있음을 재확인했을 뿐 신규 현상은 아니다(2026-09-01 S=0.511·09-28 S=0.262·10-01 등에서 동일 패턴 반복 기록 확인). 오늘 전체 `DecisionEmitted` 14건(LONG 1·NO_TRADE 13).
+
+오늘 실거래(모의) — 체결 0건, `PositionReconciled`(15:34:59) 실현손익 +0.0틱(0원), 장마감 순보유 0계약. `self_eval_2026-10-19.json`: `pnl_measurable: false`(결선 미완, 주문 자체가 없어 손익 측정 단계 아님), `promotion_evidence_eligible: false`. 섀도 메타게이트 20/20거래일 창 충족, 판단 267건 중 통과 172건(64.4%) — R18 승격 판단 가능 상태(사용자 결정 대기, 아직 결정 없음).
+
+그 외 WARNING — `PublishGraceBreached`(15:35:05, 1m headroom -2,432ms, 전일(10-16) -1,581ms 대비 -851ms, 유예 초과 4건 — `_HEADROOM_SURGE_RATIO=0.5` 기준 "급변" 표시되나 최근 변동폭(-1,200~-6,093ms) 안으로 기존 G-9 진단과 일치)·`DailyCloseBarHandedOff`(15:35:05)·`RollBasisUnmeasured`×2(A05608→A05609 2026-08-13, 기존 F-115 설계대로 offset 0 처리)·`IrrecoverableLossBudgetExceeded`(5거래일 201분, 예산 20분, 98%가 2026-10-15 단일 사고분 197분·나머지 4일 4분 — 2026-10-16의 200.3분과 거의 동일, 10-15가 5거래일 롤링창에서 빠지는 2026-10-22경 자동 해소 예상)·`IntegrityThresholdBreached`(crash-forensics-armed와 동일 원인)·`FixVerificationOverdue`×2(daily-axes-measured·exit-code-matches-log, "아직 2/3일") — 전부 dev_memory 과거 기록과 대조해 기존 확정 정상 패턴 또는 진행 중인 재검증 시계로 판정, 신규 이상점 등재 없음. 1분봉 연속성 410행 전부 결손 0분(`longest_gap_minutes: 0`), `breaches`는 crash-forensics 1건뿐, `horizon_findings`·`series_findings` 0건. 거래량 대조(`volume_check_20261019.json`) 비율 0.999849(99.98%, missing_minutes 0) OK. l1_daily·g2_daily 전체 ERROR/CRITICAL 로그 0건, API 재시도(OptionChainPollRetried 21+InvestorFlowPollRetried 9=30건) 전건 복구.
+
+### 원인
+
+해당 없음 — 오늘 관측 범위에서 신규 결함 0건. crash-forensics-armed 재발은 원인이 기존(F-138)이며 신규 코드 결함이 아니다. order-path-live의 Sizer 단계 도달도 설계된 동작(엣지 부족에 의한 주문 미생성)이다.
+
+### 결정
+
+- 이 세션은 보고만 수행한다(예약 지시 — SYSTEM.md R11·금지 15계명 3·4·10에 따라 코드 변경·커밋·배포·재기동 전부 금지). F-1·F-2·F-3·G-81·G-82·G-83 전부 미적용 유지. 신규 Fix 항목 수립 없음. 신규 고도화 제안 1건(G-84 — `order-path-live`의 "주문 1건" 기준이 구조적으로 도달 어려운지 과거 `SizerZeroQty` raw_qty 분포를 정량 집계해 재검토할 근거 자료 제안, 파라미터 변경 제안 아님).
+- `logs/dailycheck/2026-10-19_report.md`에 `## 0-C`·`## 제3부. 장후`·`## 종합 — 오늘`·`## 제4부`·`## 제5부`·`## 재시동 판단`·`## 사용자 조치`를 append했다. 장전·장중 절(헤더 표 "장후" 행 제외) 본문은 전혀 고치지 않았다. 장전·장중이 남긴 이월 항목(F-1·F-2, F-3, C-1, C-2, 1-8·1-9, G-11, G-81, G-82, G-83) 전부를 처분했다 — 1-8·1-9만 ⬆️(2/3일 진행), 나머지는 🔄지속.
+- crash-forensics-armed 재발을 phases.md C-4("재발은 항상 P0 보고 대상") 규율에 따라 리포트에 P0로 기록했으나, 원인은 기존(F-138)이므로 신규 결함으로 별도 Fix를 세우지 않았다 — 2026-10-13·10-16과 동일한 처리 방식.
+- 재시동 비권고 — `code_version.stale: false`(실행 중 코드=HEAD)이고 당일 커밋 0건이라 재시동으로 새로 적용될 코드가 없다. 재시동 없이 얻는 것(관측 연속성)이 유일한 이득이므로 재시동하지 않는다.
+
+### Why
+
+- SKILL.md 대원칙("이미 결정된 사안을 새 발견인 양 보고하지 않는다")에 따라 crash-forensics-armed·RollBasisUnmeasured·PublishGraceBreached·IrrecoverableLossBudgetExceeded 전부 기존 원인과 대조한 뒤에만 "기존"으로 처분했다 — 특히 crash-forensics-armed는 매번 다시 원인을 추적하지 않고 `ui_never_visited` 라벨과 `ui_*.log` 내용(배너만 있고 접속 흔적 없음)을 직접 대조해 "같은 원인"임을 확인한 뒤 처분했다.
+- order-path-live의 오늘 Sizer 도달을 "해결"이 아니라 "경로가 살아있다는 재확인"으로만 쓴 이유: `orders_submitted ≥ 1` 기준 자체는 여전히 미충족이고, 과거에도 같은 수준(Risk 통과 후 Sizer에서 기각)까지 여러 번 도달한 전례가 있어 이번이 질적으로 다른 사건이 아니기 때문이다. 이를 "거의 해결됨"으로 과장하면 다음에 실제로 주문이 나갔을 때의 진짜 의미(사슬이 완전히 배선됨)가 희석된다.
+- G-84를 신규 고도화로 제안하되 파라미터 변경을 제안하지 않은 이유: 사이징 파라미터(Kelly 축소 계수·변동성 목표 수량)를 바꾸는 것은 전략 로직 변경이라 R18(섀도 계측 20거래일) 대상이 될 수 있는 결정이고, 이 점검 스킬의 권한 밖이다 — 판단에 필요한 "자료"만 제공하는 선에서 제안을 한정했다.
+
+### How to apply
+
+- F-1·F-2·F-3·G-81·G-82·G-83 전부 사용자 "구현해" 지시 수신 시 적용 — 변경 대상 파일은 2026-10-16 장후 항목과 동일.
+- G-84 적용 시: `scripts/` 아래 신규 분석 스크립트 1개 — `logs/g2_daily_returns.jsonl`과 `logs/pass_cycles/*.json`(또는 각 거래일 로그의 `SizerZeroQty` 태그)을 훑어 `raw_qty`·`shortfall_ratio` 분포를 집계하고, 최소 단위(1계약) 도달 빈도를 날짜별로 표로 낸다. 거래 로직·실행 경로는 건드리지 않는다.
+
+### 검증
+
+- 라이브 미검증 — 1-8·1-9(daily-axes-measured·exit-code-matches-log) 3거래일 재검증 시계의 최종 확정은 내일(2026-10-20) 장후 배치(`FixVerificationScoreboard`)로 판정한다.
+- `IrrecoverableLossBudgetExceeded`의 "2026-10-15 사고분이 5거래일 창에서 빠지면 자동 해소"라는 예측은 2026-10-22경 실측으로 검증한다.
+- `order-path-live`: 다음 거래일 이후로도 계속 추적 — Sizer 단계에서 실제로 1계약 이상이 나오는 날이 있는지가 다음 전환점이다.
+- G-84(제안)의 "구조적으로 거의 도달 불가능"이라는 가설은 분석 스크립트 실행 전까지는 가설일 뿐이다 — 집계 결과로만 확정 가능.
+
+
+## [MW0601] 2026-10-19 장후 자동조치 — G-82 수집기 설계 공백 분리 · G-84 사이징 부족분 집계
+
+### 증상
+
+- `collect_evidence.py` §9가 2026-09-21 이후 매 거래일 `g2_daily` 08:25–08:50 25분 공백을 적신호로 올렸다(과거 장후 증거 45개 중 30개에서 정확히 같은 구간). 매 점검이 「설계상 대기」로 손 기각.
+- `order-path-live` 「판정 불가」 12일째 — 신호 부족인지 사이징 설계 탓인지 가를 자료가 없었다(G-84).
+
+### 원인
+
+- 수집기의 공백 임계는 g2 설계 주기에서 유도되지만, 선물 AI 방향 뷰가 08:50 전에 오지 않는 **기동 직후 대기**는 주기와 무관한 1회성 공백이라 걸러지지 않았다.
+- `SizerZeroQty`·`SizerZeroQtyStreak`·`OrderSubmit`이 날짜별 로그에 흩어져 있어 한 표로 본 적이 없었다.
+
+### 결정
+
+- G-82(A등급): `DEFAULT_CONFIG["known_gaps"]` 신설 + `known_gap_reason()` — 프로세스·시작 창·재개 창·길이 상한 **넷 다** 맞을 때만 §9 본문에서 빼 「알려진 설계 공백」 절로 옮긴다. §5 공백 표에 「알려진 패턴」 칸.
+- G-84(A등급): `scripts/run_sizer_shortfall_tally.py` 신설(읽기 전용). 첫 실행 결과는 리포트 제6부.
+- 보류(C): F-1·F-2(브로커 어댑터 + 폴백 동작 + 실패 시 종목 결정 미정), F-3(기동 거부 관문에 항목 신설 = R18), G-81(F-1 동시 반영으로 묶임), G-83(등록부 위반 집계에서 빼는 방향 = 기준 완화), G-11·C-1·C-2(사용자 답변 대기).
+
+### Why
+
+- G-82: 지우지 않고 **옮긴다** — 면제 조건이 틀린 날 공백이 사라지면 아무도 못 본다(08-17 F-13의 휴장일 기각 절과 같은 원칙). 창을 좁게 잡아 08:25–09:53(88분) 같은 진짜 지연은 그대로 적신호로 남게 했다.
+- G-84: 파라미터를 바꾸지 않고 자료만 낸다 — 사이징 파라미터는 사람 결정. 첫 실행에서 「0계약 외 사이징」이 있던 날 6일, 0계약 없이 `OrderSubmit`만 있는 날 9일이 나와 「구조적으로 1계약 불가」 가설과 맞지 않는다. 다만 진입/청산 구분은 안 했다.
+- 리포트 G-84 본문의 과거 인용값(09-01·09-28·10-01 = 0.611·0.616·0.463)은 원본과 달랐다 — 실제 0.931·0.513·0.616. 제6부에 정정을 남겼다(앞 본문은 손대지 않음).
+
+### How to apply
+
+- 새 설계 공백이 생기면 `known_gaps`에 항목 하나를 추가하되 **시작·재개 창과 길이 상한을 반드시 함께** 적는다. 길이 상한 없는 면제는 금지.
+- G-11 결정 전에 `python scripts/run_sizer_shortfall_tally.py --start <날짜>`로 최신 표를 뽑아 본다. 진입 주문만 세려면 다음 단계로 `OrderSubmit`의 kind를 가르는 확장이 필요하다.
+
+### 검증
+
+- 신규 테스트 12건(`test_collect_evidence_known_gaps.py` 8 · `test_sizer_shortfall_tally.py` 4) 통과. 전체 3,010 통과 / 3 실패(실데이터 의존 3건, 10-13과 동일 — 무관).
+- 실데이터: 10-19 수집기 출력에서 08:25–08:50이 별도 절로 이동한 것 확인. 라이브 검증은 내일(10-20) 장전·장중 점검의 §9에서 이 줄이 본문에 다시 안 나오는지로 한다.
