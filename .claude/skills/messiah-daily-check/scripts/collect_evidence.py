@@ -1012,6 +1012,74 @@ def live_counts_lines(root: Path, day: _date) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------- 이월 ID 대사
+# 2026-10-21 G-85. F-132(10-08 L1 전면 정지 재발방지, P0)가 10-13 보고서의 Fix 표에 있다가
+# 다음 보고서(10-15)에서 처분 기록 없이 사라졌고, 10-21 장중이 우연히 복원할 때까지 일주일
+# 넘게 아무도 몰랐다. "전일 항목을 사람이 전부 베껴 쓴다"는 절차는 점검 공백 앞에서 깨진다.
+# 그래서 전일 보고서의 계획 절(Fix·고도화·수익률)에 나온 ID가 오늘 보고서 어딘가에서 한 번은
+# 언급됐는지만 기계적으로 본다. 처분의 **내용**은 판정하지 않는다 — 빠진 것만 짚는다.
+# 같은 줄에 ✅가 붙은 ID는 전일에 이미 종결된 것으로 보고 대상에서 뺀다.
+_CARRY_ID_RE = re.compile(r"(?<![A-Za-z0-9])([FGKS]-\d+)(?!\d)")
+_CARRY_SECTION_RE = re.compile(r"^(#{2,3}) .*(Fix 작업 구현계획|고도화 방안|수익률 향상방안)")
+_HEADING_RE = re.compile(r"^(#{1,6}) ")
+_REPORT_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_report\.md$")
+
+
+def carried_ids(text: str) -> list[str]:
+    """보고서 계획 절에 나온 미종결 ID — 처음 나온 순서대로."""
+    ids: dict[str, None] = {}
+    closed: set[str] = set()
+    level: int | None = None
+    for ln in text.splitlines():
+        h = _HEADING_RE.match(ln)
+        if h:
+            s = _CARRY_SECTION_RE.match(ln)
+            if s:
+                level = len(s.group(1))
+                continue
+            if level is not None and len(h.group(1)) <= level:
+                level = None
+        if level is None:
+            continue
+        for i in _CARRY_ID_RE.findall(ln):
+            ids.setdefault(i, None)
+            if "✅" in ln:
+                closed.add(i)
+    return [i for i in ids if i not in closed]
+
+
+def carryover_check(root: Path, day: _date) -> tuple[list[str], list[str]]:
+    """(사람용 줄, 오늘 보고서에서 빠진 ID). 오늘 보고서가 없으면 빠진 ID는 빈 목록."""
+    rdir = root / "logs" / "dailycheck"
+    prev: Path | None = None
+    if rdir.is_dir():
+        D = day.strftime("%Y-%m-%d")
+        dated = sorted(
+            (m.group(1), p)
+            for p in rdir.iterdir()
+            if (m := _REPORT_NAME_RE.match(p.name)) and m.group(1) < D
+        )
+        if dated:
+            prev = dated[-1][1]
+    if prev is None:
+        return ["전일 보고서 없음 — 이월 대사 **미측정**"], []
+    ids = carried_ids(read_text(prev))
+    if not ids:
+        return [f"`{prev.name}` 계획 절에 미종결 ID 없음 — 대사할 것 없음"], []
+    out = [f"`{prev.name}` 계획 절의 미종결 ID {len(ids)}건: {', '.join(ids)}"]
+    today = rdir / f"{day:%Y-%m-%d}_report.md"
+    if not today.exists():
+        out.append("오늘 보고서가 아직 없다 — 위 ID를 **전부** 처분(✅/🔄/⬆️/⬇️/↩️)할 것")
+        return out, []
+    seen = set(_CARRY_ID_RE.findall(read_text(today)))
+    missing = [i for i in ids if i not in seen]
+    if missing:
+        out.append(f"오늘 보고서에 아직 한 번도 안 나온 ID {len(missing)}건: {', '.join(missing)}")
+    else:
+        out.append("오늘 보고서가 전부 한 번 이상 언급함")
+    return out, missing
+
+
 # ---------------------------------------------------------------- dev_memory
 def devmemory_section(root: Path, day: _date) -> list[str]:
     out = ["", "## 6. dev_memory", ""]
@@ -1643,6 +1711,14 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     # 비거래일이면 **기대치가 뒤집히는 항목만** 아래 절로 옮긴다 (2026-08-17 F-13).
     # 지우지 않는 이유: 달력이 틀린 날(거래일인데 휴장으로 등재된 날)에 그 항목들이 사라지면
     # **그날 수집이 통째로 없어진 것을 아무도 못 본다.** 기각도 판정이므로 근거와 함께 남긴다.
+    # 이월 미처분(2026-10-21 G-85) — 장전은 오늘 보고서를 이제 쓰기 시작하므로 목록만 보인다.
+    carry_lines, carry_missing = carryover_check(root, day)
+    if carry_missing and phase != "pre":
+        flags.append(
+            f"이월 미처분 ID: {', '.join(carry_missing)} — 전일 보고서 계획 절에 있었는데 오늘"
+            " 보고서에 처분 기록이 없다(F-132가 이렇게 일주일 사라졌다)"
+        )
+
     deferred: list[str] = []
     if skip_note is not None:
         kept: list[str] = []
@@ -1684,6 +1760,11 @@ def build(root: Path, day: _date, phase: str, cfg: dict) -> str:
     A("### R18 판단 가능 게이트 (적신호 아님 — 사람 결정의 재료)")
     A("")
     for line in shadow_gate_r18_lines(root, day):
+        A(f"- {line}")
+    A("")
+    A("### 전일 이월 ID 대사 (빠진 ID는 장중·장후 적신호로 올라간다)")
+    A("")
+    for line in carry_lines:
         A(f"- {line}")
     A("")
     A("### 오늘 자동 집계 (적신호 아님 — 손으로 세지 말 것)")
