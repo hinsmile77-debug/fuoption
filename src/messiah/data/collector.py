@@ -70,6 +70,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Sequence
 
+import httpx
 import websockets
 
 from messiah.broker.kis import tr_codes
@@ -122,6 +123,25 @@ class TickStallError(ConnectionError):
     """소켓은 열려 있으나 틱이 끊긴 상태 — `ConnectionError`(→`OSError`)를 상속해
     `_WS_DISCONNECT_ERRORS`에 자연히 걸린다. 재연결 경로를 새로 만들지 않고 기존 것을
     재사용하기 위한 의도적 선택이다."""
+
+
+class ApprovalKeyIssueError(ConnectionError):
+    """재연결 직전 승인키 재발급이 **네트워크 단에서** 실패한 상태 (2026-10-22 F-132).
+
+    2026-10-08 08:27:32 WS 끊김 → 재연결 중 `ApprovalKeyIssuer.issue()`가 DNS 실패
+    (`getaddrinfo failed`, `httpx.ConnectError`)를 던졌고, httpx 예외는 `OSError` 계열이 아니라
+    `_WS_DISCONNECT_ERRORS`를 빠져나가 L1 프로세스가 통째로 죽었다(그날 6시간 35분 공백).
+    `TickStallError`와 같은 방식으로 `ConnectionError`를 상속해 기존 재연결 경로에 태운다.
+    `httpx.HTTPStatusError`(4xx/5xx — 키·권한 자체 문제)는 `TransportError`가 아니라 여기서
+    안 잡히고 그대로 전파된다 — 재시도로 해결되지 않으니 사람이 봐야 한다."""
+
+
+async def _issue_approval_key(issuer: ApprovalKeyIssuer) -> str:
+    """`issuer.issue()`(동기 httpx)를 스레드에서 돌리고, 네트워크 실패만 재연결 대상으로 바꾼다."""
+    try:
+        return await asyncio.to_thread(issuer.issue)
+    except httpx.TransportError as exc:
+        raise ApprovalKeyIssueError(f"승인키 재발급 네트워크 실패: {exc!r}") from exc
 
 
 class _StallWatchdog:
@@ -378,7 +398,7 @@ class TickCollector:
         실패 조건: 연결이 끊기면(또는 다른 예외) 그대로 전파된다 — 이 메서드 자체는 재연결하지
                   않는다(run_forever()가 감싸서 처리, 모듈 docstring 참고).
         """
-        approval_key = await asyncio.to_thread(self._approval_issuer.issue)
+        approval_key = await _issue_approval_key(self._approval_issuer)
         async with self._ws_connect(tr_codes.MARKET_DATA_WS_DOMAIN) as ws:
             client = KISWebSocketClient(approval_key, ws)
             await client.subscribe(Subscription(self._tr_id, self._symbol))
@@ -402,7 +422,9 @@ class TickCollector:
              데이터로 quality_ok=True인 봉을 만드는 것도 부정확하다.
         실패 조건: OSError/websockets.WebSocketException 이외의 예외(ValueError 등 코드/설정
                   문제)는 재시도 없이 그대로 전파된다 — 재시도로 해결되지 않는 문제라 사람이
-                  봐야 한다.
+                  봐야 한다. 승인키 재발급의 네트워크 실패(httpx.TransportError)는
+                  ApprovalKeyIssueError(ConnectionError)로 바뀌어 재연결 대상이 되고,
+                  HTTPStatusError(4xx/5xx)는 그대로 전파된다(2026-10-22 F-132).
         """
         backoff = self._reconnect_initial_backoff_seconds
         was_disconnected = False
@@ -769,7 +791,7 @@ class MultiSymbolTickCollector:
     async def run_once(self, on_connected: Callable[[], None] | None = None) -> None:
         """`TickCollector.run_once()`와 같은 계약이나, 구독을 `feeds` 전부에 대해 반복한다
         (연결은 여전히 하나 — `KISWebSocketClient.subscribe()`를 여러 번 호출)."""
-        approval_key = await asyncio.to_thread(self._approval_issuer.issue)
+        approval_key = await _issue_approval_key(self._approval_issuer)
         async with self._ws_connect(tr_codes.MARKET_DATA_WS_DOMAIN) as ws:
             client = KISWebSocketClient(approval_key, ws)
             for feed in self._feeds:
