@@ -20027,3 +20027,33 @@ F-132(10-08 L1 전면 정지 재발방지, P0)가 2026-10-13 보고서 Fix 표�
 
 - `tests/test_collect_evidence_carryover.py` 8건(계획 절 범위·✅ 종결·`G-84후속` 접미 한글·`F-13`↔`F-132` 비부분일치·전일 부재=미측정·휴장 공백 건너뛰기·국면별 적신호) 통과, 수집기 관련 38건 통과. 전체 3,018 통과 / 3 실패(`test_champion_sample` 1·`test_rollover_day` 2 — 09-29부터 같은 기존 실패, 운영 데이터 의존, 무관). 실데이터 10-21 post 다이제스트에서 "이월 미처분 ID: G-82" 출력 확인. 커밋 `f2b0911`. git 쓰기는 전부 PowerShell.
 - 라이브 확인 기한: 2026-10-22 장전 다이제스트에 "전일 이월 ID 대사" 절이 뜨는지.
+
+## [MW0601] 2026-10-22 08:05 F-132 구현 — 승인키 재발급 네트워크 예외를 WS 재연결 경로로 (장전 반영, 사용자 명시 지시)
+
+### 증상
+
+2026-10-08 08:27:32 WS 끊김 → 재연결 중 `ApprovalKeyIssuer.issue()`가 DNS 실패(`httpx.ConnectError`, `getaddrinfo failed`) → httpx 예외가 `_WS_DISCONNECT_ERRORS`(`OSError`·`WebSocketException`)를 빠져나가 L1 프로세스 사망, 하루 6시간 35분 공백.
+
+### 원인
+
+`collector.py`의 두 `run_once()`(`TickCollector`·`MultiSymbolTickCollector`)가 `await asyncio.to_thread(self._approval_issuer.issue)`를 무방비로 호출. httpx 예외는 `OSError` 계열이 아니다.
+
+### 결정
+
+- 사용자 결정(2026-10-21 제6부 질문에 대한 답): **호출부 try/except 방식**, 두 곳 모두, `HTTPStatusError`는 그대로 전파.
+- 구현: `_issue_approval_key()` 헬퍼가 `httpx.TransportError`(연결·DNS·타임아웃)를 `ApprovalKeyIssueError(ConnectionError)`로 바꾼다 — `TickStallError`와 같은 방식이라 튜플은 그대로 두고 기존 재연결·백오프·`CollectorWSDisconnected` 경로에 태운다. 로그 메시지에 "승인키 재발급 네트워크 실패: …"가 붙어 일반 WS 끊김과 구분된다. 새 로그 태그 없음(R6 등록 불필요).
+- **장전 반영(R11·금지계명 4 예외)**: 07:50 지시 시점엔 원칙대로 격리 worktree 브랜치(`f132-approval-key`)에서만 구현·테스트하고 master 병합을 장후로 보류했으나, 사용자가 "장전 반영 금지 원칙은 알고 있지만 지금 병합하고 푸시해 — 08:20 기동에 들어가게"라고 명시 지시 → 08:05 fast-forward 병합·푸시(`ce1c522`). 메시아 프로세스 미기동 상태에서 반영했다(작업트리 오염 없음, 금지계명 10 준수).
+
+### Why
+
+10-21 WS 끊김 8건(최근 평균의 약 40배)처럼 네트워크가 불안한 날 같은 경로로 하루가 통째로 날아갈 위험이 남아 있었다. 사용자가 장전 반영의 위험(검증 안 된 변경이 당일 운영에 들어감)을 알고 감수하기로 결정했다. 변경 범위는 예외 변환 한 곳이라 정상 경로(발급 성공)의 동작은 바뀌지 않는다.
+
+### How to apply
+
+- `HTTPStatusError`(401·500 등)는 여전히 L1을 멈춘다 — 의도된 동작(키·권한 문제는 재시도로 안 풀린다). 승인 서버 5xx가 일시 장애로 판명되면 그때 따로 재검토.
+- DNS 장기 장애 시엔 60초 상한 백오프로 무한 재시도한다 — 기존 WS 오류와 같은 정책. 알아채는 장치는 F-133(생존 감시)의 몫.
+
+### 검증
+
+- `tests/data/test_collector_approval_key.py` 9건(두 수집기 × DNS·타임아웃 재연결/백오프 5→10초/끊김 로그 1회/재연결 로그 1회, 401·500 즉시 전파). 수집기 기존 테스트 44건 포함 53건 통과. worktree 전체 3,028 통과(실데이터 의존 3건은 worktree에 데이터가 없어 검사되지 않음). replay A05611 10-14–10-21 3,616건 통과(게이트웨이 정지 없음 — replay는 WS 경로를 타지 않는다). ruff 통과.
+- **라이브 미검증.** 오늘 08:20 기동 직후 `status_snapshot.json`의 `process_git_sha = ce1c522`(또는 이 기록 커밋) 확인. 실효 판정은 다음 승인키 재발급 네트워크 실패 시 `CollectorWSDisconnected`("승인키 재발급 네트워크 실패")만 찍히고 L1이 살아 있는지로 — 기한 미정(재현 의존).
